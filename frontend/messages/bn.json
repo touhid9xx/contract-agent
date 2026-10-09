@@ -1,0 +1,50 @@
+{
+  "common": {
+    "appName": "কন্ট্রাক্ট এজেন্ট",
+    "loading": "লোড হচ্ছে…",
+    "error": "কিছু ভুল হয়েছে",
+    "retry": "আবার চেষ্টা করুন",
+    "cancel": "বাতিল",
+    "save": "সংরক্ষণ",
+    "delete": "মুছুন",
+    "confirm": "নিশ্চিত করুন"
+  },
+  "auth": {
+    "login": "লগ ইন",
+    "register": "রেজিস্টার",
+    "email": "ইমেইল",
+    "password": "পাসওয়ার্ড",
+    "forgotPassword": "পাসওয়ার্ড ভুলে গেছেন?",
+    "loginTitle": "স্বাগতম",
+    "loginSubtitle": "আপনার অ্যাকাউন্টে সাইন ইন করুন",
+    "noAccount": "অ্যাকাউন্ট নেই?",
+    "hasAccount": "অ্যাকাউন্ট আছে?",
+    "signUp": "সাইন আপ",
+    "signIn": "সাইন ইন"
+  },
+  "nav": {
+    "dashboard": "ড্যাশবোর্ড",
+    "contracts": "কন্ট্রাক্ট",
+    "review": "রিভিউ কিউ",
+    "escalations": "এস্কেলেশন",
+    "notifications": "নোটিফিকেশন",
+    "agent": "AI এজেন্ট",
+    "audit": "অডিট লগ",
+    "settings": "সেটিংস"
+  },
+  "dashboard": {
+    "title": "ড্যাশবোর্ড",
+    "placeholder": "ড্যাশবোর্ড Milestone 19-এ আসবে"
+  },
+  "theme": {
+    "light": "লাইট",
+    "dark": "ডার্ক",
+    "system": "সিস্টেম",
+    "toggle": "থিম টগল"
+  },
+  "language": {
+    "switch": "ভাষা পরিবর্তন",
+    "en": "English",
+    "bn": "বাংলা"
+  }
+}

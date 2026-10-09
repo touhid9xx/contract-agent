@@ -1,0 +1,50 @@
+{
+  "common": {
+    "appName": "Contract Agent",
+    "loading": "Loading…",
+    "error": "Something went wrong",
+    "retry": "Retry",
+    "cancel": "Cancel",
+    "save": "Save",
+    "delete": "Delete",
+    "confirm": "Confirm"
+  },
+  "auth": {
+    "login": "Log in",
+    "register": "Register",
+    "email": "Email",
+    "password": "Password",
+    "forgotPassword": "Forgot password?",
+    "loginTitle": "Welcome back",
+    "loginSubtitle": "Sign in to your account",
+    "noAccount": "Don't have an account?",
+    "hasAccount": "Already have an account?",
+    "signUp": "Sign up",
+    "signIn": "Sign in"
+  },
+  "nav": {
+    "dashboard": "Dashboard",
+    "contracts": "Contracts",
+    "review": "Review Queue",
+    "escalations": "Escalations",
+    "notifications": "Notifications",
+    "agent": "AI Agent",
+    "audit": "Audit Log",
+    "settings": "Settings"
+  },
+  "dashboard": {
+    "title": "Dashboard",
+    "placeholder": "Dashboard coming in Milestone 19"
+  },
+  "theme": {
+    "light": "Light",
+    "dark": "Dark",
+    "system": "System",
+    "toggle": "Toggle theme"
+  },
+  "language": {
+    "switch": "Switch language",
+    "en": "English",
+    "bn": "বাংলা"
+  }
+}
