@@ -1,0 +1,80 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+ENV/
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.mypy_cache/
+.tox/
+.nox/
+
+# ---------- Environment & Secrets ----------
+.env
+.env.*
+!.env.example
+!frontend/.env.local.example
+secrets/
+*.pem
+*.key
+
+# ---------- Data & Runtime ----------
+data/raw/*
+data/processed/*
+data/voice/*
+!data/**/.gitkeep
+mlruns/
+logs/
+*.log
+*.sqlite
+*.db
+
+# ---------- Kafka / StrikeMQ / smtp4dev ----------
+strikemq-data/
+smtp4dev-data/
+*.pid
+
+# ---------- IDE / Editor ----------
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+
+# ---------- OS ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- Frontend ----------
+node_modules/
+.next/
+out/
+dist/
+coverage/
+.playwright/
+*.tsbuildinfo
+frontend/.env.local
+frontend/.env*.local
+
+# ---------- Docker ----------
+.docker/
+docker-compose.override.yml
+
+# ---------- MLflow local ----------
+mlartifacts/
