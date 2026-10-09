@@ -263,4 +263,4 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Cached settings accessor — call this everywhere (never construct Settings directly)."""
-    return Settings()
+    return Settings()  # type: ignore[call-arg]

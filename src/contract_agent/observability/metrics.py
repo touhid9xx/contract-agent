@@ -89,8 +89,18 @@ kafka_consumer_lag = Gauge(
 # SETUP
 # ------------------------------------------------------------
 def setup_metrics(app: FastAPI, *, enabled: bool = True) -> None:
-    """Attach /metrics endpoint + HTTP metrics instrumentation."""
+    """Attach /metrics endpoint + HTTP metrics instrumentation.
+
+    IMPORTANT: Prometheus client's default registry is process-global. Calling
+    `.instrument()` twice on the same app (e.g. in tests) raises DuplicatedTimeseries.
+    We guard by checking if the route already exists.
+    """
     if not enabled:
+        return
+
+    # Idempotency guard — important for tests that recreate the app
+    existing_paths = {getattr(r, "path", None) for r in app.routes}
+    if "/metrics" in existing_paths:
         return
 
     Instrumentator(

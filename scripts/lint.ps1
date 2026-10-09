@@ -10,7 +10,7 @@ ruff format --check src tests scripts
 Write-Host "[3/4] Running mypy..." -ForegroundColor Cyan
 mypy src
 
-Write-Host "[4/4] Running pytest..." -ForegroundColor Cyan
-pytest --no-cov -q
+Write-Host "[4/4] Running pytest with coverage..." -ForegroundColor Cyan
+pytest
 
 Write-Host "OK - Lint passed" -ForegroundColor Green
