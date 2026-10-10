@@ -1,21 +1,11 @@
 {
-  "title": "ErrorResponse",
-  "type": "object",
-  "required": [
-    "error",
-    "status",
-    "detail",
-    "path",
-    "request_id"
-  ],
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "properties": {
+    "detail": {},
     "error": {
       "type": "string"
     },
-    "status": {
-      "type": "integer"
-    },
-    "detail": {},
     "path": {
       "type": "string"
     },
@@ -24,6 +14,18 @@
         "string",
         "null"
       ]
+    },
+    "status": {
+      "type": "integer"
     }
-  }
+  },
+  "required": [
+    "error",
+    "status",
+    "detail",
+    "path",
+    "request_id"
+  ],
+  "title": "ErrorResponse",
+  "type": "object"
 }

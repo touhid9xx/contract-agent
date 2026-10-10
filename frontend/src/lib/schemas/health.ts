@@ -4,11 +4,13 @@
  */
 import { z } from "zod";
 
-export const healthSchema = z.object({
-  status: z.string(),
-  service: z.string(),
-  env: z.string(),
-  timestamp: z.string().datetime({ offset: true }),
-});
+export const healthSchema = z
+  .object({
+    env: z.string(),
+    service: z.string(),
+    status: z.string(),
+    timestamp: z.string().datetime({ offset: true }),
+  })
+  .strict();
 
 export type Health = z.infer<typeof healthSchema>;

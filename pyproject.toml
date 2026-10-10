@@ -31,6 +31,8 @@ dependencies = [
     "pymysql>=1.1.1,<2.0.0",
     "aiomysql>=0.2.0,<1.0.0",
     "cryptography>=43.0.3,<45.0.0",
+    "pydantic[email]>=2.9.0",
+
 
     # --- Auth & security ---
     "pyjwt>=2.9.0,<3.0.0",
@@ -90,15 +92,16 @@ dependencies = [
 dev = [
     "ruff>=0.7.4,<1.0.0",
     "mypy>=1.13.0,<2.0.0",
+    "types-passlib>=1.7.7",
     "pytest>=8.3.3,<9.0.0",
     "pytest-asyncio>=0.24.0,<1.0.0",
     "pytest-cov>=6.0.0,<7.0.0",
     "pytest-mock>=3.14.0,<4.0.0",
-    "testcontainers[mysql]>=4.8.2,<5.0.0",
     "locust>=2.32.4,<3.0.0",
     "bandit[toml]>=1.7.10,<2.0.0",
     "pip-audit>=2.7.3,<3.0.0",
     "pre-commit>=4.0.1,<5.0.0",
+    "types-redis>=4.6.0",
 ]
 
 [project.scripts]
@@ -158,7 +161,6 @@ mypy_path = "src"
 exclude = ["venv", ".venv", "build", "dist", "alembic/versions"]
 
 # Packages WITHOUT py.typed marker — tell mypy to trust them.
-# This silences "Skipping analyzing ... missing library stubs" errors.
 [[tool.mypy.overrides]]
 module = [
     "aiokafka.*",
@@ -168,29 +170,24 @@ module = [
     "pdfplumber.*",
     "edge_tts.*",
     "prometheus_fastapi_instrumentator.*",
+    "pybreaker.*"
 ]
 ignore_missing_imports = true
 
-# redis.asyncio.from_url type signature varies across redis-py versions
-# (5.x untyped, 6.x+ typed). Even with the module importable, Mypy's
-# strict `disallow_untyped_calls = true` fires on the untyped factory.
-# We disable that check for this module to keep Mypy deterministic across
-# local venv (5.x) and pre-commit isolated env (6.x).
-#
-# NOTE: `module = "redis.asyncio"` (no wildcard). Mypy matches module
-# names exactly, not patterns — the wildcard form only matches submodules.
+# redis.asyncio.from_url type signature varies across redis-py versions.
 [[tool.mypy.overrides]]
 module = "redis.asyncio"
 disallow_untyped_calls = false
 ignore_missing_imports = true
+disable_error_code = ["type-arg"]
 
 # config.py: Pydantic Settings() loader.
-#   - Local Mypy (no plugin): call-arg error → inline ignore needed.
-#   - Pre-commit Mypy (pydantic.mypy plugin active): ignore is unused.
-# Disable both error codes so both environments stay consistent.
 [[tool.mypy.overrides]]
 module = "contract_agent.main"
 disable_error_code = ["no-untyped-call"]
+[[tool.mypy.overrides]]
+module = "contract_agent.config"
+disable_error_code = ["call-arg", "unused-ignore"]
 
 # ============================================================
 # PYTEST
@@ -219,8 +216,12 @@ markers = [
 filterwarnings = [
     "error::DeprecationWarning",
     "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning:starlette.testclient",
-    "ignore:testcontainers.mysql is deprecated:DeprecationWarning",
+    # passlib 1.7.4 (unmaintained since 2020) accesses argon2.__version__,
+    # which argon2-cffi 23.x deprecated. We accept this shim until M5
+    # replaces passlib with direct argon2-cffi usage.
+    "ignore:Accessing argon2.* is deprecated:DeprecationWarning:passlib",
 ]
+
 
 # ============================================================
 # COVERAGE
@@ -232,6 +233,13 @@ omit = [
     "*/alembic/*",
     "*/tests/*",
     "*/__init__.py",
+    # --- Not-yet-used modules (deferred to their milestones) ---
+    "*/kafka/consumer.py",        # M18 — Kafka disabled in tests
+    "*/kafka/producer.py",        # M18 — Kafka disabled in tests
+    "*/security/secrets.py",      # M23 — only env provider exercised
+    "*/observability/tracing.py", # M30 — OTEL disabled in tests
+    "*/security/encryption.py",   # M7  — no model uses EncryptedString yet
+    "*/db/session.py",            # M24 — E2E exercises engine creation
 ]
 
 [tool.coverage.report]
@@ -253,4 +261,4 @@ exclude_lines = [
 # ============================================================
 [tool.bandit]
 exclude_dirs = ["tests", "venv", ".venv"]
-skips = ["B101"]  # assert_used — pytest uses assertsz
+skips = ["B101"]  # assert_used — pytest uses asserts

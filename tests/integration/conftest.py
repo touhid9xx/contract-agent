@@ -154,11 +154,7 @@ async def db_session(db_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
 # ============================================================
 @pytest.fixture()
 def fake_redis() -> MagicMock:
-    """Dict-backed fake async Redis — enough for auth flows.
-
-    Supports: get, set(ex=), delete, exists, aclose.
-    Storage is per-fixture instance (fresh for every test).
-    """
+    """Dict-backed fake async Redis — enough for auth flows."""
     store: dict[str, Any] = {}
 
     redis = MagicMock()
@@ -184,7 +180,7 @@ def fake_redis() -> MagicMock:
     redis.delete = AsyncMock(side_effect=_delete)
     redis.exists = AsyncMock(side_effect=_exists)
     redis.aclose = AsyncMock(side_effect=_aclose)
-    redis._store = store  # escape hatch for assertions
+    redis._store = store
     return redis
 
 
@@ -202,36 +198,28 @@ async def api(
 
     Why we bypass ASGI lifespan:
         httpx's ASGITransport does not run the ASGI lifespan protocol,
-        so `app.state.session_factory` and `app.state.redis` (normally set
-        in main.lifespan) would be missing. We inject them explicitly.
-
-    Overrides set:
-        - app.dependency_overrides[get_db]    → uses the test session
-        - app.state.session_factory           → for /health/db reachability
-        - app.state.redis                     → for /auth/refresh, /auth/logout
-        - app.state.kafka_producer            → mocked; endpoints touching it
-                                                 shouldn't fail on AttributeError
+        so `app.state.session_factory` and `app.state.redis` (normally
+        set in main.lifespan) would be missing. We inject them explicitly.
     """
     app = create_app()
 
-    # 1. Override get_db to use the rollback-per-test session
+    # 1. Override get_db → uses the rollback-per-test session
     async def _override_get_db() -> AsyncIterator[AsyncSession]:
         yield db_session
 
     app.dependency_overrides[get_db] = _override_get_db
 
-    # 2. Give the app a working session factory (for /health/db, /health/ready)
+    # 2. Session factory for /health/db reachability
     app.state.session_factory = async_sessionmaker(
         bind=db_engine,
         expire_on_commit=False,
         class_=AsyncSession,
     )
 
-    # 3. Provide a fake Redis (for auth refresh/logout JTI blacklist)
+    # 3. Fake Redis for /auth/refresh, /auth/logout
     app.state.redis = fake_redis
 
-    # 4. Provide a mock Kafka producer (harmless no-op) so future endpoints
-    #    that touch app.state.kafka_producer don't AttributeError.
+    # 4. Mock Kafka producer for future endpoints
     kafka_producer = MagicMock()
     kafka_producer.start = AsyncMock(return_value=None)
     kafka_producer.stop = AsyncMock(return_value=None)

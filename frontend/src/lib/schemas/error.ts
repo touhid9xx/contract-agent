@@ -4,12 +4,14 @@
  */
 import { z } from "zod";
 
-export const errorSchema = z.object({
-  error: z.string(),
-  status: z.number(),
-  detail: z.any(),
-  path: z.string(),
-  request_id: z.string().nullable(),
-});
+export const errorSchema = z
+  .object({
+    detail: z.any(),
+    error: z.string(),
+    path: z.string(),
+    request_id: z.union([z.string(), z.null()]),
+    status: z.number().int(),
+  })
+  .strict();
 
 export type Error = z.infer<typeof errorSchema>;

@@ -11,6 +11,6 @@ Write-Host "[3/4] Running mypy..." -ForegroundColor Cyan
 mypy src
 
 Write-Host "[4/4] Running pytest with coverage..." -ForegroundColor Cyan
-pytest
+python -m pytest -m "integration or not integration"
 
 Write-Host "OK - Lint passed" -ForegroundColor Green

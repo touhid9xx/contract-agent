@@ -21,6 +21,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from fastapi import Depends, Request
+from sqlalchemy import String
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -45,11 +46,23 @@ class Base(DeclarativeBase):
 # TENANT MIXIN
 # ============================================================
 class TenantMixin:
-    """Adds `tenant_id` column to any model that mixes it in."""
+    """Adds a tenant_id column + index to any model that mixes this in.
+
+    Why String(36)?
+        UUIDs as strings are 36 chars ("xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx").
+        MySQL VARCHAR requires an explicit length — a bare String() would
+        fail at DDL time with "VARCHAR requires a length on dialect mysql".
+
+    Why lazy default?
+        `get_settings()` is called inside the lambda so the value is resolved
+        at INSERT time (when env vars are already applied), not at class
+        definition time. This keeps test isolation correct.
+    """
 
     tenant_id: Mapped[str] = mapped_column(
-        index=True,
+        String(36),
         nullable=False,
+        index=True,
         default=lambda: get_settings().tenant_default_id,
     )
 

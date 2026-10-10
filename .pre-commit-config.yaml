@@ -1,16 +1,9 @@
-# Pre-commit hooks — run on every commit (backend + security).
-# Install: pre-commit install
-# Run all: pre-commit run --all-files
-#
-# Hooks are pinned to exact versions so all developers run identical checks.
-# Layered: fast checks first (ruff), slow last (mypy), security alongside.
-
 default_language_version:
   python: python3.12
 
 repos:
   # ============================================================
-  # 1. RUFF — lint + format (fastest, runs first)
+  # 1. RUFF — lint + format (fastest)
   # ============================================================
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.7.4
@@ -24,7 +17,10 @@ repos:
         files: ^(src|tests|scripts)/
 
   # ============================================================
-  # 2. MYPY — static type checking (strict)
+  # 2. MYPY — strict
+  # ============================================================
+  # ============================================================
+  # 2. MYPY — strict
   # ============================================================
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.13.0
@@ -32,66 +28,46 @@ repos:
       - id: mypy
         name: mypy (strict)
         files: ^src/
-        # NOTE: mypy runs in an ISOLATED venv created by pre-commit.
-        # Every runtime import in src/ must be resolvable OR listed in
-        # pyproject.toml's `[[tool.mypy.overrides]]` with ignore_missing_imports.
-        #
-        # We deliberately SKIP `prometheus-fastapi-instrumentator` here:
-        # its 8.x releases declare `starlette>=1.0.0`, which conflicts with
-        # FastAPI 0.115's `starlette<0.53.0` requirement. In the main venv
-        # the conflict is resolved by our explicit starlette pin — but in
-        # pre-commit's isolated env pip can't reconcile it. Since mypy only
-        # needs it for import resolution, we rely on the ignore_missing_imports
-        # override for `prometheus_fastapi_instrumentator.*` instead.
         additional_dependencies:
-          # Core framework
+          # Web framework
+          - fastapi>=0.115.0
+          - starlette>=0.40.0,<0.53.0
+          - uvicorn[standard]>=0.32.0
           - pydantic>=2.9.0
           - pydantic-settings>=2.6.0
-          - fastapi>=0.115.0,<0.137.0
-          - starlette>=0.40.0,<0.53.0
-          # Logging & config
-          - structlog>=24.4.0
-          - python-dotenv>=1.0.1
-          # Database
+          # DB
           - sqlalchemy>=2.0.36
           - alembic>=1.14.0
-          - pymysql>=1.1.1
-          # Security
           - cryptography>=43.0.3
+          # Auth & security
           - pyjwt>=2.9.0
           - passlib[argon2]>=1.7.4
-          - pybreaker>=1.2.0
+          - argon2-cffi>=23.1.0
+          - types-passlib>=1.7.7
           - slowapi>=0.1.9
-          # Events — pin redis to match pyproject.toml exactly.
-          # Otherwise pre-commit's isolated env may install redis 6.x
-          # (typed from_url) while local venv has 5.x (untyped from_url).
-          # That version skew makes mypy flip-flop on # type: ignore comments.
-          - aiokafka>=0.12.0,<0.13.0
-          - redis>=5.2.0,<6.0.0
-          - types-redis
-          # Observability — prometheus-fastapi-instrumentator INTENTIONALLY
-          # OMITTED (starlette>=1.0 conflict). Handled via pyproject.toml
-          # mypy override with ignore_missing_imports.
+          - pybreaker>=1.2.0
+          # Observability
+          - structlog>=24.4.0
           - prometheus-client>=0.21.0
+          - prometheus-fastapi-instrumentator>=7.1.0
           - opentelemetry-api>=1.28.0
           - opentelemetry-sdk>=1.28.0
+          - opentelemetry-exporter-otlp>=1.28.0
           - opentelemetry-instrumentation-fastapi>=0.49b0
           - opentelemetry-instrumentation-sqlalchemy>=0.49b0
           - opentelemetry-instrumentation-httpx>=0.49b0
-          - opentelemetry-exporter-otlp>=1.28.0
-          # Scheduling & utils
-          - apscheduler>=3.10.4
-          - tenacity>=9.0.0
-          - orjson>=3.10.11
+          # Events
+          - aiokafka>=0.12.0
+          - redis>=5.2.0,<6.0.0
+          - types-redis
+          # HTTP
           - httpx>=0.27.2
-          # Server
-          - uvicorn>=0.32.0
         args: [--config-file=pyproject.toml]
         pass_filenames: false
         entry: mypy src
 
   # ============================================================
-  # 3. BANDIT — Python security linting
+  # 3. BANDIT — security lint
   # ============================================================
   - repo: https://github.com/PyCQA/bandit
     rev: 1.7.10
@@ -103,16 +79,15 @@ repos:
         additional_dependencies: ["bandit[toml]"]
 
   # ============================================================
-  # 4. GITLEAKS — secrets detection
+  # 4. GITLEAKS — secrets
   # ============================================================
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.18.0
     hooks:
       - id: gitleaks
-        name: gitleaks (secrets)
 
   # ============================================================
-  # 5. GENERAL HYGIENE
+  # 5. HYGIENE
   # ============================================================
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0

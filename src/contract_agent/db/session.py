@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.orm import with_loader_criteria
+from sqlalchemy.orm import Session, with_loader_criteria
 
 from contract_agent.config import Settings, get_settings
 from contract_agent.db.base import get_tenant_models
@@ -66,7 +66,7 @@ def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSessi
     # Register the tenant filter on EVERY session this factory creates.
     # `do_orm_execute` is a Session-level event — must attach to the
     # session class, not to the declarative Base.
-    event.listen(AsyncSession, "do_orm_execute", _add_tenant_filter)
+    event.listen(Session, "do_orm_execute", _add_tenant_filter)
 
     return factory
 

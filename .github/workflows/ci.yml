@@ -6,7 +6,6 @@ on:
   pull_request:
     branches: [main]
 
-# Cancel in-progress runs for the same ref
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -17,28 +16,28 @@ env:
 
 jobs:
   # ============================================================
-  # BACKEND — lint, type-check, test, migration round-trip, schema drift
+  # BACKEND — ruff, mypy, pytest (unit + integration), alembic, schema drift
   # ============================================================
   backend:
     name: Backend
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     services:
       mysql:
         image: mysql:8.0
         env:
-          MYSQL_ROOT_PASSWORD: root
+          MYSQL_ROOT_PASSWORD: rootpassword
           MYSQL_DATABASE: contract_agent_test
           MYSQL_USER: contract
           MYSQL_PASSWORD: contract
         ports:
-          - 3306:3306
+          - 3307:3306      # ← matches your port 3307
         options: >-
           --health-cmd="mysqladmin ping -h localhost"
           --health-interval=10s
           --health-timeout=5s
-          --health-retries=5
+          --health-retries=10
 
       redis:
         image: redis:7-alpine
@@ -52,13 +51,13 @@ jobs:
 
     env:
       APP_ENV: test
-      JWT_SECRET_KEY: ${{ secrets.JWT_SECRET_KEY || 'x'.repeat(64) }}
-      ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY || 'MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=' }}
+      JWT_SECRET_KEY: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      ENCRYPTION_KEY: "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="
       MYSQL_HOST: 127.0.0.1
-      MYSQL_PORT: 3306
+      MYSQL_PORT: 3307
       MYSQL_USER: contract
       MYSQL_PASSWORD: contract
-      MYSQL_DB: contract_agent_test
+      MYSQL_DB: contract_agent
       REDIS_URL: redis://127.0.0.1:6379/0
       KAFKA_ENABLED: "false"
       OTEL_ENABLED: "false"
@@ -92,8 +91,14 @@ jobs:
       - name: Bandit (security)
         run: bandit -r src -c pyproject.toml -ll
 
-      - name: Pytest (with coverage)
-        run: pytest -v --cov=src/contract_agent --cov-report=xml --cov-fail-under=85
+      - name: Pytest (unit + integration)
+        run: |
+          pytest -v \
+            -o addopts="" \
+            -m "integration or not integration" \
+            --cov=src/contract_agent \
+            --cov-report=xml \
+            --cov-fail-under=85
 
       - name: Upload coverage
         if: always()
@@ -102,15 +107,18 @@ jobs:
           name: backend-coverage
           path: coverage.xml
 
-      # Migration round-trip (M4 adds alembic; this step becomes real then)
       - name: Alembic round-trip
         if: hashFiles('alembic.ini') != ''
+        env:
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: 3307
+          MYSQL_USER: contract
+          MYSQL_PASSWORD: contract
+          MYSQL_DB: contract_agent_test
         run: |
           alembic upgrade head
           alembic downgrade -1
           alembic upgrade head
-        env:
-          DATABASE_URL: mysql+pymysql://contract:contract@127.0.0.1:3306/contract_agent_test
 
       - name: Schema drift check
         run: python -m scripts.check_schema_drift
@@ -182,7 +190,7 @@ jobs:
           path: frontend/coverage
 
   # ============================================================
-  # SECURITY — dependency scanning (bandit runs in backend job)
+  # SECURITY — pip-audit, npm audit, gitleaks
   # ============================================================
   security:
     name: Security
@@ -191,6 +199,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # gitleaks needs full history
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -200,7 +210,8 @@ jobs:
       - name: pip-audit
         run: |
           pip install pip-audit
-          pip-audit --desc on
+          pip install -e .
+          pip-audit --desc on --skip-editable
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -213,13 +224,13 @@ jobs:
         working-directory: frontend
         run: npm audit --audit-level=high
 
-      - name: Gitleaks (full history)
+      - name: Gitleaks
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ============================================================
-  # DOCKER — build both images (M23 adds prod stack)
+  # DOCKER — build both images, Trivy scan (main only)
   # ============================================================
   docker:
     name: Docker

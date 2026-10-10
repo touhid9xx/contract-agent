@@ -1,25 +1,27 @@
 {
-  "title": "HealthResponse",
-  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "env": {
+      "type": "string"
+    },
+    "service": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string"
+    },
+    "timestamp": {
+      "format": "date-time",
+      "type": "string"
+    }
+  },
   "required": [
     "status",
     "service",
     "env",
     "timestamp"
   ],
-  "properties": {
-    "status": {
-      "type": "string"
-    },
-    "service": {
-      "type": "string"
-    },
-    "env": {
-      "type": "string"
-    },
-    "timestamp": {
-      "type": "string",
-      "format": "date-time"
-    }
-  }
+  "title": "HealthResponse",
+  "type": "object"
 }

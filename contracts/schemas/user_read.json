@@ -1,0 +1,71 @@
+{
+  "$defs": {
+    "UserRole": {
+      "description": "RBAC roles.\n\n- admin:    full access, can manage users\n- operator: can review fields, handle escalations, view everything\n- viewer:   read-only",
+      "enum": [
+        "admin",
+        "operator",
+        "viewer"
+      ],
+      "title": "UserRole",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "User representation \u2014 never includes password.",
+  "properties": {
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "email": {
+      "format": "email",
+      "title": "Email",
+      "type": "string"
+    },
+    "full_name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Full Name"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
+    "is_active": {
+      "title": "Is Active",
+      "type": "boolean"
+    },
+    "role": {
+      "$ref": "#/$defs/UserRole"
+    },
+    "tenant_id": {
+      "title": "Tenant Id",
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "tenant_id",
+    "email",
+    "role",
+    "is_active",
+    "full_name",
+    "created_at",
+    "updated_at"
+  ],
+  "title": "UserRead",
+  "type": "object"
+}

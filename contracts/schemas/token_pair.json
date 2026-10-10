@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Returned by /register, /login, /refresh.",
+  "properties": {
+    "access_token": {
+      "title": "Access Token",
+      "type": "string"
+    },
+    "expires_in": {
+      "title": "Expires In",
+      "type": "integer"
+    },
+    "refresh_token": {
+      "title": "Refresh Token",
+      "type": "string"
+    },
+    "token_type": {
+      "const": "bearer",
+      "default": "bearer",
+      "title": "Token Type",
+      "type": "string"
+    }
+  },
+  "required": [
+    "access_token",
+    "refresh_token",
+    "expires_in"
+  ],
+  "title": "TokenPair",
+  "type": "object"
+}
