@@ -9,8 +9,7 @@ Why isolation?
     - Override env vars BEFORE importing app modules
     - Cache-clear Settings per session
 
-Bangla: প্রতিটি test-এ আলাদা Settings + TestClient। KAFKA_ENABLED=false,
-LLM_MOCK=true — কোনো external service লাগবে না। এটা M1-এর সবচেয়ে গুরুত্বপূর্ণ file।
+
 """
 
 from __future__ import annotations
@@ -18,10 +17,13 @@ from __future__ import annotations
 import base64
 import os
 from collections.abc import Iterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+if TYPE_CHECKING:
+    from starlette.testclient import TestClient
 
 # ============================================================
 # FORCE TEST ENV *BEFORE* IMPORTING APP MODULES
@@ -85,9 +87,13 @@ def app(settings):
 
 
 @pytest.fixture()
-def client(app):
-    """TestClient with lifespan events triggered."""
+def client(app, mock_session_factory) -> Iterator[TestClient]:
     from starlette.testclient import TestClient
+
+    # Inject mock session factory if the app tried to create a real one
+    # (app.state.session_factory may be None if DB unreachable in test env)
+    if getattr(app.state, "session_factory", None) is None:
+        app.state.session_factory = mock_session_factory
 
     with TestClient(app) as c:
         yield c
@@ -189,3 +195,25 @@ def fixed_uuid() -> str:
 def default_tenant_id() -> str:
     """Matches TENANT_DEFAULT_ID from .env.example."""
     return "00000000-0000-0000-0000-000000000001"
+
+
+# ============================================================
+# MOCK: SESSION FACTORY (for tests without Docker)
+# ============================================================
+@pytest.fixture()
+def mock_session_factory() -> MagicMock:
+    """Mock async session factory — returns a mock AsyncSession."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    session = MagicMock(spec=AsyncSession)
+    session.commit = AsyncMock(return_value=None)
+    session.rollback = AsyncMock(return_value=None)
+    session.execute = AsyncMock(return_value=MagicMock(scalar=MagicMock(return_value=1)))
+    session.close = AsyncMock(return_value=None)
+
+    # Context manager protocol
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+
+    factory = MagicMock(return_value=session)
+    return factory

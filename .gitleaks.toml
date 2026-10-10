@@ -1,0 +1,31 @@
+# Gitleaks config — allowlist for known false positives.
+# Docs: https://github.com/gitleaks/gitleaks
+
+title = "Contract Agent Gitleaks Config"
+
+[extend]
+# Use the default ruleset as a base
+useDefault = true
+
+[allowlist]
+description = "Global allowlist for known test fixtures and examples"
+
+# Paths that never contain real secrets
+paths = [
+  '''tests/.*''',
+  '''.*\.example$''',
+  '''.*\.md$''',
+  '''frontend/tests/.*''',
+  '''sample_contracts/.*''',
+  '''data/.*''',
+]
+
+# Patterns that look like secrets but aren't (dev placeholders)
+regexes = [
+  '''JWT_SECRET_KEY=x+''',
+  '''ENCRYPTION_KEY=MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=''',
+  '''dev-key''',
+  '''dev-device''',
+  '''dev-webhook-secret''',
+  '''change-me''',
+]

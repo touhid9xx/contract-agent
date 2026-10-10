@@ -1,5 +1,6 @@
-// frontend/components/common/confidence-badge.tsx
-import { cn } from "cn";
+// frontend/src/components/common/confidence-badge.tsx
+
+import { cn } from "@/lib/utils";
 import { CheckCircle2, AlertTriangle, XCircle } from "lucide-react";
 
 type Confidence = "high" | "medium" | "low";

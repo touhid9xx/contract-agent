@@ -1,0 +1,25 @@
+{
+  "title": "HealthResponse",
+  "type": "object",
+  "required": [
+    "status",
+    "service",
+    "env",
+    "timestamp"
+  ],
+  "properties": {
+    "status": {
+      "type": "string"
+    },
+    "service": {
+      "type": "string"
+    },
+    "env": {
+      "type": "string"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

@@ -1,7 +1,6 @@
 "use client";
 
 import { useTranslations } from "next-intl";
-import { Link, usePathname } from "@/src/i18n/navigation";
 
 import {
   LayoutDashboard,
@@ -14,6 +13,7 @@ import {
   Settings,
 } from "lucide-react";
 import { cn } from "cn";
+import { Link, usePathname } from "@/i18n/navigation";
 
 const navItems = [
   { href: "/dashboard", labelKey: "dashboard", icon: LayoutDashboard },

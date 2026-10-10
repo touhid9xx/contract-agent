@@ -1,0 +1,46 @@
+# Alert rules — evaluate every 15s.
+# These are the same rules referenced in the original prompt.
+
+groups:
+  - name: contract-agent
+    interval: 30s
+    rules:
+      - alert: HighExtractionFailureRate
+        expr: |
+          sum(rate(extractions_total{status="failed"}[5m]))
+            /
+          sum(rate(extractions_total[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Extraction failure rate > 10%"
+          description: "More than 10% of extractions have failed over 5 minutes."
+
+      - alert: EscalationEmailFailed
+        expr: increase(escalation_email_failed_total[1h]) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Escalation email failed"
+          description: "At least one escalation email failed to send in the last hour."
+
+      - alert: AgentDecisionLatencyHigh
+        expr: |
+          histogram_quantile(0.95, rate(agent_decision_duration_seconds_bucket[5m])) > 30
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Agent decision p95 latency > 30s"
+          description: "95th percentile of agent decision latency exceeds 30 seconds."
+
+      - alert: KafkaConsumerLagHigh
+        expr: kafka_consumer_lag > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kafka consumer lag > 1000"
+          description: "Consumer lag for topic {{ $labels.topic }} partition {{ $labels.partition }} exceeds 1000."

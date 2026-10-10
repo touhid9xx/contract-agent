@@ -13,21 +13,23 @@ authors = [{ name = "Contract Agent Team" }]
 
 dependencies = [
     # --- Web framework ---
-    "fastapi>=0.115.0,<1.0.0",
+    "fastapi>=0.115.0,<0.137.0",
     "uvicorn[standard]>=0.32.0,<1.0.0",
     "python-multipart>=0.0.12,<1.0.0",
     "pydantic>=2.9.0,<3.0.0",
     "pydantic-settings>=2.6.0,<3.0.0",
     # Pin starlette <1.0 — FastAPI 0.115+ is incompatible with starlette 1.x.
-    # prometheus-fastapi-instrumentator 8.1.0 declares `starlette>=1.0.0` as a
-    # transitive dependency (over-constrained); we override it here because
-    # FastAPI 0.115+ requires `starlette>=0.40,<0.53`.
+    # prometheus-fastapi-instrumentator 8.x declares `starlette>=1.0.0` as a
+    # transitive dependency (over-constrained upstream bug). We pin both:
+    #   - starlette: <0.53 (FastAPI 0.115 requirement)
+    #   - instrumentator: <8.0 (which accepts starlette<1.0)
     "starlette>=0.40.0,<0.53.0",
 
     # --- Database ---
     "sqlalchemy>=2.0.36,<3.0.0",
     "alembic>=1.14.0,<2.0.0",
     "pymysql>=1.1.1,<2.0.0",
+    "aiomysql>=0.2.0,<1.0.0",
     "cryptography>=43.0.3,<45.0.0",
 
     # --- Auth & security ---
@@ -40,7 +42,8 @@ dependencies = [
 
     # --- Logging & observability ---
     "structlog>=24.4.0,<26.0.0",
-    "prometheus-fastapi-instrumentator>=8.0.1,<9.0.0",
+    # Pin <8.0: 8.x declares starlette>=1.0 which conflicts with FastAPI 0.115.
+    "prometheus-fastapi-instrumentator>=7.1.0,<8.0.0",
     "prometheus-client>=0.21.0,<1.0.0",
     "opentelemetry-api>=1.28.0,<2.0.0",
     "opentelemetry-sdk>=1.28.0,<2.0.0",
@@ -156,9 +159,6 @@ exclude = ["venv", ".venv", "build", "dist", "alembic/versions"]
 
 # Packages WITHOUT py.typed marker — tell mypy to trust them.
 # This silences "Skipping analyzing ... missing library stubs" errors.
-# Note: some modules here (pdfplumber, pyVoIP, etc.) are used in later
-# milestones (M10/M25/M26) — the overrides are pre-declared to avoid
-# churn when those modules land.
 [[tool.mypy.overrides]]
 module = [
     "aiokafka.*",
@@ -167,15 +167,30 @@ module = [
     "smolagents.*",
     "pdfplumber.*",
     "edge_tts.*",
+    "prometheus_fastapi_instrumentator.*",
 ]
 ignore_missing_imports = true
 
-# config.py uses `# type: ignore[call-arg]` on `Settings()` for Pylance
-# (Pylance does NOT use the pydantic.mypy plugin). Mypy sees the ignore
-# as unused because the plugin handles .env loading — allow that here.
+# redis.asyncio.from_url type signature varies across redis-py versions
+# (5.x untyped, 6.x+ typed). Even with the module importable, Mypy's
+# strict `disallow_untyped_calls = true` fires on the untyped factory.
+# We disable that check for this module to keep Mypy deterministic across
+# local venv (5.x) and pre-commit isolated env (6.x).
+#
+# NOTE: `module = "redis.asyncio"` (no wildcard). Mypy matches module
+# names exactly, not patterns — the wildcard form only matches submodules.
 [[tool.mypy.overrides]]
-module = "contract_agent.config"
-warn_unused_ignores = false
+module = "redis.asyncio"
+disallow_untyped_calls = false
+ignore_missing_imports = true
+
+# config.py: Pydantic Settings() loader.
+#   - Local Mypy (no plugin): call-arg error → inline ignore needed.
+#   - Pre-commit Mypy (pydantic.mypy plugin active): ignore is unused.
+# Disable both error codes so both environments stay consistent.
+[[tool.mypy.overrides]]
+module = "contract_agent.main"
+disable_error_code = ["no-untyped-call"]
 
 # ============================================================
 # PYTEST
@@ -191,19 +206,20 @@ addopts = [
     "--cov-report=xml",
     "--cov-report=html",
     "--cov-fail-under=85",
+    # Deselect integration tests by default via marker (not --ignore).
+    # Run explicitly: pytest -m integration
+    "-m",
+    "not integration",
 ]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "integration: integration tests that need Docker (deselected by default)",
+]
 filterwarnings = [
     "error::DeprecationWarning",
-    # anyio 4.15.0 deprecated the `anyio.abc.BlockingPortal` alias, but
-    # starlette.testclient still references it at import time. Remove this
-    # ignore once starlette migrates to `anyio.from_thread.BlockingPortal`.
-    # Upstream: https://github.com/Kludex/starlette/issues/3497
     "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning:starlette.testclient",
-    # NOTE: DO NOT add blanket ignores for passlib/pkg_resources here.
-    # If a specific warning arises in M5 (Auth) or M10 (Extraction),
-    # add a MESSAGE-SCOPED ignore (not module-scoped) with an upstream link.
+    "ignore:testcontainers.mysql is deprecated:DeprecationWarning",
 ]
 
 # ============================================================
@@ -216,10 +232,6 @@ omit = [
     "*/alembic/*",
     "*/tests/*",
     "*/__init__.py",
-    # NOTE: Do not omit main.py or tracing.py.
-    # Instead, use `# pragma: no cover` on legitimate no-op branches
-    # inside those files (e.g., `if not otel_enabled: return`).
-    # This keeps coverage reports honest and auditable.
 ]
 
 [tool.coverage.report]
@@ -241,4 +253,4 @@ exclude_lines = [
 # ============================================================
 [tool.bandit]
 exclude_dirs = ["tests", "venv", ".venv"]
-skips = ["B101"]  # assert_used — pytest uses asserts
+skips = ["B101"]  # assert_used — pytest uses assertsz

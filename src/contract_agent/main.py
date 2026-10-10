@@ -1,22 +1,16 @@
-"""FastAPI application entrypoint — wires everything.
-
-Why lifespan?
-    - Start Kafka producer/consumer on boot, stop on shutdown
-    - Modern replacement for @app.on_event("startup")
-
-Bangla: এখানে সব middleware, exception handler, metrics, tracing, Kafka wire হয়।
-`uvicorn contract_agent.main:app --reload` চালালেই app উঠবে।
-"""
+"""FastAPI application entrypoint — wires everything."""
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import redis.asyncio as aioredis
 from fastapi import FastAPI
 
 from contract_agent.api.v1.health import router as health_router
 from contract_agent.config import get_settings
+from contract_agent.db.session import create_engine, create_session_factory
 from contract_agent.exceptions import register_exception_handlers
 from contract_agent.kafka.producer import KafkaProducer
 from contract_agent.logging_config import configure_logging, get_logger
@@ -48,6 +42,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         otel_enabled=settings.otel_enabled,
     )
 
+    # --- DB engine + session factory ---
+    try:
+        engine = create_engine(settings)
+        app.state.db_engine = engine
+        app.state.session_factory = create_session_factory(engine)
+        logger.info("db_engine_ready", host=settings.mysql_host, db=settings.mysql_db)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("db_engine_failed", error=str(exc))
+        app.state.db_engine = None
+        app.state.session_factory = None
+
+    # --- Redis ---
+    try:
+        app.state.redis = aioredis.from_url(
+            settings.redis_url,
+            encoding="utf-8",
+            decode_responses=True,
+            socket_timeout=5.0,
+        )
+        logger.info("redis_client_ready", url=settings.redis_url)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("redis_client_failed", error=str(exc))
+        app.state.redis = None
+
     # --- Kafka producer ---
     producer = KafkaProducer(settings)
     await producer.start()
@@ -59,7 +77,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # --- Shutdown in reverse order ---
         await producer.stop()
+
+        # Narrow Redis via local var — Pylance can't narrow on app.state.redis
+        # directly (getattr guard doesn't affect the attribute access).
+        redis_client = getattr(app.state, "redis", None)
+        if redis_client is not None:
+            await redis_client.aclose()
+            logger.info("redis_client_closed")
+
+        # Same for DB engine.
+        db_engine = getattr(app.state, "db_engine", None)
+        if db_engine is not None:
+            await db_engine.dispose()
+            logger.info("db_engine_disposed")
+
         logger.info("app_stopped")
 
 
@@ -75,7 +108,6 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # Order: middleware → exception handlers → metrics → tracing → routes
     register_middleware(app, settings)
     register_exception_handlers(app)
 
@@ -84,10 +116,7 @@ def create_app() -> FastAPI:
 
     setup_tracing(app, settings)
 
-    # --- Routes ---
-    app.include_router(health_router)  # /health, /health/ready
-    # M5+: app.include_router(auth_router, prefix=settings.api_v1_prefix)
-    # M8+: app.include_router(contracts_router, prefix=settings.api_v1_prefix)
+    app.include_router(health_router)
 
     @app.get("/", include_in_schema=False)
     async def root() -> dict[str, str]:
@@ -106,7 +135,6 @@ app = create_app()
 
 
 def run() -> None:  # pragma: no cover
-    """Console script entrypoint."""
     import uvicorn
 
     uvicorn.run(

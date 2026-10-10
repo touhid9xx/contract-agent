@@ -1,0 +1,29 @@
+{
+  "title": "ErrorResponse",
+  "type": "object",
+  "required": [
+    "error",
+    "status",
+    "detail",
+    "path",
+    "request_id"
+  ],
+  "properties": {
+    "error": {
+      "type": "string"
+    },
+    "status": {
+      "type": "integer"
+    },
+    "detail": {},
+    "path": {
+      "type": "string"
+    },
+    "request_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

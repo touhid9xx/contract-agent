@@ -1,7 +1,9 @@
 // frontend/tests/unit/confidence-badge.test.tsx
-import { ConfidenceBadge, confidenceLevel } from "@/src/components/common/confidence-badge";
+
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
+
+import { ConfidenceBadge, confidenceLevel } from "@/components/common/confidence-badge";
 
 describe("confidenceLevel", () => {
   it.each([

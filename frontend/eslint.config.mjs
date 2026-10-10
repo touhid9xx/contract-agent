@@ -10,6 +10,14 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Project-specific ignores:
+    "coverage/**", // Vitest coverage report (auto-generated)
+    "playwright-report/**", // Playwright HTML report (auto-generated)
+    "test-results/**", // Playwright test artifacts (auto-generated)
+    "node_modules/**",
+    "htmlcov/**", // Backend coverage report (if ever generated in frontend)
+    "*.min.js",
+    "*.min.css",
   ]),
 ]);
 

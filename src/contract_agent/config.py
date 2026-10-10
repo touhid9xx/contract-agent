@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import quote
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -30,7 +31,11 @@ class Settings(BaseSettings):
     app_name: str = Field(default="contract-agent", alias="APP_NAME")
     app_env: Literal["dev", "staging", "prod", "test"] = Field(default="dev", alias="APP_ENV")
     app_debug: bool = Field(default=True, alias="APP_DEBUG")
-    app_host: str = Field(default="0.0.0.0", alias="APP_HOST")
+    # nosec B104 — `0.0.0.0` is a DEV DEFAULT. In production, `APP_HOST` is
+    # overridden via `.env` or container env to bind to a specific address.
+    # Docker containers legitimately bind `0.0.0.0` to accept external
+    # traffic (port is restricted at the host firewall / reverse proxy level).
+    app_host: str = Field(default="0.0.0.0", alias="APP_HOST")  # nosec B104
     app_port: int = Field(default=8000, alias="APP_PORT")
     app_log_level: str = Field(default="INFO", alias="APP_LOG_LEVEL")
 
@@ -242,9 +247,19 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
+        """Build DSN with URL-encoded credentials.
+
+        Why quote()?
+            Passwords may contain special characters (`@`, `:`, `/`, `#`, `?`,
+            `&`, `%`, etc.) that break URL parsing. Quote them to keep the DSN
+            unambiguous.
+        """
+        user = quote(self.mysql_user, safe="")
+        password = quote(self.mysql_password, safe="")
         return (
-            f"mysql+pymysql://{self.mysql_user}:{self.mysql_password}"
-            f"@{self.mysql_host}:{self.mysql_port}/{self.mysql_db}?charset=utf8mb4"
+            f"mysql+pymysql://{user}:{password}"
+            f"@{self.mysql_host}:{self.mysql_port}/{self.mysql_db}"
+            "?charset=utf8mb4"
         )
 
     @property
@@ -263,4 +278,4 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Cached settings accessor — call this everywhere (never construct Settings directly)."""
-    return Settings()  # type: ignore[call-arg]
+    return Settings()
