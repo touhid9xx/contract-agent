@@ -20,7 +20,7 @@ from contract_agent.config import Settings, get_settings
 from contract_agent.core.security import decode_token, is_jti_blacklisted
 from contract_agent.db.base import get_db
 from contract_agent.exceptions import AuthError, ForbiddenError
-from contract_agent.logging_config import bind_request_context, get_logger
+from contract_agent.logging_config import bind_request_context, get_logger, tenant_id_var
 from contract_agent.models.user import User, UserRole
 
 logger = get_logger(__name__)
@@ -72,7 +72,7 @@ async def get_current_user(
 
     # Bind correlation context for logs
     bind_request_context(user_id=user.id, tenant_id=user.tenant_id)
-
+    tenant_id_var.set(user.tenant_id)
     # Attach payload for logout (JTI + exp needed for blacklisting)
     request.state.jwt_payload = payload
     return user

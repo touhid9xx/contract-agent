@@ -17,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from contract_agent.config import Settings, get_settings
-from contract_agent.core.deps import CurrentUser
+from contract_agent.core.deps import CurrentUser, get_current_user, require_admin
 from contract_agent.core.security import (
     blacklist_jti,
     create_access_token,
@@ -32,6 +32,7 @@ from contract_agent.exceptions import AuthError, ConflictError
 from contract_agent.logging_config import get_logger
 from contract_agent.models.user import User, UserRole
 from contract_agent.schemas.user import (
+    PasswordChange,
     TokenPair,
     UserLogin,
     UserRead,
@@ -206,3 +207,65 @@ async def logout(
 @router.get("/me", response_model=UserRead, summary="Get current user")
 async def me(current_user: CurrentUser) -> UserRead:
     return UserRead.model_validate(current_user)
+
+
+@router.post(
+    "/change-password",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Change current user's password",
+)
+async def change_password(
+    payload: PasswordChange,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Change password. Requires current password.
+
+    Revokes all sessions by blacklisting the current JTI.
+    Other sessions remain active (only current session revoked).
+    """
+    # Verify current password
+    if not verify_password(payload.current_password, current_user.hashed_password):
+        logger.warning("change_password_wrong_current", user_id=current_user.id)
+        raise AuthError("Current password is incorrect")
+
+    # Prevent reuse
+    if verify_password(payload.new_password, current_user.hashed_password):
+        raise ConflictError("New password must differ from current")
+
+    # Update hash
+    current_user.hashed_password = hash_password(payload.new_password)
+    await db.flush()
+
+    # Blacklist current JTI (force re-login)
+    if request is not None:
+        jwt_payload = getattr(request.state, "jwt_payload", None)
+        redis = getattr(request.app.state, "redis", None)
+        if jwt_payload is not None and redis is not None:
+            import time
+
+            ttl = jwt_payload.exp - int(time.time())
+            await blacklist_jti(redis, jwt_payload.jti, ttl)
+
+    logger.info("password_changed", user_id=current_user.id)
+
+
+@router.get(
+    "/users",
+    response_model=list[UserRead],
+    summary="List users in current tenant (admin only)",
+)
+async def list_users(
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> list[UserRead]:
+    """Admin-only: list all users in the current tenant."""
+    result = await db.execute(
+        select(User)
+        .where(User.tenant_id == settings.tenant_default_id)
+        .order_by(User.created_at.desc())
+    )
+    users = result.scalars().all()
+    return [UserRead.model_validate(u) for u in users]

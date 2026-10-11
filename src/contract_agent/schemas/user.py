@@ -112,3 +112,17 @@ class TokenPayload(BaseModel):
     type: Literal["access", "refresh"]
     exp: int  # expiry epoch
     iat: int  # issued at epoch
+
+
+class PasswordChange(BaseModel):
+    """POST /auth/change-password."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    current_password: str
+    new_password: PasswordStr
+
+    @field_validator("new_password")
+    @classmethod
+    def _new_password_strength(cls, v: str) -> str:
+        return validate_password_strength(v)

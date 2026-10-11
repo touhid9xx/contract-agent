@@ -9,9 +9,7 @@ Why pydantic-settings?
 from __future__ import annotations
 
 import base64
-from functools import lru_cache
 from typing import Literal
-from urllib.parse import quote
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -247,19 +245,14 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
-        """Build DSN with URL-encoded credentials.
+        """Async SQLAlchemy URL — MUST use aiomysql (async driver).
 
-        Why quote()?
-            Passwords may contain special characters (`@`, `:`, `/`, `#`, `?`,
-            `&`, `%`, etc.) that break URL parsing. Quote them to keep the DSN
-            unambiguous.
+        Why aiomysql? create_async_engine requires an async DBAPI.
+        pymysql is sync-only; aiomysql is its async counterpart.
         """
-        user = quote(self.mysql_user, safe="")
-        password = quote(self.mysql_password, safe="")
         return (
-            f"mysql+pymysql://{user}:{password}"
+            f"mysql+aiomysql://{self.mysql_user}:{self.mysql_password}"
             f"@{self.mysql_host}:{self.mysql_port}/{self.mysql_db}"
-            "?charset=utf8mb4"
         )
 
     @property
@@ -275,7 +268,40 @@ class Settings(BaseSettings):
         return self.app_env == "test"
 
 
-@lru_cache(maxsize=1)
+# ============================================================
+# SETTINGS SINGLETON
+# ============================================================
+# Why not @lru_cache?
+#     - lru_cache's cache_clear() is import-path-dependent; if a module
+#       captures `settings = get_settings()` at import time, later
+#       cache_clear() calls leave that captured reference stale.
+#     - An explicit module-level singleton with a dedicated reset function
+#       is simpler and testable.
+_settings: Settings | None = None
+
+
 def get_settings() -> Settings:
-    """Cached settings accessor — call this everywhere (never construct Settings directly)."""
-    return Settings()  # type: ignore
+    """Cached settings accessor — call this everywhere.
+
+    Production: first call constructs Settings from env; subsequent calls
+    return the cached instance.
+
+    Tests: call `_reset_settings_for_tests()` after mutating env vars to
+    force reconstruction on the next `get_settings()` call.
+    """
+    global _settings
+    if _settings is None:
+        _settings = Settings()  # type: ignore
+    return _settings
+
+
+def _reset_settings_for_tests() -> None:
+    """Test-only: clear the cached Settings so env var changes take effect.
+
+    Not part of the public API — do not call from production code.
+    """
+    global _settings
+    _settings = None
+
+
+get_settings.cache_clear = _reset_settings_for_tests  # type: ignore[attr-defined]

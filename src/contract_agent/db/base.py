@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from contract_agent.config import get_settings
-from contract_agent.logging_config import get_logger
+from contract_agent.logging_config import get_logger, tenant_id_var
 
 logger = get_logger(__name__)
 
@@ -88,13 +88,6 @@ def get_tenant_models() -> frozenset[type[Any]]:
 # FASTAPI DEPENDENCY
 # ============================================================
 async def get_db(request: Request) -> AsyncIterator[AsyncSession]:
-    """FastAPI dependency — yields a session from app.state.session_factory.
-
-    Usage:
-        @app.get("/x")
-        async def x(db: AsyncSession = Depends(get_db)):
-            ...
-    """
     factory = request.app.state.session_factory
     async with factory() as session:
         try:
@@ -103,6 +96,8 @@ async def get_db(request: Request) -> AsyncIterator[AsyncSession]:
         except Exception:
             await session.rollback()
             raise
+        finally:
+            tenant_id_var.set(None)
 
 
 DbDep = Depends(get_db)

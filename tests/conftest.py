@@ -1,13 +1,13 @@
 """Pytest fixtures — isolated settings, test client, mocks.
 
 Fixtures hierarchy:
-    env vars (session) → settings (function) → app (function) → client (function)
+    env vars (session) → settings (session) → app (function) → client (function)
                                        ↘ mocks (kafka, llm, secrets)
 
 Why isolation?
     - Tests must NOT touch real DB / Kafka / Redis / Ollama
     - Override env vars BEFORE importing app modules
-    - Cache-clear Settings per session
+    - Reset the Settings singleton per session so env overrides apply
 """
 
 from __future__ import annotations
@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+from contract_agent.config import Settings
 
 if TYPE_CHECKING:
     from starlette.testclient import TestClient
@@ -60,28 +62,34 @@ os.environ.update(
 
 
 # ============================================================
-# SESSION-LEVEL: clear Settings LRU cache once per session
+# SESSION-LEVEL: reset the Settings singleton once per session
 # ============================================================
 @pytest.fixture(scope="session", autouse=True)
 def _clear_settings_cache() -> Iterator[None]:
-    """Ensure Settings is re-read after env overrides."""
-    from contract_agent.config import get_settings
+    """Ensure Settings is re-read after env overrides.
 
-    get_settings.cache_clear()  # type: ignore[attr-defined]
+    Uses the explicit `_reset_settings_for_tests()` from config.py —
+    not lru_cache.cache_clear(), so it works even if some module captured
+    the value at import time (which we avoid by always calling get_settings()
+    inside functions, never at module scope in production code).
+    """
+    from contract_agent.config import _reset_settings_for_tests
+
+    _reset_settings_for_tests()
     yield
-    get_settings.cache_clear()  # type: ignore[attr-defined]
+    _reset_settings_for_tests()
 
 
 # ============================================================
 # SETTINGS
 # ============================================================
 @pytest.fixture(scope="session")
-def settings():
+def settings() -> Settings:
     """Fresh Settings instance — reflects test env vars.
 
     Session-scoped so session-scoped integration fixtures (e.g., test DB
-    creation) can depend on it. get_settings() is itself an LRU-cached
-    singleton, so session vs. function scope is behaviorally identical.
+    creation) can depend on it. get_settings() returns the cached singleton
+    after the first call, so scope has no behavioral difference.
     """
     from contract_agent.config import get_settings
 
@@ -92,7 +100,7 @@ def settings():
 # APP + CLIENT
 # ============================================================
 @pytest.fixture()
-def app(settings):
+def app(settings):  # type: ignore[no-untyped-def]
     """FastAPI app instance — fresh per test."""
     from contract_agent.main import create_app
 
@@ -100,7 +108,7 @@ def app(settings):
 
 
 @pytest.fixture()
-def client(app, mock_session_factory) -> Iterator[TestClient]:
+def client(app, mock_session_factory) -> Iterator[TestClient]:  # type: ignore[no-untyped-def]
     from starlette.testclient import TestClient
 
     # Inject mock session factory if the app tried to create a real one

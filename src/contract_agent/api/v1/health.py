@@ -1,11 +1,4 @@
-"""Health & readiness endpoints — real component probes.
-
-Why separate liveness vs readiness?
-    - Liveness: is the process alive? (K8s restarts if false)
-    - Readiness: can it serve traffic? (LB stops routing if false)
-
-Each component has its own endpoint so ops can drill in fast.
-"""
+"""Health & readiness endpoints — real component probes."""
 
 from __future__ import annotations
 
@@ -23,9 +16,6 @@ router = APIRouter(tags=["health"])
 logger = get_logger(__name__)
 
 
-# ============================================================
-# HELPERS
-# ============================================================
 def _now() -> str:
     return datetime.now(tz=UTC).isoformat()
 
@@ -45,7 +35,6 @@ async def _check_db(request: Request) -> dict[str, Any]:
 
 
 async def _check_kafka(request: Request) -> dict[str, Any]:
-    """Check Kafka producer is running."""
     producer = getattr(request.app.state, "kafka_producer", None)
     if producer is None:
         return {"status": "not_configured"}
@@ -57,7 +46,6 @@ async def _check_kafka(request: Request) -> dict[str, Any]:
 
 
 async def _check_redis(request: Request) -> dict[str, Any]:
-    """Ping Redis with PING."""
     client = getattr(request.app.state, "redis", None)
     if client is None:
         return {"status": "not_configured"}
@@ -70,7 +58,6 @@ async def _check_redis(request: Request) -> dict[str, Any]:
 
 
 async def _check_ollama(settings: Settings) -> dict[str, Any]:
-    """Ping Ollama /api/tags. M25 uses the LLM; here we just probe."""
     if settings.llm_mock:
         return {"status": "mocked", "detail": "LLM_MOCK=true"}
     try:
@@ -85,12 +72,8 @@ async def _check_ollama(settings: Settings) -> dict[str, Any]:
         return {"status": "error", "detail": str(exc)}
 
 
-# ============================================================
-# ENDPOINTS
-# ============================================================
 @router.get("/health", summary="Liveness probe")
 async def health() -> dict[str, str]:
-    """Always 200 if the process is up."""
     settings = get_settings()
     return {
         "status": "ok",
@@ -102,27 +85,18 @@ async def health() -> dict[str, str]:
 
 @router.get("/health/ready", summary="Readiness probe")
 async def readiness(request: Request) -> dict[str, Any]:
-    """Aggregate readiness — 200 only if all critical components are ok."""
     settings = get_settings()
     db = await _check_db(request)
     kafka = await _check_kafka(request)
     redis = await _check_redis(request)
     ollama = await _check_ollama(settings)
-
-    # Kafka is non-critical in dev (KAFKA_ENABLED=false)
     critical_ok = db["status"] in ("ok", "not_configured") and redis["status"] in (
         "ok",
         "not_configured",
     )
-
     return {
         "status": "ok" if critical_ok else "degraded",
-        "checks": {
-            "db": db,
-            "kafka": kafka,
-            "redis": redis,
-            "ollama": ollama,
-        },
+        "checks": {"db": db, "kafka": kafka, "redis": redis, "ollama": ollama},
         "timestamp": _now(),
     }
 

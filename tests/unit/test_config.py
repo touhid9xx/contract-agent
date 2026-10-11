@@ -109,10 +109,9 @@ def test_database_url_composition() -> None:
         }
     )
     s = Settings(**env)
-    assert (
-        s.database_url
-        == "mysql+pymysql://alice:secret@db.example.com:3307/contracts?charset=utf8mb4"
-    )
+    # Async URL — must use aiomysql (async driver) for create_async_engine.
+    # pymysql is sync-only and would fail at engine creation time.
+    assert s.database_url == "mysql+aiomysql://alice:secret@db.example.com:3307/contracts"
 
 
 def test_cors_origins_parsing() -> None:
