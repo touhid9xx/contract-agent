@@ -12,15 +12,24 @@
   "auth": {
     "login": "লগ ইন",
     "register": "রেজিস্টার",
+    "signIn": "সাইন ইন",
+    "signingIn": "সাইন ইন হচ্ছে…",
+    "registering": "অ্যাকাউন্ট তৈরি হচ্ছে…",
     "email": "ইমেইল",
     "password": "পাসওয়ার্ড",
-    "forgotPassword": "পাসওয়ার্ড ভুলে গেছেন?",
+    "confirmPassword": "পাসওয়ার্ড নিশ্চিত করুন",
+    "fullName": "পূর্ণ নাম",
+    "passwordHint": "১২+ অক্ষর, সাথে বড় হাতের, ছোট হাতের, সংখ্যা, এবং চিহ্ন",
     "loginTitle": "স্বাগতম",
     "loginSubtitle": "আপনার অ্যাকাউন্টে সাইন ইন করুন",
+    "registerTitle": "অ্যাকাউন্ট তৈরি করুন",
+    "registerSubtitle": "কন্ট্রাক্ট লাইফসাইকেল ম্যানেজ করা শুরু করুন",
     "noAccount": "অ্যাকাউন্ট নেই?",
     "hasAccount": "অ্যাকাউন্ট আছে?",
-    "signUp": "সাইন আপ",
-    "signIn": "সাইন ইন"
+    "invalidCredentials": "ইমেইল বা পাসওয়ার্ড ভুল",
+    "loginFailed": "লগ ইন ব্যর্থ। আবার চেষ্টা করুন।",
+    "emailAlreadyRegistered": "এই ইমেইল আগেই রেজিস্টার করা",
+    "registerFailed": "রেজিস্ট্রেশন ব্যর্থ। আবার চেষ্টা করুন।"
   },
   "nav": {
     "dashboard": "ড্যাশবোর্ড",

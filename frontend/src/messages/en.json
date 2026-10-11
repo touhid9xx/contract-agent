@@ -9,19 +9,30 @@
     "delete": "Delete",
     "confirm": "Confirm"
   },
+
   "auth": {
     "login": "Log in",
     "register": "Register",
+    "signIn": "Sign in",
+    "signingIn": "Signing in…",
+    "registering": "Creating account…",
     "email": "Email",
     "password": "Password",
-    "forgotPassword": "Forgot password?",
+    "confirmPassword": "Confirm password",
+    "fullName": "Full name",
+    "passwordHint": "12+ characters, with uppercase, lowercase, digit, and symbol",
     "loginTitle": "Welcome back",
     "loginSubtitle": "Sign in to your account",
+    "registerTitle": "Create your account",
+    "registerSubtitle": "Start managing contract lifecycles",
     "noAccount": "Don't have an account?",
     "hasAccount": "Already have an account?",
-    "signUp": "Sign up",
-    "signIn": "Sign in"
+    "invalidCredentials": "Invalid email or password",
+    "loginFailed": "Login failed. Please try again.",
+    "emailAlreadyRegistered": "This email is already registered",
+    "registerFailed": "Registration failed. Please try again."
   },
+
   "nav": {
     "dashboard": "Dashboard",
     "contracts": "Contracts",

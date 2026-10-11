@@ -1,38 +1,51 @@
+/**
+ * Next.js 16 proxy (replaces middleware.ts).
+ *
+ * Responsibilities:
+ *   1. next-intl locale routing (/en, /bn)
+ *   2. Auth guard: /dashboard/* requires a session cookie
+ *
+ * Why cookie, not localStorage?
+ *   - Proxy runs on the edge — can't read localStorage
+ *   - We mirror tokens to a non-httpOnly cookie for the guard
+ *   - Real API auth still uses localStorage Bearer (M6); M6b moves to httpOnly
+ */
 import createMiddleware from "next-intl/middleware";
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 import { routing } from "./i18n/routing";
 
 const intlMiddleware = createMiddleware(routing);
 
-export default function proxy(request: NextRequest): NextResponse {
+const PROTECTED_PREFIXES = ["/dashboard"];
+const AUTH_PAGES = ["/login", "/register"];
+
+export default function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // ------------------------------------------------------------------
-  // Root `/` → `/<default-locale>`
-  // Handled here so we don't need a root page.tsx (which would trigger
-  // NEXT_REDIRECT during Next.js 16 `instant` validation).
-  // ------------------------------------------------------------------
-  if (pathname === "/") {
-    return NextResponse.redirect(new URL(`/${routing.defaultLocale}`, request.url));
+  // Strip locale prefix for matching
+  const segments = pathname.split("/").filter(Boolean);
+  const locale = routing.locales.includes(segments[0] as never)
+    ? segments[0]
+    : routing.defaultLocale;
+  const pathWithoutLocale = "/" + segments.slice(1).join("/");
+
+  const hasSession = request.cookies.has("ca_session");
+
+  // Guard: protected route + no session → /login
+  if (PROTECTED_PREFIXES.some((p) => pathWithoutLocale.startsWith(p)) && !hasSession) {
+    const url = request.nextUrl.clone();
+    url.pathname = `/${locale}/login`;
+    url.searchParams.set("next", pathWithoutLocale);
+    return NextResponse.redirect(url);
   }
 
-  // ------------------------------------------------------------------
-  // Locale root `/<locale>` (e.g. `/en`, `/bn`) → `/<locale>/dashboard`
-  // Same reasoning: keep redirects out of page.tsx to avoid instant
-  // validation errors on prefetch.
-  // ------------------------------------------------------------------
-  const localeRootMatch = pathname.match(/^\/([a-z]{2})\/?$/);
-  if (localeRootMatch) {
-    const locale = localeRootMatch[1];
-    if (routing.locales.includes(locale as "en" | "bn")) {
-      return NextResponse.redirect(new URL(`/${locale}/dashboard`, request.url));
-    }
+  // Guard: auth page + session → /dashboard
+  if (AUTH_PAGES.includes(pathWithoutLocale) && hasSession) {
+    const url = request.nextUrl.clone();
+    url.pathname = `/${locale}/dashboard`;
+    return NextResponse.redirect(url);
   }
 
-  // ------------------------------------------------------------------
-  // Everything else → next-intl middleware
-  // (handles locale detection, cookie, Accept-Language, etc.)
-  // ------------------------------------------------------------------
   return intlMiddleware(request);
 }
 
