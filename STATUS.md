@@ -138,15 +138,26 @@ pipeline is therefore **not** part of this slice.
 
 | Check | Command | Result |
 | --- | --- | --- |
-| Full suite | `pytest backend/tests` (no `MYSQL_TEST_URL`) | **151 passed, 4 skipped**, exit 0 |
+| Full suite, real MySQL | `pytest backend/tests` with `MYSQL_TEST_URL` set | **154 passed, 1 skipped**, exit 0 |
+| Full suite, no MySQL | `pytest backend/tests` with `MYSQL_TEST_URL` unset | **151 passed, 4 skipped**, exit 0 |
+| MySQL integration only | `pytest backend/tests -m integration` | **9 passed** (6 harness + 3 real MySQL) |
 | Kafka transport only | `pytest backend/tests/test_publishers.py` | **14 passed, 1 skipped** (the `live` broker test) |
 | Pre-commit gate | `pre-commit run --all-files` | **all 16 hooks passed** — hygiene, ruff, ruff format, mypy strict, bandit, frontend `tsc --noEmit`, frontend eslint |
 | Commit | `git commit -F .agent-cache/f4-commit-msg.txt` | **`b425ea7`**, husky hooks active, no `--no-verify` |
 
-The suite total comes from the JUnit report rather than a re-read of the console
-tail: `tests="155" failures="0" errors="0" skipped="4"`. The four skips are the
-three MySQL integration tests (that run had no `MYSQL_TEST_URL`) plus the opt-in
-`live` broker test.
+Every count above is read from a JUnit report rather than from the console tail,
+which pytest does not reliably flush to a redirected stream here. Both suite runs
+report `tests="155" failures="0" errors="0"`; only `skipped` differs, and the
+difference is exactly the three MySQL integration tests:
+
+- **No `MYSQL_TEST_URL`** → `skipped="4"`: three integration tests plus the
+  opt-in `live` broker test.
+- **`MYSQL_TEST_URL` pointing at the loopback MySQL 8.4 container** →
+  `skipped="1"`: the `live` broker test only, because no Kafka broker exists to
+  talk to (see the gap below). The remaining skip is the deliberate one.
+
+So the suite is 155 tests; the steady state is "everything runs except the one
+test that would need a broker".
 
 For the record, earlier drafts of this section said the gate could not be run at
 all: the agent's shell tool was timing out on every command, so F4 was left
@@ -180,14 +191,28 @@ finally ran, every cross-check above held on the first attempt — no signature
 mismatch, no shared-state assertion failure. That is a good argument for doing
 the same on F5, but it was never a substitute for running the suite.
 
-### The honest gap: no broker has ever been on the other end
+### Open at GATE 2 — three caveats to state, not bury
 
 `docker-compose.yml` has **no Kafka service**, and the `live` test is opt-in, so
 the wire path has only ever met a fake producer. What the tests prove is the
 *contract* — right key, right headers, right bytes, ack waited on, errors
-propagated — not that a real Kafka 4.x broker accepts it. A consumer (the
-downstream side of at-least-once) does not exist either, nor does DLQ replay
-tooling. Say all three plainly at GATE 2.
+propagated — not that a real Kafka 4.x broker accepts it. Three things are
+therefore **not** covered by a green board, and each must be said out loud when
+GATE 2 is signed:
+
+1. **No broker has ever been on the other end.** `KafkaPublisher` has only ever
+   been exercised against `FakeProducer` in `test_publishers.py`. Adding a broker
+   service to compose and running `KAFKA_LIVE=1` is the first thing that would
+   turn this from a contract test into an end-to-end one.
+2. **No consumer exists.** F4 owns producing only; the downstream side of
+   at-least-once delivery has no implementation in this repository yet.
+3. **No DLQ replay tooling.** Rows that exhaust `max_attempts` are parked in
+   dead-letter with their error text, and nothing un-parks them. The relay
+   deliberately never marks them published.
+
+None of the three is a defect: each is a slice boundary of F4, and each is
+visible in the code and in the relay's own logs rather than hidden. The caveats
+are about what has *not been built*, not about anything that is built and broken.
 
 ## Verification actually run (F2)
 
@@ -202,6 +227,13 @@ tooling. Say all three plainly at GATE 2.
 
 The three integration tests are the only ones that need a database server beyond
 SQLite. They are skipped — not failed — when MySQL is unreachable.
+
+> **Historical count, not a contradiction.** This table records what the F2 commit
+> actually reported. Two harness tests (the SQLAlchemy driver-error cases in
+> `test_mysql_integration.py`) landed afterwards in the follow-up `a79d893`
+> (`fix(f2): report the real cause when the mysql tests skip`), so running the
+> same `-m integration` command today reports **9 passed** — the F4 row above —
+> with the three real-MySQL tests unchanged.
 
 ```powershell
 docker compose up -d mysql
