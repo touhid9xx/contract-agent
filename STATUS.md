@@ -4,9 +4,9 @@ Last updated: Phase 1 (real foundation) — **F1 committed (`f0e1eef`), F2 commi
 (`331a7b4`) plus one follow-up fix to the MySQL test harness (`a79d893`), F3
 committed (`8e6b927`) plus the bootstrap-path doc (`908f50d`), F4 committed
 (`b425ea7`), F5 committed (`21daffc`), F6 committed (`0c2d734`), and F7
-committed (`90fd0e5`) with steps 1–3 of the pipeline slice landed (ingestion, the
-first real outbox producer, field extraction). GATE 2 now awaits human
-sign-off.**
+committed (`90fd0e5`), with **F8 implemented and gate-green** — all four steps of
+the pipeline slice landed (ingestion, the first real outbox producer, field
+extraction, human review). GATE 2 now awaits human sign-off.**
 
 ## Phase history
 
@@ -14,7 +14,7 @@ sign-off.**
 | --- | --- |
 | Phase 0 — mocked demo | ✅ built, verified |
 | GATE 1 — human visual approval | ✅ **approved** ("I'm happy with demo functions and look") |
-| Phase 1 — real foundation | 🔄 in progress (F1 ✅, F2 ✅, F3 ✅, F4 ✅, F5 ✅, F6 ✅, F7 ✅) |
+| Phase 1 — real foundation | 🔄 in progress (F1 ✅, F2 ✅, F3 ✅, F4 ✅, F5 ✅, F6 ✅, F7 ✅, F8 ✅) |
 | GATE 2 — foundation verification | ⏳ pending human sign-off; every automated check is green |
 
 ## F1 — Repo & infra ✅
@@ -362,6 +362,60 @@ default, is proven end-to-end. No test feeds a real PDF through the pipeline:
 there is still no upload path, so "document text" means a text file the operator
 supplies.
 
+## F8 — Human review + audited reveal ✅
+
+Step 4, and the milestone F7 was explicitly waiting for. Extraction could write
+only `auto_accepted` or `pending_review` (D7-04), which made `pending_review` a
+place rows went to stop. This slice adds the other half: the three routes that
+turn a pending field into a decision, and the first code in the repository to
+write `AuditLog` — a table that had existed since F2 with no writer.
+
+| Area | Detail |
+| --- | --- |
+| Policy | `app/api/v1/review.py` — `ReviewAction` is a `Literal["accept","reject","mark_unreadable","edit"]`, so an unknown action is a schema `422` rather than a silent no-op. Each action maps to exactly one `FieldStatus`; `accept` and `edit` are the only paths to `approved`, and both are operator-only and audited (D8-05) |
+| Queue | `GET /api/v1/review/queue` — lowest confidence first, ties broken by `created_at` then `id` so the order is stable for someone working through it. Bounded at the query (`DEFAULT_REVIEW_QUEUE_LIMIT` 100, `MAX_REVIEW_QUEUE_LIMIT` 500) rather than in the route, so no caller can ask for the whole table. Reports `count`, `oldest_minutes` (a queue that is not draining shows it) and the `threshold` that put each item there |
+| Decision | `PATCH /api/v1/review/{field_id}` — carries the `version` the reviewer was looking at; a mismatch is a `409` whose body contains the **winning row**, so a reviewer sees what changed instead of only that they lost. `StaleDataError` closes the read-to-flush race the version check cannot. Response reports the decided item plus the contract's remaining `blocking` count |
+| Correction | `action="edit"` normalizes the replacement for that field's type, encrypts it, and stores it — the same two rules F7 applies to an extracted value. An unparseable correction is a `422` and **writes nothing**, and the error never echoes the value back. The extractor's `confidence` is deliberately left alone (D8-02) |
+| Reveal | `POST /api/v1/review/{field_id}/reveal` — the only route in the API that returns a decrypted value, and the only caller of `decrypt_for_review`, which closes gap 14. `POST` because it writes an audit row, so a refresh, prefetch or cache cannot produce a reveal that left no trace (D8-03). `503` when `ENCRYPTION_KEY` is unset, `409` when the field stores no value, `500` on a rotated key without echoing the token |
+| Audit writer | `app/db/repositories/audit.py` — `AuditLogRepository.record(...)`, append-only by construction (no update, no delete), tenant stamped from the repository. Snapshots are built by the caller and carry `field_name`/`status`/`version`/`confidence` — **never a value**, because `AuditLog` has no column encryption (D8-04) |
+| Repository | `app/db/repositories/fields.py` — `by_id()` (tenant-scoped `get`, so another tenant's id reads as missing) and `awaiting_review()`, which joins `Contract` in the same statement and carries the tenant predicate on **both** sides |
+| Shared shape | `_field_summary` → public `field_summary` in `api/v1/contracts.py`; `ReviewItem` extends the value-free `ExtractedFieldSummary` instead of re-declaring it, so there is one definition of "a field without its PII" for a new route to inherit. `correlation_id_or_new` moved from a private helper in `contracts.py` to `core/middleware.py` because two routers now need it |
+| Error envelope | `main.py`'s HTTP-exception handler now fills the `details` slot `error_payload` has had since F1, when a route raises with a `{"message","details"}` dict. The envelope is byte-identical for every existing route — the F6 `409` from ingestion is covered by its own regression test |
+| Tests | `test_review.py` (34): queue ordering/tenant isolation/bounds/limit validation/viewer read/value absence; accept→`approved` with blocking cleared; reject keeps blocking; `mark_unreadable` unblocks; edit normalized and encrypted at rest; stale version→`409` carrying the winning row; one audit row per decision with snapshots that never contain the value; viewer `403` writing nothing; cross-tenant `404`; reveal round-trip with exactly one `field.value_revealed` row; `503` with no key; `409` with no stored value; `500` on a rotated key without leaking the token |
+
+`main.py` also gained the only change in this milestone that touches existing
+behaviour: a route may now raise `HTTPException(detail={"message": ..., "details":
+...})` to put structured context in the envelope. Every pre-existing raise uses a
+plain string and produces the same body as before.
+
+### Verification actually run (F8)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Full suite, no MySQL | `pytest tests` (SQLite, `MYSQL_TEST_URL` cleared) | **294 passed, 4 skipped** (JUnit: `tests=298 failures=0 errors=0 skipped=4`) |
+| Full suite, real MySQL 8.4 | `pytest tests` with `MYSQL_TEST_URL` on `:3307` | **297 passed, 1 skipped** (JUnit: `tests=298 … skipped=1`) |
+| Type check | `mypy app` (strict) | **clean, 41 source files** |
+| Lint | `ruff check app tests` | **All checks passed** |
+| Format | `ruff format --check app tests` | **61 files already formatted** |
+| Security lint | `bandit -c pyproject.toml -r backend/app` | **0 issues** |
+| Commit gate | `pre-commit run --all-files` | **16 hooks passed** (17th, `forbid submodules`, not applicable) |
+
+The F7→F8 delta is +34 tests on both databases — the whole of `test_review.py`,
+which is why the two runs differ by exactly the three real-MySQL integration tests
+and the opt-in `live` Kafka test, exactly as before.
+
+#### What the review tests prove and what they do not
+
+They prove the **rules**: a viewer cannot decide or reveal; a field in another
+tenant is indistinguishable from one that does not exist; a stale `version` cannot
+overwrite a decision; a correction is normalized and encrypted rather than stored
+as typed; every decision and every reveal writes exactly one audit row; and no
+audit snapshot, no queue item and no log line ever contains a stored value. They
+do **not** prove the workflow is usable — there is no review screen, so these
+routes have only ever been called by `TestClient` (gap 15). Nor is anything yet
+*consuming* `approved` fields: a field can now become approved and then nothing
+happens, because there is no agent-decision or notification slice yet.
+
 ## Verification actually run (F2)
 
 | Check | Command | Result |
@@ -489,15 +543,28 @@ just wrote it. Timestamps are now floored before writing.
     **and** teaching the script the Windows venv path (`venv/Scripts/pre-commit.exe`;
     it currently probes only `venv/bin/pre-commit`), which is why this is recorded
     rather than silently changed.
-14. **There is no way to read an extracted value over HTTP, and no review
-    endpoint.** `GET /contracts/{id}/fields` deliberately omits the value (D7-05),
-    and `decrypt_for_review` exists in `app/workers/extraction.py` but has no
-    caller. So the review queue cannot yet be wired: approving, rejecting,
-    correcting or marking a field unreadable is not possible through the API, and
-    the audited decrypt route that must accompany a value reveal is not built.
-    Until it is, a field below the threshold is a permanent blocking row and the
-    only way to change one is direct SQL.
-15. **The default `pattern` backend reaches 5 of the 7 field types.** Email, phone,
+14. ~~**There is no way to read an extracted value over HTTP, and no review
+    endpoint.**~~ — **closed by F8.** `GET /review/queue`, `PATCH /review/{id}` and
+    `POST /review/{id}/reveal` now cover queue → decide → audit, and the reveal
+    route is the caller `decrypt_for_review` never had. A `pending_review` row is
+    no longer a dead end; it is a row an operator can accept, reject, mark
+    unreadable or correct, with a version-checked `409` if two reviewers collide
+    and one `AuditLog` row per decision.
+15. **Nothing consumes an `approved` field.** F8 makes `approved` reachable and
+    audited, but no route, worker or event does anything with it afterwards: there
+    is no agent-decision slice and no notification slice, so a contract whose
+    fields are all approved simply sits there. The Phase-0 flow diagram
+    (extraction → review → decision → notification) is now real for the *first* two
+    arrows only. Likewise there is no review **screen**: `frontend/src/app/review`
+    still calls the mocked demo backend, so the three F8 routes have only ever been
+    called by `TestClient`.
+16. **The review queue paginates by `limit` only.** `awaiting_review()` takes a
+    bounded `limit` (100 default, 500 max) with no cursor or offset, so a queue
+    longer than the cap cannot be paged past — the oldest, lowest-confidence items
+    are always the ones returned, which is the right order but means items beyond
+    the cap are invisible. Fine at the volumes a single operator drains; it needs a
+    cursor before a portfolio-scale queue.
+17. **The default `pattern` backend reaches 5 of the 7 field types.** Email, phone,
     `start_date`, `end_date` and `contract_value` have regexes; `address` and
     `dob` are reachable only through the opt-in `ollama` backend, which has no
     compose service and has never been run against a live model. So the default
@@ -507,27 +574,26 @@ just wrote it. Timestamps are now floored before writing.
 
 ## Next permitted step
 
-**F7 (step 3) is committed (`90fd0e5`) and gate-green; GATE 2 awaits human
-sign-off.** F1–F7 are all committed. The remaining work
-inside Phase 1 is the rest of the pipeline slice below, which the repo names
-unambiguously — this is no longer a guess.
+**F8 (step 4) is gate-green and committed in this milestone; GATE 2 awaits human
+sign-off.** F1–F8 are all committed. The pipeline slice is complete, so what comes
+next is no longer inside it — the repo names the next aggregate: `AgentDecision`.
 
-- `app/db/models/` — `Contract` is writable through `POST /contracts` and
-  `ExtractedField` now has an operator writer (`python -m app.cli extract`), so
-  two of the seven aggregates are live. `AgentDecision`, `Notification`,
-  `CustomerResponse`, `Escalation` and `AuditLog` still have **no route, service
-  or worker that writes them**, and no route writes `ExtractedField` either
-  (gap 14).
-- `app/api/v1/` — `auth`, `health` and `contracts` routers exist, the last now
-  serving `POST /contracts` and `GET /contracts/{id}/fields`. There is still no
-  review route and no notification route, while `frontend/src/lib/api.ts` and the
-  Phase-0 fixtures already assume both. **The UI contract remains ahead of the
-  backend, now by roughly half a milestone.**
+- `app/db/models/` — `Contract` is writable through `POST /contracts`,
+  `ExtractedField` has both an operator writer (`python -m app.cli extract`) and
+  API writers (`PATCH /review/{id}`), and `AuditLog` finally has a writer
+  (`review` and `reveal`). **Four of the seven aggregates are live.**
+  `AgentDecision`, `Notification`, `CustomerResponse` and `Escalation` still have
+  **no route, service or worker that writes them** (gap 15).
+- `app/api/v1/` — `auth`, `health`, `contracts` and `review` routers exist. There
+  is still no notification route, while `frontend/src/lib/api.ts` and the Phase-0
+  fixtures already assume one, and no review *screen* talks to the real API yet —
+  **the UI contract is still ahead of the backend, but now by one route rather
+  than by half a milestone.**
 - Redis (rate limiting, gap 9) and Ollama are still unwired: the `ollama` backend
   is written but has no compose service, so `EXTRACTION_BACKEND=pattern` is what
-  runs (gap 15). Each belongs to the slice that first needs it.
+  runs (gap 17). Each belongs to the slice that first needs it.
 
-**The pipeline slice, in the order the dependencies demand:**
+**The pipeline slice, in the order the dependencies demanded:**
 
 1. ✅ **Done (F6).** `POST /contracts` + ingestion into `Contract` behind the F3
    principal — tenant stamped from the principal, `sha256` dedup per tenant,
@@ -539,17 +605,24 @@ unambiguously — this is no longer a guess.
    encrypted at rest, with the non-negotiable enforced in code: extraction can
    write only `auto_accepted` or `pending_review`, so nothing below the threshold
    can reach a notification.
-4. ⏳ **Next.** Review endpoints behind `require_roles`, version-checked (409 on
-   stale write), matching what the Phase-0 review queue already mocks — plus the
-   audited decrypt route that has to accompany any value reveal (gap 14).
+4. ✅ **Done (F8).** Review endpoints behind `require_roles`, version-checked (`409`
+   on a stale write, carrying the winning row), matching what the Phase-0 review
+   queue mocks — plus the audited decrypt route F7 refused to fold into the list
+   route. `approved` has a writer for the first time, and every write that can
+   reach it leaves an `AuditLog` row.
 
-Step 4 now carries the reason F7 refused to expose values on the list route: the
-reveal is the review endpoint's job, and it must be auditable. Building it is what
-turns a `pending_review` row from a dead end into a decision.
+**Next, and it is the first arrow after review:** the agent-decision slice. An
+`AgentDecision` should be computed from a contract whose fields are all
+non-blocking, using only approved/auto-accepted values, with the channel chosen and
+the reasoning redacted before storage — and it must read `blocks_pipeline`, not
+re-implement the rule. Only after that does a notification exist for the outbox
+event to describe.
 
 **Open at GATE 2 — say these out loud, do not bury them:** no Kafka broker has
 ever been on the other end of a publish (no compose service; `live` test opt-in);
-no consumer exists; DLQ replay is operator-initiated with no alerting.
+no consumer exists; DLQ replay is operator-initiated with no alerting; no live
+Ollama has answered anything; and the review routes have only ever been called by
+`TestClient`, because no review screen talks to them yet.
 
 ## Non-negotiable reminders
 

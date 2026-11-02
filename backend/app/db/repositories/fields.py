@@ -19,12 +19,56 @@ Two rules the write helpers enforce, both from
 from __future__ import annotations
 
 from app.db.enums import FieldName, FieldStatus
-from app.db.models import ExtractedField
+from app.db.models import Contract, ExtractedField
 from app.db.repositories.base import TenantScopedRepository
+
+#: How many awaiting-review fields the queue returns when the caller does not say.
+#: Bounded at the query, not in the route, so no caller can ask for the whole table.
+DEFAULT_REVIEW_QUEUE_LIMIT = 100
+MAX_REVIEW_QUEUE_LIMIT = 500
 
 
 class ExtractedFieldRepository(TenantScopedRepository[ExtractedField]):
     """Tenant-scoped access to the fields extracted from one organisation's contracts."""
+
+    def by_id(self, field_id: int) -> ExtractedField | None:
+        """One field row by primary key, or ``None`` if it belongs to another tenant.
+
+        Review is addressed by field id, so this is the lookup the review route
+        starts from. It is ``get`` rather than a hand-written query for the reason
+        the base class exists: another tenant's id must look like a missing row
+        (IDOR/BOLA).
+        """
+        return self.get(ExtractedField, field_id)
+
+    def awaiting_review(
+        self, *, limit: int = DEFAULT_REVIEW_QUEUE_LIMIT
+    ) -> list[tuple[ExtractedField, Contract]]:
+        """Fields waiting for a person, each with the contract it belongs to.
+
+        Lowest confidence first: the least trustworthy extractions are the ones a
+        reviewer should meet first. ``created_at``/``id`` break ties so the order
+        is stable across calls, which matters for a queue someone works through.
+
+        The contract is joined here rather than fetched per row — the queue shows
+        which contract a field blocks, and one query beats N. Both sides carry the
+        tenant predicate: the join is on ``contract_id`` and would otherwise be a
+        path to another tenant's row if the two ever disagreed.
+        """
+        stmt = (
+            self.scoped(ExtractedField)
+            .add_columns(Contract)
+            .join(Contract, ExtractedField.contract_id == Contract.id)
+            .where(ExtractedField.status == FieldStatus.PENDING_REVIEW)
+            .where(Contract.tenant_id == self.tenant_id)
+            .order_by(
+                ExtractedField.confidence.asc(),
+                ExtractedField.created_at.asc(),
+                ExtractedField.id.asc(),
+            )
+            .limit(limit)
+        )
+        return [(field, contract) for field, contract in self.session.execute(stmt).all()]
 
     def for_contract(self, contract_id: int) -> list[ExtractedField]:
         """Every field row of one contract, in no particular order.

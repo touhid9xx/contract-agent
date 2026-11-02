@@ -698,4 +698,95 @@ committed together. That pairing is the milestone; extraction and review follow.
   `403` would.
 - **Trade-off:** the review UI cannot render a value from this route, so the
   audited decrypt path (`decrypt_for_review`) must be exposed before the review
-  screen is wired. That is the next milestone (STATUS.md gap 14), not this one.
+  screen is wired. That was the next milestone (STATUS.md gap 14, closed by F8 —
+  see D8-03), not this one.
+
+## Phase 1 — F8 (human review)
+
+### D8-01 — Review writes an `AuditLog`, not an outbox event
+
+- **Decision:** `PATCH /review/{id}` and `POST /review/{id}/reveal` append an
+  `AuditLog` row through `AuditLogRepository.record(...)`. Neither publishes to the
+  outbox. The event type for a decided field does not exist yet, and no consumer
+  would receive it.
+- **Why:** the outbox is a *delivery* guarantee for events something downstream
+  acts on; an audit row is *evidence* that a person did something. Publishing
+  `field.reviewed` before a consumer exists would park rows in the dead-letter
+  queue the moment the default `EVENT_TRANSPORT=none` stand-in refused them
+  (D4-03), i.e. manufacture gap 5 traffic to record a decision nobody reads. The
+  Phase-0 timeline already mocks review decisions as log entries, so this is also
+  the shape the UI expects. The event belongs to the slice that first consumes it.
+- **Trade-off:** the audit trail is not replayable through Kafka, so a downstream
+  system that later wants review history reads the `audit_log` table. When a
+  consumer exists, the review write grows an outbox row inside the same
+  transaction — the atomicity pattern is already there to copy.
+
+### D8-02 — A correction keeps the extractor's confidence
+
+- **Decision:** `action="edit"` replaces `raw_value` (encrypted) and
+  `normalized_value` and sets the status to `approved`; it does **not** touch
+  `confidence`, which stays whatever the extractor produced.
+- **Why:** the confidence score is a fact about *the extraction*, and the
+  extraction did fail — that is why a person intervened. Rewriting it to `1.0`
+  would destroy the only measurement of how often the extractor is wrong, which is
+  exactly the number needed to tune it (D7-03's stated limit is "the pattern
+  backend reaches 5 of 7 fields"; nothing measures that without honest scores).
+  Review state carries the correction: `status=approved` plus `reviewed_by` and
+  `reviewed_at`.
+- **Trade-off:** a row can read `confidence=0.31, status=approved`, which looks
+  contradictory in a raw table dump. Anything that treats confidence as a proxy
+  for trustworthiness must read `status` first — the review queue already orders
+  by confidence but filters on `pending_review`, so it is unaffected.
+
+### D8-03 — Revealing a value is a `POST`
+
+- **Decision:** `POST /api/v1/review/{field_id}/reveal` returns
+  `{field_id, field_name, value, version}`. It is not a `GET`, and it is not a
+  query parameter on the queue.
+- **Why:** it writes a `field.value_revealed` audit row, so it is not a safe
+  method. `GET` would be re-issued by a browser refresh, a link prefetcher, an
+  HTTP cache or a retry-on-timeout — producing either duplicate audit rows or a
+  reveal that was never recorded, and both destroy the property the route exists
+  for. A `GET` can also be reached by an `<img src>` from any page the reviewer
+  visits, which is a real exfiltration path for the one route in the API that
+  returns decrypted PII.
+- **Trade-off:** the route cannot be bookmarked or cached, and the frontend has to
+  fire it from an explicit user gesture. Accepted: a value reveal should never be
+  incidental.
+
+### D8-04 — No value in the queue, and none in the audit trail
+
+- **Decision:** `ReviewItem` extends the F7 value-free `ExtractedFieldSummary`
+  (one definition of "a field without its PII", imported from
+  `api/v1/contracts.py` rather than re-declared). The audit snapshots hold
+  `field_name`, `status`, `version` and `confidence` only. `AuditLog` has no
+  column encryption, so a phone number written there would sit in plain text next
+  to ciphertext in `extracted_fields`.
+- **Why:** a queue listing is the easiest place to leak PII in bulk (the same
+  reason as D7-05), and an audit log is read by every operator. Encrypting one
+  column while copying the same value into an unencrypted sibling would make the
+  F7 encryption theatre.
+- **Trade-off:** the audit trail cannot answer "what was the value before the
+  correction", only "who changed which field, from what status, at which version".
+  Anyone needing the old value must rely on the fact that it was never stored
+  anywhere else — which is the point.
+
+### D8-05 — Viewers read review *state*; only admin/operator touch values
+
+- **Decision:** `GET /review/queue` admits `ADMIN`, `OPERATOR` and `VIEWER`.
+  `PATCH /review/{id}` and `POST /review/{id}/reveal` admit `ADMIN` and `OPERATOR`
+  only, and a refused viewer writes nothing. A cross-tenant field id is `404`, not
+  `403`.
+- **Why:** the split follows what each route exposes. The queue is review state —
+  the same information `GET /contracts/{id}/fields` already gives a viewer. The
+  decision is the write that can eventually put a document in front of a customer,
+  so it inherits F6's operator-only rule (D6-01) for the same reason; the reveal is
+  a PII access event. `404` rather than `403` because the repository returns
+  `None` outside the tenant, and confirming that an id exists in another tenant is
+  the BOLA leak `test_review.py` pins down (mirrors D7-05).
+- **Trade-off:** a read-only auditor cannot resolve the queue; they can see that
+  work is pending but not what it says. That is deliberate — an auditor who needs a
+  value goes through the same audited reveal as everyone else, which means their
+  access is logged too. It does require the deployment to have at least one
+  operator, so an installation staffed only by viewers accumulates blocked
+  contracts.

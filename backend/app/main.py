@@ -23,6 +23,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api.v1.auth import router as auth_router
 from app.api.v1.contracts import router as contracts_router
 from app.api.v1.health import router as health_router
+from app.api.v1.review import router as review_router
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.core.middleware import RequestContextMiddleware, current_correlation
@@ -125,10 +126,20 @@ def create_app(
         _request: Request, exc: StarletteHTTPException
     ) -> JSONResponse:
         code = _ERROR_CODES.get(exc.status_code, DEFAULT_ERROR_CODE)
-        message = str(exc.detail)
+        # A route may raise with a ``{"message": ..., "details": ...}`` dict when the
+        # caller needs more than a sentence — a 409 carrying the row that won the
+        # race, for instance. ``error_payload`` has had a ``details`` slot since F1;
+        # this is the one place that knows how to fill it, so the envelope stays
+        # identical for the plain-string details every other route uses.
+        if isinstance(exc.detail, dict):
+            message = str(exc.detail.get("message", "Request failed"))
+            details = exc.detail.get("details")
+        else:
+            message = str(exc.detail)
+            details = None
         return JSONResponse(
             status_code=exc.status_code,
-            content=error_payload(code=code, message=message),
+            content=error_payload(code=code, message=message, details=details),
             headers=getattr(exc, "headers", None),
         )
 
@@ -168,6 +179,7 @@ def create_app(
     # also what the frontend proxies and what `frontend/src/lib/api.ts` assumes.
     app.include_router(auth_router, prefix=app_settings.api_v1_prefix)
     app.include_router(contracts_router, prefix=app_settings.api_v1_prefix)
+    app.include_router(review_router, prefix=app_settings.api_v1_prefix)
 
     @app.get("/", include_in_schema=False)
     async def root() -> dict[str, Any]:

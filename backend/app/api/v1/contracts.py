@@ -42,7 +42,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_request_session, require_roles
-from app.core.middleware import current_correlation
+from app.core.middleware import correlation_id_or_new
 from app.core.principal import Principal
 from app.db.enums import ContractSource, ContractStatus, FieldName, FieldStatus, RiskLevel, UserRole
 from app.db.models import Contract, ExtractedField
@@ -165,17 +165,6 @@ def _fingerprint(payload: ContractCreateRequest) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _correlation_id() -> str:
-    """The request's correlation id, or a fresh one outside a request context.
-
-    ``OutboxEvent.correlation_id`` is non-nullable, so an empty value would make
-    ingestion fail on a column constraint; a standalone call (a script, a worker)
-    has no bound context and must not be able to trigger that.
-    """
-    bound = current_correlation().get("request_id")
-    return bound if isinstance(bound, str) and bound else str(uuid.uuid4())
-
-
 def _summary(contract: Contract, *, outbox_event_id: uuid.UUID) -> ContractSummary:
     return ContractSummary(
         id=contract.id,
@@ -237,7 +226,7 @@ def ingest_contract(
         event = enqueue_event(
             session,
             tenant_id=principal.tenant_id,
-            correlation_id=_correlation_id(),
+            correlation_id=correlation_id_or_new(),
             event_type=CONTRACT_INGESTED_EVENT,
             topic=CONTRACT_EVENTS_TOPIC,
             # All events for one contract share a partition, so a consumer sees
@@ -307,7 +296,14 @@ class ContractFieldsResponse(BaseModel):
     blocking: int
 
 
-def _field_summary(field: ExtractedField) -> ExtractedFieldSummary:
+def field_summary(field: ExtractedField) -> ExtractedFieldSummary:
+    """The value-free view of one extracted field.
+
+    Public because the review queue (``app/api/v1/review.py``) serves the same
+    shape with contract context added around it: one definition of "a field
+    without its PII" is what keeps a value from leaking through whichever route
+    is written next.
+    """
     return ExtractedFieldSummary(
         field_name=field.field_name,
         status=field.status,
@@ -348,7 +344,7 @@ def list_contract_fields(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Contract not found")
 
     rows = ExtractedFieldRepository(session, principal.tenant_id).for_contract(contract.id)
-    summaries = [_field_summary(row) for row in sorted(rows, key=lambda row: row.field_name.value)]
+    summaries = [field_summary(row) for row in sorted(rows, key=lambda row: row.field_name.value)]
     return ContractFieldsResponse(
         contract_id=contract.id,
         fields=summaries,

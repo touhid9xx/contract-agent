@@ -111,3 +111,15 @@ class RequestContextMiddleware:
 def current_correlation() -> dict[str, Any]:
     """Return the structlog contextvars bound for the current request."""
     return dict(structlog.contextvars.get_contextvars())
+
+
+def correlation_id_or_new() -> str:
+    """The request's correlation id, or a fresh one outside a request context.
+
+    ``AuditLog.correlation_id`` and ``OutboxEvent.correlation_id`` are both
+    non-nullable, so an empty string would fail on a column constraint. A call
+    made outside a request — a CLI command, a worker tick — has nothing bound in
+    the contextvars and must not be able to trigger that.
+    """
+    bound = current_correlation().get("request_id")
+    return bound if isinstance(bound, str) and bound else new_request_id()
