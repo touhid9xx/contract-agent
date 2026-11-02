@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+# Conventional Commits, enforced on every commit message.
+npx --no -- commitlint --edit "$1"

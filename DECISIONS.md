@@ -115,3 +115,77 @@ features & visuals → convenience.
 3. **Retention values** (7 y / 2 y / 1 y / 90 d) are provisional defaults, not
    legal mandates; they must be approved per purpose and jurisdiction before
    real customer data exists.
+
+---
+
+# Phase 1 — Foundation decisions (F1)
+
+## D1-01 — `pre-commit` is installed into the project venv, not globally
+
+- **Decision:** `.husky/pre-commit` execs `venv/Scripts/pre-commit.exe` (or
+  `venv/bin/pre-commit`), falling back to a bootstrap hint. `npm run bootstrap`
+  installs it from `backend/requirements-dev.txt`.
+- **Why:** the repo must be self-contained on a machine where no global Python
+  tooling exists. A globally-versioned `pre-commit` would drift between
+  developers and CI.
+
+## D1-02 — Resolves GATE 1 deviation D0-08
+
+`pre-commit run --all-files` **is now runnable** and was run over the whole tree
+including the Phase 0 demo files. D0-08 is closed.
+
+## D1-03 — `gitleaks` is bound to the `manual` stage
+
+- **Decision:** the gitleaks hook uses `language: docker_image` and
+  `stages: [manual]`, so `pre-commit run --all-files` does not block on Docker.
+- **Why:** the spec requires secret scanning, but requiring a running Docker
+  daemon for every local commit is hostile and would push developers to
+  `--no-verify`, which disables *all* hooks. The hook is still present, pinned
+  and documented — run it with
+  `pre-commit run gitleaks --all-files` (or in CI).
+- **Residual risk:** a developer who never runs the manual hook relies on CI.
+  Recorded rather than hidden.
+
+## D1-04 — Product frontend runs on port 3100, demo on 3000
+
+- **Decision:** `frontend/package.json` binds `next dev`/`next start` to 3100.
+- **Why:** the Phase 0 demo owns 3000 (and the launcher may walk it higher).
+  Keeping the real app off 3000 lets both run side by side during the Phase 1
+  → Phase 2 transition without port guessing.
+
+## D1-05 — `/api/*` is proxied through Next.js, not called cross-origin
+
+- **Decision:** `frontend/next.config.ts` rewrites `/api/*` to `API_PROXY_URL`
+  (default `http://127.0.0.1:8000`).
+- **Why:** refresh-token cookies stay first-party, so `SameSite=Strict` + no
+  CORS credentials hack is possible in F3. It also matches the demo's proven
+  shape, so `lib/api.ts` survives the Phase 2 swap.
+
+## D1-06 — Backend errors use a single envelope
+
+- **Decision:** every error response is
+  `{"error": {"code", "message", "request_id", "details"?}}`, produced by one
+  handler set in `app/main.py`; unhandled exceptions never leak a traceback.
+- **Why:** the frontend needs one parser, and correlation IDs must appear on
+  failures as well as successes so a support ticket can be traced.
+
+## D1-07 — `mypy --strict` on `backend/app`, not on tests
+
+- **Decision:** hooks and CI type-check `backend/app` only.
+- **Why:** strict mode over pytest fixtures produces noise that hides real
+  errors; tests are covered by ruff and by actually running.
+
+## D1-08 — Frontend checks run through a Node bridge script
+
+- **Decision:** `scripts/run-frontend-check.mjs <typecheck|lint>` spawns npm in
+  `frontend/`, allowlisting the task name.
+- **Why:** pre-commit cannot express "run an npm script in a subdirectory"
+  without `bash -c`, which does not exist on the Windows host. Allowlisting the
+  argument prevents the script becoming a `run-anything` shim.
+
+## D1-09 — `make` is a convenience wrapper, npm is the contract
+
+- **Decision:** the `Makefile` targets delegate to `node scripts/*` / venv
+  commands and are documented as optional.
+- **Why:** `make` is not installed on the primary Windows machine. The
+  documented one-command path (`npm run bootstrap`) must not depend on it.

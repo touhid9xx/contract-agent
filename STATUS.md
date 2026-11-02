@@ -1,54 +1,59 @@
 # Status
 
-Last updated: Phase 0 (mock demo) — **waiting for GATE 1**.
+Last updated: Phase 1 (real foundation) — **F1 committed, F2 in progress**.
 
-## Current phase
+## Phase history
 
-**Phase 0 — Interactive Demo.** Built, runnable and verified locally.
-**Not yet approved.** Phase 1 (F1–F7) must not start until the human says
-_"I'm happy with demo functions and look"_ (GATE 1).
+| Phase | State |
+| --- | --- |
+| Phase 0 — mocked demo | ✅ built, verified |
+| GATE 1 — human visual approval | ✅ **approved** ("I'm happy with demo functions and look") |
+| Phase 1 — real foundation (F1–F7) | 🔄 in progress |
+| GATE 2 — foundation verification | ⏳ pending |
 
-## Completed
+## F1 — Repo & infra ✅
 
 | Area | Detail |
 | --- | --- |
-| Repo hygiene | `.gitignore`, root `package.json`, `README.md`, `DEMO.md`, `DECISIONS.md`, `STATUS.md` |
-| Mocked backend | `demo/backend/main.py` — FastAPI, in-memory state, `/api/v1/*`, `X-Mocked: true` on every response, deterministic latency, optimistic-locking 409, blocked-pipeline 409 |
-| Fixtures | `demo/fixtures/` — contracts (11 rows + totals), extracted fields, agent decisions, notifications, escalations, timeline, dashboard, users |
-| Frontend | Next.js 16 + Tailwind 4 + TanStack Query + Zustand, 8 routes, dark mode, keyboard shortcuts, toasts, skeletons, empty/error states, `MOCKED` badges |
-| Launcher | `scripts/demo.mjs` — `npm run demo`, port auto-selection, health wait, clean shutdown |
-| Docs | `DEMO.md` screen → milestone map, walkthrough, mocked-signal table |
+| Python tooling | `pyproject.toml` — ruff (lint + format), `mypy --strict`, pytest + coverage, bandit |
+| Pre-commit | `.pre-commit-config.yaml` — hygiene, ruff, ruff-format, mypy, bandit, frontend typecheck; gitleaks bound to `manual` (D1-03) |
+| Commit gate | husky `pre-commit` + `commit-msg`, commitlint (Conventional Commits), lint-staged |
+| Backend | `app/core/config.py` fail-fast settings, `app/core/logging.py` structlog + PII redaction, `app/core/middleware.py` request/trace IDs, `app/main.py` factory + error envelope, `/api/v1/health` |
+| Containers | `Dockerfile.backend` (non-root, tini, read-only rootfs), `docker-compose.yml` (api only — DB/Redis/Kafka land in F2/F4) |
+| Frontend | Next.js 16 + Tailwind 4 + TanStack Query + Zustand + next-themes + next-intl (en, bn), ESLint flat config, Prettier, `[locale]` routing |
+| Scripts | `scripts/bootstrap.mjs` (one-command setup), `scripts/run-frontend-check.mjs` |
+| Env | `.env.example` documents every setting read by `Settings` |
 
-## Verification actually run
+## Verification actually run (F1)
 
 | Check | Command | Result |
 | --- | --- | --- |
-| TypeScript | `npx tsc --noEmit` (in `demo/frontend`) | pass, exit 0 |
-| Production build | `npm run build` (in `demo/frontend`) | pass, 8/8 routes, exit 0 |
-| Backend smoke | `GET /health`, `GET /api/v1/contracts` @ `:8000` | `200`, `200` |
-| Contract detail / review / notifications / escalations | `GET /api/v1/*` | `200` each |
-| Blocked pipeline | `POST /api/v1/agent/decisions/{id}/rerun` on an unreviewed contract | `409` as designed |
+| Backend unit/integration tests | `venv\Scripts\python.exe -m pytest backend/tests -q` | **33 passed** |
+| Lint | `ruff check backend` | pass |
+| Format | `ruff format --check backend` | 14 files already formatted |
+| Types | `mypy backend/app` (strict) | Success: no issues in 9 source files |
+| Security lint | `bandit -c pyproject.toml -r backend/app` | 0 issues (all severities) |
+| Frontend typecheck | `npm run typecheck` | pass |
+| Frontend lint | `npm run lint` | pass |
 
 ## Known gaps / issues
 
-1. **`pre-commit` not runnable yet** — `.pre-commit-config.yaml` is an F1
-   deliverable, and Phase 1 may not start before GATE 1. See `DECISIONS.md`
-   D0-08 for the proposed resolution.
-2. **No backend tests yet** — Phase 0 ships no pytest suite; the mocked service
-   is validated by the route smoke tests above. The spec's coverage targets
-   (backend ≥ 85 %, etc.) apply from Phase 1.
-3. **Port 3000 may be busy** on a machine running Docker; the launcher now walks
-   to the next free port and prints the URL to use (`DECISIONS.md` D0-07).
-4. **Upload / voice audio are intentionally inert** — upload button disabled
-   with a tooltip (`P2-A`); voice events are text fixtures (`P2-F`).
+1. **`gitleaks` needs Docker** and is manual-stage only (D1-03). Run it with
+   `pre-commit run gitleaks --all-files` before pushing, or rely on CI.
+2. **`make` is optional** — not installed on the primary Windows host; `npm`
+   scripts are the contract (D1-09).
+3. **Docker Compose currently has one service** (`api`). MySQL, Redis, Kafka and
+   Ollama are added in F2/F4 as the code that uses them lands — shipping idle
+   containers now would misrepresent readiness.
+4. **`/health/ready` does not exist yet** — it arrives in F5 once there are
+   dependencies to check. `/api/v1/health` is liveness only.
 
 ## Next permitted step
 
-Human reviews the demo at GATE 1 and replies **"I'm happy with demo functions
-and look"**. Only then: Phase 1, F1 — repo & infra (ruff, pre-commit, husky,
-docker, settings, structlog, `/health`, frontend skeleton).
+F2 — MySQL 8 + SQLAlchemy 2.0 + Alembic, tenant-scoped core tables, outbox
+table and the relay worker that publishes to Kafka/StrikeMQ.
 
-## Non-negotiable reminders for the next phase
+## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.
 - No cloud LLM; Ollama local only.
@@ -56,3 +61,4 @@ docker, settings, structlog, `/health`, frontend skeleton).
 - Outbox + idempotency for every side effect; DLQ with replay, never log-and-drop.
 - No channel switch that bypasses consent, opt-out or quiet hours.
 - No raw PII in logs, traces, Ollama payloads or MLflow.
+- Tenant identity comes from the authenticated principal, never from the client.

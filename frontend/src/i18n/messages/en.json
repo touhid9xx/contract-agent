@@ -1,0 +1,29 @@
+{
+  "app": {
+    "name": "Contract Expiry Notification Agent",
+    "tagline": "Contract-lifecycle automation with a human in the loop."
+  },
+  "nav": {
+    "dashboard": "Dashboard",
+    "contracts": "Contracts",
+    "review": "Review",
+    "escalations": "Escalations",
+    "notifications": "Notifications"
+  },
+  "home": {
+    "phaseLabel": "Phase 1 foundation",
+    "heading": "Foundation is being built",
+    "body": "The real authentication, data and messaging layers land in F2 to F7. Product features follow after GATE 2.",
+    "healthHeading": "Backend connectivity",
+    "healthOk": "API reachable",
+    "healthFail": "API unreachable",
+    "healthChecking": "Checking…"
+  },
+  "common": {
+    "language": "Language",
+    "theme": "Theme",
+    "light": "Light",
+    "dark": "Dark",
+    "system": "System"
+  }
+}

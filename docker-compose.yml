@@ -1,0 +1,35 @@
+# F1 stack: the API only.
+# MySQL/Redis/Kafka/Ollama arrive with F2/F4/F5, once something actually talks
+# to them -- declaring services here that no code uses yet would only make the
+# "is it ready?" question harder to answer.
+name: contract-agent
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    image: contract-agent-api:dev
+    env_file:
+      - .env
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      LOG_JSON: ${LOG_JSON:-false}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()"
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true

@@ -1,0 +1,95 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Design tokens are shared with the Phase 0 demo (demo/frontend/src/app/globals.css)
+   so the approved look carries over unchanged into the real product. */
+:root {
+  --background: #f7f7f9;
+  --foreground: #16181d;
+  --card: #ffffff;
+  --card-foreground: #16181d;
+  --muted: #f0f1f4;
+  --muted-foreground: #666d7d;
+  --border: #e2e4ea;
+  --input: #ffffff;
+  --primary: #2c5cf6;
+  --primary-foreground: #ffffff;
+  --accent: #eef1fe;
+  --accent-foreground: #1e3fae;
+  --success: #15803d;
+  --success-muted: #e8f6ee;
+  --warning: #b45309;
+  --warning-muted: #fdf3e2;
+  --danger: #b3261e;
+  --danger-muted: #fdeceb;
+  --ring: #2c5cf6;
+  --radius: 0.75rem;
+}
+
+.dark {
+  --background: #0d0f14;
+  --foreground: #e9ebf1;
+  --card: #14171f;
+  --card-foreground: #e9ebf1;
+  --muted: #1b1f2a;
+  --muted-foreground: #9aa3b5;
+  --border: #262b38;
+  --input: #11141b;
+  --primary: #6d8bff;
+  --primary-foreground: #0b1020;
+  --accent: #1b2440;
+  --accent-foreground: #b9c8ff;
+  --success: #4ade80;
+  --success-muted: #12291c;
+  --warning: #fbbf24;
+  --warning-muted: #2b2110;
+  --danger: #f87171;
+  --danger-muted: #2b1516;
+  --ring: #6d8bff;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-success: var(--success);
+  --color-success-muted: var(--success-muted);
+  --color-warning: var(--warning);
+  --color-warning-muted: var(--warning-muted);
+  --color-danger: var(--danger);
+  --color-danger-muted: var(--danger-muted);
+  --color-ring: var(--ring);
+  --radius-card: var(--radius);
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html,
+  body {
+    height: 100%;
+  }
+
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+}

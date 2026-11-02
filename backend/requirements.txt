@@ -1,0 +1,10 @@
+# Runtime dependencies for the backend API.
+# Versions are pinned to the exact wheels verified on this machine
+# (CPython 3.14 / Windows). Update deliberately, never implicitly.
+
+fastapi==0.121.2
+uvicorn==0.38.0
+pydantic==2.12.4
+pydantic-settings==2.16.2
+structlog==26.1.0
+python-dotenv==1.2.4

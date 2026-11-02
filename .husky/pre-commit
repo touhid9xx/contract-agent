@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+# The same gate CI runs. Requires the venv created by `npm run bootstrap`.
+set -e
+
+if [ -x venv/bin/pre-commit ]; then
+  exec venv/bin/pre-commit run --all-files
+fi
+
+if [ -x venv/Scripts/pre-commit.exe ]; then
+  exec venv/Scripts/pre-commit.exe run --all-files
+fi
+
+echo "pre-commit not found. Run: npm run bootstrap" >&2
+exit 1

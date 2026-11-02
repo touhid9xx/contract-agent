@@ -1,0 +1,94 @@
+# Pre-commit gate.
+#
+# Order runs cheapest-first so a lint failure does not wait on a full test run.
+# The Python tool hooks install their own isolated environment from pinned
+# versions, so the gate behaves identically whether or not the local venv is
+# active. Only the gitleaks hook needs an external binary/image, so it is bound
+# to the `manual` stage (see DECISIONS.md D1-03) rather than silently skipped.
+default_install_hook_types: [pre-commit, commit-msg]
+default_stages: [pre-commit]
+fail_fast: false
+
+repos:
+  # ---------------------------------------------------------------- hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+        exclude: ^demo/fixtures/            # fixture shape is asserted by tests
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: check-case-conflict
+      - id: detect-private-key
+      - id: forbid-submodules
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+  # ----------------------------------------------------------------- python
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.3
+    hooks:
+      - id: ruff
+        files: ^backend/
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+        files: ^backend/
+
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (strict)
+        entry: mypy
+        language: python
+        files: ^backend/app/
+        pass_filenames: false
+        additional_dependencies:
+          - mypy==2.4.1
+          - pydantic==2.12.4
+          - pydantic-settings==2.16.2
+          - structlog==26.1.0
+          - fastapi==0.121.2
+          - starlette==0.49.3
+
+      - id: bandit
+        name: bandit (security lint)
+        entry: bandit -c pyproject.toml -r backend/app -q
+        language: python
+        files: ^backend/app/
+        pass_filenames: false
+        additional_dependencies:
+          - bandit==1.9.4
+
+  # ------------------------------------------------------- secrets (manual)
+  - repo: local
+    hooks:
+      - id: gitleaks
+        name: gitleaks (secret scan)
+        # Requires Docker. Run explicitly: pre-commit run gitleaks --all-files
+        entry: zricethezav/gitleaks:v8.18.4 detect --source . --no-banner --redact --verbose
+        language: docker_image
+        pass_filenames: false
+        stages: [manual]
+
+  # ------------------------------------------------------------------ node
+  - repo: local
+    hooks:
+      - id: frontend-typecheck
+        name: frontend typecheck (tsc --noEmit)
+        entry: node scripts/run-frontend-check.mjs typecheck
+        language: system
+        files: ^frontend/.*\.(ts|tsx)$
+        pass_filenames: false
+
+      - id: frontend-eslint
+        name: frontend eslint
+        entry: node scripts/run-frontend-check.mjs lint
+        language: system
+        files: ^frontend/.*\.(ts|tsx|mjs)$
+        pass_filenames: false

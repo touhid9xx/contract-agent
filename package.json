@@ -6,7 +6,29 @@
   "scripts": {
     "demo": "node scripts/demo.mjs",
     "demo:backend": "node scripts/demo.mjs --only=backend",
-    "demo:frontend": "npm --prefix demo/frontend run dev"
+    "demo:frontend": "npm --prefix demo/frontend run dev",
+    "bootstrap": "node scripts/bootstrap.mjs",
+    "dev": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build",
+    "lint": "npm --prefix frontend run lint",
+    "typecheck": "npm --prefix frontend run typecheck",
+    "format": "prettier --write \"frontend/src/**/*.{ts,tsx,css}\" \"*.{json,mjs}\"",
+    "prepare": "husky"
+  },
+  "lint-staged": {
+    "frontend/src/**/*.{ts,tsx,css}": [
+      "prettier --write"
+    ],
+    "*.{json,mjs}": [
+      "prettier --write"
+    ]
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^19.6.1",
+    "@commitlint/config-conventional": "^19.6.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.2.11",
+    "prettier": "^3.4.2"
   },
   "engines": {
     "node": ">=20"
