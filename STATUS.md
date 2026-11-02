@@ -3,7 +3,8 @@
 Last updated: Phase 1 (real foundation) — **F1 committed (`f0e1eef`), F2 committed
 (`331a7b4`) plus one follow-up fix to the MySQL test harness (`a79d893`), F3
 committed (`8e6b927`) plus the bootstrap-path doc (`908f50d`), F4 committed
-(`b425ea7`), F5 (readiness + DLQ replay) with every gate executed and green.
+(`b425ea7`), F5 committed (`21daffc`), F6 implemented and gate-green with steps 1–2
+of the pipeline slice landed (ingestion + the first real outbox producer).
 GATE 2 now awaits human sign-off.**
 
 ## Phase history
@@ -12,7 +13,7 @@ GATE 2 now awaits human sign-off.**
 | --- | --- |
 | Phase 0 — mocked demo | ✅ built, verified |
 | GATE 1 — human visual approval | ✅ **approved** ("I'm happy with demo functions and look") |
-| Phase 1 — real foundation | 🔄 in progress (F1 ✅, F2 ✅, F3 ✅, F4 ✅, F5 ✅) |
+| Phase 1 — real foundation | 🔄 in progress (F1 ✅, F2 ✅, F3 ✅, F4 ✅, F5 ✅, F6 ✅) |
 | GATE 2 — foundation verification | ⏳ pending human sign-off; every automated check is green |
 
 ## F1 — Repo & infra ✅
@@ -267,6 +268,49 @@ wedged one, the 503 body shape, `not_configured` omission, and that no driver te
 reaches the response. It does **not** prove a real broker or a real outage behaves
 the same — same caveat as F4's, for the same reason (no broker service).
 
+## F6 — Contract ingestion + first real outbox producer ✅
+
+Steps 1–2 of the pipeline slice. Nothing in Phase 1 had ever enqueued an event
+from a business action before this: every prior `enqueue_event` call lived in a
+test fixture. A contract row and its `contract.ingested` event now commit in the
+same transaction, so the relay has a producer whose events are real by
+construction.
+
+| Area | Detail |
+| --- | --- |
+| Endpoint | `app/api/v1/contracts.py` — `POST /api/v1/contracts`, admin/operator only (`viewer` → 403 and nothing written). `tenant_id` comes from the principal; a `tenant_id` in the body is impossible because the schema has no such field (D6-01) |
+| Repository | `app/db/repositories/contracts.py` — `ContractRepository(TenantScopedRepository[Contract])` with `by_sha256` (per-tenant idempotency lookup) and `create` (adds without flushing; transaction control stays with the route). Deliberately does not accept `status` or `risk`, so ingestion cannot pre-set agent-computed state |
+| Atomic write | `enqueue_event(..., event_type="contract.ingested", topic="contract.events", partition_key=str(contract.id))` runs on the request session, then `flush()` → `commit()`. Row and event land together or not at all; `IntegrityError` → rollback → 409, so a lost race leaves no orphan event (D6-02, D6-04) |
+| Fingerprint | SHA-256 over the canonicalised content fields, unique per tenant via `uq_contracts_tenant_sha256`. Key order does not change the digest; the same content in another tenant is a separate contract (D6-04) |
+| Validation | `customer_ref` must be non-blank; timezones checked by IANA *shape*, not `ZoneInfo` — `tzdata` is absent on this runtime and even `ZoneInfo("UTC")` raises (D6-03). Inverted `start_date`/`end_date` → 422 |
+| Correlation | `X-Request-ID` is carried into the outbox row's `correlation_id`, so an ingested contract and its event are traceable to one request |
+| Wire | `app/main.py` mounts the router under `api_v1_prefix`; `ContractRepository` exported from `app/db/repositories/__init__.py` |
+| Tests | `backend/tests/test_contracts.py` (20 cases) — persistence, defaults (`active`/v1), outbox row pending with 0 attempts, `next_attempt_at` flooring, dedupe incl. key-order invariance, the forced-race 409, cross-tenant same-content allowed, body `tenant_id` ignored, 401/403, inverted dates, blank ref, five implausible timezones |
+
+### Verification actually run (F6)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Full suite, no MySQL | `pytest tests` (SQLite) | **199 passed, 4 skipped** (JUnit: `tests=203 failures=0 errors=0 skipped=4`) |
+| Full suite, real MySQL 8.4 | `pytest tests` with `MYSQL_TEST_URL` on `:3307` | **202 passed, 1 skipped** (JUnit: `tests=203 failures=0 errors=0 skipped=1`) |
+| Type check | `mypy app` (strict) | **clean, 35 source files** |
+| Lint | `ruff check backend/app backend/tests` | **All checks passed** |
+| Format | `ruff format --check` | **51 files already formatted** |
+| Security lint | `bandit -c pyproject.toml -r backend/app` | **0 issues** |
+
+The single skip in the MySQL run is the opt-in `live` Kafka test; the extra three
+skips without MySQL are the real-MySQL integration tests, unchanged from F5.
+Both runs report identical `tests`/`failures`/`errors`; only `skipped` differs,
+and the difference is exactly those three tests.
+
+#### What the ingestion tests prove and what they do not
+
+They prove the *transaction boundary*: the contract row and the outbox event
+share one commit, and the losing side of a dedupe race leaves no event behind.
+They do **not** prove the event ever gets published — that still needs a broker
+(gap 5). An ingested contract is also deliberately inert: no extraction runs, so
+nothing reaches a notification from this milestone.
+
 ## Verification actually run (F2)
 
 | Check | Command | Result |
@@ -373,40 +417,55 @@ just wrote it. Timestamps are now floored before writing.
     (`python -m app.cli create-admin`) is the obvious fix and is **not built** —
     it needs a decision on whether seeding is an operator CLI or a migration-safe
     env-var bootstrap, since the latter puts a password in the environment.
+11. **Ingested contracts are inert.** F6 writes the contract and its outbox event,
+    and stops there: no extraction runs, so no `ExtractedField` is produced, no
+    review item exists, and nothing can reach a notification. This is deliberate
+    (the route docstring in `app/api/v1/contracts.py` says so), but it means the
+    Phase-0 pipeline is real only up to its first stage. Extraction (Ollama) and
+    the review endpoints are the next milestone.
+12. **The ingestion fingerprint is metadata-only.** `sha256` covers the submitted
+    content fields, not the document bytes, because there is no upload yet. Two
+    genuinely different PDFs describing the same customer and dates would collide
+    (D6-04). When PDF upload lands, the digest must become the file hash — until
+    then dedupe is only as good as the metadata the caller sends.
 
 ## Next permitted step
 
-**F5 is complete and gate-green; GATE 2 awaits human sign-off.** F1–F5 are all
-committed. The remaining work inside Phase 1 is the pipeline slice below, which
-the repo names unambiguously — this is no longer a guess.
+**F6 steps 1–2 are complete and gate-green; GATE 2 awaits human sign-off.**
+F1–F6 are implemented (F1–F5 committed, F6 in this commit). The remaining work
+inside Phase 1 is the rest of the pipeline slice below, which the repo names
+unambiguously — this is no longer a guess.
 
-- `app/db/models/` — **the largest remaining gap.** `Contract`, `ExtractedField`,
-  `AgentDecision`, `Notification`, `CustomerResponse`, `Escalation` and
-  `AuditLog` all exist with **no route, service or worker that writes them**.
-  F5 made the outbox recoverable, but nothing enqueues an event from a business
-  action yet, so no domain event has ever travelled end-to-end.
-- `app/api/v1/` — only `auth` and `health` routers exist. There is no
-  `/contracts` route, no review route, and no notification route, while
-  `frontend/src/lib/api.ts` and the Phase-0 fixtures already assume all three
-  exist. **The UI contract is ahead of the backend by roughly a milestone.**
+- `app/db/models/` — `Contract` is now writable through `POST /contracts`, and
+  the outbox finally has a producer whose event comes from a business write
+  rather than a test fixture. `ExtractedField`, `AgentDecision`, `Notification`,
+  `CustomerResponse`, `Escalation` and `AuditLog` still have **no route, service
+  or worker that writes them** — that is the remainder of the slice.
+- `app/api/v1/` — `auth`, `health` and now `contracts` routers exist. There is
+  still no review route and no notification route, while `frontend/src/lib/api.ts`
+  and the Phase-0 fixtures already assume both. **The UI contract remains ahead
+  of the backend, now by roughly half a milestone.**
 - Redis (rate limiting, gap 9) and Ollama (extraction, the non-negotiable
   "local LLM only" rule) are still unwired, and each belongs to the slice that
   first needs it.
 
-**Next slice (F6), in the order the dependencies demand:**
+**The pipeline slice, in the order the dependencies demand:**
 
-1. `POST /contracts` + ingestion into `Contract` behind the F3 principal —
-   tenant stamped from the principal, `sha256` dedup per tenant, optimistic
-   `version` respected.
-2. The first real `enqueue_event` from inside that same transaction, so the outbox
-   finally has a producer and the relay has a genuine event to publish.
-3. Extraction into `ExtractedField` — Ollama-backed, confidence scored, with the
-   non-negotiable that nothing below the review threshold reaches a notification.
-4. Review endpoints behind `require_roles`, version-checked (409 on stale write),
-   matching what the Phase-0 review queue already mocks.
+1. ✅ **Done (F6).** `POST /contracts` + ingestion into `Contract` behind the F3
+   principal — tenant stamped from the principal, `sha256` dedup per tenant,
+   optimistic `version` respected.
+2. ✅ **Done (F6).** The first real `enqueue_event` from inside that same
+   transaction, so the outbox has a producer and the relay has a genuine event to
+   publish.
+3. ⏳ **Next.** Extraction into `ExtractedField` — Ollama-backed, confidence
+   scored, with the non-negotiable that nothing below the review threshold
+   reaches a notification.
+4. ⏳ Then. Review endpoints behind `require_roles`, version-checked (409 on stale
+   write), matching what the Phase-0 review queue already mocks.
 
-Steps 1–2 are the smallest slice that makes the outbox end-to-end real, so if the
-scope needs trimming, start there and treat 3–4 as the following milestone.
+Step 3 is the next milestone. It is the first step that needs Ollama, so it also
+decides how extraction failures are recorded on the contract rather than
+swallowed — an ingest that produces no fields must be visible, not silent.
 
 **Open at GATE 2 — say these out loud, do not bury them:** no Kafka broker has
 ever been on the other end of a publish (no compose service; `live` test opt-in);

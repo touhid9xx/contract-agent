@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.v1.auth import router as auth_router
+from app.api.v1.contracts import router as contracts_router
 from app.api.v1.health import router as health_router
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
@@ -166,6 +167,7 @@ def create_app(
     # Everything that is actual API lives under the configured prefix, which is
     # also what the frontend proxies and what `frontend/src/lib/api.ts` assumes.
     app.include_router(auth_router, prefix=app_settings.api_v1_prefix)
+    app.include_router(contracts_router, prefix=app_settings.api_v1_prefix)
 
     @app.get("/", include_in_schema=False)
     async def root() -> dict[str, Any]:

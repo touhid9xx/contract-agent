@@ -530,3 +530,94 @@ Closes the two gaps F4 left open and made worse: a process nobody could ask
   this project that is the correct bar — a parked row is an operations event, not
   a customer-facing one. Flagged as an open item for GATE 2: there is still no
   automatic replay, and no alert fires when rows park.
+
+## Phase 1 — F6 (contract ingestion, first real producer)
+
+The outbox was built in F2, exercised by tests and fakes in F4, and made
+recoverable in F5 — but until this milestone no *business write* had ever produced
+an event. `POST /contracts` is that first producer: one row and one event,
+committed together. That pairing is the milestone; extraction and review follow.
+
+### D6-01 — Ingestion is an operator write, and the tenant cannot be in the body
+
+- **Decision:** `POST /{prefix}/contracts` is gated to `admin` and `operator`
+  through the existing `require_roles` dependency. `tenant_id` is not a field of
+  `ContractCreateRequest`, `ContractRepository` receives it from
+  `principal.tenant_id`, and a `tenant_id` a client sends anyway is silently
+  ignored (Pydantic's default `extra="ignore"`).
+- **Why:** ingestion starts a reminder clock, so it is not a read. A `viewer`
+  holding a valid token must not be able to create obligations — the same
+  reasoning that puts `POST /auth/users` behind `require_roles(admin)`. The field
+  is omitted rather than accepted-and-validated because there is nothing to
+  validate: tenant identity has exactly one source (F3, D2-02). A field that
+  exists only to be rejected still teaches a client that it is a parameter worth
+  probing, so rejecting it with a 422 would be marginally more informative and
+  marginally worse.
+- **Trade-off:** a client that believes it is sending `tenant_id` gets no
+  feedback that it was ignored; its contract is created in its own tenant, which
+  is what a correct client wanted anyway. The refusal path is covered by
+  `test_a_viewer_may_not_ingest`, which also asserts that nothing was written.
+
+### D6-02 — One topic per aggregate, partitioned by contract id
+
+- **Decision:** every contract event goes to the single topic
+  `contract.events`, with `event_type` (`contract.ingested` for now) in the
+  envelope, and `partition_key=str(contract.id)`.
+- **Why:** a consumer of contract lifecycle facts wants *all* of them, in order,
+  for a given contract — ingested, then extracted, then notified. The partition
+  key is therefore the aggregate id, and ordering within a contract is Kafka's
+  per-partition ordering rather than a consumer-side reorder buffer. A topic per
+  event type would scatter one contract's history across N partitions and force
+  every consumer to grow a subscription with every new event. The version lives
+  in the payload and on the row (`Contract.version`), not in the topic or the
+  event name, so a consumer keeps its subscription while the payload grows.
+- **Trade-off:** this is a constraint on future work, not a present cost —
+  unrelated event families (billing, audit) must *not* be added to
+  `contract.events`. The topic is scoped to the contract aggregate; a second
+  aggregate gets a second topic.
+
+### D6-03 — Timezone is validated by shape, because the runtime has no tz database
+
+- **Decision:** `timezone` is checked against
+  `^[A-Za-z][A-Za-z0-9_+\-]*(?:/[A-Za-z0-9_+\-]+)*$` and rejected when it does
+  not match. It is **not** resolved through `zoneinfo.ZoneInfo`.
+- **Why:** `ZoneInfo("UTC")` raises `ZoneInfoNotFoundError: No time zone found
+  with key UTC` on this host — verified, not assumed. CPython on Windows reads the
+  zone database from the `tzdata` package, which is not a declared dependency
+  here, so the obvious validator would reject *correct* input. A shape check still
+  rejects the empty/blank string, path traversal (`../../etc/passwd`),
+  injection-shaped strings and doubled separators — everything that matters
+  before the value is consumed. Nothing reads the zone until the deterministic
+  quiet-hours check, which is exactly where a real tz database has to arrive;
+  validating against a database the image does not ship would be validation that
+  cannot fire (the D4-05 lesson).
+- **Trade-off:** a syntactically plausible but nonexistent zone (`Mars/Olympus`)
+  is accepted at ingest and will fail later, at the quiet-hours computation. That
+  is the correct seam: ingestion records what the caller asserted, and the check
+  that needs the database runs where the database exists. `tzdata` belongs in the
+  change that first needs to *resolve* a zone, not in this one.
+
+### D6-04 — A duplicate ingestion is a 409 that names the existing row
+
+- **Decision:** the content fingerprint is SHA-256 over a fixed, sorted key set of
+  the request's content fields, stored in `contracts.sha256` under the existing
+  `(tenant_id, sha256)` uniqueness. A repeat POST returns **409** carrying the id
+  of the row that already holds that content, and writes neither a second contract
+  nor a second outbox event. A concurrent race that slips past the advisory
+  lookup is caught by `IntegrityError`, rolled back, and reported as the same 409.
+- **Why:** a retried POST did not perform a creation, so `200`/`201` would be a
+  lie the client cannot detect, and `500` would be an error it cannot act on.
+  Naming the existing id turns a dead end into a redirect: the caller can read what
+  it already created. The lookup-then-constraint split is deliberate — the lookup
+  produces the useful message, the constraint is what actually decides, and the
+  rollback is why a losing race leaves no orphan event (the atomicity
+  `enqueue_event` exists for, pinned by
+  `test_a_losing_race_leaves_neither_a_row_nor_an_event`).
+- **Trade-off:** the fingerprint covers metadata only for now. When PDF upload
+  lands, `contracts.sha256` will hold the file's bytes instead — see the ingestion
+  route docstring. Both schemes are SHA-256 over different preimages, so mixing
+  them still answers correctly for each path (the same document is one row, the
+  same metadata is one row), but a contract uploaded as a PDF *and* posted as
+  metadata will legitimately appear twice. Closing that means the upload path must
+  hash the same canonical metadata; it is noted for the milestone that adds
+  upload, not solved here.
