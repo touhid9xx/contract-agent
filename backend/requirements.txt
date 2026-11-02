@@ -2,9 +2,24 @@
 # Versions are pinned to the exact wheels verified on this machine
 # (CPython 3.14 / Windows). Update deliberately, never implicitly.
 
+# --- HTTP layer ---
 fastapi==0.121.2
 uvicorn==0.38.0
 pydantic==2.12.4
 pydantic-settings==2.16.2
+
+# --- Observability ---
 structlog==26.1.0
 python-dotenv==1.2.4
+
+# --- Persistence (F2) ---
+# PyMySQL is the pure-Python driver for MySQL 8.x. `cryptography` is not
+# optional: MySQL 8.4 defaults to the caching_sha2_password plugin, and PyMySQL
+# refuses to authenticate with it unless cryptography is importable.
+SQLAlchemy==2.0.55
+PyMySQL==1.2.3
+cryptography==50.0.2
+
+# Alembic ships in the runtime image (not just dev) because migrations are
+# applied by the deployment, not by a developer's laptop.
+alembic==1.20.1

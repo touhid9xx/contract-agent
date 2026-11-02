@@ -55,9 +55,23 @@ class Settings(BaseSettings):
 
     # --- infrastructure --------------------------------------------------
     database_url: str = "mysql+pymysql://app:app@localhost:3306/contracts"
+    db_pool_size: int = Field(default=20, gt=0, le=200)
+    db_max_overflow: int = Field(default=10, ge=0, le=200)
+    db_pool_recycle_seconds: int = Field(default=1800, gt=0)
+    db_echo: bool = False
     redis_url: str = "redis://localhost:6379/0"
     kafka_bootstrap_servers: str = "localhost:9092"
     ollama_base_url: str = "http://localhost:11434"
+
+    # --- outbox relay ----------------------------------------------------
+    #: Rows claimed per relay tick. Bounded so one tick cannot starve the loop.
+    outbox_batch_size: int = Field(default=50, gt=0, le=1000)
+    #: How long a claimed batch stays owned by one relay before another may
+    #: reclaim it. Must exceed the worst-case publish latency of a batch.
+    outbox_lease_seconds: int = Field(default=120, gt=0, le=3600)
+    #: Retries before a row is parked in the dead-letter state for an operator.
+    outbox_max_attempts: int = Field(default=10, gt=0, le=100)
+    outbox_poll_interval_seconds: float = Field(default=0.5, gt=0, le=60)
 
     # --- http ------------------------------------------------------------
     cors_origins: str = "http://localhost:3000"

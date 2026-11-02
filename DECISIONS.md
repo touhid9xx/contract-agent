@@ -189,3 +189,77 @@ including the Phase 0 demo files. D0-08 is closed.
   commands and are documented as optional.
 - **Why:** `make` is not installed on the primary Windows machine. The
   documented one-command path (`npm run bootstrap`) must not depend on it.
+
+---
+
+## Phase 1 — F2 (persistence, outbox, relay)
+
+### D2-01 — Stored timestamps are naive UTC
+
+- **Decision:** every `DATETIME` column stores a naive UTC value.
+  `utc_now()` returns `datetime.now(UTC).replace(tzinfo=None)`, and `as_utc()`
+  is the single place that re-attaches `UTC` for serialisation.
+- **Why:** MySQL `DATETIME` discards `tzinfo`, so an aware datetime comes back
+  naive and any `aware - naive` arithmetic raises at runtime in production but
+  not in tests. One convention everywhere beats a mixed one that only fails
+  sometimes.
+- **Trade-off:** presentation needs the tenant's timezone, which is not stored
+  here — it arrives with tenant settings later.
+
+### D2-02 — `tenant_id` is repeated on every tenant-owned table
+
+- **Decision:** tables carry their own `tenant_id` column even when the owner
+  can be reached through a join (e.g. `extracted_fields` → `contracts`).
+- **Why:** tenant scoping becomes one predicate in one place
+  (`TenantScopedRepository`), which is auditable. Reaching the tenant through a
+  join means every new query has to re-derive the rule, and one missed join is a
+  cross-tenant leak.
+- **Trade-off:** a redundant column and the obligation to keep it consistent
+  with its parent. Accepted — correctness of isolation outranks normalisation.
+
+### D2-03 — Outbox claiming uses a row lease, not a Redis lock
+
+- **Decision:** `SELECT … FOR UPDATE SKIP LOCKED` plus a `locked_until` lease.
+  No Redis, no singleton relay.
+- **Why:** a Redis singleton lock would (a) cap publishing throughput at one
+  process and (b) turn a Redis outage into an outage of *event delivery*, which
+  is worse than the problem it solves. A row lease is correct with N replicas
+  and survives a crashed worker by expiring. The lease doubles as a fencing
+  token: `record_outcome` refuses to write for a row this worker no longer owns.
+
+### D2-04 — The relay knows nothing about Kafka
+
+- **Decision:** `OutboxRelay` publishes through an `EventPublisher` protocol.
+  `UnavailablePublisher` — the stand-in until a real transport lands in F4 —
+  **raises** `PublisherUnavailableError` rather than returning successfully.
+- **Why:** a publisher that silently no-ops would let the relay mark rows
+  `published` while nothing was sent — exactly the log-and-drop failure the spec
+  forbids. Failing loudly retries with backoff and eventually parks the row in
+  `failed`, where an operator can see it.
+
+### D2-05 — The outbox has no foreign key to `tenants`
+
+- **Decision:** `outbox.tenant_id` is a plain indexed `CHAR(36)`, unlike every
+  other tenant-owned table, which cascades from `tenants`.
+- **Why:** the outbox records something that has already happened. If a tenant
+  row is ever purged, cascading would delete undelivered events — losing the
+  very record that proves delivery was owed. The envelope also has to remain
+  publishable if the tenant row is mid-cleanup.
+- **Trade-off:** no referential integrity on that column; the relay treats
+  `tenant_id` as data, not as a lookup.
+
+### D2-06 — Timestamps are floored before they are written
+
+- **Decision:** `enqueue_event` stores `truncate_to_second(available_at or
+  utc_now())`, not the raw value with microseconds.
+- **Why:** a real defect, caught by the MySQL integration test rather than by
+  reasoning. MySQL's `DATETIME` (no fractional-seconds specifier) **rounds** a
+  value carrying microseconds — so a row enqueued at `12:00:00.7` is stored as
+  `12:00:01` and is *not yet due* at `12:00:00.9`. The relay would skip an event
+  it had just written and only pick it up on a later tick. SQLite keeps the
+  microseconds, so the SQLite suite could never have found this. Regression test:
+  `test_enqueued_timestamp_is_floored_to_stored_precision`.
+- **Rejected alternative:** widening the columns to `DATETIME(6)`. It fixes the
+  symptom but requires a dialect-specific type (`mysql.DATETIME(fsp=6)`) that
+  SQLite does not have, and the system has no requirement finer than a second —
+  the backoff floor is 2 s.
