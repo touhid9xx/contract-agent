@@ -78,6 +78,38 @@ The one warning in the run is `starlette/testclient.py` deprecating an
    *permitted* shape satisfies the arithmetic — so a future bound widening fails
    in CI instead of silently.
 
+#### Creating the first account (manual testing)
+
+There is **no bootstrap endpoint or CLI yet** — see gap 10. `POST /auth/users`
+requires an admin token, which requires a user, so a fresh database cannot be
+logged into at all without one manual step. Until a seed command exists, create
+the first tenant and admin directly:
+
+```powershell
+venv\Scripts\python.exe -c @"
+from app.core.config import get_settings
+from app.core.security import hash_password
+from app.db.enums import UserRole
+from app.db.models import Tenant, User
+from app.db.session import build_engine, build_session_factory
+
+settings = get_settings()
+session = build_session_factory(build_engine(settings))()
+tenant = Tenant(name='Acme', slug='acme')
+session.add(tenant)
+session.flush()
+session.add(User(tenant_id=tenant.id, email='admin@acme.test', role=UserRole.ADMIN,
+                 password_hash=hash_password('correct-horse-battery', settings)))
+session.commit()
+print('created tenant', tenant.slug)
+"@
+```
+
+(Run from `backend/` with `DATABASE_URL` set, after `alembic upgrade head`. This
+exact snippet was executed against a real MySQL 8.4 schema before being written
+here, not transcribed from memory. `Tenant`/`User` take the keyword arguments
+shown — verified against `backend/app/db/models/tenant.py`.)
+
 ## Verification actually run (F2)
 
 | Check | Command | Result |
@@ -162,6 +194,13 @@ just wrote it. Timestamps are now floored before writing.
 9. **No rate limiting on `/auth/login`.** Argon2id makes each attempt expensive
    server-side, which is not the same as throttling an attacker. Admission
    control belongs at the edge (proxy/WAF) or with a later Redis-backed limiter.
+10. **No bootstrap path for the first user.** `POST /auth/users` requires an
+    admin token, which requires an existing user, so a fresh database cannot be
+    logged into at all. The workaround is the manual snippet under "Creating the
+    first account" (executed and verified above). A seed command
+    (`python -m app.cli create-admin`) is the obvious fix and is **not built** —
+    it needs a decision on whether seeding is an operator CLI or a migration-safe
+    env-var bootstrap, since the latter puts a password in the environment.
 
 ## Next permitted step
 
