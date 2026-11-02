@@ -1,0 +1,11 @@
+{
+  "mocked": true,
+  "notifications": [
+    { "id": "n-1042-t30", "contract_id": 1042, "customer_name": "A. Rahman", "channel": "email", "status": "sent", "sent_at": "2025-06-14T09:41:40Z", "template": "T-30", "idempotency_key": "1042:T-30:2025-07-08", "retry_count": 0, "retry_max": 3 },
+    { "id": "n-1041-t60", "contract_id": 1041, "customer_name": "S. Chowdhury", "channel": "sms", "status": "sent", "sent_at": "2025-06-14T09:39:02Z", "template": "T-60", "idempotency_key": "1041:T-60:2025-08-01", "retry_count": 0, "retry_max": 3 },
+    { "id": "n-1040-t14", "contract_id": 1040, "customer_name": "M. Hossain", "channel": "voice", "status": "answered", "sent_at": "2025-06-13T17:02:11Z", "template": "T-14", "idempotency_key": "1040:T-14:2025-06-22", "retry_count": 0, "retry_max": 3 },
+    { "id": "n-1037-t14", "contract_id": 1037, "customer_name": "N. Begum", "channel": "voice", "status": "machine", "sent_at": "2025-06-13T16:44:58Z", "template": "T-14", "idempotency_key": "1037:T-14:2025-06-15", "retry_count": 1, "retry_max": 3 },
+    { "id": "n-1036-t30", "contract_id": 1036, "customer_name": "F. Karim", "channel": "email", "status": "failed", "sent_at": "2025-06-13T16:40:19Z", "template": "T-30", "idempotency_key": "1036:T-30:2025-06-25", "retry_count": 2, "retry_max": 3 },
+    { "id": "n-1038-t30", "contract_id": 1038, "customer_name": "T. Islam", "channel": "email", "status": "sent", "sent_at": "2025-06-13T16:38:05Z", "template": "T-30", "idempotency_key": "1038:T-30:2025-07-19", "retry_count": 0, "retry_max": 3 }
+  ]
+}

@@ -1,0 +1,61 @@
+{
+  "mocked": true,
+  "fields": [
+    { "id": "f-1042-email", "contract_id": 1042, "field": "email", "value": "a.r***@mail.com", "confidence": 0.96, "source": "pdfplumber p.1 line 9", "status": "approved", "version": 1 },
+    { "id": "f-1042-phone", "contract_id": 1042, "field": "phone", "value": "+8801******", "confidence": 0.91, "source": "pdfplumber p.1 line 11", "status": "approved", "version": 1 },
+    { "id": "f-1042-dob", "contract_id": 1042, "field": "dob", "value": "1985-**-**", "confidence": 0.88, "source": "pdfplumber p.2 line 4", "status": "approved", "version": 1 },
+    { "id": "f-1042-address", "contract_id": 1042, "field": "address", "value": "Dhaka, BD", "confidence": 0.54, "source": "pdfplumber p.2 line 14", "status": "approved", "version": 3, "reviewed_by": "operator@acme.test", "reviewed_at": "2025-06-14T09:31:00Z", "original_value": "House 12, Road 5, Ban…" },
+    { "id": "f-1042-start", "contract_id": 1042, "field": "start_date", "value": "2024-07-08", "confidence": 0.97, "source": "pdfplumber p.1 line 6", "status": "approved", "version": 1 },
+
+    { "id": "f-1039-email", "contract_id": 1039, "field": "email", "value": "r.a***@mail.com", "confidence": 0.93, "source": "pdfplumber p.1 line 9", "status": "approved", "version": 1 },
+    { "id": "f-1039-phone", "contract_id": 1039, "field": "phone", "value": "+8801******", "confidence": 0.87, "source": "pdfplumber p.1 line 11", "status": "approved", "version": 1 },
+    { "id": "f-1039-dob", "contract_id": 1039, "field": "dob", "value": "1994-**-**", "confidence": 0.84, "source": "pdfplumber p.2 line 4", "status": "approved", "version": 1 },
+    { "id": "f-1039-address", "contract_id": 1039, "field": "address", "value": "House 12, Road 5, Ban…", "confidence": 0.54, "source": "pdfplumber p.1 line 14", "status": "pending_review", "version": 1 },
+    { "id": "f-1039-start", "contract_id": 1039, "field": "start_date", "value": "2024-06-30", "confidence": 0.95, "source": "pdfplumber p.1 line 6", "status": "approved", "version": 1 },
+
+    { "id": "f-1037-email", "contract_id": 1037, "field": "email", "value": "n.b***@mail.com", "confidence": 0.92, "source": "pdfplumber p.1 line 9", "status": "approved", "version": 1 },
+    { "id": "f-1037-phone", "contract_id": 1037, "field": "phone", "value": "+8801******", "confidence": 0.90, "source": "pdfplumber p.1 line 11", "status": "approved", "version": 1 },
+    { "id": "f-1037-dob", "contract_id": 1037, "field": "dob", "value": "1972-**-**", "confidence": 0.86, "source": "pdfplumber p.2 line 4", "status": "approved", "version": 1 },
+    { "id": "f-1037-address", "contract_id": 1037, "field": "address", "value": "Dhaka, BD", "confidence": 0.88, "source": "pdfplumber p.2 line 14", "status": "approved", "version": 1 },
+
+    { "id": "f-1040-email", "contract_id": 1040, "field": "email", "value": "m.h***@mail.com", "confidence": 0.97, "source": "pdfplumber p.1 line 9", "status": "approved", "version": 1 },
+    { "id": "f-1040-phone", "contract_id": 1040, "field": "phone", "value": "+8801******", "confidence": 0.94, "source": "pdfplumber p.1 line 11", "status": "approved", "version": 1 },
+    { "id": "f-1040-dob", "contract_id": 1040, "field": "dob", "value": "1990-**-**", "confidence": 0.90, "source": "pdfplumber p.2 line 4", "status": "approved", "version": 1 },
+    { "id": "f-1040-address", "contract_id": 1040, "field": "address", "value": "Sylhet, BD", "confidence": 0.89, "source": "pdfplumber p.2 line 14", "status": "approved", "version": 1 },
+
+    { "id": "f-1041-email", "contract_id": 1041, "field": "email", "value": "s.c***@mail.com", "confidence": 0.90, "source": "pdfplumber p.1 line 9", "status": "approved", "version": 1 },
+    { "id": "f-1041-phone", "contract_id": 1041, "field": "phone", "value": "+8801******", "confidence": 0.93, "source": "pdfplumber p.1 line 11", "status": "approved", "version": 1 },
+    { "id": "f-1041-dob", "contract_id": 1041, "field": "dob", "value": "1979-**-**", "confidence": 0.87, "source": "pdfplumber p.2 line 4", "status": "approved", "version": 1 },
+    { "id": "f-1041-address", "contract_id": 1041, "field": "address", "value": "Chattogram, BD", "confidence": 0.86, "source": "pdfplumber p.2 line 14", "status": "approved", "version": 1 },
+
+    { "id": "f-1038-email", "contract_id": 1038, "field": "email", "value": "t.i***@mail.com", "confidence": 0.91, "source": "pdfplumber p.1 line 9", "status": "approved", "version": 1 },
+    { "id": "f-1038-phone", "contract_id": 1038, "field": "phone", "value": "+8801******", "confidence": 0.88, "source": "pdfplumber p.1 line 11", "status": "approved", "version": 1 },
+    { "id": "f-1038-dob", "contract_id": 1038, "field": "dob", "value": "1988-**-**", "confidence": 0.85, "source": "pdfplumber p.2 line 4", "status": "approved", "version": 1 },
+    { "id": "f-1038-address", "contract_id": 1038, "field": "address", "value": "Khulna, BD", "confidence": 0.87, "source": "pdfplumber p.2 line 14", "status": "approved", "version": 1 },
+
+    { "id": "f-1036-dob", "contract_id": 1036, "field": "dob", "value": "19**-**-**", "confidence": 0.62, "source": "pdfplumber p.2 line 4", "status": "pending_review", "version": 1 },
+    { "id": "f-1036-email", "contract_id": 1036, "field": "email", "value": "f.k***@mail.com", "confidence": 0.94, "source": "pdfplumber p.1 line 9", "status": "approved", "version": 1 },
+    { "id": "f-1036-phone", "contract_id": 1036, "field": "phone", "value": "+8801******", "confidence": 0.90, "source": "pdfplumber p.1 line 11", "status": "approved", "version": 1 },
+    { "id": "f-1036-address", "contract_id": 1036, "field": "address", "value": "Rajshahi, BD", "confidence": 0.88, "source": "pdfplumber p.2 line 14", "status": "approved", "version": 1 },
+
+    { "id": "f-1035-phone", "contract_id": 1035, "field": "phone", "value": "+8801******", "confidence": 0.61, "source": "pdfplumber p.1 line 11", "status": "pending_review", "version": 1, "conflict": "Another contract (#1029) already uses this phone number — possible OCR typo." },
+    { "id": "f-1035-email", "contract_id": 1035, "field": "email", "value": "k.s***@mail.com", "confidence": 0.92, "source": "pdfplumber p.1 line 9", "status": "approved", "version": 1 },
+    { "id": "f-1035-dob", "contract_id": 1035, "field": "dob", "value": "1991-**-**", "confidence": 0.86, "source": "pdfplumber p.2 line 4", "status": "approved", "version": 1 },
+    { "id": "f-1035-address", "contract_id": 1035, "field": "address", "value": "Bogura, BD", "confidence": 0.87, "source": "pdfplumber p.2 line 14", "status": "approved", "version": 1 },
+
+    { "id": "f-1033-email", "contract_id": 1033, "field": "email", "value": "j.a***@mail.com", "confidence": 0.49, "source": "pdfplumber p.1 line 9", "status": "pending_review", "version": 1 },
+    { "id": "f-1033-phone", "contract_id": 1033, "field": "phone", "value": "+8801******", "confidence": 0.88, "source": "pdfplumber p.1 line 11", "status": "approved", "version": 1 },
+    { "id": "f-1033-dob", "contract_id": 1033, "field": "dob", "value": "1986-**-**", "confidence": 0.84, "source": "pdfplumber p.2 line 4", "status": "approved", "version": 1 },
+    { "id": "f-1033-address", "contract_id": 1033, "field": "address", "value": "Cumilla, BD", "confidence": 0.85, "source": "pdfplumber p.2 line 14", "status": "approved", "version": 1 },
+
+    { "id": "f-1029-address", "contract_id": 1029, "field": "address", "value": "Narayanganj, B…", "confidence": 0.58, "source": "pdfplumber p.2 line 14", "status": "pending_review", "version": 1 },
+    { "id": "f-1029-email", "contract_id": 1029, "field": "email", "value": "h.u***@mail.com", "confidence": 0.91, "source": "pdfplumber p.1 line 9", "status": "approved", "version": 1 },
+    { "id": "f-1029-phone", "contract_id": 1029, "field": "phone", "value": "+8801******", "confidence": 0.89, "source": "pdfplumber p.1 line 11", "status": "approved", "version": 1 },
+    { "id": "f-1029-dob", "contract_id": 1029, "field": "dob", "value": "1983-**-**", "confidence": 0.86, "source": "pdfplumber p.2 line 4", "status": "approved", "version": 1 },
+
+    { "id": "f-1027-phone", "contract_id": 1027, "field": "phone", "value": "+8801******", "confidence": 0.55, "source": "pdfplumber p.1 line 11", "status": "pending_review", "version": 1 },
+    { "id": "f-1027-email", "contract_id": 1027, "field": "email", "value": "s.r***@mail.com", "confidence": 0.90, "source": "pdfplumber p.1 line 9", "status": "approved", "version": 1 },
+    { "id": "f-1027-dob", "contract_id": 1027, "field": "dob", "value": "1990-**-**", "confidence": 0.85, "source": "pdfplumber p.2 line 4", "status": "approved", "version": 1 },
+    { "id": "f-1027-address", "contract_id": 1027, "field": "address", "value": "Gazipur, BD", "confidence": 0.86, "source": "pdfplumber p.2 line 14", "status": "approved", "version": 1 }
+  ]
+}

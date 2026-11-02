@@ -1,0 +1,294 @@
+{
+  "mocked": true,
+  "timeline": {
+    "1042": [
+      {
+        "id": "ev-1042-1",
+        "contract_id": 1042,
+        "at": "2025-06-14T09:11:05Z",
+        "type": "contract.ingested",
+        "title": "contract.ingested",
+        "summary": "PDF received, sha256 a3f9…",
+        "payload": {
+          "sha256": "a3f9c1d2e7b4…",
+          "filename": "contract_1042.pdf",
+          "size_bytes": 284133,
+          "tenant_id": "acme",
+          "correlation_id": "8f2c1f0e-4a41-4c62-9a10-9c0d2b7f1a44",
+          "document_text_included": false
+        }
+      },
+      {
+        "id": "ev-1042-2",
+        "contract_id": 1042,
+        "at": "2025-06-14T09:12:02Z",
+        "type": "fields.extracted",
+        "title": "fields.extracted",
+        "summary": "5 fields extracted, 1 low-confidence",
+        "payload": {
+          "fields": 5,
+          "low_confidence": 1,
+          "method": "pdfplumber + regex + spaCy",
+          "confidence": { "email": 0.96, "phone": 0.91, "dob": 0.88, "address": 0.54, "start_date": 0.97 },
+          "pii_included": false
+        }
+      },
+      {
+        "id": "ev-1042-3",
+        "contract_id": 1042,
+        "at": "2025-06-14T09:12:04Z",
+        "type": "review.queued",
+        "title": "review.queued",
+        "summary": "address below auto-accept threshold (0.80) — pipeline blocked",
+        "payload": { "field": "address", "confidence": 0.54, "threshold": 0.8, "pipeline_blocked": true }
+      },
+      {
+        "id": "ev-1042-4",
+        "contract_id": 1042,
+        "at": "2025-06-14T09:31:00Z",
+        "type": "review.resolved",
+        "title": "review.resolved",
+        "summary": "address accepted by operator@acme.test (value edited)",
+        "payload": {
+          "field": "address",
+          "action": "accept_after_edit",
+          "previous_value": "House 12, Road 5, Ban…",
+          "new_value": "Dhaka, BD",
+          "reviewer": "operator@acme.test",
+          "reason": "OCR truncated the address line",
+          "version": 3,
+          "pipeline_blocked": false
+        }
+      },
+      {
+        "id": "ev-1042-5",
+        "contract_id": 1042,
+        "at": "2025-06-14T09:40:00Z",
+        "type": "audit_log",
+        "title": "outbox.published",
+        "summary": "outbox published to notification.dispatch",
+        "payload": {
+          "topic": "notification.dispatch",
+          "partition_key": "1042",
+          "outbox_id": 88121,
+          "status": "published",
+          "correlation_id": "c1a7e0f2-7d55-4a0d-8f61-2b1c9b0a7e33"
+        }
+      },
+      {
+        "id": "ev-1042-6",
+        "contract_id": 1042,
+        "at": "2025-06-14T09:41:12Z",
+        "type": "agent_decisions",
+        "title": "agent_decisions",
+        "summary": "channel=email conf=0.92",
+        "payload": {
+          "channel": "email",
+          "confidence": 0.92,
+          "prompt_version": "v3",
+          "llm_model": "qwen2:7b",
+          "needs_review": false,
+          "input_signals": { "age_bucket": "40-50", "has_email": true, "has_phone": false, "contract_value_bucket": "low", "days_to_expiry": 24 },
+          "mlflow_run_id": "7f3a9c2e"
+        }
+      },
+      {
+        "id": "ev-1042-7",
+        "contract_id": 1042,
+        "at": "2025-06-14T09:41:40Z",
+        "type": "notifications",
+        "title": "notification.sent",
+        "summary": "email · T-30 · sent",
+        "payload": {
+          "channel": "email",
+          "status": "sent",
+          "template": "T-30",
+          "idempotency_key": "1042:T-30:2025-07-08",
+          "provider_message_id": "smtp4dev-9f31…",
+          "recipient_redacted": "a.r***@mail.com"
+        }
+      }
+    ],
+    "1039": [
+      {
+        "id": "ev-1039-1",
+        "contract_id": 1039,
+        "at": "2025-06-14T09:12:01Z",
+        "type": "contract.ingested",
+        "title": "contract.ingested",
+        "summary": "PDF received, sha256 b7d1…",
+        "payload": { "sha256": "b7d1a4f0c9e2…", "filename": "contract_1039.pdf", "size_bytes": 311902, "tenant_id": "acme", "correlation_id": "1d9bb8c4-2f10-4c8b-9a51-6a2c8f3d9b21" }
+      },
+      {
+        "id": "ev-1039-2",
+        "contract_id": 1039,
+        "at": "2025-06-14T09:12:09Z",
+        "type": "fields.extracted",
+        "title": "fields.extracted",
+        "summary": "5 fields extracted, 1 low-confidence",
+        "payload": { "fields": 5, "low_confidence": 1, "method": "pdfplumber + regex + spaCy", "confidence": { "email": 0.93, "phone": 0.87, "dob": 0.84, "address": 0.54, "start_date": 0.95 } }
+      },
+      {
+        "id": "ev-1039-3",
+        "contract_id": 1039,
+        "at": "2025-06-14T09:12:09Z",
+        "type": "review.queued",
+        "title": "review.queued",
+        "summary": "address below auto-accept threshold — no channel decision will run",
+        "payload": { "field": "address", "confidence": 0.54, "threshold": 0.8, "pipeline_blocked": true, "agent_not_invoked": true }
+      }
+    ],
+    "1041": [
+      {
+        "id": "ev-1041-1",
+        "contract_id": 1041,
+        "at": "2025-05-29T09:37:58Z",
+        "type": "audit_log",
+        "title": "outbox.published",
+        "summary": "outbox published to notification.dispatch",
+        "payload": { "topic": "notification.dispatch", "partition_key": "1041", "outbox_id": 87210, "status": "published" }
+      },
+      {
+        "id": "ev-1041-2",
+        "contract_id": 1041,
+        "at": "2025-05-29T09:38:40Z",
+        "type": "agent_decisions",
+        "title": "agent_decisions",
+        "summary": "channel=sms conf=0.88 (1 schema repair)",
+        "payload": { "channel": "sms", "confidence": 0.88, "prompt_version": "v3", "llm_model": "qwen2:7b", "schema_repairs": 1, "needs_review": false, "mlflow_run_id": "2b81e4d0" }
+      },
+      {
+        "id": "ev-1041-3",
+        "contract_id": 1041,
+        "at": "2025-05-29T09:39:11Z",
+        "type": "notifications",
+        "title": "notification.sent",
+        "summary": "sms · T-60 · sent",
+        "payload": { "channel": "sms", "status": "sent", "template": "T-60", "idempotency_key": "1041:T-60:2025-08-01", "recipient_redacted": "+8801******" }
+      },
+      {
+        "id": "ev-1041-4",
+        "contract_id": 1041,
+        "at": "2025-06-12T10:04:00Z",
+        "type": "escalation.triggered",
+        "title": "escalation.triggered",
+        "summary": "no response after 14 days — escalated to human operator",
+        "payload": { "reason": "no_response_window_elapsed", "response_window_days": 14, "sla_deadline": "2025-06-14T10:04:00Z", "assigned_to": "op1" }
+      },
+      {
+        "id": "ev-1041-5",
+        "contract_id": 1041,
+        "at": "2025-06-14T09:39:02Z",
+        "type": "notifications",
+        "title": "notification.sent",
+        "summary": "sms · T-60 final reminder · sent",
+        "payload": { "channel": "sms", "status": "sent", "template": "T-60", "idempotency_key": "1041:T-60:2025-08-01", "note": "final reminder inside the permitted window" }
+      }
+    ],
+    "1040": [
+      {
+        "id": "ev-1040-1",
+        "contract_id": 1040,
+        "at": "2025-06-13T16:55:03Z",
+        "type": "agent_decisions",
+        "title": "agent_decisions",
+        "summary": "channel=voice conf=0.95",
+        "payload": { "channel": "voice", "confidence": 0.95, "prompt_version": "v3", "llm_model": "qwen2:7b", "needs_review": false, "mlflow_run_id": "9c40a17b" }
+      },
+      {
+        "id": "ev-1040-2",
+        "contract_id": 1040,
+        "at": "2025-06-13T16:55:40Z",
+        "type": "audit_log",
+        "title": "voice.precheck.passed",
+        "summary": "deterministic policy checks passed (consent, DNC, window, cap)",
+        "payload": { "consent": true, "recording_consent": true, "dnc_clear": true, "local_time": "16:55", "window": "09:00-20:00", "calls_this_week": 0, "max_calls_per_week": 3 }
+      },
+      {
+        "id": "ev-1040-3",
+        "contract_id": 1040,
+        "at": "2025-06-13T17:02:11Z",
+        "type": "notifications",
+        "title": "notification.sent",
+        "summary": "voice · T-14 · answered by human",
+        "payload": { "channel": "voice", "status": "answered", "amd_result": "human", "amd_confidence": 0.94, "recording": "encrypted ./data/voice/9f21….wav.enc", "duration_s": 96 }
+      },
+      {
+        "id": "ev-1040-4",
+        "contract_id": 1040,
+        "at": "2025-06-13T17:03:30Z",
+        "type": "customer_responses",
+        "title": "customer.responded",
+        "summary": "response_type=call_answered · renewal intent confirmed",
+        "payload": { "channel": "voice", "response_type": "call_answered", "meaningful_response": true, "outcome": "renewal_intent" }
+      },
+      {
+        "id": "ev-1040-5",
+        "contract_id": 1040,
+        "at": "2025-06-13T17:04:00Z",
+        "type": "audit_log",
+        "title": "contract.status_changed",
+        "summary": "status active → responded",
+        "payload": { "from": "active", "to": "responded", "actor": "system" }
+      }
+    ],
+    "1038": [
+      {
+        "id": "ev-1038-1",
+        "contract_id": 1038,
+        "at": "2025-06-13T16:44:10Z",
+        "type": "agent_decisions",
+        "title": "agent_decisions",
+        "summary": "channel=email conf=0.91",
+        "payload": { "channel": "email", "confidence": 0.91, "prompt_version": "v2", "llm_model": "qwen2:7b", "needs_review": false, "mlflow_run_id": "6a02ff19" }
+      },
+      {
+        "id": "ev-1038-2",
+        "contract_id": 1038,
+        "at": "2025-06-13T16:44:58Z",
+        "type": "notifications",
+        "title": "notification.sent",
+        "summary": "email · T-30 · sent",
+        "payload": { "channel": "email", "status": "sent", "template": "T-30", "idempotency_key": "1038:T-30:2025-07-19", "recipient_redacted": "t.i***@mail.com" }
+      }
+    ],
+    "1037": [
+      {
+        "id": "ev-1037-1",
+        "contract_id": 1037,
+        "at": "2025-06-13T16:40:22Z",
+        "type": "agent_decisions",
+        "title": "agent_decisions",
+        "summary": "channel=voice conf=0.79 (2 schema repairs)",
+        "payload": { "channel": "voice", "confidence": 0.79, "prompt_version": "v3", "llm_model": "qwen2:7b", "schema_repairs": 2, "needs_review": false, "mlflow_run_id": "4d19bb83" }
+      },
+      {
+        "id": "ev-1037-2",
+        "contract_id": 1037,
+        "at": "2025-06-13T16:44:58Z",
+        "type": "notifications",
+        "title": "notification.sent",
+        "summary": "voice · T-14 · machine answered — TTS message left",
+        "payload": { "channel": "voice", "status": "machine", "amd_result": "machine", "amd_confidence": 0.88, "tts_message_left": true, "policy_permits_voicemail": true, "recording": "encrypted ./data/voice/4ab0….wav.enc" }
+      },
+      {
+        "id": "ev-1037-3",
+        "contract_id": 1037,
+        "at": "2025-06-10T08:00:00Z",
+        "type": "escalation.triggered",
+        "title": "escalation.triggered",
+        "summary": "no response after 14 days — escalated, SLA breached",
+        "payload": { "reason": "no_response_window_elapsed", "response_window_days": 14, "sla_deadline": "2025-06-12T08:00:00Z", "status": "sla_breached" }
+      },
+      {
+        "id": "ev-1037-4",
+        "contract_id": 1037,
+        "at": "2025-06-14T08:05:00Z",
+        "type": "audit_log",
+        "title": "escalation.sla_breached",
+        "summary": "SLA breached by 2 days — still unassigned",
+        "payload": { "sla_deadline": "2025-06-12T08:00:00Z", "breached_by_days": 2, "assigned_to": null }
+      }
+    ]
+  }
+}

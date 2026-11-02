@@ -1,0 +1,14 @@
+{
+  "name": "contract-expiry-notification-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Contract-lifecycle automation: contract PDF ingestion, AI field extraction, channel selection, reminders, response tracking and escalation.",
+  "scripts": {
+    "demo": "node scripts/demo.mjs",
+    "demo:backend": "node scripts/demo.mjs --only=backend",
+    "demo:frontend": "npm --prefix demo/frontend run dev"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

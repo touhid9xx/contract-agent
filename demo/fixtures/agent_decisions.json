@@ -1,0 +1,125 @@
+{
+  "mocked": true,
+  "decisions": [
+    {
+      "contract_id": 1042,
+      "channel": "email",
+      "confidence": 0.92,
+      "reasoning": "Customer has a valid email, no phone consent on file, 24 days to expiry, contract value is low risk.",
+      "needs_review": false,
+      "prompt_version": "v3",
+      "llm_model": "qwen2:7b",
+      "temperature": 0.2,
+      "tokens_in": 412,
+      "tokens_out": 58,
+      "latency_ms": 1900,
+      "schema_repairs": 0,
+      "mlflow_run_id": "7f3a9c2e",
+      "injection_tags_present": false,
+      "created_at": "2025-06-14T09:41:12Z",
+      "input_signals": {
+        "age_bucket": "40-50",
+        "has_email": true,
+        "has_phone": false,
+        "contract_value_bucket": "low",
+        "days_to_expiry": 24
+      }
+    },
+    {
+      "contract_id": 1041,
+      "channel": "sms",
+      "confidence": 0.88,
+      "reasoning": "Phone consent on file, SMS delivered earlier in the reminder window, contract value medium.",
+      "needs_review": false,
+      "prompt_version": "v3",
+      "llm_model": "qwen2:7b",
+      "temperature": 0.2,
+      "tokens_in": 398,
+      "tokens_out": 51,
+      "latency_ms": 1720,
+      "schema_repairs": 1,
+      "mlflow_run_id": "2b81e4d0",
+      "injection_tags_present": false,
+      "created_at": "2025-05-29T09:38:40Z",
+      "input_signals": {
+        "age_bucket": "40-50",
+        "has_email": true,
+        "has_phone": true,
+        "contract_value_bucket": "medium",
+        "days_to_expiry": 64
+      }
+    },
+    {
+      "contract_id": 1040,
+      "channel": "voice",
+      "confidence": 0.95,
+      "reasoning": "Voice consent and recording consent on file, high contract value, customer answered the previous call.",
+      "needs_review": false,
+      "prompt_version": "v3",
+      "llm_model": "qwen2:7b",
+      "temperature": 0.2,
+      "tokens_in": 421,
+      "tokens_out": 63,
+      "latency_ms": 2110,
+      "schema_repairs": 0,
+      "mlflow_run_id": "9c40a17b",
+      "injection_tags_present": false,
+      "created_at": "2025-06-13T16:55:03Z",
+      "input_signals": {
+        "age_bucket": "30-40",
+        "has_email": true,
+        "has_phone": true,
+        "contract_value_bucket": "high",
+        "days_to_expiry": 9
+      }
+    },
+    {
+      "contract_id": 1037,
+      "channel": "voice",
+      "confidence": 0.79,
+      "reasoning": "No reply to email or SMS; phone consent valid, but confidence reduced because the last call reached voicemail.",
+      "needs_review": false,
+      "prompt_version": "v3",
+      "llm_model": "qwen2:7b",
+      "temperature": 0.2,
+      "tokens_in": 405,
+      "tokens_out": 66,
+      "latency_ms": 2340,
+      "schema_repairs": 2,
+      "mlflow_run_id": "4d19bb83",
+      "injection_tags_present": false,
+      "created_at": "2025-06-13T16:40:22Z",
+      "input_signals": {
+        "age_bucket": "50-60",
+        "has_email": true,
+        "has_phone": true,
+        "contract_value_bucket": "high",
+        "days_to_expiry": 2
+      }
+    },
+    {
+      "contract_id": 1038,
+      "channel": "email",
+      "confidence": 0.91,
+      "reasoning": "Email consent valid, low contract value, 35 days to expiry so the T-30 reminder is the next eligible window.",
+      "needs_review": false,
+      "prompt_version": "v2",
+      "llm_model": "qwen2:7b",
+      "temperature": 0.2,
+      "tokens_in": 389,
+      "tokens_out": 49,
+      "latency_ms": 1610,
+      "schema_repairs": 0,
+      "mlflow_run_id": "6a02ff19",
+      "injection_tags_present": false,
+      "created_at": "2025-06-13T16:44:10Z",
+      "input_signals": {
+        "age_bucket": "30-40",
+        "has_email": true,
+        "has_phone": true,
+        "contract_value_bucket": "low",
+        "days_to_expiry": 35
+      }
+    }
+  ]
+}

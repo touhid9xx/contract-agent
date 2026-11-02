@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+
+# Runtime data (Phase 1+)
+data/
+.env
+.env.local
+.env.*.local
+
+# Tooling / OS
+.agent-cache/
+.DS_Store
+Thumbs.db
+*.log

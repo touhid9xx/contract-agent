@@ -1,0 +1,10 @@
+{
+  "mocked": true,
+  "current_user": {
+    "name": "admin@acme.test",
+    "display_name": "Demo Admin",
+    "role": "admin",
+    "tenant_id": "acme",
+    "tenant_name": "Acme Ltd (fictional)"
+  }
+}

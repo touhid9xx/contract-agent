@@ -1,0 +1,27 @@
+{
+  "mocked": true,
+  "today": "2025-06-14",
+  "counts": {
+    "active_contracts": 1284,
+    "expiring_in_30_days": 47,
+    "awaiting_review": 6,
+    "escalations": 3
+  },
+  "reminder_windows": [
+    { "milestone": "T-60", "contracts": 38, "capacity": 60 },
+    { "milestone": "T-30", "contracts": 22, "capacity": 60 },
+    { "milestone": "T-14", "contracts": 41, "capacity": 60 }
+  ],
+  "recent_activity": [
+    { "id": "ra-1", "at": "2025-06-14T09:41:12Z", "kind": "agent_decision", "tone": "info", "contract_id": 1042, "text": "agent decided: email · confidence 0.92", "detail": "contract #1042" },
+    { "id": "ra-2", "at": "2025-06-14T09:41:40Z", "kind": "notification_sent", "tone": "info", "contract_id": 1042, "text": "notification sent · email · T-30", "detail": "contract #1042" },
+    { "id": "ra-3", "at": "2025-06-14T09:12:04Z", "kind": "low_confidence", "tone": "warn", "contract_id": 1039, "text": "low-confidence field flagged · address 0.54", "detail": "contract #1039" },
+    { "id": "ra-4", "at": "2025-06-14T08:05:00Z", "kind": "escalation", "tone": "warn", "contract_id": 1037, "text": "escalation SLA breached · unassigned", "detail": "contract #1037" },
+    { "id": "ra-5", "at": "2025-06-13T17:02:11Z", "kind": "notification_sent", "tone": "info", "contract_id": 1040, "text": "voice call answered · renewal intent", "detail": "contract #1040" }
+  ],
+  "channel_mix": [
+    { "channel": "email", "percent": 62 },
+    { "channel": "sms", "percent": 21 },
+    { "channel": "voice", "percent": 17 }
+  ]
+}

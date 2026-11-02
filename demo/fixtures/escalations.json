@@ -1,0 +1,52 @@
+{
+  "mocked": true,
+  "escalations": [
+    {
+      "id": 1037,
+      "contract_id": 1037,
+      "customer_name": "N. Begum",
+      "raised_at": "2025-06-10T08:00:00Z",
+      "sla_deadline": "2025-06-12T08:00:00Z",
+      "status": "sla_breached",
+      "assigned_to": null,
+      "last_activity": "voice: machine answered, TTS message left",
+      "note": "No response after email + SMS + voice across the 2-week response window."
+    },
+    {
+      "id": 1041,
+      "contract_id": 1041,
+      "customer_name": "S. Chowdhury",
+      "raised_at": "2025-06-12T10:04:00Z",
+      "sla_deadline": "2025-06-14T10:04:00Z",
+      "status": "open",
+      "assigned_to": "op1",
+      "last_activity": "sms delivered, no reply",
+      "note": "Reminder sent, no reply inside the 2-week window."
+    },
+    {
+      "id": 1033,
+      "contract_id": 1033,
+      "customer_name": "J. Ahmed",
+      "raised_at": "2025-06-13T11:30:00Z",
+      "sla_deadline": "2025-06-15T11:30:00Z",
+      "status": "open",
+      "assigned_to": null,
+      "last_activity": "manual review required before any contact",
+      "note": "Raised by operator because the email field failed extraction."
+    },
+    {
+      "id": 1030,
+      "contract_id": 1030,
+      "customer_name": "A. Siddique",
+      "raised_at": "2025-06-13T12:10:00Z",
+      "sla_deadline": "2025-06-15T12:10:00Z",
+      "status": "resolved",
+      "assigned_to": "op2",
+      "resolved_at": "2025-06-13T15:14:00Z",
+      "resolved_by": "op2",
+      "resolution": "renewal confirmed",
+      "last_activity": "customer confirmed renewal by phone",
+      "note": "Resolved in 3h 4m."
+    }
+  ]
+}
