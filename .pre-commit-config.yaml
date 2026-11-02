@@ -58,6 +58,11 @@ repos:
           # mypy analyses the ORM models, so the isolated hook env needs the
           # same SQLAlchemy build the venv has (it ships its own type hints).
           - SQLAlchemy==2.0.55
+          # Both ship `py.typed` and are imported by app/core/security.py. The
+          # hook env is isolated from the venv, so without these mypy would fail
+          # on a missing stub rather than on a real type error.
+          - PyJWT==2.10.1
+          - argon2-cffi==25.1.0
 
       - id: bandit
         name: bandit (security lint)

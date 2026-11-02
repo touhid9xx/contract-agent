@@ -53,6 +53,15 @@ class Settings(BaseSettings):
     refresh_token_expire_days: int = Field(default=7, gt=0, le=30)
     encryption_key: str = ""
 
+    # --- password hashing (Argon2id) -------------------------------------
+    #: The defaults are argon2-cffi's recommendations and comfortably exceed the
+    #: OWASP Argon2id minimum (19 MiB, t=2, p=1). The lower bounds are enforced
+    #: here so a weakened production configuration fails at start-up rather than
+    #: quietly becoming cheap to brute-force. Tests lower them deliberately.
+    argon2_time_cost: int = Field(default=3, ge=1, le=16)
+    argon2_memory_cost: int = Field(default=65536, ge=8192, le=4_194_304)
+    argon2_parallelism: int = Field(default=4, ge=1, le=16)
+
     # --- infrastructure --------------------------------------------------
     database_url: str = "mysql+pymysql://app:app@localhost:3306/contracts"
     db_pool_size: int = Field(default=20, gt=0, le=200)
@@ -116,6 +125,12 @@ class Settings(BaseSettings):
         # "access token must expire before the refresh token" is guaranteed
         # structurally by the Field bounds (<=120 minutes vs >=1 day), so no
         # cross-field check is needed; adding one would be unreachable code.
+
+        # Argon2 requires ``memory_cost >= 8 * parallelism``. The Field bounds
+        # already make a violation unrepresentable -- memory is at least 8192 KiB
+        # and parallelism at most 16, so even the strictest permitted shape gives
+        # 512 KiB per lane -- and a model validator for it would be unreachable
+        # code (see ``test_security`` for the guard on that arithmetic).
 
         if self.app_env in {"staging", "production"}:
             self._reject_insecure_production_defaults()

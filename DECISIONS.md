@@ -263,3 +263,105 @@ including the Phase 0 demo files. D0-08 is closed.
   symptom but requires a dialect-specific type (`mysql.DATETIME(fsp=6)`) that
   SQLite does not have, and the system has no requirement finer than a second —
   the backoff floor is 2 s.
+
+---
+
+## Phase 1 — F3 (authentication, tenant binding)
+
+### D3-01 — Argon2id, with parameters read from the stored hash
+
+- **Decision:** passwords are hashed with Argon2id (`argon2-cffi`), parameters
+  coming from `Settings` (`argon2_time_cost` 3, `memory_cost` 65536 KiB,
+  `parallelism` 4 — argon2-cffi's defaults, above the OWASP minimum).
+  `verify_password` always uses the parameters **stored inside the hash**, never
+  the current settings; `password_needs_rehash` compares the two.
+- **Why:** cost factors must be raisable as hardware improves. If verification
+  used the *configured* cost, raising it would invalidate every existing hash and
+  lock out every user. Reading the stored parameters means a cost increase is
+  invisible to users: an old hash still verifies, and the next successful login
+  transparently re-hashes it at the new cost (`auth.py` rehashes best-effort and
+  never fails the login if the write fails).
+- **Trade-off:** two sources of truth for the cost, which is exactly what
+  `password_needs_rehash` exists to reconcile.
+
+### D3-02 — The tenant slug in the login body is the only client-supplied tenant
+
+- **Decision:** `POST /auth/login` takes `{tenant, email, password}`. It is the
+  sole endpoint that accepts a tenant from the client. Every other route derives
+  `tenant_id` from the authenticated principal.
+- **Why:** login happens *before* a principal exists, so there is nothing else to
+  derive a tenant from — the caller has to say which organisation they are aiming
+  at. Crucially the slug **selects, it does not authorise**: the token that comes
+  back carries the `tenant_id` of the tenant that owned the *matched user row*,
+  so a mis-targeted slug cannot mint a token for another organisation, and
+  `get_current_principal` re-checks that the row still belongs to the tenant the
+  token claims.
+- **Trade-off:** a login attempt reveals nothing, but the slug is public
+  knowledge within the deployment (it is in URLs). Accepted: the secret is the
+  password, not the tenant name.
+
+### D3-03 — The user row outranks the token on every request
+
+- **Decision:** every authenticated request re-reads the user row and rejects on
+  any of: row missing, row's `tenant_id` ≠ claim, user `is_active` false, tenant
+  `is_active` false, `user.token_epoch` ≠ claim. A token is not a capability.
+- **Why:** without those checks a token is valid until it expires, so firing
+  someone, deactivating an organisation, or a "log out everywhere" request could
+  not take effect until expiry — and the only workaround, a server-side denylist,
+  is state this system would then have to keep correct and purge. One indexed
+  primary-key read per request buys immediate revocation with no extra
+  infrastructure. `token_epoch` is the revocation primitive: bumping it
+  invalidates every outstanding token for that user.
+- **Trade-off:** one DB read per request (eager-loads the tenant so it is one
+  round trip, not two). Accepted — a token is stateless only in the direction
+  that hurts security.
+
+### D3-04 — `IdentityDirectory` is the single audited exception to tenant scoping
+
+- **Decision:** `IdentityDirectory` (in `app/db/repositories/users.py`) offers
+  tenant-agnostic, **read-only** lookups (`tenant_by_slug`, `user_by_id`).
+  Everything else goes through `TenantScopedRepository`. The class docstring
+  states the rule and the module docstring explains why.
+- **Why:** authentication is inherently pre-tenant — you cannot scope a query to
+  a tenant you do not yet know. Rather than weaken `TenantScopedRepository` with
+  an `allow_unscoped=True` escape hatch (which every future caller could then
+  use silently), the exception is a separate class that cannot be reached by
+  accident and cannot write.
+- **Trade-off:** two access paths into `users`. Accepted, because the exception
+  is now visible in one file, is read-only, and a write method added to it would
+  read as a cross-tenant write primitive in review.
+
+### D3-05 — A short-lived access token, and no refresh token yet
+
+- **Decision:** HS256 bearer tokens, 15 minutes by default
+  (`access_token_expire_minutes`, bounded 1–120). No refresh token, no cookie
+  session. One algorithm is allow-listed at decode time; `alg: none` and any
+  other algorithm are rejected, as are wrong-issuer tokens and a refresh-type
+  token presented as an access token (`typ` claim).
+- **Why:** a refresh-token flow is real state — rotation, reuse detection,
+  storage — and doing it badly is worse than not having it. Fifteen minutes plus
+  `token_epoch` gives revocation on the next request without that surface. The
+  token also carries `tid`, but D3-03 means it is a hint the row must confirm,
+  not the authority.
+- **Trade-off:** a user idle for 15 minutes logs in again. Acceptable for an
+  internal ops tool; a refresh flow is a later milestone, and the `typ` claim is
+  already there so it cannot be replayed as an access token when it arrives.
+
+### D3-06 — Every login failure is one indistinguishable 401, and a corrupt hash is a wrong password
+
+- **Decision:** unknown tenant, unknown user, wrong password and deactivated
+  account all return the same 401 body after spending the same Argon2id work
+  (`spend_password_hash_time` hashes a dummy password when no account matched).
+  A hash that cannot be parsed makes `verify_password` return `False`; it does
+  **not** raise.
+- **Why:** distinct messages or distinct response times turn login into an oracle
+  for which addresses and organisations exist. The second half was a real defect
+  found while writing the tests: `argon2.exceptions.InvalidHashError` subclasses
+  `ValueError`, **not** `Argon2Error`, so catching only `Argon2Error` let a
+  corrupted or truncated hash propagate as a 500 that named the affected
+  account — the exact leak the module's docstring promised to prevent. Both
+  exception types are now caught, in `verify_password` and
+  `password_needs_rehash` alike.
+- **Trade-off:** a genuinely corrupt hash is invisible in the response. It is
+  logged (`login_failed`, reason `bad_password_or_inactive_account`) so operators
+  keep the signal the client does not get.

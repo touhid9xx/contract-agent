@@ -23,3 +23,11 @@ cryptography==50.0.2
 # Alembic ships in the runtime image (not just dev) because migrations are
 # applied by the deployment, not by a developer's laptop.
 alembic==1.20.1
+
+# --- Authentication (F3) ---
+# argon2-cffi provides the Argon2id password hash `users.password_hash` stores.
+# Its binding layer publishes an `abi3` wheel, so it works on 3.14 without a
+# version-specific build. PyJWT is the HS256 token codec; it ships `py.typed`,
+# so mypy strict analyses it rather than treating it as `Any`.
+argon2-cffi==25.1.0
+PyJWT==2.10.1

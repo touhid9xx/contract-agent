@@ -29,8 +29,10 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.config import Settings, get_settings
 from app.core.logging import redact_event_dict
+from app.core.security import hash_password
 from app.db.base import Base
-from app.db.models import Tenant
+from app.db.enums import UserRole
+from app.db.models import Tenant, User
 from app.db.repositories import enqueue_event as enqueue_outbox_event
 from app.db.session import build_session_factory, session_scope
 from app.main import create_app
@@ -80,14 +82,34 @@ def quiet_logging() -> Iterator[None]:
     _detach_structlog_from_capture()
 
 
+#: Password used by every fixture-made user. Not a credential: it never leaves
+#: the test process and the databases it protects are in-memory.
+DEFAULT_PASSWORD = "correct-horse-battery-staple"
+
+
 @pytest.fixture
 def settings() -> Settings:
-    return Settings(app_env="test", log_json=False)
+    """Test settings, with Argon2 cost lowered on purpose.
+
+    The code path is identical; only the work is smaller. The production
+    defaults cost ~80 ms per hash, which would dominate the suite, and a
+    verification reads its parameters from the stored hash rather than from
+    settings — so lowering the cost here cannot mask a verification bug.
+    ``test_security`` asserts the real defaults separately.
+    """
+    return Settings(
+        app_env="test",
+        log_json=False,
+        argon2_time_cost=1,
+        argon2_memory_cost=8192,
+        argon2_parallelism=1,
+    )
 
 
 @pytest.fixture
-def client(settings: Settings) -> Iterator[TestClient]:
-    app = create_app(settings)
+def client(settings: Settings, session_factory: sessionmaker[Session]) -> Iterator[TestClient]:
+    """A TestClient whose app talks to the same in-memory database as the tests."""
+    app = create_app(settings, session_factory=session_factory)
     with TestClient(app) as test_client:
         yield test_client
 
@@ -157,6 +179,40 @@ def other_tenant(db_session: Session) -> Tenant:
     db_session.add(owner)
     db_session.commit()
     return owner
+
+
+@pytest.fixture
+def make_user(session_factory: sessionmaker[Session], settings: Settings) -> Callable[..., User]:
+    """Create one committed user inside a tenant and return it.
+
+    Committed rather than flushed because the request under test runs in another
+    session and must see the row; returning a detached object is safe here
+    because the factory does not expire attributes on commit.
+    """
+
+    def _create(
+        owner: Tenant,
+        *,
+        email: str = "ops@acme.test",
+        password: str = DEFAULT_PASSWORD,
+        role: UserRole = UserRole.ADMIN,
+        is_active: bool = True,
+        token_epoch: int = 0,
+    ) -> User:
+        with session_scope(session_factory) as session:
+            user = User(
+                tenant_id=owner.id,
+                email=email.strip().lower(),
+                password_hash=hash_password(password, settings),
+                role=role,
+                is_active=is_active,
+                token_epoch=token_epoch,
+            )
+            session.add(user)
+            session.flush()
+        return user
+
+    return _create
 
 
 @pytest.fixture

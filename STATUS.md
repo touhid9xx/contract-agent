@@ -1,7 +1,8 @@
 # Status
 
 Last updated: Phase 1 (real foundation) — **F1 committed (`f0e1eef`), F2 committed
-(`331a7b4`) plus one follow-up fix to the MySQL test harness**.
+(`331a7b4`) plus one follow-up fix to the MySQL test harness (`a79d893`), F3
+shipping in the commit this file is part of**.
 
 ## Phase history
 
@@ -9,7 +10,7 @@ Last updated: Phase 1 (real foundation) — **F1 committed (`f0e1eef`), F2 commi
 | --- | --- |
 | Phase 0 — mocked demo | ✅ built, verified |
 | GATE 1 — human visual approval | ✅ **approved** ("I'm happy with demo functions and look") |
-| Phase 1 — real foundation | 🔄 in progress (F1 ✅, F2 ✅) |
+| Phase 1 — real foundation | 🔄 in progress (F1 ✅, F2 ✅, F3 ✅) |
 | GATE 2 — foundation verification | ⏳ pending |
 
 ## F1 — Repo & infra ✅
@@ -34,6 +35,48 @@ Last updated: Phase 1 (real foundation) — **F1 committed (`f0e1eef`), F2 commi
 | Repositories | `TenantScopedRepository` — refuses construction without a tenant; `get()` returns `None` for another tenant's id (D2-02). `OutboxRepository` — lease-fenced `claim_due` / `record_outcome`, bounded exponential backoff with ±20 % jitter, error truncation |
 | Relay | `backend/app/workers/outbox_relay.py` — transport-agnostic `EventPublisher`; `UnavailablePublisher` **raises** rather than no-ops so nothing is silently log-and-dropped; outcome recorded in its own transaction (at-least-once); SIGINT/SIGTERM graceful stop |
 | Compose | `docker-compose.yml` — MySQL 8.4 (loopback-bound), `api`, and a separate `relay` service on the same image so publishing survives API restarts |
+
+## F3 — Authentication & tenant binding ✅
+
+Closes the F2 gap where tenant scoping was "a well-tested contract without a
+producer". `tenant_id` now originates in exactly one place: a verified bearer
+token confirmed against the database.
+
+| Area | Detail |
+| --- | --- |
+| Security primitives | `app/core/security.py` — Argon2id hash/verify/rehash (parameters read from the *stored* hash, so raising the cost never locks anyone out), HS256 issue/verify with a one-algorithm allow-list, `TokenExpiredError` / `InvalidTokenError`, and `spend_password_hash_time` so login is not an enumeration oracle (D3-01, D3-06) |
+| Principal | `app/core/principal.py` — frozen `Principal`; the only validated carrier of `tenant_id` downstream |
+| Dependencies | `app/api/deps.py` — request-scoped session that does **not** commit implicitly; `get_current_principal` with five ordered checks (token → signature/expiry → row exists → tenant matches → active → `token_epoch`); `require_roles` returning 401 vs 403 correctly (D3-03) |
+| Repositories | `app/db/repositories/users.py` — `UserRepository` (tenant-scoped) and `IdentityDirectory`, the single audited read-only exception for pre-authentication lookups (D3-04) |
+| Routes | `app/api/v1/auth.py` — `POST /auth/login`, `GET /auth/me`, `GET\|POST /auth/users` (admin-only, tenant from principal, 409 on duplicate). Mounted under `settings.api_v1_prefix` so `/api/v1` — the prefix `frontend/src/lib/api.ts` already assumes — stays true |
+| Config | `app/core/config.py` — `argon2_*` bounds and `access_token_expire_minutes` (15, bounded 1–120); app factory takes an injectable `session_factory` so tests share one in-memory DB |
+
+### Verification actually run (F3)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Full suite, no MySQL | `pytest backend/tests` with `MYSQL_TEST_URL` unset | **137 passed, 3 skipped** |
+| Full suite, real MySQL 8.4 | `pytest backend/tests` with `MYSQL_TEST_URL` on `:3307` | **140 passed** |
+| Type check | `mypy app` (strict) | **clean, 30 source files** |
+| Lint / format | `ruff check backend` | **All checks passed** |
+| Security lint | `bandit -c pyproject.toml -r backend/app` | **0 issues** |
+
+The one warning in the run is `starlette/testclient.py` deprecating an
+`anyio.abc.BlockingPortal` alias — third-party, not ours.
+
+#### Two defects found by the tests, not by reasoning
+
+1. **A corrupted hash produced a 500 naming the account.** `verify_password`
+   caught only `Argon2Error`, but `argon2.exceptions.InvalidHashError` subclasses
+   `ValueError`. Any truncated or corrupted hash therefore raised instead of
+   reading as a wrong password — the exact leak the module promised to prevent.
+   Both types are now caught, in `verify_password` and `password_needs_rehash`.
+2. **A startup guard that could never fire.** The
+   `argon2_memory_cost < 8 * parallelism` check was unreachable, because the
+   memory floor (8192) dwarfs `8 × 16`. Dead validation is worse than none: it
+   reads as protection. Removed, and replaced with a test asserting every
+   *permitted* shape satisfies the arithmetic — so a future bound widening fails
+   in CI instead of silently.
 
 ## Verification actually run (F2)
 
@@ -105,17 +148,50 @@ just wrote it. Timestamps are now floored before writing.
    `UnavailablePublisher`, which raises, so rows retry with backoff and then park
    as failed for an operator. Nothing is silently dropped, but nothing is
    delivered either — the outbox is wired end-to-end except the wire itself.
-6. **No auth yet.** `TenantScopedRepository` enforces the tenant predicate, but
-   nothing yet derives `tenant_id` from an authenticated principal. Until that
-   lands, tenant scoping is a well-tested contract without a producer.
+6. **No refresh token.** Access tokens last 15 minutes and cannot be renewed
+   without re-entering credentials (D3-05). Revocation works immediately via
+   `token_epoch`, so this is a usability limit, not a security one.
+7. **The frontend does not use the auth API yet.** F3 is backend-only: there is
+   no login screen, no token storage and no `Authorization` header in
+   `frontend/src/`. The `frontend/src/lib/api.ts` module and the `demo/` fixtures
+   still run unauthenticated. Wiring the UI is part of a later milestone — until
+   then, `/api/v1/auth/*` is exercised by tests only.
+8. **Only `POST /auth/users` exists for account lifecycle.** There is no
+   password reset, no self-service change, no deactivate/delete endpoint. A
+   forgotten password is an operator task (bump `token_epoch`, set a new hash).
+9. **No rate limiting on `/auth/login`.** Argon2id makes each attempt expensive
+   server-side, which is not the same as throttling an attacker. Admission
+   control belongs at the edge (proxy/WAF) or with a later Redis-backed limiter.
 
 ## Next permitted step
 
-The outstanding foundation work (the operations described in the delivery plan as
-F3 onward) is **not recorded anywhere in this repository** — `README.md`,
-`DECISIONS.md`, `STATUS.md` and `DEMO.md` name F1/F2 only. The F3…F7 breakdown
-lives in the task specification, so it needs to be restated before further
-milestones are built, rather than guessed at.
+**F3 is complete and F4 is still undefined in this repository.** The F3…F7
+breakdown lives in the task specification, not in the repo — `README.md`,
+`DECISIONS.md`, `STATUS.md` and `DEMO.md` name F1/F2 only. F3 was built because
+its scope (authentication + tenant binding) was confirmed explicitly in-conversation
+rather than guessed; the same confirmation is needed for F4 before more code is
+written.
+
+The repository does contain indirect hints about the remaining milestones, enough
+to propose a scope but **not** enough to treat as a specification:
+
+- `docker-compose.yml` — "Redis/Kafka/Ollama arrive with F4/F5".
+- `app/api/v1/health.py` — readiness "deliberately omits … pending F5".
+- `app/workers/outbox_relay.py` — `UnavailablePublisher` is explicitly the
+  stand-in "until a real transport lands in F4" (D2-04). Every published event
+  currently retries and then parks as failed, so **no domain event has ever been
+  delivered end-to-end.**
+- `app/db/models/` — the schema is ahead of the code: `Contract`,
+  `ExtractedField`, `AgentDecision`, `Notification`, `CustomerResponse`,
+  `Escalation` and `AuditLog` all exist with no route, service or worker that
+  writes them.
+
+**Proposed F4, pending confirmation:** the ingestion → extraction → review
+pipeline behind the F3 principal (`POST /contracts`, PDF/text ingestion into
+`Contract`, extraction into `ExtractedField`, the review endpoints the Phase-0
+demo mocks, and a real `EventPublisher` so the outbox finally delivers). This is
+the smallest slice that makes the schema stop being dead weight and reuses the
+`blocks_pipeline` rule already modelled in F2.
 
 ## Non-negotiable reminders
 

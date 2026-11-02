@@ -9,11 +9,15 @@ from __future__ import annotations
 
 from app.db.repositories.base import MissingTenantContextError, TenantScopedRepository
 from app.db.repositories.outbox import OutboxRepository, backoff_seconds, enqueue_event
+from app.db.repositories.users import IdentityDirectory, UserRepository, normalize_email
 
 __all__ = [
+    "IdentityDirectory",
     "MissingTenantContextError",
     "OutboxRepository",
     "TenantScopedRepository",
+    "UserRepository",
     "backoff_seconds",
     "enqueue_event",
+    "normalize_email",
 ]
