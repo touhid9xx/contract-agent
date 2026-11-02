@@ -2,8 +2,9 @@
 
 Last updated: Phase 1 (real foundation) — **F1 committed (`f0e1eef`), F2 committed
 (`331a7b4`) plus one follow-up fix to the MySQL test harness (`a79d893`), F3
-committed (`8e6b927`) plus the bootstrap-path doc (`908f50d`), and F4 in the
-working tree awaiting its commit.**
+committed (`8e6b927`) plus the bootstrap-path doc (`908f50d`), F4 committed
+(`b425ea7`) with every gate executed and green. GATE 2 now awaits human
+sign-off.**
 
 ## Phase history
 
@@ -11,8 +12,8 @@ working tree awaiting its commit.**
 | --- | --- |
 | Phase 0 — mocked demo | ✅ built, verified |
 | GATE 1 — human visual approval | ✅ **approved** ("I'm happy with demo functions and look") |
-| Phase 1 — real foundation | 🔄 in progress (F1 ✅, F2 ✅, F3 ✅, F4 ✅ code / ⏳ commit) |
-| GATE 2 — foundation verification | ⏳ pending |
+| Phase 1 — real foundation | 🔄 in progress (F1 ✅, F2 ✅, F3 ✅, F4 ✅) |
+| GATE 2 — foundation verification | ⏳ pending human sign-off; every automated check is green |
 
 ## F1 — Repo & infra ✅
 
@@ -111,7 +112,7 @@ exact snippet was executed against a real MySQL 8.4 schema before being written
 here, not transcribed from memory. `Tenant`/`User` take the keyword arguments
 shown — verified against `backend/app/db/models/tenant.py`.)
 
-## F4 — Event transport ✅ (code) / ⏳ (commit)
+## F4 — Event transport ✅
 
 Closes D2-04: a real transport now exists, and the relay still does not know its
 name. **Scope was taken from the repository, not invented** — `DECISIONS.md`
@@ -135,29 +136,25 @@ pipeline is therefore **not** part of this slice.
 
 ### Verification state (F4) — read this before GATE 2
 
-| Check | Result |
-| --- | --- |
-| `pytest backend/tests/test_publishers.py` | **14 passed, 1 skipped** (the `live` broker test) |
-| Full suite after these files landed | **not run** — the shell wedged before it could be (see below) |
-| `pre-commit run --all-files` / `mypy` / `bandit` after these files landed | **not run** for the same reason |
+| Check | Command | Result |
+| --- | --- | --- |
+| Full suite | `pytest backend/tests` (no `MYSQL_TEST_URL`) | **151 passed, 4 skipped**, exit 0 |
+| Kafka transport only | `pytest backend/tests/test_publishers.py` | **14 passed, 1 skipped** (the `live` broker test) |
+| Pre-commit gate | `pre-commit run --all-files` | **all 16 hooks passed** — hygiene, ruff, ruff format, mypy strict, bandit, frontend `tsc --noEmit`, frontend eslint |
+| Commit | `git commit -F .agent-cache/f4-commit-msg.txt` | **`b425ea7`**, husky hooks active, no `--no-verify` |
 
-`run_command` stopped returning: every command, including a bare `echo`, times
-out before producing any output. This was diagnosed rather than assumed —
+The suite total comes from the JUnit report rather than a re-read of the console
+tail: `tests="155" failures="0" errors="0" skipped="4"`. The four skips are the
+three MySQL integration tests (that run had no `MYSQL_TEST_URL`) plus the opt-in
+`live` broker test.
 
-- a command run with its output redirected to a file produced **no file**, so the
-  process never started (this rules out "output stream is stuck");
-- both the default shell and `cmd /c` hang identically, so it is not one broken
-  shell;
-- it persisted across a session boundary, so it is not a leftover `git diff`
-  pager. An earlier note here blamed the pager; that was wrong and is corrected.
+For the record, earlier drafts of this section said the gate could not be run at
+all: the agent's shell tool was timing out on every command, so F4 was left
+uncommitted rather than pushed through with `--no-verify`. That block proved
+intermittent — it cleared mid-session, and the results above were then produced
+normally. Nothing here is claimed as verified that was not actually executed.
 
-The practical consequence is that **`pytest`, `ruff`, `mypy`, `bandit`,
-`pre-commit` and `git commit` are all unavailable**, since pre-commit's hooks run
-the same tools. F4 was deliberately **not** committed with `--no-verify` to route
-around this: that would record F4 as gated when it is not. Nothing below is
-claimed as verified that was not actually executed.
-
-### What *was* checked without a shell
+### Static cross-checks made before the first run
 
 The likeliest way the F4 tests would fail on their first run is a call that does
 not match the signature it calls. Each one was therefore cross-checked against
@@ -178,8 +175,10 @@ The last row is the one that would silently break those assertions: on a shared
 database, rows enqueued by another test would be claimed by the same tick. They
 are not shared, so the count assertions are sound.
 
-This is static verification, not execution. It rules out the most common
-first-run failure (a stale signature); it does not substitute for the gate.
+These were static checks, made while execution was unavailable. When the gate
+finally ran, every cross-check above held on the first attempt — no signature
+mismatch, no shared-state assertion failure. That is a good argument for doing
+the same on F5, but it was never a substitute for running the suite.
 
 ### The honest gap: no broker has ever been on the other end
 
@@ -287,8 +286,8 @@ just wrote it. Timestamps are now floored before writing.
 
 ## Next permitted step
 
-**F4 code is written and unit-verified but not committed, and F5 is undefined in
-this repository.** The F3…F7 breakdown lives in the task specification, not in the
+**F4 is committed (`b425ea7`) with every gate green; F5 is undefined in this
+repository.** The F3…F7 breakdown lives in the task specification, not in the
 repo. F3 was built because its scope was confirmed explicitly in-conversation, and
 F4 because `DECISIONS.md` D2-04 and the relay docstring name it outright — neither
 was guessed. **F5 needs the same evidence or an explicit scope; the repo will not
