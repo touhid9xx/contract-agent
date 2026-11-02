@@ -466,3 +466,67 @@ its name.
 - **Trade-off:** a broker slower than 10 s per record fails the publish and
   retries. That is the correct outcome: a broker that slow is broken, and the
   retry is visible in `attempts` on the row.
+
+## Phase 1 — F5 (readiness, operability)
+
+Closes the two gaps F4 left open and made worse: a process nobody could ask
+"are you actually able to serve?" and parked rows nothing could un-park.
+
+### D5-01 — Liveness stays dependency-free; readiness probes only what a request needs
+
+- **Decision:** `/health` is unchanged — it reads process state and touches no
+  dependency. `/health/ready` runs `check_database` and, **only when
+  `EVENT_TRANSPORT != none`**, `check_event_transport`. Both run sequentially in
+  the threadpool under `readiness_timeout_seconds`; a failed or timed-out check
+  returns 503 with `{"status": "not_ready", "checks": {...}}`.
+- **Why:** Docker's `healthcheck` drives `restart: unless-stopped`.
+
+  A liveness probe that fails when MySQL is down restarts a perfectly healthy
+  API, which is precisely the outage-amplification the split exists to prevent —
+  so `docker-compose.yml` keeps its healthcheck on `/health` and a deliberate
+  comment says why (D1-06's cousin: one rule, one place). The event-transport
+  check is skipped rather than reported green when no broker is configured:
+  `check_event_transport` returns `ok/not_configured` for its own callers, but
+  `readiness_report` omits the entry entirely, because a `"database": ok`
+  neighbour would make `"event_transport": ok` read as "the broker is healthy"
+  when no broker is in use (same reasoning as D4-03).
+- **Trade-off:** readiness can take up to `len(checks) * timeout` (2 × 5 s by
+  default) on a wedged dependency. Sequential is a choice: there are at most two
+  checks and a concurrent gather would make it harder to attribute which one
+  hung. Bounded per-check timeouts keep an abandoned Kafka thread from piling up
+  one per scrape.
+
+### D5-02 — Readiness reasons are coarse, and the detail goes to the log
+
+- **Decision:** a failing check carries one of exactly three reasons —
+  `unavailable`, `timeout`, `not_configured` — never the driver's exception text.
+  The full `f"{type(exc).__name__}: {exc}"` is logged through the existing
+  redacting logger.
+- **Why:** `/health/ready` is unauthenticated and lives outside the versioned
+  prefix, so anyone who can reach the port can read it. A raw PyMySQL or Kafka
+  error string leaks hostnames, ports, user names and sometimes fragments of a
+  connection URL — exactly the class of data `app/core/logging.py` spends effort
+  masking. The reason enum is enough to route the alert; the log has the rest.
+- **Trade-off:** an operator must correlate by request id / timestamp to learn
+  the underlying driver error. Accepted: the logs already carry correlation ids
+  (F1) and the body stays useful without them.
+
+### D5-03 — Dead-letter replay is an operator CLI command, not an HTTP endpoint
+
+- **Decision:** `python -m app.cli outbox-replay [--list | --dry-run | --ids N,N]`
+  requeues `failed` outbox rows via `replay_dead_lettered`. It resets `attempts`
+  to 0, floors `next_attempt_at` to the stored second precision (the D2-06
+  lesson), and returns the previous error text so the operator sees what they are
+  overriding. It refuses to touch `published` or `pending` rows.
+- **Why:** replay is a privileged, rarely-run repair action with no worker
+  identity and no lease — giving it an HTTP route would mean inventing an
+  authorization scope and a rate-limit story for something an operator does by
+  hand after reading a log. A CLI can be run inside the same container/network as
+  the relay with the same credentials, needs no new attack surface, and its exit
+  codes (`EXIT_OK` / `EXIT_NO_MATCH`) make it scriptable. `--dry-run` and
+  `--list` exist because the first question after "a row is parked" is "what is
+  it, and did I mean to requeue it?".
+- **Trade-off:** replay requires shell access to a host with the app image. For
+  this project that is the correct bar — a parked row is an operations event, not
+  a customer-facing one. Flagged as an open item for GATE 2: there is still no
+  automatic replay, and no alert fires when rows park.

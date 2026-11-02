@@ -60,6 +60,17 @@ def _unauthorized() -> HTTPException:
     )
 
 
+def app_session_factory(request: Request) -> sessionmaker[Session]:
+    """The session factory the running app was built with.
+
+    Separate from :func:`get_request_session` for callers that must open their
+    own session rather than share the request's — the readiness probe runs its
+    blocking check in a worker thread, where a session bound to the request
+    thread would be the wrong object to hand out.
+    """
+    return cast("sessionmaker[Session]", request.app.state.session_factory)
+
+
 def get_request_session(request: Request) -> Iterator[Session]:
     """Yield a session bound to this request, closing it afterwards.
 
@@ -67,8 +78,7 @@ def get_request_session(request: Request) -> Iterator[Session]:
     endpoint commits once, explicitly, when it has finished its work. An
     implicit commit here would turn any accidental write into a durable one.
     """
-    factory = cast("sessionmaker[Session]", request.app.state.session_factory)
-    session = factory()
+    session = app_session_factory(request)()
     try:
         yield session
     finally:

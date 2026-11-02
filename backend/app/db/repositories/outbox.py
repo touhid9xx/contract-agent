@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import random
 import uuid
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -35,6 +37,10 @@ BACKOFF_JITTER = 0.2
 #: address, so the stored text is short and the caller is expected to have
 #: redacted it already.
 MAX_ERROR_LENGTH = 500
+
+#: Default number of parked rows one inspection or replay touches. Bounded so an
+#: operator command cannot load an unbounded table into memory.
+DEFAULT_REPLAY_LIMIT = 100
 
 
 def backoff_seconds(attempts: int) -> int:
@@ -230,3 +236,107 @@ class OutboxRepository:
             .where(OutboxEvent.status.in_([OutboxStatus.PENDING, OutboxStatus.PUBLISHING]))
         )
         return int(self._session.execute(stmt).scalar_one())
+
+
+# --- dead letter (operator operations) ------------------------------------
+# Module-level functions rather than OutboxRepository methods on purpose: that
+# class is the relay's claim/fence machinery and its constructor demands a
+# worker identity plus a lease, neither of which a replay has. These take the
+# caller's session for the same reason ``enqueue_event`` does -- the caller owns
+# the transaction boundary and commits once.
+
+
+@dataclass(frozen=True)
+class DeadLetterReplay:
+    """What one replay did to one parked row.
+
+    Carries the state *before* the reset, so the operator's log keeps the reason
+    the row was parked even though the row itself no longer shows it.
+    """
+
+    id: int
+    event_type: str
+    tenant_id: str
+    attempts: int
+    last_error: str | None
+
+
+def dead_lettered(session: Session, *, limit: int = DEFAULT_REPLAY_LIMIT) -> list[OutboxEvent]:
+    """Rows parked after exhausting ``max_attempts``, oldest first.
+
+    ``last_error`` is returned as stored: that text is the reason an operator is
+    looking at these rows in the first place.
+    """
+    stmt = (
+        select(OutboxEvent)
+        .where(OutboxEvent.status == OutboxStatus.FAILED)
+        .order_by(OutboxEvent.id)
+        .limit(limit)
+    )
+    return list(session.execute(stmt).scalars())
+
+
+def replay_dead_lettered(
+    session: Session,
+    *,
+    event_ids: Sequence[int] | None = None,
+    limit: int = DEFAULT_REPLAY_LIMIT,
+    dry_run: bool = False,
+) -> list[DeadLetterReplay]:
+    """Requeue parked rows for another delivery attempt; return what was touched.
+
+    Replay is the missing half of "dead letter with replay, never log-and-drop".
+    The relay parks a row precisely so a human can decide later; without this,
+    "later" meant editing the table by hand.
+
+    Semantics, each deliberate:
+
+    * **Only ``failed`` rows are touched.** Replaying a ``published`` row would
+      republish an event the business write never asked to send twice, and
+      re-marking a ``pending`` or ``publishing`` row would collide with a live
+      relay. The status predicate is the guard, not a caller's good intentions.
+    * **``attempts`` resets to zero.** The retry budget exists to stop a live
+      loop hammering a broken transport, not to cap how many times an operator
+      may recover one row over its lifetime.
+    * **``last_error`` clears** so the next failure is reported as itself rather
+      than as stale text. The pre-replay error is handed back in
+      :class:`DeadLetterReplay` so the reason is preserved in the invocation log.
+    * **``next_attempt_at`` is floored, not truncated by the database** — the
+      D2-06 lesson: MySQL's second-precision ``DATETIME`` rounds microseconds, so
+      a row requeued at ``12:00:00.7`` could be stored as not-yet-due and be
+      skipped by the very relay this was meant to feed.
+
+    No ``SELECT ... FOR UPDATE``: the relay never claims a ``failed`` row, so
+    there is no concurrent writer to fence off. Two simultaneous replays would
+    both set ``pending``, which is idempotent.
+    """
+    stmt = select(OutboxEvent).where(OutboxEvent.status == OutboxStatus.FAILED)
+    if event_ids is not None:
+        stmt = stmt.where(OutboxEvent.id.in_(list(event_ids)))
+
+    rows = list(session.execute(stmt.order_by(OutboxEvent.id).limit(limit)).scalars())
+
+    replays = [
+        DeadLetterReplay(
+            id=event.id,
+            event_type=event.event_type,
+            tenant_id=str(event.tenant_id),
+            attempts=event.attempts,
+            last_error=event.last_error,
+        )
+        for event in rows
+    ]
+
+    if dry_run or not rows:
+        return replays
+
+    now = truncate_to_second(utc_now())
+    for event in rows:
+        event.status = OutboxStatus.PENDING
+        event.attempts = 0
+        event.next_attempt_at = now
+        event.locked_by = None
+        event.locked_until = None
+        event.last_error = None
+    session.flush()
+    return replays

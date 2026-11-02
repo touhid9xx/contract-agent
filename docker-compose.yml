@@ -7,7 +7,9 @@
 # Kafka: the transport landed in F4 (EVENT_TRANSPORT=kafka, read from .env by
 #        both services), but no broker is defined here yet, so the relay defaults
 #        to EVENT_TRANSPORT=none and parks events instead of dropping them.
-#        Redis/Ollama still arrive with F5 once code actually talks to them.
+#        F5 added /health/ready, which probes MySQL and — when a broker is
+#        configured — Kafka. No Redis/Ollama service is defined yet because no
+#        code talks to either; they arrive with the milestones that use them.
 name: contract-agent
 
 services:
@@ -55,6 +57,11 @@ services:
     ports:
       - "${API_PORT:-8000}:8000"
     healthcheck:
+      # Deliberately /health (liveness), not /health/ready. A Docker healthcheck
+      # drives `restart: unless-stopped`, so pointing it at readiness would
+      # restart a healthy API every time MySQL blips — the exact failure the
+      # liveness/readiness split exists to avoid. Use /health/ready from a load
+      # balancer or orchestrator that removes the instance from rotation instead.
       test:
         - CMD
         - python

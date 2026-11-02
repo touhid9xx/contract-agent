@@ -3,8 +3,8 @@
 Last updated: Phase 1 (real foundation) — **F1 committed (`f0e1eef`), F2 committed
 (`331a7b4`) plus one follow-up fix to the MySQL test harness (`a79d893`), F3
 committed (`8e6b927`) plus the bootstrap-path doc (`908f50d`), F4 committed
-(`b425ea7`) with every gate executed and green. GATE 2 now awaits human
-sign-off.**
+(`b425ea7`), F5 (readiness + DLQ replay) with every gate executed and green.
+GATE 2 now awaits human sign-off.**
 
 ## Phase history
 
@@ -12,7 +12,7 @@ sign-off.**
 | --- | --- |
 | Phase 0 — mocked demo | ✅ built, verified |
 | GATE 1 — human visual approval | ✅ **approved** ("I'm happy with demo functions and look") |
-| Phase 1 — real foundation | 🔄 in progress (F1 ✅, F2 ✅, F3 ✅, F4 ✅) |
+| Phase 1 — real foundation | 🔄 in progress (F1 ✅, F2 ✅, F3 ✅, F4 ✅, F5 ✅) |
 | GATE 2 — foundation verification | ⏳ pending human sign-off; every automated check is green |
 
 ## F1 — Repo & infra ✅
@@ -214,6 +214,59 @@ None of the three is a defect: each is a slice boundary of F4, and each is
 visible in the code and in the relay's own logs rather than hidden. The caveats
 are about what has *not been built*, not about anything that is built and broken.
 
+> **Status after F5:** caveat 3 is now closed — `python -m app.cli outbox-replay`
+> requeues parked rows (D5-03). Caveats 1 and 2 still stand: still no broker
+> service, still no consumer.
+
+## F5 — Readiness + dead-letter replay ✅
+
+Closes gaps 4 and 5. Neither is a new feature so much as making two things that
+already existed observable and recoverable: a process that could not be asked
+whether it could serve, and parked rows nothing could un-park.
+
+| Area | Detail |
+| --- | --- |
+| Readiness core | `app/core/readiness.py` — `check_database` (`SELECT 1` via the real session factory), `create_broker_probe` (lazy `KafkaAdminClient.list_topics`, bounded by `request_timeout_ms` so an abandoned thread cannot accumulate per scrape), `check_event_transport`, `readiness_report`. Coarse reasons only; driver text goes to the redacting log (D5-02) |
+| Endpoint | `app/api/v1/health.py` — `GET /health/ready` → 200 `{"status": "ready", "checks": {...}}` or 503 `{"status": "not_ready", ...}`. `/health` untouched: liveness still touches no dependency (D5-01) |
+| Operator CLI | `app/cli.py` — `python -m app.cli outbox-replay [--list \| --dry-run \| --ids N,N]`, exit `EXIT_OK` / `EXIT_NO_MATCH`, structlog (redacted) output. Injectable settings/session factory mirroring `create_app` |
+| Replay repo | `app/db/repositories/outbox.py` — `dead_lettered`, `replay_dead_lettered`, `DeadLetterReplay`, `DEFAULT_REPLAY_LIMIT`. Module-level (not `OutboxRepository` methods): replay has no worker identity and no lease. Only `failed` rows are touched; `attempts` resets; `next_attempt_at` floored to the stored second (the D2-06 lesson) |
+| Config | `app/core/config.py` — `readiness_timeout_seconds` (`gt=0, le=30`, default 5); `.env.example` documents it |
+| Compose | `docker-compose.yml` — header comment corrected (F5 landed, Redis/Ollama still unused). The `api` healthcheck **stays on `/health`** with a comment saying why: it drives `restart: unless-stopped`, so readiness there would restart a healthy API whenever MySQL blips |
+| Tests | `backend/tests/test_readiness.py` (15 cases), `backend/tests/test_outbox_replay.py` (13 cases) |
+
+### Verification actually run (F5)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Full suite, no MySQL | `pytest` with `MYSQL_TEST_URL` unset | **179 passed, 4 skipped** (JUnit: `tests=183 failures=0 errors=0 skipped=4`) |
+| Full suite, real MySQL 8.4 | `pytest` with `MYSQL_TEST_URL` on `:3307` | **182 passed, 1 skipped** (JUnit: `tests=183 failures=0 errors=0 skipped=1`) |
+| Type check | `mypy app` (strict) | **clean, 33 source files** |
+| Lint | `ruff check backend` | **All checks passed** |
+| Format | `ruff format backend` | **stable** (2 files reformatted, then clean) |
+| Security lint | `bandit -c pyproject.toml -r backend/app` | **0 issues** |
+
+The single skip in the MySQL run is the opt-in `live` Kafka test (`KAFKA_LIVE=1`),
+unchanged from F4. The four skips without MySQL are the three real-MySQL tests
+plus that same `live` test.
+
+#### Two gate failures caught before the commit, not by reasoning
+
+1. **`ruff ASYNC109` on `_guarded`.** Naming a parameter `timeout` on an `async`
+   function is flagged because a timeout is easy to forget to enforce. Renamed to
+   `limit_seconds`; both call sites pass positionally, so nothing else moved.
+2. **`mypy` was invoked against the wrong paths.** `mypy app agents tools migrations`
+   aborted with `Duplicate module named "__main__"` (both `agents` and `tools`
+   carry one). The project's gate is `mypy app` — that passes; the error was in
+   the command, not the code.
+
+#### What the readiness tests do and do not prove
+
+`test_readiness.py` injects an `UnreachableDatabase` and a fake broker probe, so
+it proves the *verdict logic*: fail-closed on a dead dependency, `timeout` under a
+wedged one, the 503 body shape, `not_configured` omission, and that no driver text
+reaches the response. It does **not** prove a real broker or a real outage behaves
+the same — same caveat as F4's, for the same reason (no broker service).
+
 ## Verification actually run (F2)
 
 | Check | Command | Result |
@@ -286,14 +339,19 @@ just wrote it. Timestamps are now floored before writing.
    hard-coded fixture passwords). This is deliberate: `B101` in tests carries no
    signal, and narrowing the app scope to silence it would be worse than
    documenting it.
-4. **`/health/ready` does not exist yet** — `/api/v1/health` is liveness only.
-5. **No broker, no consumer, no DLQ replay tool.** F4 delivers a Kafka
-   *publisher*; `docker-compose.yml` still has no Kafka service, so nothing has
-   been proven against a real broker and the `live` test is opt-in
-   (`KAFKA_LIVE=1`). The consumer side of at-least-once does not exist, and rows
-   parked in the outbox `failed` state can only be replayed by hand. The default
-   `EVENT_TRANSPORT=none` keeps the refusing stand-in, so a fresh deployment
-   retries and parks events rather than losing them (D4-03).
+4. ~~**`/health/ready` does not exist yet**~~ — **closed by F5.** `GET
+   /health/ready` probes MySQL and, when a transport is configured, Kafka, and
+   returns 503 with a coarse per-check reason (D5-01, D5-02). It is deliberately
+   **not** what the Docker healthcheck calls, because that would restart a
+   healthy API on a database blip.
+5. **No broker and no consumer; DLQ replay is manual.** F4 delivers a Kafka
+   *publisher* and F5 adds `python -m app.cli outbox-replay` for parked rows, but
+   `docker-compose.yml` still has no Kafka service, so nothing has been proven
+   against a real broker and the `live` test is opt-in (`KAFKA_LIVE=1`). The
+   consumer side of at-least-once does not exist. Replay is operator-initiated:
+   **no alert fires when rows park and nothing requeues them automatically**
+   (D5-03). The default `EVENT_TRANSPORT=none` keeps the refusing stand-in, so a
+   fresh deployment retries and parks events rather than losing them (D4-03).
 6. **No refresh token.** Access tokens last 15 minutes and cannot be renewed
    without re-entering credentials (D3-05). Revocation works immediately via
    `token_epoch`, so this is a usability limit, not a security one.
@@ -318,42 +376,41 @@ just wrote it. Timestamps are now floored before writing.
 
 ## Next permitted step
 
-**F4 is committed (`b425ea7`) with every gate green; F5 is undefined in this
-repository.** The F3…F7 breakdown lives in the task specification, not in the
-repo. F3 was built because its scope was confirmed explicitly in-conversation, and
-F4 because `DECISIONS.md` D2-04 and the relay docstring name it outright — neither
-was guessed. **F5 needs the same evidence or an explicit scope; the repo will not
-supply one on its own.**
+**F5 is complete and gate-green; GATE 2 awaits human sign-off.** F1–F5 are all
+committed. The remaining work inside Phase 1 is the pipeline slice below, which
+the repo names unambiguously — this is no longer a guess.
 
-What the repository does say about F5 is thin:
-
-- `app/api/v1/health.py` — readiness checks (DB/Redis/Kafka/Ollama) are
-  "deliberately omitted … pending F5", so `/health/ready` is the one concrete F5
-  artefact already named in code.
-- `docker-compose.yml` — the header comment now separates the two cases: the
-  Kafka *transport* landed in F4 (though no broker service is defined), while
-  Redis and Ollama are still listed as arriving with F5. **Nothing in
-  `backend/app` uses Redis today** (D2-03 chose a row lease deliberately).
-- `app/db/models/` — still the largest gap: `Contract`, `ExtractedField`,
+- `app/db/models/` — **the largest remaining gap.** `Contract`, `ExtractedField`,
   `AgentDecision`, `Notification`, `CustomerResponse`, `Escalation` and
-  `AuditLog` all exist with **no route, service or worker that writes them**. The
-  outbox can now physically deliver events, but nothing enqueues one from a
-  business action yet, so no domain event has ever travelled end-to-end.
+  `AuditLog` all exist with **no route, service or worker that writes them**.
+  F5 made the outbox recoverable, but nothing enqueues an event from a business
+  action yet, so no domain event has ever travelled end-to-end.
+- `app/api/v1/` — only `auth` and `health` routers exist. There is no
+  `/contracts` route, no review route, and no notification route, while
+  `frontend/src/lib/api.ts` and the Phase-0 fixtures already assume all three
+  exist. **The UI contract is ahead of the backend by roughly a milestone.**
+- Redis (rate limiting, gap 9) and Ollama (extraction, the non-negotiable
+  "local LLM only" rule) are still unwired, and each belongs to the slice that
+  first needs it.
 
-**Two candidate F5 scopes, both defensible from the above — pick one or paste the
-real definition:**
+**Next slice (F6), in the order the dependencies demand:**
 
-1. **Readiness + operability:** `/health/ready` (DB, and Kafka when a transport is
-   selected), plus the DLQ replay path that gap 5 admits is missing. Small,
-   unblocks deployment, closes two recorded gaps.
-2. **The ingestion → extraction → review pipeline behind the F3 principal:**
-   `POST /contracts`, PDF/text ingestion into `Contract`, extraction into
-   `ExtractedField`, the review endpoints the Phase-0 demo already mocks, and the
-   first real `enqueue_event` call from a business write. Closes the "schema is
-   ahead of the code" gap and gives the outbox its first genuine event.
+1. `POST /contracts` + ingestion into `Contract` behind the F3 principal —
+   tenant stamped from the principal, `sha256` dedup per tenant, optimistic
+   `version` respected.
+2. The first real `enqueue_event` from inside that same transaction, so the outbox
+   finally has a producer and the relay has a genuine event to publish.
+3. Extraction into `ExtractedField` — Ollama-backed, confidence scored, with the
+   non-negotiable that nothing below the review threshold reaches a notification.
+4. Review endpoints behind `require_roles`, version-checked (409 on stale write),
+   matching what the Phase-0 review queue already mocks.
 
-My read is that (2) is the higher-value slice and the one the Phase-0 demo was
-built to anticipate, but (1) is what the code itself names. Not guessing.
+Steps 1–2 are the smallest slice that makes the outbox end-to-end real, so if the
+scope needs trimming, start there and treat 3–4 as the following milestone.
+
+**Open at GATE 2 — say these out loud, do not bury them:** no Kafka broker has
+ever been on the other end of a publish (no compose service; `live` test opt-in);
+no consumer exists; DLQ replay is operator-initiated with no alerting.
 
 ## Non-negotiable reminders
 

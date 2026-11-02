@@ -98,6 +98,14 @@ class Settings(BaseSettings):
     outbox_max_attempts: int = Field(default=10, gt=0, le=100)
     outbox_poll_interval_seconds: float = Field(default=0.5, gt=0, le=60)
 
+    # --- readiness (F5) --------------------------------------------------
+    #: Upper bound on one dependency check in ``/health/ready``. Readiness has to
+    #: answer or fail quickly: an orchestrator that receives no answer cannot
+    #: distinguish "overloaded" from "dead", and keeps routing traffic to a
+    #: wedged process. The same value bounds the Kafka admin client's request
+    #: timeout, since a worker thread cannot be cancelled from outside.
+    readiness_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
+
     # --- http ------------------------------------------------------------
     cors_origins: str = "http://localhost:3000"
 
