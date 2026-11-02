@@ -4,7 +4,10 @@
 #   relay  — outbox relay worker (F2); a separate process on purpose, because the
 #            API must never publish synchronously and the relay must survive API
 #            restarts.
-# Redis/Kafka/Ollama arrive with F4/F5 once code actually talks to them.
+# Kafka: the transport landed in F4 (EVENT_TRANSPORT=kafka, read from .env by
+#        both services), but no broker is defined here yet, so the relay defaults
+#        to EVENT_TRANSPORT=none and parks events instead of dropping them.
+#        Redis/Ollama still arrive with F5 once code actually talks to them.
 name: contract-agent
 
 services:

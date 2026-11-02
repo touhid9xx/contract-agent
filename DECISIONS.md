@@ -236,6 +236,11 @@ including the Phase 0 demo files. D0-08 is closed.
   `published` while nothing was sent — exactly the log-and-drop failure the spec
   forbids. Failing loudly retries with backoff and eventually parks the row in
   `failed`, where an operator can see it.
+- **Updated (F4):** the stand-in has been superseded in practice —
+  `build_publisher` returns `KafkaPublisher` when `EVENT_TRANSPORT=kafka`
+  (D4-01…D4-05). The decision itself stands unchanged: `OutboxRelay` still knows
+  only the protocol, and `UnavailablePublisher` still refuses rather than no-ops
+  when no transport is selected.
 
 ### D2-05 — The outbox has no foreign key to `tenants`
 
@@ -365,3 +370,99 @@ including the Phase 0 demo files. D0-08 is closed.
 - **Trade-off:** a genuinely corrupt hash is invisible in the response. It is
   logged (`login_failed`, reason `bad_password_or_inactive_account`) so operators
   keep the signal the client does not get.
+
+---
+
+## Phase 1 — F4 (event transport)
+
+Resolves D2-04: a real transport now exists, and the relay still does not know
+its name.
+
+### D4-01 — Publishing is synchronous and acknowledged, so "returned" means "delivered"
+
+- **Decision:** `KafkaPublisher.publish` calls `producer.send(...)` and then
+  blocks on `record.get(timeout=kafka_publish_timeout_seconds)`. The producer is
+  built with `acks="all"` and `linger_ms=0`. Exceptions are **not** caught.
+- **Why:** the relay's whole failure model rests on one inference — a publish that
+  returned normally was delivered, anything that raised was not. A fire-and-forget
+  `send` (which is what `kafka-python` gives by default) breaks that inference:
+  the broker could be down, the send buffered and dropped, and the row marked
+  `published`. That is the log-and-drop failure the specification forbids. `acks="all"`
+  means an ack survives a leader crash immediately after the write; `linger_ms=0`
+  adds nothing to lose, because the relay already waits per row.
+- **Trade-off:** throughput is one in-flight record per relay. At the outbox's
+  scale (a daily expiry scan) that is irrelevant, and batching is available later
+  by relaxing only `linger_ms` — the ack wait is what must not be relaxed.
+
+### D4-02 — Envelope identity travels in the body *and* the headers
+
+- **Decision:** `event_id`, `tenant_id`, `event_type`, `schema_version` and
+  `correlation_id` appear both in the JSON body (`encode_envelope`) and as Kafka
+  record headers (`encode_headers`); the partition key stays `partition_key`
+  (the contract id). The body is serialised with `sort_keys=True`,
+  `separators=(",", ":")` and `default=str`, so the same event always produces
+  byte-identical output.
+- **Why:** headers are what a router or a filter needs *before* parsing, and a
+  consumer that reads only the value must still be able to de-duplicate on
+  `event_id` and scope itself to `tenant_id` without a schema-specific parser.
+  Deterministic bytes make dedup and the tests stable; `default=str` keeps a UUID
+  or datetime inside a payload from raising mid-publish, after the event has
+  already been claimed.
+- **Trade-off:** the same fact exists twice on the wire. Accepted — they are
+  written from one row by one function, and a divergence would be a bug in a
+  single place.
+
+### D4-03 — `EVENT_TRANSPORT` defaults to `none`, and nothing forces it to `kafka`
+
+- **Decision:** the relay's transport is selected by `EVENT_TRANSPORT`
+  (`none | kafka`) in `build_publisher`. `none` keeps `UnavailablePublisher`, so
+  rows retry and then park as `failed`. Selecting `kafka` is **not** required in
+  staging/production, and the relay logs `outbox_relay_transport` at start-up.
+- **Why:** `docker-compose.yml` runs the API and the relay from one image with
+  one environment, and the API never publishes. A production-only rule would
+  either force a Kafka dependency into the API's configuration or fail a
+  deployment whose relay is intentionally disabled. Refusing to guess is safe
+  because the failure is loud and bounded (bounded backoff, then a parked row,
+  never a silently dropped event). The start-up log line is the operator's answer
+  to "is this box delivering or parking?".
+- **Trade-off:** a misconfigured production relay fails events rather than
+  failing the deploy. Mitigated by the log line and by the parked rows carrying
+  their last error. Flagged as an open item for GATE 2.
+
+### D4-04 — `kafka-python`, imported lazily, with a local mypy override
+
+- **Decision:** `kafka-python==2.2.15` is a runtime dependency, but
+  `app/workers/publishers.py` imports it **inside** `create_kafka_producer`. The
+  publisher depends on a narrow `Producer` protocol rather than on the library,
+  and `pyproject.toml` gives `kafka` and `kafka.*` an `ignore_missing_imports`
+  override.
+- **Why:** pure Python, so it resolves on the project's CPython 3.14 toolchain —
+  checked before it was added, not after. The local import means a deployment
+  running `EVENT_TRANSPORT=none`, and every test that never reaches a broker,
+  never pays for or needs the library. The `Producer` protocol is what lets
+  `test_publishers.py` exercise the real publish path (including the ack wait and
+  error propagation) against a fake, with no broker in CI. The mypy override is
+  honest rather than convenient: the library ships no `py.typed`, so a strict
+  check on it would assert types that do not exist.
+- **Trade-off:** a *missing* `kafka-python` install fails at relay start-up (when
+  `create_kafka_producer` runs) rather than at module import, so `EVENT_TRANSPORT=kafka`
+  in an image built without it is a runtime fault. Covered by the transport log
+  line and by `build_publisher`'s test.
+
+### D4-05 — The publish timeout must stay below the outbox lease
+
+- **Decision:** `_validate_consistency` rejects `kafka_publish_timeout_seconds >=
+  outbox_lease_seconds`, and rejects an empty `KAFKA_BOOTSTRAP_SERVERS` when the
+  transport is `kafka`.
+- **Why:** the lease is a fencing token (D2-03). If one publish could outlive it,
+  a second relay would reclaim the row and publish it while the first is still
+  blocked on the ack — a duplicate that at-least-once delivery is supposed to be
+  the *result* of a crash, not a steady state. Both guards are reachable through
+  configuration (the default 10 s publish timeout passes the default 120 s lease;
+  `KAFKA_PUBLISH_TIMEOUT_SECONDS=120` fails), unlike the Argon2
+  memory/parallelism guard that was deleted after F3 because its own `Field`
+  bounds made it unreachable — validation that cannot fire reads as protection
+  without being any.
+- **Trade-off:** a broker slower than 10 s per record fails the publish and
+  retries. That is the correct outcome: a broker that slow is broken, and the
+  retry is visible in `attempts` on the row.

@@ -31,3 +31,12 @@ alembic==1.20.1
 # so mypy strict analyses it rather than treating it as `Any`.
 argon2-cffi==25.1.0
 PyJWT==2.10.1
+
+# --- Event transport (F4) ---
+# kafka-python is the outbox relay's transport. It is pure Python (no compiled
+# extension), so it installs on CPython 3.14 without a wheel hunt, and its
+# send().get() future gives a real per-record broker acknowledgement — the
+# relay treats "returned normally" as "delivered", so a fire-and-forget producer
+# would not be a substitute. Imported lazily, so EVENT_TRANSPORT=none never
+# needs it at runtime.
+kafka-python==2.2.15

@@ -65,6 +65,14 @@ plugins = ["pydantic.mypy"]
 module = ["backend.tests.*"]
 disallow_untyped_defs = false
 
+# kafka-python ships no `py.typed` and no stubs, so its symbols are untyped. The
+# import is confined to app/workers/publishers.py, where the producer is cast to
+# a local Protocol; without this override mypy strict fails on a missing
+# implementation rather than on a real type error.
+[[tool.mypy.overrides]]
+module = ["kafka", "kafka.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 pythonpath = ["backend"]
 testpaths = ["backend/tests"]

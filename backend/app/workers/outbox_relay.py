@@ -1,8 +1,9 @@
 """Outbox relay worker.
 
 Reads claimed rows from the outbox and hands them to a transport. It is
-deliberately transport-agnostic: F4 supplies the Kafka/StrikeMQ producer, and
-until then :class:`UnavailablePublisher` refuses every publish on purpose.
+deliberately transport-agnostic: the concrete transport is chosen by
+``EVENT_TRANSPORT`` in :mod:`app.workers.publishers` (F4), and when none is
+configured :class:`UnavailablePublisher` refuses every publish on purpose.
 
 Why refuse rather than no-op? Because a relay that "succeeds" without a broker
 is the log-and-drop failure mode the specification forbids. With the refusing
@@ -212,9 +213,23 @@ def main() -> int:
 
     engine = build_engine(settings)
     factory = build_session_factory(engine)
+
+    # Imported here rather than at module scope: ``publishers`` imports this
+    # module for the EventPublisher protocol, so a top-level import is circular.
+    # The selected transport is logged below so an operator can see whether a
+    # tick will actually deliver or park rows.
+    from app.workers.publishers import build_publisher
+
+    publisher = build_publisher(settings)
+    log.info(
+        "outbox_relay_transport",
+        transport=settings.event_transport,
+        publisher=type(publisher).__name__,
+    )
+
     relay = OutboxRelay(
         factory,
-        UnavailablePublisher(),
+        publisher,
         batch_size=settings.outbox_batch_size,
         lease_seconds=settings.outbox_lease_seconds,
         max_attempts=settings.outbox_max_attempts,

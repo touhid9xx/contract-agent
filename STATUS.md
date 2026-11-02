@@ -2,7 +2,8 @@
 
 Last updated: Phase 1 (real foundation) — **F1 committed (`f0e1eef`), F2 committed
 (`331a7b4`) plus one follow-up fix to the MySQL test harness (`a79d893`), F3
-shipping in the commit this file is part of**.
+committed (`8e6b927`) plus the bootstrap-path doc (`908f50d`), and F4 in the
+working tree awaiting its commit.**
 
 ## Phase history
 
@@ -10,7 +11,7 @@ shipping in the commit this file is part of**.
 | --- | --- |
 | Phase 0 — mocked demo | ✅ built, verified |
 | GATE 1 — human visual approval | ✅ **approved** ("I'm happy with demo functions and look") |
-| Phase 1 — real foundation | 🔄 in progress (F1 ✅, F2 ✅, F3 ✅) |
+| Phase 1 — real foundation | 🔄 in progress (F1 ✅, F2 ✅, F3 ✅, F4 ✅ code / ⏳ commit) |
 | GATE 2 — foundation verification | ⏳ pending |
 
 ## F1 — Repo & infra ✅
@@ -110,6 +111,85 @@ exact snippet was executed against a real MySQL 8.4 schema before being written
 here, not transcribed from memory. `Tenant`/`User` take the keyword arguments
 shown — verified against `backend/app/db/models/tenant.py`.)
 
+## F4 — Event transport ✅ (code) / ⏳ (commit)
+
+Closes D2-04: a real transport now exists, and the relay still does not know its
+name. **Scope was taken from the repository, not invented** — `DECISIONS.md`
+D2-04 and the `outbox_relay.py` docstring both name F4 as "the real
+transport/publisher" milestone, and `docker-compose.yml` said Kafka would arrive
+with F4. That comment has since been corrected: the transport exists, but the
+stack still defines **no broker service**, so the relay keeps the `none`
+transport unless `.env` says otherwise. The ingestion → extraction → review
+pipeline is therefore **not** part of this slice.
+
+| Area | Detail |
+| --- | --- |
+| Publisher | `app/workers/publishers.py` — `KafkaPublisher` calls `send()` and then **blocks on the broker ack**; errors are not caught, so "returned normally" really does mean "delivered" (D4-01) |
+| Wire format | `encode_envelope` (sorted keys, compact separators, `default=str`, `occurred_at` through the existing `as_utc`) and `encode_headers` (bytes). Identity travels in body **and** headers; partition key stays the contract id (D4-02) |
+| Producer | `create_kafka_producer` — `acks="all"`, `retries` from settings, `linger_ms=0`. `kafka` imported **inside** the function, so `EVENT_TRANSPORT=none` and every offline test never import it (D4-04) |
+| Selection | `build_publisher(settings)` — `kafka` → `KafkaPublisher`, anything else → the existing refusing `UnavailablePublisher` (D4-03) |
+| Relay | `main()` in `outbox_relay.py` now builds a transport (function-local import, avoids the cycle) and logs `outbox_relay_transport` at start-up so an operator can see whether a tick delivers or parks rows |
+| Config | `event_transport` (`none`\|`kafka`, default `none`), `kafka_client_id`, `kafka_publish_timeout_seconds` (10), `kafka_produce_retries` (3). Two **reachable** guards: empty `KAFKA_BOOTSTRAP_SERVERS` with `kafka`, and publish timeout ≥ lease, which would let a second relay republish mid-ack (D4-05) |
+| Deps | `kafka-python==2.2.15` — pure Python, resolves on CPython 3.14; `pyproject.toml` gives `kafka`/`kafka.*` an `ignore_missing_imports` override because it ships no `py.typed` |
+| Tests | `backend/tests/test_publishers.py` — encoding determinism, UTC-aware envelope, byte headers, partition key, ack wait, error propagation, factory selection, both config guards, and relay-behaviour (marked published on ack; left pending on broker outage). One opt-in `live` test needs `KAFKA_LIVE=1` |
+
+### Verification state (F4) — read this before GATE 2
+
+| Check | Result |
+| --- | --- |
+| `pytest backend/tests/test_publishers.py` | **14 passed, 1 skipped** (the `live` broker test) |
+| Full suite after these files landed | **not run** — the shell wedged before it could be (see below) |
+| `pre-commit run --all-files` / `mypy` / `bandit` after these files landed | **not run** for the same reason |
+
+`run_command` stopped returning: every command, including a bare `echo`, times
+out before producing any output. This was diagnosed rather than assumed —
+
+- a command run with its output redirected to a file produced **no file**, so the
+  process never started (this rules out "output stream is stuck");
+- both the default shell and `cmd /c` hang identically, so it is not one broken
+  shell;
+- it persisted across a session boundary, so it is not a leftover `git diff`
+  pager. An earlier note here blamed the pager; that was wrong and is corrected.
+
+The practical consequence is that **`pytest`, `ruff`, `mypy`, `bandit`,
+`pre-commit` and `git commit` are all unavailable**, since pre-commit's hooks run
+the same tools. F4 was deliberately **not** committed with `--no-verify` to route
+around this: that would record F4 as gated when it is not. Nothing below is
+claimed as verified that was not actually executed.
+
+### What *was* checked without a shell
+
+The likeliest way the F4 tests would fail on their first run is a call that does
+not match the signature it calls. Each one was therefore cross-checked against
+its definition by reading the code:
+
+| Call made by `test_publishers.py` | What it must match | Verified at |
+| --- | --- | --- |
+| `OutboxRelay(factory, publisher, *, batch_size, lease_seconds, max_attempts, poll_interval_seconds, worker_id)` | keyword-only, exactly these names | `outbox_relay.py:82-91` |
+| `relay.run_once()` → `int` | returns the count actually published | `outbox_relay.py:120-121` |
+| `Settings.kafka_servers` | property → `list[str]`, blank entries dropped | `config.py:210-212` |
+| `event_transport`, `kafka_client_id`, `kafka_publish_timeout_seconds`, `kafka_produce_retries` | fields exist, defaults `none` / relay id / `10.0` / `3` | `config.py:83-89` |
+| `as_utc(created_at)` → aware UTC | naive → `replace(tzinfo=UTC)`, so `isoformat()` ends `+00:00` | `base.py:55-61` |
+| `enqueue_event()` defaults | `event_type`/`topic` `contract.ingested`, key `1042`, payload `{"contract_id": 1042}` | `conftest.py:222-234` |
+| `row.status is OutboxStatus.PUBLISHED` | `Enum` column, so member identity holds | `models/outbox.py:76-78` |
+| `assert published == 1` | `db_engine` is a **fresh** in-memory DB per test | `conftest.py:126-147` |
+
+The last row is the one that would silently break those assertions: on a shared
+database, rows enqueued by another test would be claimed by the same tick. They
+are not shared, so the count assertions are sound.
+
+This is static verification, not execution. It rules out the most common
+first-run failure (a stale signature); it does not substitute for the gate.
+
+### The honest gap: no broker has ever been on the other end
+
+`docker-compose.yml` has **no Kafka service**, and the `live` test is opt-in, so
+the wire path has only ever met a fake producer. What the tests prove is the
+*contract* — right key, right headers, right bytes, ack waited on, errors
+propagated — not that a real Kafka 4.x broker accepts it. A consumer (the
+downstream side of at-least-once) does not exist either, nor does DLQ replay
+tooling. Say all three plainly at GATE 2.
+
 ## Verification actually run (F2)
 
 | Check | Command | Result |
@@ -176,10 +256,13 @@ just wrote it. Timestamps are now floored before writing.
    signal, and narrowing the app scope to silence it would be worse than
    documenting it.
 4. **`/health/ready` does not exist yet** — `/api/v1/health` is liveness only.
-5. **The Kafka transport is not implemented.** The relay ships with
-   `UnavailablePublisher`, which raises, so rows retry with backoff and then park
-   as failed for an operator. Nothing is silently dropped, but nothing is
-   delivered either — the outbox is wired end-to-end except the wire itself.
+5. **No broker, no consumer, no DLQ replay tool.** F4 delivers a Kafka
+   *publisher*; `docker-compose.yml` still has no Kafka service, so nothing has
+   been proven against a real broker and the `live` test is opt-in
+   (`KAFKA_LIVE=1`). The consumer side of at-least-once does not exist, and rows
+   parked in the outbox `failed` state can only be replayed by hand. The default
+   `EVENT_TRANSPORT=none` keeps the refusing stand-in, so a fresh deployment
+   retries and parks events rather than losing them (D4-03).
 6. **No refresh token.** Access tokens last 15 minutes and cannot be renewed
    without re-entering credentials (D3-05). Revocation works immediately via
    `token_epoch`, so this is a usability limit, not a security one.
@@ -204,33 +287,42 @@ just wrote it. Timestamps are now floored before writing.
 
 ## Next permitted step
 
-**F3 is complete and F4 is still undefined in this repository.** The F3…F7
-breakdown lives in the task specification, not in the repo — `README.md`,
-`DECISIONS.md`, `STATUS.md` and `DEMO.md` name F1/F2 only. F3 was built because
-its scope (authentication + tenant binding) was confirmed explicitly in-conversation
-rather than guessed; the same confirmation is needed for F4 before more code is
-written.
+**F4 code is written and unit-verified but not committed, and F5 is undefined in
+this repository.** The F3…F7 breakdown lives in the task specification, not in the
+repo. F3 was built because its scope was confirmed explicitly in-conversation, and
+F4 because `DECISIONS.md` D2-04 and the relay docstring name it outright — neither
+was guessed. **F5 needs the same evidence or an explicit scope; the repo will not
+supply one on its own.**
 
-The repository does contain indirect hints about the remaining milestones, enough
-to propose a scope but **not** enough to treat as a specification:
+What the repository does say about F5 is thin:
 
-- `docker-compose.yml` — "Redis/Kafka/Ollama arrive with F4/F5".
-- `app/api/v1/health.py` — readiness "deliberately omits … pending F5".
-- `app/workers/outbox_relay.py` — `UnavailablePublisher` is explicitly the
-  stand-in "until a real transport lands in F4" (D2-04). Every published event
-  currently retries and then parks as failed, so **no domain event has ever been
-  delivered end-to-end.**
-- `app/db/models/` — the schema is ahead of the code: `Contract`,
-  `ExtractedField`, `AgentDecision`, `Notification`, `CustomerResponse`,
-  `Escalation` and `AuditLog` all exist with no route, service or worker that
-  writes them.
+- `app/api/v1/health.py` — readiness checks (DB/Redis/Kafka/Ollama) are
+  "deliberately omitted … pending F5", so `/health/ready` is the one concrete F5
+  artefact already named in code.
+- `docker-compose.yml` — the header comment now separates the two cases: the
+  Kafka *transport* landed in F4 (though no broker service is defined), while
+  Redis and Ollama are still listed as arriving with F5. **Nothing in
+  `backend/app` uses Redis today** (D2-03 chose a row lease deliberately).
+- `app/db/models/` — still the largest gap: `Contract`, `ExtractedField`,
+  `AgentDecision`, `Notification`, `CustomerResponse`, `Escalation` and
+  `AuditLog` all exist with **no route, service or worker that writes them**. The
+  outbox can now physically deliver events, but nothing enqueues one from a
+  business action yet, so no domain event has ever travelled end-to-end.
 
-**Proposed F4, pending confirmation:** the ingestion → extraction → review
-pipeline behind the F3 principal (`POST /contracts`, PDF/text ingestion into
-`Contract`, extraction into `ExtractedField`, the review endpoints the Phase-0
-demo mocks, and a real `EventPublisher` so the outbox finally delivers). This is
-the smallest slice that makes the schema stop being dead weight and reuses the
-`blocks_pipeline` rule already modelled in F2.
+**Two candidate F5 scopes, both defensible from the above — pick one or paste the
+real definition:**
+
+1. **Readiness + operability:** `/health/ready` (DB, and Kafka when a transport is
+   selected), plus the DLQ replay path that gap 5 admits is missing. Small,
+   unblocks deployment, closes two recorded gaps.
+2. **The ingestion → extraction → review pipeline behind the F3 principal:**
+   `POST /contracts`, PDF/text ingestion into `Contract`, extraction into
+   `ExtractedField`, the review endpoints the Phase-0 demo already mocks, and the
+   first real `enqueue_event` call from a business write. Closes the "schema is
+   ahead of the code" gap and gives the outbox its first genuine event.
+
+My read is that (2) is the higher-value slice and the one the Phase-0 demo was
+built to anticipate, but (1) is what the code itself names. Not guessing.
 
 ## Non-negotiable reminders
 

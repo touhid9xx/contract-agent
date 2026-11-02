@@ -16,6 +16,9 @@ from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 AppEnv = Literal["development", "test", "staging", "production"]
+#: Transport the outbox relay publishes through. ``none`` keeps the refusing
+#: stand-in, so events retry and then park as failed instead of being dropped.
+EventTransport = Literal["none", "kafka"]
 
 #: The value shipped in .env.example. Never valid in staging/production.
 #: Not a credential: production validation below refuses to start when it is
@@ -72,6 +75,19 @@ class Settings(BaseSettings):
     kafka_bootstrap_servers: str = "localhost:9092"
     ollama_base_url: str = "http://localhost:11434"
 
+    # --- event transport (F4) --------------------------------------------
+    #: Read by the relay process only. The API shares this settings object but
+    #: never publishes, so selecting a transport is not required for it — which
+    #: is why this is not enforced in staging/production (docker-compose.yml
+    #: runs both processes from one image with one environment).
+    event_transport: EventTransport = "none"
+    kafka_client_id: str = "contract-agent-outbox-relay"
+    #: Upper bound on a single publish. Delivery is acknowledged per event, so
+    #: this must stay below ``outbox_lease_seconds``: a slow broker would
+    #: otherwise let the lease expire mid-batch and a second relay republishes.
+    kafka_publish_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    kafka_produce_retries: int = Field(default=3, ge=0, le=20)
+
     # --- outbox relay ----------------------------------------------------
     #: Rows claimed per relay tick. Bounded so one tick cannot starve the loop.
     outbox_batch_size: int = Field(default=50, gt=0, le=1000)
@@ -125,6 +141,19 @@ class Settings(BaseSettings):
         # "access token must expire before the refresh token" is guaranteed
         # structurally by the Field bounds (<=120 minutes vs >=1 day), so no
         # cross-field check is needed; adding one would be unreachable code.
+
+        if self.event_transport == "kafka":
+            if not self.kafka_servers:
+                raise ValueError(
+                    "KAFKA_BOOTSTRAP_SERVERS must list at least one host when EVENT_TRANSPORT=kafka"
+                )
+            if self.kafka_publish_timeout_seconds >= self.outbox_lease_seconds:
+                raise ValueError(
+                    "KAFKA_PUBLISH_TIMEOUT_SECONDS must be below OUTBOX_LEASE_SECONDS; "
+                    f"got {self.kafka_publish_timeout_seconds} vs "
+                    f"{self.outbox_lease_seconds}. A publish that outlives the lease "
+                    "lets another relay reclaim the row and publish it twice."
+                )
 
         # Argon2 requires ``memory_cost >= 8 * parallelism``. The Field bounds
         # already make a violation unrepresentable -- memory is at least 8192 KiB
