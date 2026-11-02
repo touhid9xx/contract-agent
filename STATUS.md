@@ -3,7 +3,7 @@
 Last updated: Phase 1 (real foundation) — **F1 committed (`f0e1eef`), F2 committed
 (`331a7b4`) plus one follow-up fix to the MySQL test harness (`a79d893`), F3
 committed (`8e6b927`) plus the bootstrap-path doc (`908f50d`), F4 committed
-(`b425ea7`), F5 committed (`21daffc`), F6 implemented and gate-green with steps 1–2
+(`b425ea7`), F5 committed (`21daffc`), F6 committed (`0c2d734`) with steps 1–2
 of the pipeline slice landed (ingestion + the first real outbox producer).
 GATE 2 now awaits human sign-off.**
 
@@ -428,6 +428,15 @@ just wrote it. Timestamps are now floored before writing.
     genuinely different PDFs describing the same customer and dates would collide
     (D6-04). When PDF upload lands, the digest must become the file hash — until
     then dedupe is only as good as the metadata the caller sends.
+13. **The husky commit gate has never actually run.** `.husky/pre-commit` and
+    `.husky/commit-msg` exist, but `git config --get-all core.hooksPath` is empty
+    in every scope and `.husky/_/` (the v9 wrapper that sets it) is absent — so git
+    has never invoked either hook. Every commit so far passed the gate only
+    because `pre-commit run --all-files` was executed by hand beforehand; no
+    commit was made with `--no-verify`. Fixing it means wiring `core.hooksPath`
+    **and** teaching the script the Windows venv path (`venv/Scripts/pre-commit.exe`;
+    it currently probes only `venv/bin/pre-commit`), which is why this is recorded
+    rather than silently changed.
 
 ## Next permitted step
 
