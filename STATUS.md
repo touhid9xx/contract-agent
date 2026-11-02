@@ -3,9 +3,9 @@
 Last updated: Phase 1 (real foundation) — **F1 committed (`f0e1eef`), F2 committed
 (`331a7b4`) plus one follow-up fix to the MySQL test harness (`a79d893`), F3
 committed (`8e6b927`) plus the bootstrap-path doc (`908f50d`), F4 committed
-(`b425ea7`), F5 committed (`21daffc`), F6 committed (`0c2d734`), and F7
-committed (`90fd0e5`), with **F8 implemented and gate-green** — all four steps of
-the pipeline slice landed (ingestion, the first real outbox producer, field
+(`b425ea7`), F5 committed (`21daffc`), F6 committed (`0c2d734`), F7
+committed (`90fd0e5`), and F8 committed (`8c5e09f`) — all four steps of the
+pipeline slice landed (ingestion, the first real outbox producer, field
 extraction, human review). GATE 2 now awaits human sign-off.**
 
 ## Phase history
@@ -574,7 +574,7 @@ just wrote it. Timestamps are now floored before writing.
 
 ## Next permitted step
 
-**F8 (step 4) is gate-green and committed in this milestone; GATE 2 awaits human
+**F8 (step 4) is committed (`8c5e09f`) and gate-green; GATE 2 awaits human
 sign-off.** F1–F8 are all committed. The pipeline slice is complete, so what comes
 next is no longer inside it — the repo names the next aggregate: `AgentDecision`.
 
