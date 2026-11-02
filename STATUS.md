@@ -1,7 +1,7 @@
 # Status
 
-Last updated: Phase 1 (real foundation) — **F1 committed, F2 complete and verified
-(uncommitted at the time of writing)**.
+Last updated: Phase 1 (real foundation) — **F1 committed (`f0e1eef`), F2 committed
+(`331a7b4`) plus one follow-up fix to the MySQL test harness**.
 
 ## Phase history
 
@@ -39,9 +39,9 @@ Last updated: Phase 1 (real foundation) — **F1 committed, F2 complete and veri
 
 | Check | Command | Result |
 | --- | --- | --- |
-| Full suite, real MySQL | `pytest backend/tests` with `MYSQL_TEST_URL` set | **82 passed** |
-| Full suite, no MySQL | `pytest backend/tests` with `MYSQL_TEST_URL` unset/blank | **79 passed, 3 skipped** |
-| MySQL integration only | `pytest -m integration` | **pass** (3 tests) |
+| Full suite, real MySQL | `pytest backend/tests` with `MYSQL_TEST_URL` set | **84 passed** |
+| Full suite, no MySQL | `pytest backend/tests` with `MYSQL_TEST_URL` unset/blank | **81 passed, 3 skipped** |
+| MySQL integration only | `pytest -m integration` | **7 passed** (4 harness + 3 real MySQL) |
 | Pre-commit gate | `pre-commit run --all-files` | **all 16 hooks passed** |
 | Security lint (gate scope) | `bandit -c pyproject.toml -r backend/app` | 0 issues |
 | Security lint (repo-wide) | `bandit -c pyproject.toml -r backend` | 0 Medium/High; 170 Low, **all in `backend/tests`** (165 × B101 `assert_used`, 5 × B106 hard-coded fixture passwords) |
@@ -51,13 +51,28 @@ SQLite. They are skipped — not failed — when MySQL is unreachable.
 
 ```powershell
 docker compose up -d mysql
-$env:MYSQL_TEST_URL = "mysql+pymysql://contract_agent:contract_agent@127.0.0.1:3306/contract_agent_test"
+# compose has NO default MYSQL_PASSWORD, so this must match the .env it was started with.
+$env:MYSQL_TEST_URL = "mysql+pymysql://contract_agent:<MYSQL_PASSWORD>@127.0.0.1:3306/contract_agent_test"
 venv\Scripts\python.exe -m pytest -m integration backend/tests
 ```
 
 `MYSQL_TEST_URL` points at a **disposable** database — the tests drop and
 recreate the schema. A set-but-blank value falls back to the default rather than
 erroring (regression-tested).
+
+**Set `MYSQL_TEST_URL`, including the password.** The built-in fallback assumes
+the password is literally `contract_agent`; `docker-compose.yml` declares
+`MYSQL_PASSWORD` as required with no default, so in any real setup the fallback
+is wrong and the tests skip. One extra step is needed the first time: the app
+user usually lacks `CREATE DATABASE`, so create the scratch database once as an
+admin —
+
+```powershell
+docker compose exec mysql mysql -uroot -p -e "CREATE DATABASE IF NOT EXISTS contract_agent_test"
+```
+
+Skip reasons name the exact cause (unreachable vs. `Access denied` vs. no
+`CREATE` privilege) and never print the password.
 
 ### What the MySQL tests prove that SQLite cannot
 

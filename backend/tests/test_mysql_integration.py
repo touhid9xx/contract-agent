@@ -22,6 +22,7 @@ The tests drop and recreate the schema, so never aim it at real data.
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -30,7 +31,7 @@ import pytest
 from alembic import command
 from alembic.config import Config as AlembicConfig
 from sqlalchemy import create_engine, inspect, text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.db.base import Base, utc_now
@@ -41,8 +42,15 @@ pytestmark = pytest.mark.integration
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 
-#: Matches the credentials ``docker-compose.yml`` defaults to, but a *test*
-#: database name so a stray local ``contract_agent`` database is never dropped.
+#: Best-effort fallback matching ``docker-compose.yml``'s default *user* and
+#: *database* — with a ``_test`` suffix so a stray local ``contract_agent``
+#: database is never dropped.
+#:
+#: It is only a guess: compose has **no** default ``MYSQL_PASSWORD`` (the file
+#: requires ``MYSQL_PASSWORD`` to be set in ``.env``), so whenever the password
+#: is anything other than ``contract_agent`` — which is the normal case — these
+#: tests skip with "cannot connect ... as 'contract_agent'" and the operator must
+#: pass ``MYSQL_TEST_URL``. That is the documented path in ``STATUS.md``.
 DEFAULT_URL = "mysql+pymysql://contract_agent:contract_agent@127.0.0.1:3306/contract_agent_test"
 
 
@@ -73,15 +81,112 @@ def test_an_explicit_url_is_used_verbatim(monkeypatch: pytest.MonkeyPatch) -> No
     assert _mysql_url() == "mysql+pymysql://u:p@db:3306/scratch"
 
 
+class _FakeDBAPIError(Exception):
+    """Stands in for a SQLAlchemy ``DBAPIError``, which carries ``.orig``."""
+
+    def __init__(self, orig: BaseException) -> None:
+        super().__init__("(wrapped by SQLAlchemy)")
+        self.orig = orig
+
+
+def test_driver_error_surfaces_the_errno_and_message() -> None:
+    """A skip reason must name the real cause, not the wrapper's class name.
+
+    Regression: an auth failure (1045) was reported as "cannot reach or create
+    the test database", which sends the operator hunting for a database that is
+    in fact running fine.
+    """
+    error = _FakeDBAPIError(OSError(1045, "Access denied for user 'x'"))
+    assert _driver_error(error) == "MySQL error 1045: Access denied for user 'x'"
+
+
+def test_driver_error_falls_back_to_the_type_name() -> None:
+    """Non-driver errors (DNS, socket, malformed URL) have no errno to show."""
+    assert _driver_error(OSError("network unreachable")) == "OSError"
+    assert _driver_error(_FakeDBAPIError(ValueError("no errno here"))) == "_FakeDBAPIError"
+
+
+#: The test database name is interpolated into DDL, so it must not be clever.
+_SAFE_DATABASE_NAME = re.compile(r"\w+")
+
+
+def _driver_error(exc: Exception) -> str:
+    """The driver's own words, e.g. ``MySQL error 1045: Access denied ...``.
+
+    ``str(exc)`` on a SQLAlchemy error wraps the driver error in a multi-line
+    message plus a docs URL, which is noise in a skip reason. PyMySQL puts
+    ``(errno, message)`` in ``exc.orig.args``, so surface that directly.
+    """
+    args = getattr(getattr(exc, "orig", None), "args", ())
+    if args and isinstance(args[0], int):
+        detail = args[1] if len(args) > 1 else ""
+        return f"MySQL error {args[0]}: {detail}".strip()
+    return type(exc).__name__
+
+
+def _ensure_database(url: str) -> None:
+    """Create the test database if it is missing, or skip with the reason *why*.
+
+    ``docker compose up -d mysql`` only creates ``contract_agent``, so out of the
+    box the test database does not exist. Connecting straight to it raises
+    "Unknown database", which the fixture would report as a *skip* — reading
+    exactly like "no MySQL here" while the tests silently never run.
+
+    The two ways this can fail need different fixes, so they get different
+    messages. Collapsing them into one is actively misleading: a wrong password
+    (``Access denied``, error 1045) used to be reported as "cannot reach or
+    create the test database", pointing the operator at ``docker compose up``
+    and a ``CREATE DATABASE`` when the real fix is to correct the credentials in
+    ``MYSQL_TEST_URL``.
+    """
+    parsed = make_url(url)
+    name = parsed.database or ""
+    if not _SAFE_DATABASE_NAME.fullmatch(name):
+        pytest.skip(f"MYSQL_TEST_URL must name a simple database, got {name!r}")
+
+    try:
+        engine = create_engine(parsed.set(database=None), pool_pre_ping=True, future=True)
+    except Exception as exc:
+        pytest.skip(f"cannot build a MySQL engine from MYSQL_TEST_URL ({type(exc).__name__})")
+
+    # ``render_as_string`` omits the password, so this is safe to put in output.
+    where = f"{parsed.host}:{parsed.port} as {parsed.username!r}"
+    try:
+        try:
+            with engine.connect() as connection:
+                connection.execute(text("SELECT 1"))
+        except Exception as exc:
+            pytest.skip(
+                f"cannot connect to MySQL at {where} ({_driver_error(exc)}). Check that the "
+                f"server is up (`docker compose up -d mysql`) and that MYSQL_TEST_URL uses the "
+                f"same MYSQL_USER/MYSQL_PASSWORD credentials compose was started with."
+            )
+
+        try:
+            with engine.begin() as connection:
+                connection.execute(
+                    text(f"CREATE DATABASE IF NOT EXISTS `{name}` CHARACTER SET utf8mb4")
+                )
+        except Exception as exc:
+            pytest.skip(
+                f"connected to MySQL at {where} but cannot create the test database {name!r} "
+                f"({_driver_error(exc)}). Create it once as an admin: docker compose exec mysql "
+                f'mysql -uroot -p -e "CREATE DATABASE IF NOT EXISTS {name}"'
+            )
+    finally:
+        engine.dispose()
+
+
 @pytest.fixture(scope="module")
 def mysql_engine() -> Iterator[Engine]:
     """A connected engine, or a skip when no MySQL is reachable."""
     url = _mysql_url()
+    _ensure_database(url)
     engine = create_engine(url, pool_pre_ping=True, future=True)
     try:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
-    except Exception as exc:  # noqa: BLE001 - any driver/connection error means "skip"
+    except Exception as exc:
         engine.dispose()
         pytest.skip(f"MySQL not reachable at {url!r} ({type(exc).__name__})")
     try:
@@ -99,9 +204,7 @@ def migrated(mysql_engine: Engine) -> Engine:
     """
     config = AlembicConfig(str(BACKEND_DIR / "alembic.ini"))
     config.set_main_option("script_location", str(BACKEND_DIR / "migrations"))
-    config.set_main_option(
-        "sqlalchemy.url", mysql_engine.url.render_as_string(hide_password=False)
-    )
+    config.set_main_option("sqlalchemy.url", mysql_engine.url.render_as_string(hide_password=False))
     command.downgrade(config, "base")
     command.upgrade(config, "head")
     return mysql_engine
