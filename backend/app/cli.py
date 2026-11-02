@@ -1,10 +1,11 @@
-"""Operator entry points (F5).
+"""Operator entry points (F5, F7).
 
 Run from ``backend/``::
 
     python -m app.cli outbox-replay --list
     python -m app.cli outbox-replay --dry-run
     python -m app.cli outbox-replay --ids 12,14
+    python -m app.cli extract --contract-id 12 --text-file contract.txt
 
 Why a command rather than an HTTP endpoint: republishing parked events is a
 privileged, rare operation. Over HTTP it would become a "republish any tenant's
@@ -26,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -33,7 +35,9 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings, get_settings
+from app.core.crypto import MissingEncryptionKeyError, build_cipher
 from app.core.logging import configure_logging
+from app.db.repositories.contracts import contract_for_operator
 from app.db.repositories.outbox import (
     DEFAULT_REPLAY_LIMIT,
     DeadLetterReplay,
@@ -41,6 +45,8 @@ from app.db.repositories.outbox import (
     replay_dead_lettered,
 )
 from app.db.session import build_engine, build_session_factory, session_scope
+from app.workers.extraction import ExtractionUnavailableError, extract_contract
+from app.workers.extractors import build_extractor
 
 log = structlog.get_logger(__name__)
 
@@ -48,6 +54,13 @@ EXIT_OK = 0
 #: Explicit ids were given and at least one is not in the dead-letter state. A
 #: wrong id is an operator mistake worth a non-zero code so a script notices.
 EXIT_NO_MATCH = 1
+#: Extraction stored nothing: the document yielded no usable field, or every
+#: candidate was skipped or discarded. Distinct from ``EXIT_FAILED`` because the
+#: run itself succeeded — the *result* is what needs a human (STATUS.md gap 11).
+EXIT_NOTHING_EXTRACTED = 2
+#: The run could not start or could not finish: missing key, unreadable document,
+#: or a backend that did not answer.
+EXIT_FAILED = 3
 
 
 def _ids_arg(value: str) -> list[int]:
@@ -102,6 +115,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="report what would be requeued without writing anything",
     )
     replay.set_defaults(handler=_outbox_replay)
+
+    extract = commands.add_parser(
+        "extract",
+        help="extract field values from a contract document into reviewable rows",
+        description=(
+            "Read a contract document's text and write one ExtractedField per "
+            "field the configured backend finds. Values are encrypted before "
+            "they are stored, and nothing is ever written as 'approved'."
+        ),
+    )
+    extract.add_argument(
+        "--contract-id",
+        type=int,
+        required=True,
+        metavar="N",
+        help="id of the contract the document belongs to",
+    )
+    extract.add_argument(
+        "--text-file",
+        required=True,
+        metavar="PATH",
+        help=(
+            "plain-text document to extract from (UTF-8). There is no upload or "
+            "text storage yet, so the operator supplies it, which is also why "
+            "the file may be a PDF's extracted text rather than a PDF"
+        ),
+    )
+    extract.set_defaults(handler=_extract)
     return parser
 
 
@@ -175,6 +216,96 @@ def _outbox_replay(
             # the operator read a different database (or a stale export).
             log.warning("outbox_replay_ids_not_parked", ids=missing)
             return EXIT_NO_MATCH
+
+    return EXIT_OK
+
+
+def _extract(
+    args: argparse.Namespace,
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+) -> int:
+    contract_id = int(args.contract_id)
+    document = Path(str(args.text_file))
+
+    try:
+        text = document.read_text(encoding="utf-8")
+    except OSError as exc:
+        log.error("extract_document_unreadable", path=str(document), error=str(exc))
+        return EXIT_FAILED
+
+    if not text.strip():
+        log.error("extract_document_empty", path=str(document))
+        return EXIT_FAILED
+
+    # Refuse rather than truncate. A truncated document produces missing fields,
+    # and "missing" is indistinguishable from "the contract never stated it" — the
+    # exact ambiguity the review queue exists to resolve, so it must not be
+    # manufactured here.
+    limit = settings.extraction_max_document_chars
+    if len(text) > limit:
+        log.error("extract_document_too_long", characters=len(text), limit=limit)
+        return EXIT_FAILED
+
+    try:
+        cipher = build_cipher(settings)
+    except MissingEncryptionKeyError as exc:
+        log.error("extract_refused_without_encryption_key", error=str(exc))
+        return EXIT_FAILED
+
+    extractor = build_extractor(settings)
+
+    with session_scope(session_factory) as session:
+        contract = contract_for_operator(session, contract_id)
+        if contract is None:
+            log.error("extract_contract_not_found", contract_id=contract_id)
+            return EXIT_NO_MATCH
+
+        # The tenant comes from the contract row, never from an argument.
+        tenant_id = contract.tenant_id
+        try:
+            outcome = extract_contract(
+                session,
+                contract,
+                text,
+                extractor=extractor,
+                cipher=cipher,
+                review_threshold=settings.extraction_review_threshold,
+            )
+        except ExtractionUnavailableError as exc:
+            log.error(
+                "extract_backend_unavailable",
+                contract_id=contract_id,
+                backend=settings.extraction_backend,
+                error=str(exc),
+            )
+            return EXIT_FAILED
+
+    log.info(
+        "contract_extracted",
+        contract_id=outcome.contract_id,
+        tenant_id=tenant_id,
+        backend=settings.extraction_backend,
+        candidates=outcome.candidates,
+        created=outcome.created,
+        updated=outcome.updated,
+        skipped_reviewed=outcome.skipped_reviewed,
+        discarded=outcome.discarded,
+        found=list(outcome.found),
+    )
+
+    if outcome.produced_nothing:
+        # Not an exception: the run worked and the answer is "nothing usable".
+        # Loud, and a distinct exit code, because a silent empty extraction is the
+        # failure mode this milestone exists to remove.
+        log.warning(
+            "contract_extraction_empty",
+            contract_id=outcome.contract_id,
+            backend=settings.extraction_backend,
+            candidates=outcome.candidates,
+            discarded=outcome.discarded,
+        )
+        return EXIT_NOTHING_EXTRACTED
 
     return EXIT_OK
 

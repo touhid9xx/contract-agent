@@ -3,9 +3,10 @@
 Last updated: Phase 1 (real foundation) — **F1 committed (`f0e1eef`), F2 committed
 (`331a7b4`) plus one follow-up fix to the MySQL test harness (`a79d893`), F3
 committed (`8e6b927`) plus the bootstrap-path doc (`908f50d`), F4 committed
-(`b425ea7`), F5 committed (`21daffc`), F6 committed (`0c2d734`) with steps 1–2
-of the pipeline slice landed (ingestion + the first real outbox producer).
-GATE 2 now awaits human sign-off.**
+(`b425ea7`), F5 committed (`21daffc`), F6 committed (`0c2d734`), and F7
+implemented and gate-green with steps 1–3 of the pipeline slice landed
+(ingestion, the first real outbox producer, field extraction). GATE 2 now awaits
+human sign-off.**
 
 ## Phase history
 
@@ -13,7 +14,7 @@ GATE 2 now awaits human sign-off.**
 | --- | --- |
 | Phase 0 — mocked demo | ✅ built, verified |
 | GATE 1 — human visual approval | ✅ **approved** ("I'm happy with demo functions and look") |
-| Phase 1 — real foundation | 🔄 in progress (F1 ✅, F2 ✅, F3 ✅, F4 ✅, F5 ✅, F6 ✅) |
+| Phase 1 — real foundation | 🔄 in progress (F1 ✅, F2 ✅, F3 ✅, F4 ✅, F5 ✅, F6 ✅, F7 ✅) |
 | GATE 2 — foundation verification | ⏳ pending human sign-off; every automated check is green |
 
 ## F1 — Repo & infra ✅
@@ -308,8 +309,58 @@ and the difference is exactly those three tests.
 They prove the *transaction boundary*: the contract row and the outbox event
 share one commit, and the losing side of a dedupe race leaves no event behind.
 They do **not** prove the event ever gets published — that still needs a broker
-(gap 5). An ingested contract is also deliberately inert: no extraction runs, so
-nothing reaches a notification from this milestone.
+(gap 5). An ingested contract is also deliberately inert at this milestone: the
+route runs no extraction, so nothing reaches a notification from it (F7 adds the
+operator-run extractor, and still does not trigger it on ingest).
+
+## F7 — Field extraction + encryption at rest ✅
+
+Step 3 of the pipeline slice, and the milestone where "no low-confidence field
+reaches a notification" stops being an intention and becomes code. A contract's
+document text now becomes `ExtractedField` rows that carry a status, a confidence
+and provenance; the only two statuses extraction can write are `auto_accepted`
+and `pending_review`.
+
+| Area | Detail |
+| --- | --- |
+| Policy module | `app/workers/extraction.py` — `extract_contract(session, contract, text, *, extractor, cipher, review_threshold)`. `cipher` and `extractor` are **required keyword arguments**, so there is no branch that stores a value in the clear and no branch that silently skips encryption. Tenant comes from `contract.tenant_id`, not from a parameter, so a caller cannot write one tenant's fields onto another's contract (D7-01, D7-04) |
+| Review gate | `_status_for` maps confidence ≥ `EXTRACTION_REVIEW_THRESHOLD` to `auto_accepted` and everything below to `pending_review`; `approved` is unreachable from this module. Re-runs skip rows in `approved`/`rejected`/`unreadable` and report the count as `skipped_reviewed` instead of overwriting a person's decision (D7-04) |
+| Backends | `app/workers/extractors.py` — `PatternExtractor` (default: deterministic offline regexes for 5 of 7 field types; an ambiguous `03/04/2025` is dropped rather than guessed) and `OllamaExtractor` (opt-in: `/api/generate`, `format:"json"`, `temperature:0`, errors never echo the document or the endpoint). `build_extractor` is total over the literal, and the two backends are alternatives, never merged (D7-02, D7-03) |
+| Config | `ExtractionBackend = Literal["pattern", "ollama"]` — a cloud backend is not a member, so `EXTRACTION_BACKEND=openai` is a start-up `ValidationError` rather than a code path (D7-02). `EXTRACTION_MODEL`, `_TIMEOUT_SECONDS`, `_REVIEW_THRESHOLD` (0.8, matching what the Phase-0 review UI renders) and `_MAX_DOCUMENT_CHARS` are bounded; a **present but malformed** `ENCRYPTION_KEY` fails at boot, while an empty one stays legal because the API process never stores field values |
+| Crypto | `app/core/crypto.py` — `FieldCipher` over Fernet (AES-CBC + HMAC-SHA256, so tampering fails loudly); `build_cipher` raises `MissingEncryptionKeyError` on an empty key; `DecryptionError` never carries the token. `cryptography` is already a runtime dependency (PyMySQL needs it), so the import is unconditional (D7-01) |
+| Repository | `app/db/repositories/fields.py` — `ExtractedFieldRepository.for_contract/create/overwrite`; the upsert keeps `uq_extracted_fields_contract_field` intact, and the overwrite *policy* stays in the worker, not here |
+| Operator write path | `python -m app.cli extract --contract-id N --text-file P`. Exit codes are a contract: `0` stored something, `1` no such contract, `2` **ran fine and extracted nothing** (`contract_extraction_empty` — gap 11), `3` refused or failed (no key, empty or over-long document, backend down). An over-long document is refused, not truncated, because missing fields are indistinguishable from fields the contract never stated |
+| Read route | `GET /api/v1/contracts/{id}/fields` — `ExtractedFieldSummary` carries name/status/confidence/`version`/provenance/review state plus a `blocking` count and **never** `raw_value` or `normalized_value`. Viewer may read; a cross-tenant id is `404`, not `403` (D7-05) |
+| Tests | `test_crypto.py` (10), `test_extraction.py` (41, parametrised normalisation included), `test_contract_fields.py` (9). Normalisation per field, per-backend confidences, the review gate (including *extraction cannot write `approved`*), encryption at rest, in-place re-run bumping `version` to 2, reviewer rows never overwritten, `ExtractionBackend` having no cloud member, a malformed `ENCRYPTION_KEY` refused at boot, and the route's non-disclosure. `test_config.py` gained the malformed-key case (17 now) |
+
+### Verification actually run (F7)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Full suite, no MySQL | `pytest tests` (SQLite) | **260 passed, 4 skipped** (JUnit: `tests=264 failures=0 errors=0 skipped=4`) |
+| Full suite, real MySQL 8.4 | `pytest tests` with `MYSQL_TEST_URL` on `:3307` | **263 passed, 1 skipped** (JUnit: `tests=264 … skipped=1`) |
+| Type check | `mypy app` (strict) | **clean, 39 source files** |
+| Lint | `ruff check backend/app backend/tests` | **All checks passed** |
+| Format | `ruff format --check` | **58 files already formatted** |
+| Security lint | `bandit -c pyproject.toml -r backend/app` | **0 issues** |
+| Commit gate | `pre-commit run --all-files` | **16/16 hooks passed** |
+
+Counts are up from F6's 199/202 because every `test_extraction.py` parametrisation
+counts as a case. The F6→F7 deltas are +61 tests on SQLite and +61 on MySQL; the
+skips are unchanged (the three real-MySQL integration tests when no server is
+configured; the opt-in `live` Kafka test always).
+
+#### What the extraction tests prove and what they do not
+
+They prove the **policy**: with a fake `DocumentExtractor` and a real key, the
+worker cannot write a plaintext value, cannot approve a field, cannot overwrite a
+reviewer's decision, and cannot cross a tenant. They do **not** prove a real
+Ollama answers anything — `docker-compose.yml` has no Ollama service, so the
+`ollama` backend has never been exercised against a live model, and its parsing is
+tested against canned payloads. The `pattern` backend, which *is* what runs by
+default, is proven end-to-end. No test feeds a real PDF through the pipeline:
+there is still no upload path, so "document text" means a text file the operator
+supplies.
 
 ## Verification actually run (F2)
 
@@ -417,12 +468,13 @@ just wrote it. Timestamps are now floored before writing.
     (`python -m app.cli create-admin`) is the obvious fix and is **not built** —
     it needs a decision on whether seeding is an operator CLI or a migration-safe
     env-var bootstrap, since the latter puts a password in the environment.
-11. **Ingested contracts are inert.** F6 writes the contract and its outbox event,
-    and stops there: no extraction runs, so no `ExtractedField` is produced, no
-    review item exists, and nothing can reach a notification. This is deliberate
-    (the route docstring in `app/api/v1/contracts.py` says so), but it means the
-    Phase-0 pipeline is real only up to its first stage. Extraction (Ollama) and
-    the review endpoints are the next milestone.
+11. ~~**Ingested contracts are inert.**~~ — **closed by F7.** `python -m app.cli
+    extract` turns a contract's document text into `ExtractedField` rows with a
+    status, confidence and provenance, and the run's counts are logged with a
+    distinct exit code (`2`) when it stores nothing — so an ingest that produces
+    no fields is loud rather than silent. Nothing *automatically* triggers
+    extraction on ingest yet: it is an operator command, which is the same
+    deliberate shape as `outbox-replay` (D7-01's trade-off).
 12. **The ingestion fingerprint is metadata-only.** `sha256` covers the submitted
     content fields, not the document bytes, because there is no upload yet. Two
     genuinely different PDFs describing the same customer and dates would collide
@@ -437,26 +489,43 @@ just wrote it. Timestamps are now floored before writing.
     **and** teaching the script the Windows venv path (`venv/Scripts/pre-commit.exe`;
     it currently probes only `venv/bin/pre-commit`), which is why this is recorded
     rather than silently changed.
+14. **There is no way to read an extracted value over HTTP, and no review
+    endpoint.** `GET /contracts/{id}/fields` deliberately omits the value (D7-05),
+    and `decrypt_for_review` exists in `app/workers/extraction.py` but has no
+    caller. So the review queue cannot yet be wired: approving, rejecting,
+    correcting or marking a field unreadable is not possible through the API, and
+    the audited decrypt route that must accompany a value reveal is not built.
+    Until it is, a field below the threshold is a permanent blocking row and the
+    only way to change one is direct SQL.
+15. **The default `pattern` backend reaches 5 of the 7 field types.** Email, phone,
+    `start_date`, `end_date` and `contract_value` have regexes; `address` and
+    `dob` are reachable only through the opt-in `ollama` backend, which has no
+    compose service and has never been run against a live model. So the default
+    path — the one the verification above actually exercises — cannot produce a
+    reviewable address, and a contract whose only contact detail is a postal
+    address yields nothing usable (D7-03).
 
 ## Next permitted step
 
-**F6 steps 1–2 are complete and gate-green; GATE 2 awaits human sign-off.**
-F1–F6 are implemented (F1–F5 committed, F6 in this commit). The remaining work
+**F7 (step 3) is complete and gate-green; GATE 2 awaits human sign-off.**
+F1–F7 are implemented (F1–F6 committed, F7 in this commit). The remaining work
 inside Phase 1 is the rest of the pipeline slice below, which the repo names
 unambiguously — this is no longer a guess.
 
-- `app/db/models/` — `Contract` is now writable through `POST /contracts`, and
-  the outbox finally has a producer whose event comes from a business write
-  rather than a test fixture. `ExtractedField`, `AgentDecision`, `Notification`,
+- `app/db/models/` — `Contract` is writable through `POST /contracts` and
+  `ExtractedField` now has an operator writer (`python -m app.cli extract`), so
+  two of the seven aggregates are live. `AgentDecision`, `Notification`,
   `CustomerResponse`, `Escalation` and `AuditLog` still have **no route, service
-  or worker that writes them** — that is the remainder of the slice.
-- `app/api/v1/` — `auth`, `health` and now `contracts` routers exist. There is
-  still no review route and no notification route, while `frontend/src/lib/api.ts`
-  and the Phase-0 fixtures already assume both. **The UI contract remains ahead
-  of the backend, now by roughly half a milestone.**
-- Redis (rate limiting, gap 9) and Ollama (extraction, the non-negotiable
-  "local LLM only" rule) are still unwired, and each belongs to the slice that
-  first needs it.
+  or worker that writes them**, and no route writes `ExtractedField` either
+  (gap 14).
+- `app/api/v1/` — `auth`, `health` and `contracts` routers exist, the last now
+  serving `POST /contracts` and `GET /contracts/{id}/fields`. There is still no
+  review route and no notification route, while `frontend/src/lib/api.ts` and the
+  Phase-0 fixtures already assume both. **The UI contract remains ahead of the
+  backend, now by roughly half a milestone.**
+- Redis (rate limiting, gap 9) and Ollama are still unwired: the `ollama` backend
+  is written but has no compose service, so `EXTRACTION_BACKEND=pattern` is what
+  runs (gap 15). Each belongs to the slice that first needs it.
 
 **The pipeline slice, in the order the dependencies demand:**
 
@@ -466,15 +535,17 @@ unambiguously — this is no longer a guess.
 2. ✅ **Done (F6).** The first real `enqueue_event` from inside that same
    transaction, so the outbox has a producer and the relay has a genuine event to
    publish.
-3. ⏳ **Next.** Extraction into `ExtractedField` — Ollama-backed, confidence
-   scored, with the non-negotiable that nothing below the review threshold
-   reaches a notification.
-4. ⏳ Then. Review endpoints behind `require_roles`, version-checked (409 on stale
-   write), matching what the Phase-0 review queue already mocks.
+3. ✅ **Done (F7).** Extraction into `ExtractedField`, confidence scored, values
+   encrypted at rest, with the non-negotiable enforced in code: extraction can
+   write only `auto_accepted` or `pending_review`, so nothing below the threshold
+   can reach a notification.
+4. ⏳ **Next.** Review endpoints behind `require_roles`, version-checked (409 on
+   stale write), matching what the Phase-0 review queue already mocks — plus the
+   audited decrypt route that has to accompany any value reveal (gap 14).
 
-Step 3 is the next milestone. It is the first step that needs Ollama, so it also
-decides how extraction failures are recorded on the contract rather than
-swallowed — an ingest that produces no fields must be visible, not silent.
+Step 4 now carries the reason F7 refused to expose values on the list route: the
+reveal is the review endpoint's job, and it must be auditable. Building it is what
+turns a `pending_review` row from a dead end into a decision.
 
 **Open at GATE 2 — say these out loud, do not bury them:** no Kafka broker has
 ever been on the other end of a publish (no compose service; `live` test opt-in);

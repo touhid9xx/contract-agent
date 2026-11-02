@@ -19,6 +19,11 @@ AppEnv = Literal["development", "test", "staging", "production"]
 #: Transport the outbox relay publishes through. ``none`` keeps the refusing
 #: stand-in, so events retry and then park as failed instead of being dropped.
 EventTransport = Literal["none", "kafka"]
+#: Which backend reads field values out of a contract document. ``pattern`` is
+#: deterministic and offline; ``ollama`` adds a local LLM for the fields a regex
+#: cannot reach. There is deliberately no cloud member: "no cloud LLM" is a
+#: non-negotiable, so it is unrepresentable rather than merely discouraged.
+ExtractionBackend = Literal["pattern", "ollama"]
 
 #: The value shipped in .env.example. Never valid in staging/production.
 #: Not a credential: production validation below refuses to start when it is
@@ -106,6 +111,18 @@ class Settings(BaseSettings):
     #: timeout, since a worker thread cannot be cancelled from outside.
     readiness_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
 
+    # --- extraction (F7) -------------------------------------------------
+    extraction_backend: ExtractionBackend = "pattern"
+    #: Local model name, read only by the Ollama backend.
+    extraction_model: str = "llama3.1:8b"
+    extraction_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
+    #: Confidence at or above which a field may skip human review. Below it the
+    #: field is written ``pending_review`` and blocks the notification pipeline.
+    #: 0.8 matches the threshold the Phase-0 review UI already renders against.
+    extraction_review_threshold: float = Field(default=0.8, gt=0, le=1)
+    #: Upper bound on the document text handed to a backend, in characters.
+    extraction_max_document_chars: int = Field(default=20_000, gt=0, le=200_000)
+
     # --- http ------------------------------------------------------------
     cors_origins: str = "http://localhost:3000"
 
@@ -162,6 +179,17 @@ class Settings(BaseSettings):
                     f"{self.outbox_lease_seconds}. A publish that outlives the lease "
                     "lets another relay reclaim the row and publish it twice."
                 )
+
+        # A malformed key is worse than a missing one: it fails at the first
+        # encrypt rather than at start-up, which is a write path, not a boot.
+        # Empty stays legal here because the API process never stores field
+        # values; ``build_cipher`` refuses at the point of use instead.
+        if self.encryption_key and not self.fernet_key_is_valid:
+            raise ValueError(
+                "ENCRYPTION_KEY must be a 32-byte URL-safe base64 value; generate "
+                'one with: python -c "from cryptography.fernet import Fernet; '
+                'print(Fernet.generate_key().decode())"'
+            )
 
         # Argon2 requires ``memory_cost >= 8 * parallelism``. The Field bounds
         # already make a violation unrepresentable -- memory is at least 8192 KiB

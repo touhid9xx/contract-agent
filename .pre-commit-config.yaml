@@ -63,6 +63,10 @@ repos:
           # on a missing stub rather than on a real type error.
           - PyJWT==2.10.1
           - argon2-cffi==25.1.0
+          # Ships `py.typed`; imported by app/core/crypto.py (F7). Without it the
+          # Fernet calls type as `Any`, which strict mode reports as no-any-return
+          # in the cipher rather than as the missing-import it really is.
+          - cryptography==50.0.2
 
       - id: bandit
         name: bandit (security lint)

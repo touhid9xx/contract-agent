@@ -23,6 +23,9 @@ from __future__ import annotations
 import uuid
 from datetime import date
 
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
 from app.db.enums import ContractSource
 from app.db.models import Contract
 from app.db.repositories.base import TenantScopedRepository
@@ -69,3 +72,20 @@ class ContractRepository(TenantScopedRepository[Contract]):
             created_by=created_by,
         )
         return self.add(contract)
+
+
+def contract_for_operator(session: Session, contract_id: int) -> Contract | None:
+    """Fetch a contract by id with **no** tenant predicate.
+
+    This is the second audited exception to tenant scoping, and it exists for the
+    same reason ``dead_lettered`` does: an operator running
+    ``python -m app.cli extract`` has a database connection, not a principal, so
+    there is no tenant for them to be scoped to. Keeping the bypass in one named
+    function — rather than an unscoped ``select`` at the call site — is what makes
+    it reviewable.
+
+    The contract's own ``tenant_id`` is then what scopes the *write*: extraction
+    builds its repository from ``contract.tenant_id``, so this lookup can widen
+    which contract an operator can see, but never which tenant a row lands in.
+    """
+    return session.execute(select(Contract).where(Contract.id == contract_id)).scalar_one_or_none()

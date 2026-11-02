@@ -104,15 +104,23 @@ def test_kafka_servers_are_split() -> None:
 
 
 def test_encryption_key_shape_detection() -> None:
+    # Empty is legal, not valid: the API process never stores field values, so a
+    # missing key must not stop it booting. ``build_cipher`` refuses at the point
+    # of use instead (fail-closed).
     assert Settings(app_env="development").fernet_key_is_valid is False
-    assert (
-        Settings(app_env="development", encryption_key="not-base64!!").fernet_key_is_valid is False
-    )
 
     # 32 raw bytes, url-safe base64 encoded -> structurally a valid Fernet key.
     valid_key = base64.urlsafe_b64encode(bytes(32)).decode("ascii")
     assert Settings(app_env="development", encryption_key=valid_key).fernet_key_is_valid is True
 
+
+def test_a_malformed_encryption_key_is_refused_at_startup() -> None:
+    # A malformed key is worse than a missing one: it would fail at the first
+    # encrypt, i.e. mid-write, rather than at boot (D7-01).
+    with pytest.raises(ValidationError, match="ENCRYPTION_KEY"):
+        Settings(app_env="development", encryption_key="not-base64!!")
+
     # Right alphabet, wrong length.
     short_key = base64.urlsafe_b64encode(bytes(16)).decode("ascii")
-    assert Settings(app_env="development", encryption_key=short_key).fernet_key_is_valid is False
+    with pytest.raises(ValidationError, match="ENCRYPTION_KEY"):
+        Settings(app_env="development", encryption_key=short_key)

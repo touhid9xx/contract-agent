@@ -44,9 +44,10 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_request_session, require_roles
 from app.core.middleware import current_correlation
 from app.core.principal import Principal
-from app.db.enums import ContractSource, ContractStatus, RiskLevel, UserRole
-from app.db.models import Contract
+from app.db.enums import ContractSource, ContractStatus, FieldName, FieldStatus, RiskLevel, UserRole
+from app.db.models import Contract, ExtractedField
 from app.db.repositories.contracts import ContractRepository
+from app.db.repositories.fields import ExtractedFieldRepository
 from app.db.repositories.outbox import enqueue_event
 
 log = structlog.get_logger(__name__)
@@ -271,3 +272,85 @@ def ingest_contract(
         source=payload.source.value,
     )
     return summary
+
+
+class ExtractedFieldSummary(BaseModel):
+    """One extracted field's review state — deliberately **without its value**.
+
+    The value is PII. The Phase-0 review queue renders a confidence bar and a set
+    of actions; revealing what was extracted is a review *detail* action that has
+    to be audited, which makes it the review endpoint's job rather than something
+    a list route any viewer can poll (DECISIONS.md D7-05).
+    """
+
+    field_name: FieldName
+    status: FieldStatus
+    confidence: float
+    version: int
+    source_page: int | None
+    source_line: int | None
+    reviewed_at: datetime | None
+    review_reason: str | None
+    #: Taken from the model, not recomputed here: one definition of "this field
+    #: stops the pipeline", or the two will drift (``ExtractedField``).
+    blocks_pipeline: bool
+
+
+class ContractFieldsResponse(BaseModel):
+    """What extraction produced for one contract."""
+
+    contract_id: int
+    fields: list[ExtractedFieldSummary]
+    #: How many fields still hold the notification pipeline. This is the number an
+    #: operator acts on, and it is why a zero-field contract is visible rather
+    #: than looking like a clean one.
+    blocking: int
+
+
+def _field_summary(field: ExtractedField) -> ExtractedFieldSummary:
+    return ExtractedFieldSummary(
+        field_name=field.field_name,
+        status=field.status,
+        # ``Numeric(4,3)`` comes back as ``Decimal``; the API has always spoken
+        # floats for confidence (the Phase-0 fixtures do too).
+        confidence=float(field.confidence),
+        version=field.version,
+        source_page=field.source_page,
+        source_line=field.source_line,
+        reviewed_at=field.reviewed_at,
+        review_reason=field.review_reason,
+        blocks_pipeline=field.blocks_pipeline,
+    )
+
+
+@router.get(
+    "/{contract_id}/fields",
+    response_model=ContractFieldsResponse,
+    summary="List the fields extracted from one contract",
+)
+def list_contract_fields(
+    contract_id: int,
+    principal: Principal = Depends(
+        require_roles(UserRole.ADMIN, UserRole.OPERATOR, UserRole.VIEWER)
+    ),
+    session: Session = Depends(get_request_session),
+) -> ContractFieldsResponse:
+    """Read one contract's extraction state.
+
+    Viewer is allowed: this is a read, and it is what the review queue lists.
+
+    A contract belonging to another tenant is answered 404, not 403 — the
+    repository's ``get`` returns ``None`` for a row outside this tenant, so the
+    route cannot be used to learn which contract ids exist (IDOR/BOLA).
+    """
+    contract = ContractRepository(session, principal.tenant_id).get(Contract, contract_id)
+    if contract is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Contract not found")
+
+    rows = ExtractedFieldRepository(session, principal.tenant_id).for_contract(contract.id)
+    summaries = [_field_summary(row) for row in sorted(rows, key=lambda row: row.field_name.value)]
+    return ContractFieldsResponse(
+        contract_id=contract.id,
+        fields=summaries,
+        blocking=sum(1 for summary in summaries if summary.blocks_pipeline),
+    )

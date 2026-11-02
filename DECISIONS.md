@@ -621,3 +621,81 @@ committed together. That pairing is the milestone; extraction and review follow.
   metadata will legitimately appear twice. Closing that means the upload path must
   hash the same canonical metadata; it is noted for the milestone that adds
   upload, not solved here.
+
+## Phase 1 — F7 (field extraction)
+
+### D7-01 — Encryption at rest is a write condition, not a convention
+
+- **Decision:** `extract_contract` takes a `FieldCipher` as a *required*
+  argument, and `ExtractedField.raw_value` only ever receives
+  `cipher.encrypt(value)`. `build_cipher` raises `MissingEncryptionKeyError` when
+  `ENCRYPTION_KEY` is empty, so "there is no plaintext mode" is true by
+  construction: no branch in the module stores a value without a key. A key that
+  is *present but malformed* is refused at start-up by a `Settings` model
+  validator (right alphabet/wrong length included), because a bad key would
+  otherwise fail mid-write at the first encrypt instead of at boot. An empty key
+  stays legal — the API process never stores field values, so requiring one would
+  stop a read-only deployment from starting; `build_cipher` refuses at the point
+  of use.
+- **Why:** the alternative, "encrypt when a key happens to be configured", makes
+  a security property depend on an operator remembering a variable. Fail-closed is
+  the only version of this rule that survives a misconfigured deployment.
+- **Trade-off:** the operator CLI is now the only writer of extracted fields, and
+  it exits `3` without a key (`extract_refused_without_encryption_key`). That is
+  intended: a run that cannot store its result safely must not look like it ran.
+
+### D7-02 — No cloud LLM is representable
+
+- **Decision:** `ExtractionBackend = Literal["pattern", "ollama"]`. A hosted API
+  is not a member, so `EXTRACTION_BACKEND=openai` is a start-up
+  `ValidationError` rather than a code path someone could add by accident;
+  `build_extractor` is then total over the literal.
+- **Why:** the non-negotiable is "local Ollama only". A rule enforced by a type
+  has no runtime branch that can be forgotten or overridden by an environment
+  variable. Documenting the rule is not the same as making it unrepresentable.
+- **Trade-off:** adding a second local runtime (vLLM, llama.cpp) means editing the
+  literal. That is a deliberate one-line cost which forces the change to be
+  reviewed as a boundary move rather than appearing as a config value.
+
+### D7-03 — `pattern` is the default; the two backends are alternatives, not layers
+
+- **Decision:** the default backend is the deterministic `PatternExtractor`.
+  `EXTRACTION_BACKEND=ollama` replaces it wholesale; results are never merged.
+- **Why:** there is no Ollama service in `docker-compose.yml`, so an LLM-only
+  default would be a milestone whose behaviour cannot be proven in this
+  repository. Merging two backends needs a per-field precedence rule, and
+  inventing that rule before either backend has run against a real document would
+  be guessing presented as design.
+- **Trade-off:** `pattern` reaches 5 of the 7 field types (email, phone,
+  start_date, end_date, contract_value). `address` and `dob` are reachable only
+  through Ollama, so the default path cannot produce a reviewable address. This is
+  a stated limit, recorded as a gap in STATUS.md, not an oversight.
+
+### D7-04 — Extraction cannot approve a field
+
+- **Decision:** `extract_contract` writes only `auto_accepted` (at or above
+  `EXTRACTION_REVIEW_THRESHOLD`) or `pending_review`. Rows already in
+  `approved`/`rejected`/`unreadable` are skipped, counted as `skipped_reviewed`,
+  and never overwritten. Re-extraction updates in place, bumping `version`.
+- **Why:** approval is a human act (spec: no low-confidence field reaches the
+  notification pipeline). If the worker could write `approved`, the review queue
+  would be advisory instead of binding. Skipping rather than overwriting a
+  reviewer's row is the same rule seen from the other side: a person's decision
+  outranks a re-run, and the skip is reported rather than silent.
+- **Trade-off:** a corrected document needs the reviewer to reset the field before
+  re-extraction can change it — intentional friction on a path that should be
+  rare, and visible in the run's counts.
+
+### D7-05 — The fields API never returns a value
+
+- **Decision:** `GET /api/v1/contracts/{id}/fields` returns field name, status,
+  confidence, `version`, provenance (`source_page`/`source_line`), review state
+  and a `blocking` count — never `raw_value` or `normalized_value`. A cross-tenant
+  id is `404`, not `403`. Viewers may read; only admin/operator may ingest.
+- **Why:** a list endpoint is the easiest place to leak PII in bulk, and revealing
+  a value belongs to a review *detail* action that has to be auditable rather than
+  incidental. `404` avoids confirming that an id exists in another tenant, which a
+  `403` would.
+- **Trade-off:** the review UI cannot render a value from this route, so the
+  audited decrypt path (`decrypt_for_review`) must be exposed before the review
+  screen is wired. That is the next milestone (STATUS.md gap 14), not this one.
