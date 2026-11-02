@@ -4,9 +4,9 @@ Last updated: Phase 1 (real foundation) — **F1 committed (`f0e1eef`), F2 commi
 (`331a7b4`) plus one follow-up fix to the MySQL test harness (`a79d893`), F3
 committed (`8e6b927`) plus the bootstrap-path doc (`908f50d`), F4 committed
 (`b425ea7`), F5 committed (`21daffc`), F6 committed (`0c2d734`), and F7
-implemented and gate-green with steps 1–3 of the pipeline slice landed
-(ingestion, the first real outbox producer, field extraction). GATE 2 now awaits
-human sign-off.**
+committed (`90fd0e5`) with steps 1–3 of the pipeline slice landed (ingestion, the
+first real outbox producer, field extraction). GATE 2 now awaits human
+sign-off.**
 
 ## Phase history
 
@@ -507,8 +507,8 @@ just wrote it. Timestamps are now floored before writing.
 
 ## Next permitted step
 
-**F7 (step 3) is complete and gate-green; GATE 2 awaits human sign-off.**
-F1–F7 are implemented (F1–F6 committed, F7 in this commit). The remaining work
+**F7 (step 3) is committed (`90fd0e5`) and gate-green; GATE 2 awaits human
+sign-off.** F1–F7 are all committed. The remaining work
 inside Phase 1 is the rest of the pipeline slice below, which the repo names
 unambiguously — this is no longer a guess.
 
