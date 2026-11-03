@@ -5,9 +5,13 @@ Last updated: Phase 1 (real foundation) — **F1 committed (`f0e1eef`), F2 commi
 committed (`8e6b927`) plus the bootstrap-path doc (`908f50d`), F4 committed
 (`b425ea7`), F5 committed (`21daffc`), F6 committed (`0c2d734`), F7
 committed (`90fd0e5`), F8 committed (`8c5e09f`), F9 committed (`50dd0cd`), and F10
-committed (`b344c17`) — all six steps of the pipeline slice landed (ingestion, the
-first real outbox producer, field extraction, human review, channel selection,
-notification dispatch). F10 closes the last structural gap in the arrow chain but
+committed (`b344c17`), and `chore(hooks)` committed (`4a9e8e9`) — all six steps of the
+pipeline slice landed (ingestion, the first real outbox producer, field extraction,
+human review, channel selection, notification dispatch). The hooks commit closes gap
+13: root `node_modules` was installed, `prepare` → `husky` set `core.hooksPath`, and
+`4a9e8e9` is **the first commit in this project that git itself gated** — every
+earlier one was gated by a hand-run `pre-commit run --all-files` and nothing more.
+F10 closes the last structural gap in the arrow chain but
 **does not contact anybody**: it ships a row, a state machine and a contact policy,
 and no transport. GATE 2 now awaits human sign-off.**
 
@@ -26,7 +30,7 @@ and no transport. GATE 2 now awaits human sign-off.**
 | --- | --- |
 | Python tooling | `pyproject.toml` — ruff (lint + format), `mypy --strict`, pytest + coverage, bandit |
 | Pre-commit | `.pre-commit-config.yaml` — hygiene, ruff, ruff-format, mypy, bandit, frontend typecheck, frontend eslint; gitleaks bound to `manual` (D1-03) |
-| Commit gate | husky `pre-commit` + `commit-msg`, commitlint (Conventional Commits), lint-staged |
+| Commit gate | husky `pre-commit` + `commit-msg`, commitlint (Conventional Commits), lint-staged — **written in F1 but not actually wired until `4a9e8e9`** (gap 13): the `prepare` hook never ran because root `node_modules` was absent |
 | Backend | `app/core/config.py` fail-fast settings, `app/core/logging.py` structlog + PII redaction, `app/core/middleware.py` request/trace IDs, `app/main.py` factory + error envelope, `/api/v1/health` |
 | Frontend | Next.js 16 + Tailwind 4 + TanStack Query + Zustand + next-themes + next-intl (en, bn), ESLint flat config, Prettier, `[locale]` routing |
 | Scripts | `scripts/bootstrap.mjs` (one-command setup), `scripts/run-frontend-check.mjs` |
@@ -148,7 +152,7 @@ pipeline is therefore **not** part of this slice.
 | MySQL integration only | `pytest backend/tests -m integration` | **9 passed** (6 harness + 3 real MySQL) |
 | Kafka transport only | `pytest backend/tests/test_publishers.py` | **14 passed, 1 skipped** (the `live` broker test) |
 | Pre-commit gate | `pre-commit run --all-files` | **all 16 hooks passed** — hygiene, ruff, ruff format, mypy strict, bandit, frontend `tsc --noEmit`, frontend eslint |
-| Commit | `git commit -F .agent-cache/f4-commit-msg.txt` | **`b425ea7`**, husky hooks active, no `--no-verify` |
+| Commit | `git commit -F .agent-cache/f4-commit-msg.txt` | **`b425ea7`**, no `--no-verify` — but the husky hooks did **not** run (gap 13; corrected, closed in `4a9e8e9`) |
 
 Every count above is read from a JUnit report rather than from the console tail,
 which pytest does not reliably flush to a redirected stream here. Both suite runs
@@ -701,15 +705,22 @@ just wrote it. Timestamps are now floored before writing.
     genuinely different PDFs describing the same customer and dates would collide
     (D6-04). When PDF upload lands, the digest must become the file hash — until
     then dedupe is only as good as the metadata the caller sends.
-13. **The husky commit gate has never actually run.** `.husky/pre-commit` and
-    `.husky/commit-msg` exist, but `git config --get-all core.hooksPath` is empty
-    in every scope and `.husky/_/` (the v9 wrapper that sets it) is absent — so git
-    has never invoked either hook. Every commit so far passed the gate only
-    because `pre-commit run --all-files` was executed by hand beforehand; no
-    commit was made with `--no-verify`. Fixing it means wiring `core.hooksPath`
-    **and** teaching the script the Windows venv path (`venv/Scripts/pre-commit.exe`;
-    it currently probes only `venv/bin/pre-commit`), which is why this is recorded
-    rather than silently changed.
+13. ~~**The husky commit gate has never actually run.**~~ — **closed by
+    `chore(hooks)` (`4a9e8e9`).** The cause was upstream of `core.hooksPath`: root
+    `node_modules` did not exist on this host at all (bootstrap had been run with
+    `--skip-node`), so the `prepare` → `husky` step in `package.json` had never
+    executed and `.husky/_/` — the v9 shim directory that is the thing which sets
+    `core.hooksPath` — had never been generated. `npm install` at the root, exactly
+    what `scripts/bootstrap.mjs` already intended, was the whole fix. Verified **by
+    refusal rather than by inspection**: `git commit --allow-empty -m "nope this is
+    not conventional"` ran all 17 hooks green and was then rejected by commitlint
+    (`subject-empty`, `type-empty`, exit 1, no commit object created), after which
+    `4a9e8e9` was committed with both hooks live. One clause of the original entry
+    was **wrong** and is corrected here: `.husky/pre-commit` already probed both
+    `venv/bin/pre-commit` and `venv/Scripts/pre-commit.exe`, so the script needed
+    no change and was never the obstacle. The root `package-lock.json` is now
+    tracked so the gate's own tooling (husky, commitlint, prettier, lint-staged)
+    is reproducible, the same reason the two frontend lockfiles are tracked.
 14. ~~**There is no way to read an extracted value over HTTP, and no review
     endpoint.**~~ — **closed by F8.** `GET /review/queue`, `PATCH /review/{id}` and
     `POST /review/{id}/reveal` now cover queue → decide → audit, and the reveal
@@ -870,12 +881,12 @@ onto the existing `failed` / `attempts` / `notification_retry_max` rules; and
 whether `sent` may ever be asserted without a provider-side receipt — the honest
 default is that it may not, which is exactly why the stand-in refuses today.
 
-Two alternatives are defensible, and both are gap-sized rather than milestone-sized:
+~~Close the harness gate first (gap 13).~~ — **done** in `4a9e8e9`. `core.hooksPath`
+is `.husky/_` and both hooks are live; the wiring was proven by a commit that git
+*refused*, not by reading config. Every commit from here on is gated for real.
 
-- **Close the harness gate first (gap 13).** `core.hooksPath` has never been set, so
-  no commit in this project — including the last five — was gated by husky. Wiring
-  it, and teaching `.husky/pre-commit` the Windows venv path it currently cannot
-  find, is small, and it is the only item here that improves every future slice.
+One alternative remains, and it is gap-sized rather than milestone-sized:
+
 - **Settle the schema questions before they calcify.** Gaps 19, 21 and 20 are one
   cluster: `AgentDecision` and `Notification` both want a `version` column (one
   migration, `0003`, not two), and `normalized_value` is plaintext PII that
