@@ -13,7 +13,12 @@ human review, channel selection, notification dispatch). The hooks commit closes
 earlier one was gated by a hand-run `pre-commit run --all-files` and nothing more.
 F10 closes the last structural gap in the arrow chain but
 **does not contact anybody**: it ships a row, a state machine and a contact policy,
-and no transport. GATE 2 now awaits human sign-off.**
+and no transport. Since then one gap-closing slice has landed — `0f5da36`
+(`fix(f10): lock agent decisions and notifications against lost writes`, migration
+`0003`) — closing gaps 19 and 21 by giving `AgentDecision` and `Notification` a
+`version` column and taking the notification row under `SELECT ... FOR UPDATE`
+*before* the dispatch policy runs. The pipeline is now fully locked and still sends
+nothing. GATE 2 now awaits human sign-off.**
 
 ## Phase history
 
@@ -541,10 +546,10 @@ before the transport is reached.
 | Format | `ruff format --check app tests` | **69 files already formatted** |
 | Type check | `mypy app` (strict) | **clean, 47 source files** |
 | Security lint | `bandit -c pyproject.toml -r backend/app` | **0 issues** |
-| **Migration, real MySQL** | `alembic check` at head | **NOT RUN — Docker daemon was not running on this host.** F10 adds no migration, so `0002 (head)` is unchanged from F9, but this row is unrun rather than green and must not be cited as verified |
+| **Migration, real MySQL** | `alembic check` at head | **NOT RUN — Docker daemon was not running on this host.** F10 itself added no migration, so at the time of the F10 commit `0002` was still head. **Superseded by the delivery-lock slice below:** `0003` now exists, head is `0003`, and this row is *more* unrun than it was — there is now a new revision that has never been checked against MySQL either. Do not cite this row as verified |
 | **Full suite, real MySQL** | `pytest` with `MYSQL_TEST_URL` on `:3307` | **NOT RUN — same cause.** Expect `388 … skipped=1`; confirm `skipped="1"`, because a skip is not a pass (this is the mistake F9's first report made) |
 | Commit gate | `pre-commit run --files` on the 12 changed files | **all hooks passed**; the two frontend hooks (`tsc --noEmit`, `eslint`) reported `(no files to check)` because no frontend file changed in this slice. `--all-files` was not used, so the repo-wide tsc/eslint pass is **not** claimed here |
-| Alembic topology | `alembic heads` | **`0002 (head)`** — one head, unchanged. This does **not** replace `alembic check` (row above), which needs a live server |
+| Alembic topology | `alembic heads` | Was **`0002 (head)`** at the F10 commit — one head, unchanged from F9. **Now `0003 (head)`** after the delivery-lock slice. This does **not** replace `alembic check` (row above), which needs a live server |
 
 The F9→F10 delta is **+46 SQLite tests** (`388` vs `342`). The two MySQL rows are
 left explicitly unrun rather than filled in from expectation: the harness that
@@ -647,6 +652,53 @@ These tests earned their keep immediately: they caught **D2-06**, where MySQL's
 second-precision `DATETIME` *rounds* microseconds on insert, so an event
 enqueued "now" could be stored as not-yet-due and be skipped by the relay that
 just wrote it. Timestamps are now floored before writing.
+
+## Optimistic locking for the delivery tables ✅ (`0f5da36`, migration `0003`)
+
+Gap-closing slice rather than a numbered milestone: `AgentDecision` (gap 19) and
+`Notification` (gap 21) were the two tables in the flow with no `version` column and
+no `__mapper_args__`, so neither could be optimistic-locked. For `Notification` that
+was load-bearing — `POST /{id}/dispatch` and `/{id}/retry` mutated the row as a plain
+last-writer-wins UPDATE, so a worker could revert another's `SENT` transition or lose
+its `attempts` increment. For `AgentDecision` it was structural: a table that cannot
+be locked is why no override or flag-review route could be written at all.
+
+The change is four parts, and the second is the one that is not just schema:
+
+1. `version` + `__mapper_args__` on both models, mirroring `Contract`'s idiom.
+2. **`NotificationRepository.claim_for_dispatch`** reads the row under
+   `SELECT ... FOR UPDATE` *before* the policy runs. A version column alone
+   serialises the commit, not the send: two workers would still both reach the
+   transport, then one would lose at commit after the customer already had two
+   emails. The lock makes the second request block and then see `sent`, so it
+   refuses `NOT_PENDING` instead of sending twice.
+3. `_commit_or_conflict` maps `StaleDataError` to a `409 CONCURRENT_UPDATE`,
+   deliberately distinct from `NOT_PENDING` — that means the row was already sent
+   when we looked, this means it moved while we looked.
+4. `0003_delivery_versions.py`, hand-written like `0001`/`0002`, adding both columns
+   `NOT NULL` with `server_default=1` so existing rows get the truthful value rather
+   than a placeholder.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Full suite, SQLite | `pytest tests` | **391 tests, 0 failures, 4 skipped** (JUnit-confirmed; `+3` lock tests) |
+| Lint | `ruff check app tests migrations` | **All checks passed** |
+| Format | `ruff format --check app tests migrations` | **73 files already formatted** (2 needed reformatting first) |
+| Type check | `mypy app` (strict) | **clean, 47 source files** |
+| Security lint | `bandit` | **0 issues** (3 expected `nosec B104`) |
+| Migration applies | `alembic upgrade head` on a fresh database | **`0001 → 0002 → 0003`, exit 0** |
+| `alembic check` at head | SQLite, fresh DB built by the chain | **zero operations for either new `version` column.** The 13 reported diffs are all `modify_type` on enum columns created by `0001` — a pre-existing SQLite-vs-`ENUM` length artefact, not drift this slice introduced |
+| Alembic topology | `alembic heads` | **`0003 (head)`** — one head |
+| **`alembic check`, real MySQL** | needs a server | **NOT RUN — no Docker daemon on this host.** Unrun, not green |
+| Commit gate | husky pre-commit + commit-msg | **all 17 hooks Passed**, including `tsc --noEmit` and `eslint` |
+
+The three new tests are `test_models.py::test_notification_rejects_a_stale_write`,
+`::test_agent_decision_rejects_a_stale_write`, and
+`test_notifications.py::test_a_lost_race_is_reported_as_a_conflict`. The last one
+drives `_commit_or_conflict` directly rather than over HTTP, because every session in
+that suite shares one in-memory connection (`StaticPool`) so a competing commit
+cannot land behind an in-flight request; the out-of-band `UPDATE` still bumps the
+stored version, so the dirty row's commit is genuinely rejected.
 
 ## Known gaps / issues
 
@@ -769,19 +821,21 @@ just wrote it. Timestamps are now floored before writing.
     and the window (`[20:00, 08:00)` by default) is checked immediately before the
     transport is reached, on the customer's wall clock and DST-safely (D10-01,
     D10-02). The non-negotiable's third clause now has code behind it.
-19. **An `AgentDecision` cannot be overridden or flagged, and for a structural
-    reason.** `AgentDecision` has no `version` column and no `__mapper_args__`, so
-    unlike `Contract`, `ExtractedField` and `Escalation` it cannot be
-    optimistic-locked — which is exactly what an override needs, since two
-    operators overriding the same decision is the collision the other tables
-    already guard against. So there is no `override` route and no `flag-review`
-    route; a re-run is a new `POST`, which **appends** rather than mutating, and
-    that is the only supported correction. The Phase-0 demo's
+19. **An `AgentDecision` cannot be overridden or flagged — the structural half is
+    closed, the routes are not.** ~~`AgentDecision` has no `version` column and no
+    `__mapper_args__`, so it cannot be optimistic-locked~~ — **retired by `0003`
+    (`0f5da36`).** The column and the declarative directive now exist, so the
+    collision two operators overriding the same decision would produce *is* now
+    detectable, which was the blocker. What remains is the feature itself: there is
+    still no `override` route and no `flag-review` route, the column is inert until
+    one exists, and a re-run is a new `POST` that **appends** rather than mutating —
+    that is still the only supported correction. The Phase-0 demo's
     `POST /agent/decisions/{id}/rerun|override|flag-review` shapes and its
     `original_channel` / `overridden_by` / `rerun_count` columns are therefore
     **not** implemented, and `demo/fixtures/agent_decisions.json` carries field
-    names (`tokens_in`, `input_signals`, …) the real model does not have. Adding
-    any of it needs a second migration, not just a route.
+    names (`tokens_in`, `input_signals`, …) the real model does not have. The
+    override columns those shapes imply are still absent, so introducing them needs
+    a further migration — but the lock that made the route unwritable no longer is.
 20. **`normalized_value` is plaintext PII, and it is the column the policy reads.**
     F7 encrypts `raw_value`, and the fields API never carries either column — but
     `ExtractedField.normalized_value` is a plain `Text` column holding the
@@ -795,19 +849,36 @@ just wrote it. Timestamps are now floored before writing.
     patch: encrypt this column too and compare on a hash, or keep it and state the
     exception openly. It is not a migration to slip in — it changes how the decision
     and dispatch policies read fields.
-21. **A `Notification` cannot be locked against a concurrent dispatch.** The same
-    structural gap as 19, one table over: no `version` column and no
-    `__mapper_args__`, so two workers dispatching the same row are not serialised
-    and both can reach the transport. The unique `idempotency_key` is handed
-    downstream so a provider *could* dedupe, but the only shipped transport is
-    `none`, so nothing proves that. Needs `0003` alongside gap 19's column, not a
-    route (D10-05).
+21. ~~**A `Notification` cannot be locked against a concurrent dispatch.**~~ —
+    **closed by `0003` (`0f5da36`).** Two mechanisms, because one was not enough:
+    `version` + `__mapper_args__` makes the loser's `UPDATE` match zero rows, and
+    `NotificationRepository.claim_for_dispatch` takes the row under
+    `SELECT ... FOR UPDATE` *before* the policy runs, so the second worker blocks and
+    then sees `sent` and refuses `NOT_PENDING` rather than reaching the transport
+    twice. A version column alone would only have serialised the commit, after both
+    sends had happened. The lost race now surfaces as `409 CONCURRENT_UPDATE`, not a
+    500. What remains unproven is stated as gap 23.
 22. **No scheduler polls notifications.** The outbox relay claims *events*, not
     notifications. A row deferred by quiet hours, or one parked `failed` after
     exhausting `notification_retry_max`, moves again only when an operator calls
     `POST /{id}/dispatch` or `/retry`. Same operator-initiated shape as DLQ replay
     (D5-03) and the same weakness: nothing alerts when rows sit deferred or parked,
     so a quiet-hours deferral can stay deferred indefinitely.
+23. **The double-send serialisation is proven by reasoning, not by a concurrent
+    test.** `0003` (`0f5da36`) makes the second dispatch block on
+    `SELECT ... FOR UPDATE` and then refuse `NOT_PENDING`. But `with_for_update()`
+    is a **silent no-op on SQLite**, and SQLite is what the suite runs on — so the
+    lock itself has never been exercised. Every session in `test_notifications.py`
+    shares one in-memory connection (`StaticPool`), which is why
+    `test_a_lost_race_is_reported_as_a_conflict` drives `_commit_or_conflict`
+    directly instead of racing two real requests: a competing commit *cannot* land
+    behind an in-flight request there. What is proven is the `version` column
+    (the loser's `UPDATE` matches zero rows → `409`); what is *not* proven is the
+    lock that makes the loser lose **before** reaching the transport — the half
+    that actually prevents two emails. Closing this needs the MySQL suite
+    (row above in the F10 table, still unrun) plus a test that opens two real
+    connections and asserts the second blocks. Until then this is a design
+    argument, stated as one.
 
 ## Next permitted step
 
@@ -887,10 +958,14 @@ is `.husky/_` and both hooks are live; the wiring was proven by a commit that gi
 
 One alternative remains, and it is gap-sized rather than milestone-sized:
 
-- **Settle the schema questions before they calcify.** Gaps 19, 21 and 20 are one
-  cluster: `AgentDecision` and `Notification` both want a `version` column (one
-  migration, `0003`, not two), and `normalized_value` is plaintext PII that
-  contradicts a non-negotiable. Each gets more expensive the more rows exist.
+- **Decide what to do about `normalized_value` (gap 20).** This was a three-gap
+  schema cluster; gaps 19 and 21 are now closed by `0003` (`0f5da36`), so one
+  question is left and it is not a migration to slip in. `ExtractedField.raw_value`
+  is Fernet ciphertext, but `normalized_value` — the canonical email or E.164 phone
+  the decision and dispatch policies actually read — is a plain `Text` column, so
+  the "no raw PII at rest" non-negotiable is contradicted one column over. It needs
+  a decision (encrypt it and compare on a hash, or keep it and record the exception
+  openly), because either answer changes how those two policies read fields.
 
 **Open at GATE 2 — say these out loud, do not bury them:** no Kafka broker has
 ever been on the other end of a publish (no compose service; `live` test opt-in);
@@ -901,15 +976,20 @@ have only ever been called by `TestClient`, because no screen talks to them yet.
 **Nothing has ever been sent to a customer** (gap 15): the only transport refuses,
 so `sent: true` is unreachable over HTTP. From F9: **every contract that predates
 `0002` is un-contactable** until someone sets consent one row at a time (gap 18),
-and an `AgentDecision` **cannot be overridden or flagged** for want of a `version`
-column (gap 19). Quiet hours — the caveat F9 had to carry — are now enforced
+and an `AgentDecision` still **cannot be overridden or flagged** — the `version`
+column that blocked those routes now exists (`0f5da36`), but the routes themselves
+still do not (gap 19). Quiet hours — the caveat F9 had to carry — are now enforced
 (D10-01/D10-02), so that one is retired rather than repeated. Two gate reports in
 this project were wrong the first time and both are recorded as such: F9's first
 "MySQL gate green" carried a bad password and skipped, and F10's two MySQL rows are
 **still unrun** because no Docker daemon answered on this host. The suite builds
 tables from `Base.metadata`, so `alembic check` is the only thing that proves a
-migration matches the models. It was run for `0002` at F9; it has **not** been
-re-run since F10, which adds no migration but remains unverified all the same.
+migration matches the models: it was green on SQLite for `0003` (zero operations for
+either new `version` column, the 13 remaining diffs being pre-existing enum-length
+artefacts), and it has **never** been run against MySQL since `0002` — so `0003` is
+a revision no real database has validated. The dispatch lock is also unproven under
+concurrency, because `FOR UPDATE` is a no-op on the SQLite the suite runs on
+(gap 23).
 
 ## Non-negotiable reminders
 
