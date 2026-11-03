@@ -24,6 +24,12 @@ EventTransport = Literal["none", "kafka"]
 #: cannot reach. There is deliberately no cloud member: "no cloud LLM" is a
 #: non-negotiable, so it is unrepresentable rather than merely discouraged.
 ExtractionBackend = Literal["pattern", "ollama"]
+#: Transport a notification is sent through. ``none`` keeps the refusing
+#: stand-in, so a dispatch records an attempt and fails visibly instead of
+#: pretending a message left the building. There is no ``smtp`` member yet for
+#: the same reason ``EventTransport`` has no ``console``: a transport is added
+#: with the adapter that implements it, not ahead of it.
+NotificationTransport = Literal["none"]
 
 #: The value shipped in .env.example. Never valid in staging/production.
 #: Not a credential: production validation below refuses to start when it is
@@ -123,6 +129,24 @@ class Settings(BaseSettings):
     #: Upper bound on the document text handed to a backend, in characters.
     extraction_max_document_chars: int = Field(default=20_000, gt=0, le=200_000)
 
+    # --- notification dispatch (F10) -------------------------------------
+    notification_transport: NotificationTransport = "none"
+    #: Quiet hours, as **local wall-clock hours in the contract's own time zone**
+    #: (``Contract.timezone``), never UTC: 08:00 means 08:00 where the customer
+    #: is, which is the only reading that protects them from a call at 03:00.
+    #:
+    #: The window is half-open — ``[start, end)`` — and wraps past midnight when
+    #: ``start > end`` (the normal case: 20:00 up to, not including, 08:00).
+    #: ``end`` equal to ``start`` is refused below, because a zero-length window
+    #: would switch quiet hours off entirely while looking configured, and the
+    #: contact policy treats quiet hours as a rule rather than an option.
+    quiet_hours_start: int = Field(default=20, ge=0, le=23)
+    quiet_hours_end: int = Field(default=8, ge=0, le=23)
+    #: Dispatch attempts before a row is parked ``failed`` for an operator. The
+    #: same role ``outbox_max_attempts`` plays for a parked event row: a retry
+    #: loop has to be bounded, and a bound has to be visible.
+    notification_retry_max: int = Field(default=3, ge=0, le=20)
+
     # --- http ------------------------------------------------------------
     cors_origins: str = "http://localhost:3000"
 
@@ -179,6 +203,16 @@ class Settings(BaseSettings):
                     f"{self.outbox_lease_seconds}. A publish that outlives the lease "
                     "lets another relay reclaim the row and publish it twice."
                 )
+
+        # A zero-length window would read as "quiet hours configured" while
+        # switching them off, so the contact policy refuses the shape rather
+        # than silently sending at 03:00. ``start > end`` is the legal way to
+        # describe a window that wraps midnight.
+        if self.quiet_hours_start == self.quiet_hours_end:
+            raise ValueError(
+                "QUIET_HOURS_START and QUIET_HOURS_END must differ; use "
+                "start > end (e.g. 20 and 8) for a window that wraps midnight"
+            )
 
         # A malformed key is worse than a missing one: it fails at the first
         # encrypt rather than at start-up, which is a write path, not a boot.

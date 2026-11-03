@@ -24,6 +24,7 @@ from app.api.v1.agent import router as agent_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.contracts import router as contracts_router
 from app.api.v1.health import router as health_router
+from app.api.v1.notifications import router as notifications_router
 from app.api.v1.review import router as review_router
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
@@ -183,6 +184,7 @@ def create_app(
     app.include_router(contracts_router, prefix=app_settings.api_v1_prefix)
     app.include_router(review_router, prefix=app_settings.api_v1_prefix)
     app.include_router(agent_router, prefix=app_settings.api_v1_prefix)
+    app.include_router(notifications_router, prefix=app_settings.api_v1_prefix)
 
     @app.get("/", include_in_schema=False)
     async def root() -> dict[str, Any]:

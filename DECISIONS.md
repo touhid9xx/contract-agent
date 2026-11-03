@@ -903,3 +903,114 @@ committed together. That pairing is the milestone; extraction and review follow.
   only partly met: re-run works by posting again (appending), the other two do not
   exist. Adding a version column later means backfilling `1` on an append-only
   table, which is cheap precisely because nothing edits these rows today.
+
+## Phase 1 — F10 (notification dispatch)
+
+### D10-01 — `tzdata` becomes a runtime dependency, and quiet hours are the customer's clock
+
+- **Decision:** `backend/requirements.txt` pins `tzdata==2026.6` as a **runtime**
+  dependency. Quiet hours are evaluated by converting *now* into
+  `Contract.timezone` with `zoneinfo` and comparing the **local wall-clock hour**
+  against the half-open window `[quiet_hours_start, quiet_hours_end)`, which wraps
+  midnight when `start > end`. A zone that cannot be resolved refuses the dispatch
+  (`UNKNOWN_TIMEZONE`) instead of falling back to UTC.
+- **Why:** the previous slice deferred this step (D9-03) and cited two blockers:
+  a window check belongs immediately before a send, and `Contract.timezone` had no
+  tz database behind it. The second was verified, not assumed — on this host
+  `ZoneInfo("Europe/London")` raised `ZoneInfoNotFoundError`, because no `tzdata`
+  package and no system zone files exist on Windows. Installing `tzdata` made real
+  DST behaviour observable (`21:00Z` → `21:00` London in winter, `22:00+01:00` in
+  summer, `03:00+06:00` Dhaka), so the caveat is retired rather than repeated.
+  Wall clock, not UTC, because "do not call at 03:00" is a statement about the
+  customer's clock; evaluating it in server time would be wrong by up to fourteen
+  hours. Refusing an unresolved zone rather than assuming UTC is the same
+  fail-closed argument as the consent flags: `UTC` is a *guess* that can authorise
+  a 03:00 call, while a refusal costs one retry and is recoverable.
+- **Trade-off:** the deployment now ships tz data, and it is pinned, so a customer's
+  quiet window cannot move under a silent tz refresh. Two sub-hours offsets that
+  the IANA database changes at short notice (as some jurisdictions have) require a
+  dependency bump rather than a config change. The window is also global rather
+  than per tenant: one deployment, one `[20:00, 08:00)`, so two customers with
+  genuinely different expectations cannot both be expressed.
+
+### D10-02 — Quiet hours **defer** the row; they do not refuse it
+
+- **Decision:** when a dispatch reaches the quiet-hours check, the worker moves
+  `Notification.scheduled_at` to the next window opening and returns
+  `DispatchOutcome(sent=False, deferred_until=…)`. The route answers `200`, the row
+  keeps `status=pending` and its slot, and the transport is never reached. A future
+  `scheduled_at` is a separate, earlier refusal (`NOT_YET_DUE`) that changes nothing.
+- **Why:** these are two different facts and a caller acts on them differently.
+  "Not yet" is the normal, expected outcome of a policy the customer benefits from —
+  it needs no operator, and a `409` would make a compliant system look broken for
+  the eight hours a day it is not allowed to send. "Refused" means a human has to do
+  something. Collapsing them into one status would also lose the information the
+  caller needs to reschedule, which is exactly `deferred_until`. Deferral happens
+  before the transport is consulted, so quiet hours cannot be bypassed by a
+  provider that would have accepted the message.
+- **Trade-off:** nothing loops the deferred row. There is no scheduler in this repo
+  (the outbox relay polls events, not notifications), so a deferred row is resent
+  only when something dispatches it again — the same "operator-initiated" shape as
+  DLQ replay (D5-03). A day-long quiet window therefore means a `pending` row that
+  nobody retries automatically; recorded as a gap rather than implied to be a queue.
+
+### D10-03 — Consent is re-read at send time, never trusted from the decision
+
+- **Decision:** `dispatch_notification` calls `assert_may_contact` again against the
+  **contract as it is now**, and `build_notification` calls the same function. One
+  definition, two call sites. A decision row's channel is used only to name the
+  route; whether that route is still permitted is asked fresh.
+- **Why:** an `AgentDecision` is append-only history. A decision made yesterday
+  records that a channel *was* permitted then; a customer who telephoned this morning
+  and asked not to be contacted has changed the contract row and nothing else. A
+  sender that trusted the decision would keep emailing someone who opted out, and the
+  failure would be invisible in the decision table — the record would still look
+  correct. Two call sites sharing one gate is the only structure that guarantees the
+  second call cannot be weaker than the first.
+- **Trade-off:** a send can now fail on grounds the decision never mentioned, so the
+  refusal vocabulary is wider than F9's (`CHANNEL_NOT_CONSENTED` is distinct from
+  `NO_CONSENT`, because "withdrew one channel" and "never consented to anything" are
+  different operator tasks). The tests pin the gate *order*, since a contract with
+  several problems is told about exactly one of them.
+
+### D10-04 — `NotificationTransport` has exactly one member: `none`
+
+- **Decision:** `notification_transport: Literal["none"] = "none"`, and
+  `build_sender` returns `UnavailableSender` unconditionally. That stand-in reports
+  `available = False`, and a dispatch against it raises `SENDER_UNAVAILABLE`, having
+  already recorded the attempt on the row. There is no `smtp`/`sms`/`voice` member.
+- **Why:** the same choice `EventPublisher` (D4-03) and `DocumentExtractor` (D7-03)
+  already made, for the same reason: a literal naming a transport that does not exist
+  is a lie a config file can tell. A no-op sender would be worse than a refusing one
+  — it would let the state machine reach `sent` with nothing delivered, which is
+  precisely the row that looks like contact happened. The seam is a `Protocol`
+  (`MessageSender`) plus a `build_sender(settings)` factory, so a real adapter is an
+  addition, not a rewrite.
+- **Trade-off:** **`sent: true` is unreachable through HTTP in this build.** Every
+  route-level dispatch is either a `409 SENDER_UNAVAILABLE` or a quiet-hours
+  deferral, and the send path is only exercised by calling `dispatch_notification`
+  with an injected fake. So "F10 sends notifications" is false; what F10 delivers is
+  a writer, an idempotent slot, a state machine and an enforced contact policy.
+
+### D10-05 — No `Notification.version` lock: gap 21, not a migration mid-slice
+
+- **Decision:** `Notification` stays without a `version` column and without
+  `__mapper_args__["version_id_col"]`. Concurrent dispatches of the same pending row
+  are not serialised. The mitigation shipped instead is the unique
+  `idempotency_key` — derived from `(contract_id, template, scheduled_date)` only,
+  never from a timestamp — which is passed to the transport so a real provider can
+  deduplicate.
+- **Why:** every other mutable row here (`Contract`, `ExtractedField`, `Escalation`)
+  is optimistic-locked, so this is a known gap rather than an oversight, and it is
+  the right one to record: the idempotency key is the *correct* dedupe primitive for
+  a send (a provider dedupes on it; a version column would only make one of two
+  racers lose), so adding a lock would not close the double-send hole on its own.
+  Adding `version` is also a schema change plus a backfill, and the slice that needs
+  it (a dispatcher loop, or an operator "resend") does not exist yet.
+- **Trade-off:** two simultaneous `POST /notifications/{id}/dispatch` calls can each
+  reach the transport and each increment `attempts`, so a provider without idempotency
+  support would double-send. Recorded as gap 21, alongside the plaintext
+  `ExtractedField.normalized_value` (**gap 20**) that `_recipient_for` reads — the
+  recipient is taken from an unencrypted column while `raw_value` beside it is
+  Fernet-ciphertext, which is a PII-at-rest inconsistency this slice inherits and
+  does not fix.

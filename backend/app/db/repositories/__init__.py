@@ -12,6 +12,11 @@ from app.db.repositories.audit import AuditLogRepository
 from app.db.repositories.base import MissingTenantContextError, TenantScopedRepository
 from app.db.repositories.contracts import ContractRepository, contract_for_operator
 from app.db.repositories.fields import ExtractedFieldRepository
+from app.db.repositories.notifications import (
+    DEFAULT_NOTIFICATION_LIMIT,
+    MAX_NOTIFICATION_LIMIT,
+    NotificationRepository,
+)
 from app.db.repositories.outbox import (
     DeadLetterReplay,
     OutboxRepository,
@@ -23,6 +28,8 @@ from app.db.repositories.outbox import (
 from app.db.repositories.users import IdentityDirectory, UserRepository, normalize_email
 
 __all__ = [
+    "DEFAULT_NOTIFICATION_LIMIT",
+    "MAX_NOTIFICATION_LIMIT",
     "AgentDecisionRepository",
     "AuditLogRepository",
     "ContractRepository",
@@ -30,6 +37,7 @@ __all__ = [
     "ExtractedFieldRepository",
     "IdentityDirectory",
     "MissingTenantContextError",
+    "NotificationRepository",
     "OutboxRepository",
     "TenantScopedRepository",
     "UserRepository",

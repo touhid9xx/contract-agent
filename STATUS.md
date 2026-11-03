@@ -4,10 +4,12 @@ Last updated: Phase 1 (real foundation) — **F1 committed (`f0e1eef`), F2 commi
 (`331a7b4`) plus one follow-up fix to the MySQL test harness (`a79d893`), F3
 committed (`8e6b927`) plus the bootstrap-path doc (`908f50d`), F4 committed
 (`b425ea7`), F5 committed (`21daffc`), F6 committed (`0c2d734`), F7
-committed (`90fd0e5`), F8 committed (`8c5e09f`), and F9 committed (`50dd0cd`) —
-all five steps of the pipeline slice landed (ingestion, the first real outbox
-producer, field extraction, human review, channel selection). GATE 2 now awaits
-human sign-off.**
+committed (`90fd0e5`), F8 committed (`8c5e09f`), F9 committed (`50dd0cd`), and F10
+committed (`PENDING`) — all six steps of the pipeline slice landed (ingestion, the
+first real outbox producer, field extraction, human review, channel selection,
+notification dispatch). F10 closes the last structural gap in the arrow chain but
+**does not contact anybody**: it ships a row, a state machine and a contact policy,
+and no transport. GATE 2 now awaits human sign-off.**
 
 ## Phase history
 
@@ -15,8 +17,8 @@ human sign-off.**
 | --- | --- |
 | Phase 0 — mocked demo | ✅ built, verified |
 | GATE 1 — human visual approval | ✅ **approved** ("I'm happy with demo functions and look") |
-| Phase 1 — real foundation | 🔄 in progress (F1 ✅, F2 ✅, F3 ✅, F4 ✅, F5 ✅, F6 ✅, F7 ✅, F8 ✅, F9 ✅) |
-| GATE 2 — foundation verification | ⏳ pending human sign-off; every automated check is green |
+| Phase 1 — real foundation | 🔄 in progress (F1 ✅, F2 ✅, F3 ✅, F4 ✅, F5 ✅, F6 ✅, F7 ✅, F8 ✅, F9 ✅, F10 ✅) |
+| GATE 2 — foundation verification | ⏳ pending human sign-off; every automated check except the MySQL row (see F10) is green |
 
 ## F1 — Repo & infra ✅
 
@@ -484,6 +486,98 @@ never a value; a re-run appends; a viewer cannot decide; another tenant's contra
 is `404` and its decisions invisible. They do **not** prove the decision reaches
 anyone — there is no dispatcher, no notification row and no screen, so these routes
 have only ever been called by `TestClient`.
+
+## F10 — Notification dispatch ✅ (with one gate unrun — see below)
+
+Step 6, and the arrow F9 left dangling. F9 produced a decision naming a channel;
+`Notification` — a table since F2 — still had **no writer at all**. This slice adds
+the writer, the state machine and the contact policy in front of it. It also
+retires the caveat F9 had to carry: **quiet hours are now enforced**, because
+`tzdata` made `Contract.timezone` resolvable and the window is checked immediately
+before the transport is reached.
+
+| Area | Detail |
+| --- | --- |
+| Policy | `app/workers/dispatch.py` — milestone selection (`T-60` / `T-30` / `T-14`, innermost due wins), the idempotency key, quiet hours, and one nine-step gate order. `blocks_pipeline`, `CLOSED_CONTRACT_STATUSES` and the consent refusals are **imported from F9, not restated** — a second copy is how two policies start disagreeing about whether a customer may be contacted |
+| Consent, re-read | `assert_may_contact` runs at *plan* time and again at *send* time against the current contract row. An `AgentDecision` is history: a customer who withdrew consent an hour ago must not be emailed by a decision made yesterday (D10-03) |
+| Quiet hours | Evaluated as **local wall clock in `Contract.timezone`** via `zoneinfo` + `tzdata` (`[20:00, 08:00)` by default, half-open, wrapping midnight). DST is handled by doing the arithmetic on local time and converting to UTC once, so a transition moves the *instant*, not the hour the customer is called. An unresolvable zone refuses (`UNKNOWN_TIMEZONE`) rather than assuming UTC — a guess can authorise a 03:00 call (D10-01) |
+| Deferral, not refusal | Inside the window the row keeps its slot, keeps `pending`, and `scheduled_at` moves to the window opening; the response is `200` with `deferred_until` and the transport is never reached (D10-02). A future `scheduled_at` is the separate `NOT_YET_DUE` `409` |
+| Transport seam | `MessageSender` protocol + `UnavailableSender` + `build_sender(settings)`, mirroring `EventPublisher` and `DocumentExtractor`. `notification_transport` has **exactly one member, `none`**, so the stand-in refuses instead of marking a row `sent` with nothing delivered (D10-04) |
+| Routes | `GET /api/v1/notifications` (filters `status`/`channel`/`contract_id`, bounded 1–200, viewer allowed — the row carries no recipient), `POST /api/v1/notifications` (schedule from the newest decision, or a `decision_id` the caller names; `409 NOTIFICATION_EXISTS` on a taken slot), `POST /{id}/dispatch`, `POST /{id}/retry` (`409 NOT_FAILED`) |
+| Repository | `app/db/repositories/notifications.py` — `for_contract`, `recent` (status/channel filters), `find_slot` (the read side of the unique `(contract_id, template, scheduled_date)` slot), `create`. Tenant-stamped from the base class; another tenant's id is `404` |
+| Refusals | Fourteen dispatch codes, one shape: the F9 vocabulary (`CONTRACT_CLOSED`, `CONTACT_REFUSED`, `NO_CONSENT`, `PIPELINE_BLOCKED`) plus `NOT_PENDING`, `NOT_YET_DUE`, `NOT_IN_WINDOW`, `MISSING_END_DATE`, `UNKNOWN_TIMEZONE`, `NEEDS_REVIEW`, `CHANNEL_NOT_CONSENTED`, `ATTEMPTS_EXHAUSTED`, `SENDER_UNAVAILABLE`, `RECIPIENT_UNAVAILABLE`. `DispatchRefusedError` subclasses `DecisionRefusedError` so both map through **one** envelope (`refusal()` in `api/v1/agent.py` became public rather than growing a second vocabulary) |
+| PII | The recipient is resolved **last**, after every gate, through a callable — so a refusal never puts a value in the frame. `OutgoingMessage.recipient` is `repr=False`, and no test-visible response echoes it. `DISPATCH_POLICY_VERSION` is documentation: `Notification` has no `prompt_version` column to store it in |
+| Config | `notification_transport`, `quiet_hours_start` / `quiet_hours_end` (0–23, `start == end` refused at startup because a zero-length window would read as "configured" while switching the rule off), `notification_retry_max` |
+| Dependency | `tzdata==2026.6` **added to `backend/requirements.txt`**, pinned and commented. This is a new runtime dependency, not a dev extra: without it `ZoneInfo("Europe/London")` raises on Windows (verified, not assumed) |
+| Tests | `test_notifications.py` (55): every refusal code and the gate order; quiet-hours deferral across midnight **and across a DST transition** (summer "08:00 local" asserts `07:00Z`); `do_not_contact` beating a full grant; consent withdrawn between schedule and dispatch; idempotent slot; viewer can list but not dispatch; attempt exhaustion parking the row `failed`; `SENT`/`FAILED`/`PENDING` after a transport failure; no recipient value in any response or stored row |
+
+### What F10 does **not** do — state it, do not bury it
+
+- **Nothing is sent.** `build_sender` returns the refusing stand-in, so
+  **`sent: true` is unreachable through the API**: every HTTP dispatch is either
+  `409 SENDER_UNAVAILABLE` or a quiet-hours deferral. The send path is exercised
+  only by calling `dispatch_notification` with an injected fake in tests. "F10 sends
+  notifications" is false until an adapter exists (gap 15).
+- **No scheduler.** A deferred row is retried only when something dispatches it
+  again — the outbox relay polls *events*, not notifications. Same
+  operator-initiated shape as DLQ replay (D5-03, gap 22).
+- **No row lock.** `Notification` has no `version` column, so two concurrent
+  dispatches are not serialised; the unique `idempotency_key` is passed to the
+  transport for provider-side dedupe (D10-05, gap 21).
+- **No content rendering and no outbox event.** `template` names the milestone; the
+  body is the transport's job. A send emits no `contract.events` message, so nothing
+  downstream learns that contact happened.
+
+### Verification actually run (F10)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Full suite, SQLite | `pytest tests` (`MYSQL_TEST_URL` cleared) | **388 tests, 0 failures, 4 skipped** |
+| Lint | `ruff check app tests` | **All checks passed** |
+| Format | `ruff format --check app tests` | **69 files already formatted** |
+| Type check | `mypy app` (strict) | **clean, 47 source files** |
+| Security lint | `bandit -c pyproject.toml -r backend/app` | **0 issues** |
+| **Migration, real MySQL** | `alembic check` at head | **NOT RUN — Docker daemon was not running on this host.** F10 adds no migration, so `0002 (head)` is unchanged from F9, but this row is unrun rather than green and must not be cited as verified |
+| **Full suite, real MySQL** | `pytest` with `MYSQL_TEST_URL` on `:3307` | **NOT RUN — same cause.** Expect `388 … skipped=1`; confirm `skipped="1"`, because a skip is not a pass (this is the mistake F9's first report made) |
+| Commit gate | `pre-commit run --all-files` | see the commit that carries this file |
+
+The F9→F10 delta is **+46 SQLite tests** (`388` vs `342`). The two MySQL rows are
+left explicitly unrun rather than filled in from expectation: the harness that
+proves `SKIP LOCKED` and the real ENUM columns needs a server, and no server was
+reachable.
+
+#### Five defects the tests caught in my own work
+
+1. **Quiet-hours assertions read the wrong `Settings`.** Two tests compared against
+   `settings.quiet_hours_end` (the default `8`) while the fixture ran a tuned window
+   whose end was `12`. The policy was right and the assertion was wrong. Fixed with a
+   `quiet_window` fixture that owns the tuned pair and feeds both the client and the
+   assertions.
+2. **A consent-withdrawal test constructed a case it did not mean.** Withdrawing the
+   *only* consent flag empties `consent_channels`, so the earlier `NO_CONSENT` code
+   fires correctly and `CHANNEL_NOT_CONSENTED` was unreachable — the test now also
+   grants SMS, so withdrawal of email leaves a non-empty set and exercises the narrow
+   gate.
+3. **A DST assertion contradicted its own comment.** The comment said "08:00 BST is
+   07:00 UTC"; the assertion said `08:00`. The comment was right.
+4. **A milestone boundary off-by-one.** `2026-06-01` is exactly `end_date - 30`, and
+   `milestone_for`'s window is inclusive at the edge, so that day is legitimately
+   `T-30`. Replaced with a date genuinely outside it, asserted as a full
+   `(template, scheduled_date)` tuple so both halves are pinned.
+5. **Deprecated `datetime.utcnow()`** in one test (gap 10, carried since F2). Replaced
+   with the existing `app.db.base.utc_now()` helper; `utcnow` now appears nowhere in
+   `backend/`.
+
+#### One unexplained editor warning, stated as unexplained
+
+Pylance reports ~117 `Mapped`/attribute errors in `test_notifications.py` while
+`test_agent_decisions.py`, `test_review.py`, `test_contracts.py` and
+`test_contract_fields.py` report **zero** with the identical imports, `__future__`
+annotations and `Mapped` usage. A scratch module importing the same set resolves
+cleanly, so it is not a poisoned import; it looks like per-file inference bail-out on
+a ~1300-line module against SQLAlchemy's plugin-less stubs. `mypy` — the actual gate,
+scoped to `backend/app/` in `.pre-commit-config.yaml` — does not analyse
+`backend/tests/` and is clean. Recorded as **unproven**, not as fixed.
 
 ## Verification actually run (F2)
 

@@ -32,6 +32,15 @@ alembic==1.20.1
 argon2-cffi==25.1.0
 PyJWT==2.10.1
 
+# --- Time zones (F10) ---
+# tzdata supplies the IANA database that `zoneinfo` reads. It is not optional:
+# a Windows image ships no system zone files, so `ZoneInfo("Europe/London")`
+# raises `ZoneInfoNotFoundError` there and the quiet-hours check in the dispatch
+# policy cannot resolve the contract's own zone. Pure Python, data only, no
+# compiled extension. It is pinned like any other dependency so a silent tz
+# refresh cannot change when a customer is called.
+tzdata==2026.6
+
 # --- Event transport (F4) ---
 # kafka-python is the outbox relay's transport. It is pure Python (no compiled
 # extension), so it installs on CPython 3.14 without a wheel hunt, and its

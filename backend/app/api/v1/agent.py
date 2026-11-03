@@ -117,13 +117,18 @@ def _view(decision: AgentDecision) -> AgentDecisionView:
     )
 
 
-def _refusal(exc: DecisionRefusedError) -> HTTPException:
+def refusal(exc: DecisionRefusedError) -> HTTPException:
     """Turn a policy refusal into a 409 that says *why* in machine-readable form.
 
     All five refusals share one status code because they are all "this contract
     cannot be decided on right now", but the ``code`` distinguishes them: the
     Phase-0 UI already branches on ``PIPELINE_BLOCKED``, and an operator needs to
     know whether to review a field, record consent, or chase a contact detail.
+
+    Public rather than module-private because the dispatch router maps its own
+    refusals through the identical envelope — :class:`~app.workers.dispatch.
+    DispatchRefusedError` subclasses the decision error, so one helper covering
+    both is what stops the two routers from drifting into two error vocabularies.
     """
     return HTTPException(
         status_code=status.HTTP_409_CONFLICT,
@@ -201,7 +206,7 @@ def decide_channel(
             reason=exc.code,
             **exc.details,
         )
-        raise _refusal(exc) from None
+        raise refusal(exc) from None
 
     stored = AgentDecisionRepository(session, principal.tenant_id).add(decision)
     session.commit()
