@@ -790,3 +790,116 @@ committed together. That pairing is the milestone; extraction and review follow.
   access is logged too. It does require the deployment to have at least one
   operator, so an installation staffed only by viewers accumulates blocked
   contracts.
+
+## Phase 1 — F9 (agent channel decision)
+
+### D9-01 — Consent is a column set on `Contract`, and one `PUT` writes it
+
+- **Decision:** `do_not_contact`, `consent_email`, `consent_sms`, `consent_voice`
+  and `consent_updated_at` are columns on `contracts` (migration `0002`), not a
+  `consent` side table. All three flags default to `false` in the model *and* as
+  the migration's `server_default`. `PUT /api/v1/contracts/{id}/consent` is the
+  only route that writes them: a full-state replacement, version-checked, audited
+  through `AuditLogRepository`, and a no-op when the body matches what is stored.
+- **Why:** the column set is closed — `Channel` has three members — so a boolean
+  per channel is queryable and cannot be typo'd into a channel that does not
+  exist, whereas a side table buys a join plus a uniqueness constraint to become
+  equally safe without ever being easier to read. Fail-closed defaults mean a
+  contract that was ingested and never consented to cannot be contacted by any
+  route; backfilling `true` in `0002` would have granted consent nobody gave.
+  `PUT` rather than `PATCH` because consent is a *state*, not a stream of deltas:
+  a partial update leaves a caller unable to express "this channel is withdrawn"
+  without knowing the previous value, and a stale body can silently resurrect a
+  grant. `do_not_contact` is its own column rather than a fourth channel flag
+  because it is a veto, not a route — it has to be able to overrule a mistaken
+  grant, which is what `may_contact` and the selector's gate order are for.
+- **Trade-off:** every contract that existed before `0002` is un-contactable until
+  an operator records consent, so the migration carries a one-off data task rather
+  than a silent policy change. The version check runs **before** the no-op
+  short-circuit, so a caller holding a stale version gets a `409` even when its
+  body would have changed nothing — the alternative reports success against a
+  snapshot the caller no longer holds, which is precisely the lost update the
+  version column exists to catch.
+
+### D9-02 — Channel selection is deterministic, not model-backed
+
+- **Decision:** `app.workers.decision` picks the channel by applying the fixed
+  `CHANNEL_PRIORITY` (email, then SMS, then voice) to
+  `contract.consent_channels` intersected with the channels that have a usable
+  value. No prompt, no model call, no network. The stored row records
+  `llm_model="deterministic"` and `prompt_version="policy.channel.1"`.
+- **Why:** the same reason D7-03 chose the pattern extractor — no live Ollama has
+  ever answered in this repository, so a selector that depended on one could not
+  be tested here, and "the channel is whatever the model said" is not a rule an
+  operator can predict or a reviewer can check. A second, sharper reason applies
+  to the provenance columns: `AgentDecision` exists to record *what produced this
+  recommendation*, so writing `qwen2:7b` for a decision no model made would be a
+  fabricated row in the table whose whole purpose is provenance. Priority order is
+  fixed data rather than a score because a score invites tuning before anything
+  measures the outcome.
+- **Trade-off:** the policy cannot weigh context a model could — a customer who
+  has never answered email still gets email first. Changing the order is a code
+  change plus a `CHANNEL_POLICY_VERSION` bump, not a config value; that is
+  deliberate, because the priority by which a customer is contacted is a product
+  decision rather than a deployment knob. A model-backed selector can genuinely be
+  unsure, and it is the slice that gets to set `needs_review` (D9-05).
+
+### D9-03 — Quiet hours belong to dispatch, not to channel selection
+
+- **Decision:** `select_channel` reads consent and opt-out and nothing about time.
+  `Contract.timezone` is not consulted. The quiet-hours window is checked
+  immediately before a message is sent, in the dispatch slice.
+- **Why:** the two are different kinds of input. Consent decides *whether* a
+  channel may be used and is stable for days; quiet hours decide *when* a message
+  may leave and are stale within hours. A decision made at 14:00 that will be sent
+  at 09:00 the next morning would have been validated against the wrong instant,
+  so checking the clock during selection produces a row that looks compliant and
+  is not. It is also unimplementable here as things stand: D6-03 kept
+  `Contract.timezone` a regex-validated string with no tz database at runtime, so
+  "is it 21:30 in Asia/Dhaka" has no code path yet.
+- **Trade-off:** a decision may name a channel that must not be used at the moment
+  it is dispatched, so the rule has to be enforced by the sender. Until that slice
+  exists, nothing enforces quiet hours at all — recorded as a gap in STATUS.md
+  rather than implied to be covered by the consent gate.
+
+### D9-04 — Every refusal is a `409` with a stable `code`, and writes nothing
+
+- **Decision:** `CONTRACT_CLOSED`, `PIPELINE_BLOCKED`, `CONTACT_REFUSED`,
+  `NO_CONSENT` and `NO_CONTACT_VALUE` all return `409` from
+  `POST /agent/decisions`, distinguished by `detail.code`. A refusal creates no
+  `AgentDecision` row and no `AuditLog` row, and is logged at **info** with the
+  contract id and the reason.
+- **Why:** these are not five different HTTP semantics, they are one — "this
+  contract cannot be decided on right now" — so inventing a status code per reason
+  would encode policy in the transport. The `code` is what a caller can act on, and
+  the Phase-0 UI already branches on `PIPELINE_BLOCKED`, so matching that vocabulary
+  keeps the eventual screen a straight port. No row is written because an
+  `AgentDecision` is an *assertion that a channel was chosen*; absence is the
+  record of a refusal, and a row with a null channel would make every
+  `for_contract` reader handle a shape that means "nothing happened". Info rather
+  than warning because every closed contract and every opted-out customer takes
+  this path — logging it as a fault would train operators to ignore the log.
+- **Trade-off:** there is no queryable history of refusals, so "how often are
+  contracts blocked, and on what" is answerable only from logs. A slice that wants
+  that as data needs its own table; the alternative — overloading
+  `AgentDecision` — would make the decision history ambiguous for every reader.
+
+### D9-05 — `needs_review` is always `false`; override and flag-review wait (gap 19)
+
+- **Decision:** `build_decision` sets `needs_review=False` unconditionally and
+  stores no overridden/flagged state. Re-running the policy for a contract appends
+  a second `AgentDecision` rather than editing the first. There is no override or
+  flag-review route in this slice.
+- **Why:** a deterministic selector cannot be *uncertain* — it either finds a
+  permitted channel or raises. Setting the flag to mean "a model would have had
+  more to say" would make it permanently `true` and therefore carry no information,
+  while a reader would reasonably treat `true` as "a human should look at this".
+  Override and flag-review are operator *edits to an existing decision*, and
+  `AgentDecision` has no `version` column, so an optimistic-locked edit has nothing
+  to lock against; two operators resolving the same flagged decision would silently
+  overwrite each other. That is a migration plus a UI, so it belongs to the slice
+  that needs it rather than to this one.
+- **Trade-off:** the demo screens' re-run, override and flag-review affordances are
+  only partly met: re-run works by posting again (appending), the other two do not
+  exist. Adding a version column later means backfilling `1` on an append-only
+  table, which is cheap precisely because nothing edits these rows today.

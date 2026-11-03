@@ -6,6 +6,7 @@ import uuid
 from datetime import date, datetime
 
 from sqlalchemy import (
+    Boolean,
     Date,
     DateTime,
     ForeignKey,
@@ -20,6 +21,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin
 from app.db.enums import (
+    Channel,
     ContractSource,
     ContractStatus,
     FieldName,
@@ -78,6 +80,26 @@ class Contract(Base, TimestampMixin):
     #: quiet-hours window checked deterministically before any dispatch.
     timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="UTC")
 
+    #: Standing instruction to make no contact at all, whatever consent exists.
+    #: Separate from the per-channel flags below because it is a veto, not a
+    #: choice of route: an opt-out must survive someone re-granting consent by
+    #: mistake, so the decision policy checks it first and refuses outright.
+    do_not_contact: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    #: Per-channel consent, one column each rather than a JSON blob: the column
+    #: set is closed (``Channel`` has three members) and a boolean is queryable,
+    #: index-friendly and impossible to typo into a channel that does not exist.
+    #: All three default to ``False`` — consent is opt-in, so a contract ingested
+    #: but never consented to cannot be contacted by any route (fail closed).
+    consent_email: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    consent_sms: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    consent_voice: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    #: When consent was last recorded or revoked, so "was this in force at the
+    #: time?" is answerable without replaying the audit log.
+    consent_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=False), nullable=True
+    )
+
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_by: Mapped[uuid.UUID | None] = mapped_column(GUID(), nullable=True)
 
@@ -88,6 +110,35 @@ class Contract(Base, TimestampMixin):
     #: Declarative directive, not shared state: SQLAlchemy reads this dict off the
     #: class body and copies it, so it is a per-class constant, not a mutable default.
     __mapper_args__ = {"version_id_col": version}  # noqa: RUF012
+
+    @property
+    def consent_channels(self) -> set[Channel]:
+        """The channels this customer has granted consent for, ignoring opt-out.
+
+        Spelled out one flag at a time rather than looked up in a mapping: the
+        column set is closed, and an explicit list is what a mypy run can check
+        against the columns that actually exist.
+        """
+        granted: set[Channel] = set()
+        if self.consent_email:
+            granted.add(Channel.EMAIL)
+        if self.consent_sms:
+            granted.add(Channel.SMS)
+        if self.consent_voice:
+            granted.add(Channel.VOICE)
+        return granted
+
+    @property
+    def may_contact(self) -> bool:
+        """Whether any channel at all is permitted.
+
+        Opt-out wins over consent: a ``do_not_contact`` contract is not
+        contactable even if every channel flag is set, because the flag is a
+        standing instruction rather than an expired permission. The decision
+        policy refuses outright instead of selecting a channel and relying on the
+        sender to suppress it later.
+        """
+        return not self.do_not_contact and bool(self.consent_channels)
 
 
 class ExtractedField(Base, TimestampMixin):

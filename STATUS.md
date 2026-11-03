@@ -4,9 +4,10 @@ Last updated: Phase 1 (real foundation) — **F1 committed (`f0e1eef`), F2 commi
 (`331a7b4`) plus one follow-up fix to the MySQL test harness (`a79d893`), F3
 committed (`8e6b927`) plus the bootstrap-path doc (`908f50d`), F4 committed
 (`b425ea7`), F5 committed (`21daffc`), F6 committed (`0c2d734`), F7
-committed (`90fd0e5`), and F8 committed (`8c5e09f`) — all four steps of the
-pipeline slice landed (ingestion, the first real outbox producer, field
-extraction, human review). GATE 2 now awaits human sign-off.**
+committed (`90fd0e5`), F8 committed (`8c5e09f`), and F9 committed (`PENDING`) —
+all five steps of the pipeline slice landed (ingestion, the first real outbox
+producer, field extraction, human review, channel selection). GATE 2 now awaits
+human sign-off.**
 
 ## Phase history
 
@@ -14,7 +15,7 @@ extraction, human review). GATE 2 now awaits human sign-off.**
 | --- | --- |
 | Phase 0 — mocked demo | ✅ built, verified |
 | GATE 1 — human visual approval | ✅ **approved** ("I'm happy with demo functions and look") |
-| Phase 1 — real foundation | 🔄 in progress (F1 ✅, F2 ✅, F3 ✅, F4 ✅, F5 ✅, F6 ✅, F7 ✅, F8 ✅) |
+| Phase 1 — real foundation | 🔄 in progress (F1 ✅, F2 ✅, F3 ✅, F4 ✅, F5 ✅, F6 ✅, F7 ✅, F8 ✅, F9 ✅) |
 | GATE 2 — foundation verification | ⏳ pending human sign-off; every automated check is green |
 
 ## F1 — Repo & infra ✅
@@ -416,6 +417,74 @@ routes have only ever been called by `TestClient` (gap 15). Nor is anything yet
 *consuming* `approved` fields: a field can now become approved and then nothing
 happens, because there is no agent-decision or notification slice yet.
 
+## F9 — Agent channel decision + consent ✅
+
+Step 5, and the first arrow after review. F8 made `approved` reachable and then
+nothing happened (gap 15): the decision that turns an approved contact value into
+a channel did not exist. This slice adds it, and with it the first writer of
+`AgentDecision` — a table that had existed since F2 with no route, worker or
+service touching it.
+
+It also had to add a schema before it could add a rule. The non-negotiable "no
+channel switch that bypasses consent, opt-out or quiet hours" had **nothing in the
+database to enforce it against**: no consent flag, no opt-out, no quiet-hours
+window. Migration `0002` and the five `contracts` columns exist because of that,
+not as a preference.
+
+| Area | Detail |
+| --- | --- |
+| Consent schema | `Contract.do_not_contact`, `consent_email`, `consent_sms`, `consent_voice`, `consent_updated_at`; `consent_channels` and `may_contact` properties. **All three flags default to `false` in the model and as the migration's `server_default`** — a `true` backfill would grant consent nobody gave (D9-01). Opt-out is a separate column because it is a veto, not a channel choice |
+| Migration | `0002_contract_consent.py`, hand-written like `0001`. It is the first revision added to the chain since the baseline, and the integration fixture's `downgrade base` → `upgrade head` now exercises it in both directions on real MySQL |
+| Consent route | `PUT /api/v1/contracts/{id}/consent` — full-state replacement (a partial `PATCH` cannot express a withdrawal), carries the `version` the caller read, `409` whose body holds the **current** consent state, one `AuditLog` row when something changed, and a no-op when nothing did. The version check runs **before** the no-op short-circuit, so a stale body is never reported as success |
+| Policy | `app/workers/decision.py` — candidate set is `contract.consent_channels` ∩ channels with an approved contact value, then the fixed `CHANNEL_PRIORITY` (email → SMS → voice). `blocks_pipeline` is **read, not re-implemented**: a field awaiting review or rejected is a hard stop, and there is exactly one definition of that rule |
+| Refusals | Five stable codes — `CONTRACT_CLOSED`, `PIPELINE_BLOCKED`, `CONTACT_REFUSED`, `NO_CONSENT`, `NO_CONTACT_VALUE` — all `409`, distinguished by `detail.code`, all writing **nothing** and logging at info. Gate order is fixed and tested, because it decides which reason a contract with several problems is told about (D9-04) |
+| Provenance | `prompt_version="policy.channel.1"` and `llm_model="deterministic"`: the column set records *what produced the recommendation*, so naming a model for a decision no model made would fabricate the one fact the table exists to carry (D9-02). `needs_review` is always `false` — a deterministic selector cannot be unsure (D9-05) |
+| Routes | `POST /api/v1/agent/decisions` (201, appends rather than updates, admin/operator) and `GET /api/v1/agent/decisions` (viewer allowed — no customer value is in the row; cross-tenant `contract_id` returns an empty list rather than confirming an id exists) |
+| Repository | `app/db/repositories/agent.py` — `for_contract`, `recent`, `latest_for_contract`, `create`, tenant-stamped from the base class, ordered `created_at DESC, id DESC` so a re-run's history reads newest first |
+| Error envelope | `main.py`'s handler now also honours a route-raised `code`, so a policy refusal arrives as `{code, message, details}`. Every pre-existing raise is unchanged — the F8 `details` regression test and the F6 ingestion `409` remain green |
+| Tests | `test_agent_decisions.py` (44): priority order; consent subsetting; each refusal path; opt-out beating a full grant; nothing value-shaped in `reasoning` or in `GET`; `409` carries the winning consent state; one audit row per consent change; identical resubmission writes nothing; stale-but-no-change is still a conflict; tenant isolation; viewer cannot decide; unauthenticated rejected |
+
+Two limits are stated rather than implied. **Quiet hours are not enforced
+anywhere** (gap 18, D9-03): the window is a timing input checked immediately
+before sending, and `Contract.timezone` has no tz database behind it at runtime
+(D6-03). And **nothing sends** (gap 15): a decision now names a channel, but there
+is no dispatcher, so the pipeline still stops one arrow short of a notification.
+
+### Verification actually run (F9)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Full suite, no MySQL | `pytest tests` (SQLite, `MYSQL_TEST_URL` cleared) | **342 tests, 0 failures, 4 skipped** (JUnit: `tests=342 failures=0 errors=0 skipped=4`) |
+| Full suite, real MySQL 8.4 | `pytest tests` with `MYSQL_TEST_URL` on `:3307` | **342 tests, 0 failures, 1 skipped** (JUnit: `tests=342 … skipped=1`) |
+| Migration, real MySQL | `alembic current` / `alembic check` at head, plus the integration fixture's `downgrade base` → `upgrade head` | **`0002 (head)`**, **"No new upgrade operations detected"**, columns present as `tinyint(1) NOT NULL DEFAULT 0` |
+| Type check | `mypy app` (strict) | **clean, 44 source files** |
+| Lint | `ruff check app tests` | **All checks passed** |
+| Format | `ruff format --check app tests` | **68 files already formatted** |
+| Security lint | `bandit -c pyproject.toml -r backend/app` | **0 issues** |
+| Commit gate | `pre-commit run --all-files` | **16 hooks passed** (17th, `forbid submodules`, not applicable) |
+
+The F8→F9 delta is **+44 tests on both databases** — the whole of
+`test_agent_decisions.py`. The two runs differ by exactly the three real-MySQL
+integration tests and the opt-in `live` Kafka test, unchanged from F8.
+
+The migration row is worth reading twice, because it is the gate that does **not**
+run by default and the one I had wrongly reported as green. The suite builds its
+tables from `Base.metadata`, so the new columns work in tests while `0002` itself
+could be broken; `alembic check` against the real server is what proves otherwise,
+and the integration fixture only caught it because it runs the migration chain
+rather than `create_all`.
+
+#### What the decision tests prove and what they do not
+
+They prove the **rules**: a channel is chosen only from consented channels that
+also have an approved value; an opt-out refuses even when every consent flag is
+set; a refusal writes no decision row and no audit row; a blocked pipeline is
+reported as blocked rather than as a consent gap; reasoning names channels and
+never a value; a re-run appends; a viewer cannot decide; another tenant's contract
+is `404` and its decisions invisible. They do **not** prove the decision reaches
+anyone — there is no dispatcher, no notification row and no screen, so these routes
+have only ever been called by `TestClient`.
+
 ## Verification actually run (F2)
 
 | Check | Command | Result |
@@ -550,14 +619,16 @@ just wrote it. Timestamps are now floored before writing.
     no longer a dead end; it is a row an operator can accept, reject, mark
     unreadable or correct, with a version-checked `409` if two reviewers collide
     and one `AuditLog` row per decision.
-15. **Nothing consumes an `approved` field.** F8 makes `approved` reachable and
-    audited, but no route, worker or event does anything with it afterwards: there
-    is no agent-decision slice and no notification slice, so a contract whose
-    fields are all approved simply sits there. The Phase-0 flow diagram
-    (extraction → review → decision → notification) is now real for the *first* two
-    arrows only. Likewise there is no review **screen**: `frontend/src/app/review`
-    still calls the mocked demo backend, so the three F8 routes have only ever been
-    called by `TestClient`.
+15. **Nothing consumes an `approved` field — narrowed by F9, not closed.** F9 gives
+    `approved` its first consumer: `app/workers/decision.py` reads approved contact
+    values to choose a channel, so a fully approved contract now produces an
+    `AgentDecision` instead of sitting inert. What is still missing is everything
+    after that: **no notification row, no dispatcher, no outbox event and no
+    screen**, so the pipeline stops one arrow short of contacting anyone. The
+    Phase-0 flow (extraction → review → decision → notification) is real for the
+    first three arrows only. Likewise there is no review *screen*:
+    `frontend/src/app/review` still calls the mocked demo backend, so the F8 and F9
+    routes have only ever been called by `TestClient`.
 16. **The review queue paginates by `limit` only.** `awaiting_review()` takes a
     bounded `limit` (100 default, 500 max) with no cursor or offset, so a queue
     longer than the cap cannot be paged past — the oldest, lowest-confidence items
@@ -571,24 +642,47 @@ just wrote it. Timestamps are now floored before writing.
     path — the one the verification above actually exercises — cannot produce a
     reviewable address, and a contract whose only contact detail is a postal
     address yields nothing usable (D7-03).
+18. **Consent has no UI, no import path, and quiet hours are enforced nowhere.**
+    F9's flags default to `false`, so **every contract that existed before `0002`
+    became un-contactable** — fail-closed and correct, but resolvable only through
+    `PUT /contracts/{id}/consent`, one contract at a time. There is no consent
+    screen and no bulk import, so this is a standing data-entry task somebody has
+    to own; it is also the honest answer to "why does the decision route refuse
+    everything on a fresh database". Separately, the non-negotiable also names
+    **quiet hours**, and nothing checks a window: `Contract.timezone` is stored but
+    never read, and `zoneinfo` resolution is still unimplemented (D6-03). Consent
+    and opt-out are enforced in code; quiet hours are not enforced at all (D9-03).
+19. **An `AgentDecision` cannot be overridden or flagged, and for a structural
+    reason.** `AgentDecision` has no `version` column and no `__mapper_args__`, so
+    unlike `Contract`, `ExtractedField` and `Escalation` it cannot be
+    optimistic-locked — which is exactly what an override needs, since two
+    operators overriding the same decision is the collision the other tables
+    already guard against. So there is no `override` route and no `flag-review`
+    route; a re-run is a new `POST`, which **appends** rather than mutating, and
+    that is the only supported correction. The Phase-0 demo's
+    `POST /agent/decisions/{id}/rerun|override|flag-review` shapes and its
+    `original_channel` / `overridden_by` / `rerun_count` columns are therefore
+    **not** implemented, and `demo/fixtures/agent_decisions.json` carries field
+    names (`tokens_in`, `input_signals`, …) the real model does not have. Adding
+    any of it needs a second migration, not just a route.
 
 ## Next permitted step
 
-**F8 (step 4) is committed (`8c5e09f`) and gate-green; GATE 2 awaits human
-sign-off.** F1–F8 are all committed. The pipeline slice is complete, so what comes
-next is no longer inside it — the repo names the next aggregate: `AgentDecision`.
+**F9 (step 5) is committed (`PENDING`) and gate-green; GATE 2 awaits human
+sign-off.** F1–F9 are all committed. The pipeline slice is complete, so what comes
+next is no longer inside it — the repo names the next aggregate: `Notification`.
 
 - `app/db/models/` — `Contract` is writable through `POST /contracts`,
   `ExtractedField` has both an operator writer (`python -m app.cli extract`) and
-  API writers (`PATCH /review/{id}`), and `AuditLog` finally has a writer
-  (`review` and `reveal`). **Four of the seven aggregates are live.**
-  `AgentDecision`, `Notification`, `CustomerResponse` and `Escalation` still have
-  **no route, service or worker that writes them** (gap 15).
-- `app/api/v1/` — `auth`, `health`, `contracts` and `review` routers exist. There
-  is still no notification route, while `frontend/src/lib/api.ts` and the Phase-0
-  fixtures already assume one, and no review *screen* talks to the real API yet —
-  **the UI contract is still ahead of the backend, but now by one route rather
-  than by half a milestone.**
+  API writers (`PATCH /review/{id}`), `AuditLog` has writers (`review`, `reveal`
+  and now consent changes), and `AgentDecision` has a producer at last
+  (`POST /agent/decisions`). `Notification`, `CustomerResponse` and `Escalation`
+  still have **no route, service or worker that writes them** (gap 15).
+- `app/api/v1/` — `auth`, `health`, `contracts` and `agent` routers exist, plus
+  `review`. There is still no notification route, while
+  `frontend/src/lib/api.ts` and the Phase-0 fixtures already assume one, and no
+  *screen* talks to the real API yet — **the UI contract is still ahead of the
+  backend, but now by one route rather than by half a milestone.**
 - Redis (rate limiting, gap 9) and Ollama are still unwired: the `ollama` backend
   is written but has no compose service, so `EXTRACTION_BACKEND=pattern` is what
   runs (gap 17). Each belongs to the slice that first needs it.
@@ -610,19 +704,45 @@ next is no longer inside it — the repo names the next aggregate: `AgentDecisio
    queue mocks — plus the audited decrypt route F7 refused to fold into the list
    route. `approved` has a writer for the first time, and every write that can
    reach it leaves an `AuditLog` row.
+5. ✅ **Done (F9).** Channel selection into `AgentDecision`, reading
+   `blocks_pipeline` rather than re-implementing the rule and selecting only from
+   `contract.consent_channels` — so an opt-out beats a grant and a `REJECTED`
+   field stops the pipeline before a channel is chosen. Refusals are `409`s with
+   stable codes (`PIPELINE_BLOCKED`, `CONTACT_REFUSED`, `NO_CONSENT`,
+   `NO_CONTACT_VALUE`, `CONTRACT_CLOSED`), and `reasoning` is assembled from
+   channel names only, never a value. Consent itself became real: `0002` adds
+   `do_not_contact` + three per-channel flags to `Contract`, set through
+   `PUT /contracts/{id}/consent`, version-checked and audited.
 
-**Next, and it is the first arrow after review:** the agent-decision slice. An
-`AgentDecision` should be computed from a contract whose fields are all
-non-blocking, using only approved/auto-accepted values, with the channel chosen and
-the reasoning redacted before storage — and it must read `blocks_pipeline`, not
-re-implement the rule. Only after that does a notification exist for the outbox
-event to describe.
+**Next, and it is the first arrow after the decision:** notification dispatch.
+`Notification` is the last structural orphan with a producer already waiting — it
+needs `contract_id`, `milestone`, `channel` copied from the current
+`AgentDecision`, a status that moves (`pending` → `sent`/`failed`), and an
+idempotency guard so a re-run cannot double-send. Three things do **not** exist yet
+and must be decided rather than improvised: **a sender transport** (there is no
+SMTP, SMS or portal adapter anywhere in the tree, so `sent` cannot honestly mean
+delivered); **quiet hours** (deferred from F9 by D9-03 — a window check belongs
+immediately before send, which is exactly here, and `timezone` is still never
+read); and **the outbox event** that should accompany a send. Write the row and the
+state machine first; a transport can be injected behind a protocol the way
+`EventPublisher` and `DocumentExtractor` already are.
 
 **Open at GATE 2 — say these out loud, do not bury them:** no Kafka broker has
 ever been on the other end of a publish (no compose service; `live` test opt-in);
 no consumer exists; DLQ replay is operator-initiated with no alerting; no live
-Ollama has answered anything; and the review routes have only ever been called by
-`TestClient`, because no review screen talks to them yet.
+Ollama has answered anything; and the `review` and `agent` routes have only ever
+been called by `TestClient`, because no screen talks to them yet. From F9
+specifically: **every contract that predates `0002` is now un-contactable** until
+someone sets consent one row at a time (gap 18); **quiet hours are enforced
+nowhere** (same gap); an `AgentDecision` **cannot be overridden or flagged** for
+want of a `version` column, so a re-run appends rather than corrects and the
+Phase-0 override UI shapes are unimplemented (gap 19); and the pipeline still
+stops before anyone is contacted — there is no notification, no sender and no
+outbox event for a send. Also worth stating plainly: F9's first "MySQL gate green"
+report was wrong — the URL carried the wrong password, the three integration tests
+skipped, and only a re-run against the container's real credentials made the gate
+real. The suite builds tables from `Base.metadata`, so `alembic check` is the only
+thing that proves `0002` matches the models; it does, and that is checked now.
 
 ## Non-negotiable reminders
 

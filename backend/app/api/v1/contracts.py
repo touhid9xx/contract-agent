@@ -40,12 +40,23 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.api.deps import get_request_session, require_roles
 from app.core.middleware import correlation_id_or_new
 from app.core.principal import Principal
-from app.db.enums import ContractSource, ContractStatus, FieldName, FieldStatus, RiskLevel, UserRole
+from app.db.base import utc_now
+from app.db.enums import (
+    Channel,
+    ContractSource,
+    ContractStatus,
+    FieldName,
+    FieldStatus,
+    RiskLevel,
+    UserRole,
+)
 from app.db.models import Contract, ExtractedField
+from app.db.repositories.audit import ACTOR_USER, AUDIT_ENTITY_CONTRACT, AuditLogRepository
 from app.db.repositories.contracts import ContractRepository
 from app.db.repositories.fields import ExtractedFieldRepository
 from app.db.repositories.outbox import enqueue_event
@@ -350,3 +361,165 @@ def list_contract_fields(
         fields=summaries,
         blocking=sum(1 for summary in summaries if summary.blocks_pipeline),
     )
+
+
+class ConsentUpdateRequest(BaseModel):
+    """The full consent state for one contract.
+
+    All four flags are required on every call. This is a replacement of the whole
+    consent picture, not a patch of one flag, because the dangerous mistake here is
+    a partial write: a caller that sends only ``consent_email: true`` and leaves the
+    rest unset must not silently revoke SMS consent it never mentioned. Omitting a
+    field is a 422 rather than an implicit ``false``.
+    """
+
+    consent_email: bool
+    consent_sms: bool
+    consent_voice: bool
+    #: A veto over every channel. Auditable separately from the grants because the
+    #: two answer different questions: what did they allow, and did they say stop.
+    do_not_contact: bool
+    #: The version the operator was looking at, as ``GET /contracts/{id}/fields`` and
+    #: the decision listing report it. A mismatch is a 409 so two operators cannot
+    #: overwrite each other's consent decision.
+    version: int = Field(ge=1)
+
+
+class ConsentView(BaseModel):
+    """A contract's stored consent state, plus what it resolves to."""
+
+    contract_id: int
+    consent_email: bool
+    consent_sms: bool
+    consent_voice: bool
+    do_not_contact: bool
+    #: Derived from the flags, not stored twice: this is the same answer the
+    #: decision policy reads, so a caller can see *why* a decision will be refused.
+    consent_channels: list[Channel]
+    may_contact: bool
+    consent_updated_at: datetime | None
+    version: int
+
+
+CONSENT_UPDATED_ACTION = "contract.consent_updated"
+
+
+def _consent_state(contract: Contract) -> dict[str, object]:
+    """The audit snapshot for consent — four booleans and a version, no PII.
+
+    Nothing here identifies the customer; the row this describes already does, and
+    ``AuditLog`` is plain text that any operator can read.
+    """
+    return {
+        "consent_email": contract.consent_email,
+        "consent_sms": contract.consent_sms,
+        "consent_voice": contract.consent_voice,
+        "do_not_contact": contract.do_not_contact,
+        "version": contract.version,
+    }
+
+
+def _consent_view(contract: Contract) -> ConsentView:
+    return ConsentView(
+        contract_id=contract.id,
+        consent_email=contract.consent_email,
+        consent_sms=contract.consent_sms,
+        consent_voice=contract.consent_voice,
+        do_not_contact=contract.do_not_contact,
+        consent_channels=sorted(contract.consent_channels, key=lambda channel: channel.value),
+        may_contact=contract.may_contact,
+        consent_updated_at=contract.consent_updated_at,
+        version=contract.version,
+    )
+
+
+@router.put(
+    "/{contract_id}/consent",
+    response_model=ConsentView,
+    summary="Record a contract's channel consent and opt-out state",
+)
+def update_consent(
+    contract_id: int,
+    payload: ConsentUpdateRequest,
+    principal: Principal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
+    session: Session = Depends(get_request_session),
+) -> ConsentView:
+    """Replace the consent state for one contract.
+
+    This route exists because the columns default to ``false``: without a write path
+    every contract would be un-contactable, which is the correct fail-closed default
+    but not a usable system. Consent is recorded by a person who has it, so this is
+    an operator action, and it is audited for the same reason a review decision is —
+    "who said we could call this customer" has to be answerable later.
+
+    A re-submission identical to what is stored writes nothing: no version bump, no
+    audit row. Otherwise an idempotent retry would look like a second consent
+    decision and could lose an operator's concurrent change for no reason.
+
+    ``PUT`` rather than ``PATCH`` because the body carries the complete state, and
+    because ``PATCH`` already means "one reviewer decision" elsewhere in v1.
+    """
+    contract = ContractRepository(session, principal.tenant_id).get(Contract, contract_id)
+    if contract is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Contract not found")
+
+    if contract.version != payload.version:
+        # Same shape as the review 409: the caller is told what the row is now, so a
+        # lost update does not have to be diagnosed by re-reading everything.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "VERSION_CONFLICT",
+                "message": "Consent changed since you loaded it; reload and try again",
+                "details": {"current": _consent_view(contract).model_dump(mode="json")},
+            },
+        )
+
+    before = _consent_state(contract)
+    contract.consent_email = payload.consent_email
+    contract.consent_sms = payload.consent_sms
+    contract.consent_voice = payload.consent_voice
+    contract.do_not_contact = payload.do_not_contact
+    unchanged = all(before[key] == value for key, value in _consent_state(contract).items())
+    if unchanged:
+        return _consent_view(contract)
+
+    contract.consent_updated_at = utc_now()
+    try:
+        # Flush before the snapshot so ``after`` records the version the write
+        # produced, not the one it replaced.
+        session.flush()
+        after = _consent_state(contract)
+        AuditLogRepository(session, principal.tenant_id).record(
+            correlation_id=correlation_id_or_new(),
+            actor_type=ACTOR_USER,
+            actor_id=principal.user_id,
+            action=CONSENT_UPDATED_ACTION,
+            entity=AUDIT_ENTITY_CONTRACT,
+            entity_id=str(contract.id),
+            before=before,
+            after=after,
+            reason="consent recorded through the API",
+        )
+        session.commit()
+    except StaleDataError:
+        # The version check above is the common path; this is the race it cannot
+        # close on its own (another writer committed between the read and the flush).
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "VERSION_CONFLICT",
+                "message": "Consent changed since you loaded it; reload and try again",
+            },
+        ) from None
+
+    session.refresh(contract)
+    log.info(
+        "contract_consent_updated",
+        contract_id=contract.id,
+        channels=[channel.value for channel in contract.consent_channels],
+        do_not_contact=contract.do_not_contact,
+        version=contract.version,
+    )
+    return _consent_view(contract)

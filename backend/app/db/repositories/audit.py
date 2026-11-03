@@ -29,11 +29,16 @@ from typing import Any
 from app.db.models import AuditLog
 from app.db.repositories.base import TenantScopedRepository
 
-__all__ = ["ACTOR_USER", "AUDIT_ENTITY_FIELD", "AuditLogRepository"]
+__all__ = ["ACTOR_USER", "AUDIT_ENTITY_CONTRACT", "AUDIT_ENTITY_FIELD", "AuditLogRepository"]
 
 #: ``AuditLog.entity`` for extracted-field rows, matching the table name so the
 #: log joins back to what it describes without a lookup table of its own.
 AUDIT_ENTITY_FIELD = "extracted_fields"
+
+#: ``AuditLog.entity`` for contract rows. Consent and opt-out are recorded here
+#: rather than on a separate consent table: the flags are columns on the contract,
+#: and the audit row is what says who set them and when.
+AUDIT_ENTITY_CONTRACT = "contracts"
 
 #: ``AuditLog.actor_type`` value for a person acting through the API. The model
 #: also allows ``worker``/``system`` for actions that have no human actor.
