@@ -5,7 +5,7 @@ Last updated: Phase 1 (real foundation) — **F1 committed (`f0e1eef`), F2 commi
 committed (`8e6b927`) plus the bootstrap-path doc (`908f50d`), F4 committed
 (`b425ea7`), F5 committed (`21daffc`), F6 committed (`0c2d734`), F7
 committed (`90fd0e5`), F8 committed (`8c5e09f`), F9 committed (`50dd0cd`), and F10
-committed (`PENDING`) — all six steps of the pipeline slice landed (ingestion, the
+committed (`b344c17`) — all six steps of the pipeline slice landed (ingestion, the
 first real outbox producer, field extraction, human review, channel selection,
 notification dispatch). F10 closes the last structural gap in the arrow chain but
 **does not contact anybody**: it ships a row, a state machine and a contact policy,
@@ -539,7 +539,8 @@ before the transport is reached.
 | Security lint | `bandit -c pyproject.toml -r backend/app` | **0 issues** |
 | **Migration, real MySQL** | `alembic check` at head | **NOT RUN — Docker daemon was not running on this host.** F10 adds no migration, so `0002 (head)` is unchanged from F9, but this row is unrun rather than green and must not be cited as verified |
 | **Full suite, real MySQL** | `pytest` with `MYSQL_TEST_URL` on `:3307` | **NOT RUN — same cause.** Expect `388 … skipped=1`; confirm `skipped="1"`, because a skip is not a pass (this is the mistake F9's first report made) |
-| Commit gate | `pre-commit run --all-files` | see the commit that carries this file |
+| Commit gate | `pre-commit run --files` on the 12 changed files | **all hooks passed**; the two frontend hooks (`tsc --noEmit`, `eslint`) reported `(no files to check)` because no frontend file changed in this slice. `--all-files` was not used, so the repo-wide tsc/eslint pass is **not** claimed here |
+| Alembic topology | `alembic heads` | **`0002 (head)`** — one head, unchanged. This does **not** replace `alembic check` (row above), which needs a live server |
 
 The F9→F10 delta is **+46 SQLite tests** (`388` vs `342`). The two MySQL rows are
 left explicitly unrun rather than filled in from expectation: the harness that
@@ -568,16 +569,19 @@ reachable.
    with the existing `app.db.base.utc_now()` helper; `utcnow` now appears nowhere in
    `backend/`.
 
-#### One unexplained editor warning, stated as unexplained
+#### One editor warning that came and went — stated, not explained
 
-Pylance reports ~117 `Mapped`/attribute errors in `test_notifications.py` while
-`test_agent_decisions.py`, `test_review.py`, `test_contracts.py` and
-`test_contract_fields.py` report **zero** with the identical imports, `__future__`
-annotations and `Mapped` usage. A scratch module importing the same set resolves
-cleanly, so it is not a poisoned import; it looks like per-file inference bail-out on
-a ~1300-line module against SQLAlchemy's plugin-less stubs. `mypy` — the actual gate,
-scoped to `backend/app/` in `.pre-commit-config.yaml` — does not analyse
-`backend/tests/` and is clean. Recorded as **unproven**, not as fixed.
+Mid-slice, Pylance reported ~117 `Mapped`/attribute errors in
+`test_notifications.py` while `test_agent_decisions.py`, `test_review.py`,
+`test_contracts.py` and `test_contract_fields.py` reported **zero** with identical
+imports, `__future__` annotations and `Mapped` usage. A scratch module importing the
+same set resolved cleanly, so it was not a poisoned import.
+
+**It does not reproduce now.** Re-querying diagnostics on that file after the test
+fixes reports it clean. I never identified the cause, so I am not claiming to have
+fixed it: the honest statement is that the warning was real, is gone, and was never
+diagnosed. `mypy` — the actual gate, scoped to `backend/app/` in
+`.pre-commit-config.yaml` — does not analyse `backend/tests/` and is clean either way.
 
 ## Verification actually run (F2)
 
@@ -713,15 +717,21 @@ just wrote it. Timestamps are now floored before writing.
     no longer a dead end; it is a row an operator can accept, reject, mark
     unreadable or correct, with a version-checked `409` if two reviewers collide
     and one `AuditLog` row per decision.
-15. **Nothing consumes an `approved` field — narrowed by F9, not closed.** F9 gives
-    `approved` its first consumer: `app/workers/decision.py` reads approved contact
-    values to choose a channel, so a fully approved contract now produces an
-    `AgentDecision` instead of sitting inert. What is still missing is everything
-    after that: **no notification row, no dispatcher, no outbox event and no
-    screen**, so the pipeline stops one arrow short of contacting anyone. The
-    Phase-0 flow (extraction → review → decision → notification) is real for the
-    first three arrows only. Likewise there is no review *screen*:
-    `frontend/src/app/review` still calls the mocked demo backend, so the F8 and F9
+15. **Nothing leaves the building — narrowed by F10, not closed.** F9 gave an
+    `approved` field its first consumer and F10 gave the decision its own, so the
+    Phase-0 arrow chain is now real end to end *inside the database*:
+    `POST /agent/decisions` writes an `AgentDecision`, `POST /notifications` writes
+    a `Notification` from it, and `POST /{id}/dispatch` moves that row
+    `pending` → `sent`/`failed` with retries that park exhausted rows. What no
+    adapter exists for is the send itself. `build_sender` returns the refusing
+    stand-in and `notification_transport` has exactly one member, `none`, so
+    **`sent: true` is unreachable through the API**: every HTTP dispatch is either
+    `409 SENDER_UNAVAILABLE` or a quiet-hours deferral, and the send path is proven
+    only by injecting a fake into `dispatch_notification`. "F10 sends
+    notifications" is false until a real transport lands. Separately,
+    `CustomerResponse` and `Escalation` still have **no writer**, so nothing records
+    a reply or opens an SLA clock; and no *screen* talks to the real API:
+    `frontend/src/app/*` still calls the mocked demo backend, so the F8, F9 and F10
     routes have only ever been called by `TestClient`.
 16. **The review queue paginates by `limit` only.** `awaiting_review()` takes a
     bounded `limit` (100 default, 500 max) with no cursor or offset, so a queue
@@ -736,16 +746,18 @@ just wrote it. Timestamps are now floored before writing.
     path — the one the verification above actually exercises — cannot produce a
     reviewable address, and a contract whose only contact detail is a postal
     address yields nothing usable (D7-03).
-18. **Consent has no UI, no import path, and quiet hours are enforced nowhere.**
-    F9's flags default to `false`, so **every contract that existed before `0002`
-    became un-contactable** — fail-closed and correct, but resolvable only through
+18. **Consent has no UI and no import path.** F9's flags default to `false`, so
+    **every contract that existed before `0002` became un-contactable** —
+    fail-closed and correct, but resolvable only through
     `PUT /contracts/{id}/consent`, one contract at a time. There is no consent
     screen and no bulk import, so this is a standing data-entry task somebody has
     to own; it is also the honest answer to "why does the decision route refuse
-    everything on a fresh database". Separately, the non-negotiable also names
-    **quiet hours**, and nothing checks a window: `Contract.timezone` is stored but
-    never read, and `zoneinfo` resolution is still unimplemented (D6-03). Consent
-    and opt-out are enforced in code; quiet hours are not enforced at all (D9-03).
+    everything on a fresh database". Consent and opt-out are enforced in code at
+    both plan time and send time. ~~Quiet hours are enforced nowhere~~ — **retired
+    by F10.** `Contract.timezone` is read at last, `zoneinfo` + `tzdata` resolve it,
+    and the window (`[20:00, 08:00)` by default) is checked immediately before the
+    transport is reached, on the customer's wall clock and DST-safely (D10-01,
+    D10-02). The non-negotiable's third clause now has code behind it.
 19. **An `AgentDecision` cannot be overridden or flagged, and for a structural
     reason.** `AgentDecision` has no `version` column and no `__mapper_args__`, so
     unlike `Contract`, `ExtractedField` and `Escalation` it cannot be
@@ -759,24 +771,53 @@ just wrote it. Timestamps are now floored before writing.
     **not** implemented, and `demo/fixtures/agent_decisions.json` carries field
     names (`tokens_in`, `input_signals`, …) the real model does not have. Adding
     any of it needs a second migration, not just a route.
+20. **`normalized_value` is plaintext PII, and it is the column the policy reads.**
+    F7 encrypts `raw_value`, and the fields API never carries either column — but
+    `ExtractedField.normalized_value` is a plain `Text` column holding the
+    *canonical* form of the same data (a lowercased email, an E.164 phone), and
+    downstream code depends on it precisely because it is readable:
+    `decision.py` requires it present to pick a channel and `dispatch.py` returns
+    it as the recipient. So the ciphertext on `raw_value` is shadowed by a
+    cleartext copy one column over, and the "no raw PII at rest" non-negotiable is
+    contradicted in fact. This is acknowledged in-code rather than discovered here
+    (`test_notifications.py` names it as gap 20), but it needs a decision, not a
+    patch: encrypt this column too and compare on a hash, or keep it and state the
+    exception openly. It is not a migration to slip in — it changes how the decision
+    and dispatch policies read fields.
+21. **A `Notification` cannot be locked against a concurrent dispatch.** The same
+    structural gap as 19, one table over: no `version` column and no
+    `__mapper_args__`, so two workers dispatching the same row are not serialised
+    and both can reach the transport. The unique `idempotency_key` is handed
+    downstream so a provider *could* dedupe, but the only shipped transport is
+    `none`, so nothing proves that. Needs `0003` alongside gap 19's column, not a
+    route (D10-05).
+22. **No scheduler polls notifications.** The outbox relay claims *events*, not
+    notifications. A row deferred by quiet hours, or one parked `failed` after
+    exhausting `notification_retry_max`, moves again only when an operator calls
+    `POST /{id}/dispatch` or `/retry`. Same operator-initiated shape as DLQ replay
+    (D5-03) and the same weakness: nothing alerts when rows sit deferred or parked,
+    so a quiet-hours deferral can stay deferred indefinitely.
 
 ## Next permitted step
 
-**F9 (step 5) is committed (`50dd0cd`) and gate-green; GATE 2 awaits human
-sign-off.** F1–F9 are all committed. The pipeline slice is complete, so what comes
-next is no longer inside it — the repo names the next aggregate: `Notification`.
+**F10 (step 6) is committed (`b344c17`); GATE 2 awaits human sign-off.** F1–F10 are
+all committed and the pipeline slice is closed — every arrow in the Phase-0 flow
+(ingest → extract → review → decide → notify) now has real code behind it. What F10
+does **not** do is send, so the next step is a decision rather than an obvious
+feature to build.
 
-- `app/db/models/` — `Contract` is writable through `POST /contracts`,
-  `ExtractedField` has both an operator writer (`python -m app.cli extract`) and
-  API writers (`PATCH /review/{id}`), `AuditLog` has writers (`review`, `reveal`
-  and now consent changes), and `AgentDecision` has a producer at last
-  (`POST /agent/decisions`). `Notification`, `CustomerResponse` and `Escalation`
-  still have **no route, service or worker that writes them** (gap 15).
-- `app/api/v1/` — `auth`, `health`, `contracts` and `agent` routers exist, plus
-  `review`. There is still no notification route, while
-  `frontend/src/lib/api.ts` and the Phase-0 fixtures already assume one, and no
-  *screen* talks to the real API yet — **the UI contract is still ahead of the
-  backend, but now by one route rather than by half a milestone.**
+- `app/db/models/` — every table in the flow now has a writer: `Contract`
+  (`POST /contracts`), `ExtractedField` (`python -m app.cli extract`,
+  `PATCH /review/{id}`), `AuditLog` (review, reveal, consent), `AgentDecision`
+  (`POST /agent/decisions`) and `Notification` (`POST /notifications`,
+  `POST /{id}/dispatch`, `POST /{id}/retry`). `CustomerResponse` and `Escalation`
+  remain writer-less (gap 15), which is why nothing records a reply or opens an SLA
+  clock.
+- `app/api/v1/` — `auth`, `health`, `contracts`, `agent`, `review` and now
+  `notifications`. The backend is no longer *behind* the UI contract by a route; on
+  the notification path it is ahead of it. No screen talks to the real API yet:
+  `frontend/src/app/*` still calls the mocked demo backend, so the F8, F9 and F10
+  routes have only ever been called by `TestClient`.
 - Redis (rate limiting, gap 9) and Ollama are still unwired: the `ollama` backend
   is written but has no compose service, so `EXTRACTION_BACKEND=pattern` is what
   runs (gap 17). Each belongs to the slice that first needs it.
@@ -808,35 +849,56 @@ next is no longer inside it — the repo names the next aggregate: `Notification
    `do_not_contact` + three per-channel flags to `Contract`, set through
    `PUT /contracts/{id}/consent`, version-checked and audited.
 
-**Next, and it is the first arrow after the decision:** notification dispatch.
-`Notification` is the last structural orphan with a producer already waiting — it
-needs `contract_id`, `milestone`, `channel` copied from the current
-`AgentDecision`, a status that moves (`pending` → `sent`/`failed`), and an
-idempotency guard so a re-run cannot double-send. Three things do **not** exist yet
-and must be decided rather than improvised: **a sender transport** (there is no
-SMTP, SMS or portal adapter anywhere in the tree, so `sent` cannot honestly mean
-delivered); **quiet hours** (deferred from F9 by D9-03 — a window check belongs
-immediately before send, which is exactly here, and `timezone` is still never
-read); and **the outbox event** that should accompany a send. Write the row and the
-state machine first; a transport can be injected behind a protocol the way
-`EventPublisher` and `DocumentExtractor` already are.
+6. ✅ **Done (F10).** Notification dispatch behind a transport seam:
+   `app/workers/dispatch.py` selects the innermost due milestone (`T-60` / `T-30` /
+   `T-14`), enforces quiet hours on the customer's wall clock via `zoneinfo` +
+   `tzdata` (DST-safe), re-reads consent at send time, and moves the row
+   `pending` → `sent`/`failed` under a unique idempotency key. It imports
+   `blocks_pipeline` and the consent refusals from F9 rather than restating them.
+   `MessageSender` has exactly one implementation — `UnavailableSender`, which
+   refuses — so the send path is proven only against an injected fake.
+
+**Next, and it is a decision rather than a build order.** The pipeline is complete
+inside the database and nothing leaves it. The one change that would make F10's
+state machine mean something is a real `MessageSender` adapter, and it cannot be
+improvised: it needs a provider (SMTP relay, an email API, or a portal stub) and
+credentials supplied through `Settings` in the fail-fast style the rest of the
+config already uses. Three consequences follow *from* that choice rather than
+preceding it: whether a send also emits a `contract.events` event (F10 emits none,
+so nothing downstream learns that contact happened); how a provider failure maps
+onto the existing `failed` / `attempts` / `notification_retry_max` rules; and
+whether `sent` may ever be asserted without a provider-side receipt — the honest
+default is that it may not, which is exactly why the stand-in refuses today.
+
+Two alternatives are defensible, and both are gap-sized rather than milestone-sized:
+
+- **Close the harness gate first (gap 13).** `core.hooksPath` has never been set, so
+  no commit in this project — including the last five — was gated by husky. Wiring
+  it, and teaching `.husky/pre-commit` the Windows venv path it currently cannot
+  find, is small, and it is the only item here that improves every future slice.
+- **Settle the schema questions before they calcify.** Gaps 19, 21 and 20 are one
+  cluster: `AgentDecision` and `Notification` both want a `version` column (one
+  migration, `0003`, not two), and `normalized_value` is plaintext PII that
+  contradicts a non-negotiable. Each gets more expensive the more rows exist.
 
 **Open at GATE 2 — say these out loud, do not bury them:** no Kafka broker has
 ever been on the other end of a publish (no compose service; `live` test opt-in);
-no consumer exists; DLQ replay is operator-initiated with no alerting; no live
-Ollama has answered anything; and the `review` and `agent` routes have only ever
-been called by `TestClient`, because no screen talks to them yet. From F9
-specifically: **every contract that predates `0002` is now un-contactable** until
-someone sets consent one row at a time (gap 18); **quiet hours are enforced
-nowhere** (same gap); an `AgentDecision` **cannot be overridden or flagged** for
-want of a `version` column, so a re-run appends rather than corrects and the
-Phase-0 override UI shapes are unimplemented (gap 19); and the pipeline still
-stops before anyone is contacted — there is no notification, no sender and no
-outbox event for a send. Also worth stating plainly: F9's first "MySQL gate green"
-report was wrong — the URL carried the wrong password, the three integration tests
-skipped, and only a re-run against the container's real credentials made the gate
-real. The suite builds tables from `Base.metadata`, so `alembic check` is the only
-thing that proves `0002` matches the models; it does, and that is checked now.
+no consumer exists; DLQ replay is operator-initiated with no alerting, and nothing
+polls notifications either, so a deferred row can stay deferred (gap 22); no live
+Ollama has answered anything; and the `review`, `agent` and `notification` routes
+have only ever been called by `TestClient`, because no screen talks to them yet.
+**Nothing has ever been sent to a customer** (gap 15): the only transport refuses,
+so `sent: true` is unreachable over HTTP. From F9: **every contract that predates
+`0002` is un-contactable** until someone sets consent one row at a time (gap 18),
+and an `AgentDecision` **cannot be overridden or flagged** for want of a `version`
+column (gap 19). Quiet hours — the caveat F9 had to carry — are now enforced
+(D10-01/D10-02), so that one is retired rather than repeated. Two gate reports in
+this project were wrong the first time and both are recorded as such: F9's first
+"MySQL gate green" carried a bad password and skipped, and F10's two MySQL rows are
+**still unrun** because no Docker daemon answered on this host. The suite builds
+tables from `Base.metadata`, so `alembic check` is the only thing that proves a
+migration matches the models. It was run for `0002` at F9; it has **not** been
+re-run since F10, which adds no migration but remains unverified all the same.
 
 ## Non-negotiable reminders
 
