@@ -40,6 +40,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.api.deps import app_settings, get_request_session, require_roles
 from app.api.v1.agent import refusal
@@ -83,6 +84,12 @@ REFUSAL_NO_DECISION = "NO_DECISION"
 REFUSAL_DECISION_MISMATCH = "DECISION_MISMATCH"
 #: ``retry`` was asked for on a row that is not parked ``failed``.
 REFUSAL_NOT_FAILED = "NOT_FAILED"
+#: Another writer changed this row between our read and our commit, so the update
+#: matched zero rows (gap 21). Distinct from ``NOT_PENDING``: that means the row was
+#: *already* sent when we looked, this means it moved *while* we looked. The caller's
+#: fix is identical — reload — but an operator debugging a double send needs to tell
+#: the two apart in the logs.
+REFUSAL_CONCURRENT_UPDATE = "CONCURRENT_UPDATE"
 
 
 class NotificationView(BaseModel):
@@ -190,18 +197,50 @@ def _recipient_for(channel: Channel, fields: Sequence[ExtractedField]) -> str:
     raise LookupError(f"no usable {wanted.value} value for channel {channel.value}")
 
 
-def _load_notification(
+def _claim_notification(
     session: Session, principal: Principal, notification_id: int
 ) -> Notification:
-    """One row, tenant-scoped; a row from another organisation is a 404.
+    """One row, tenant-scoped, **read under a write lock**; foreign id is a 404.
 
     404 rather than 403 for the reason every other route here uses: a 403 confirms
     the id exists, which is the enumeration oracle IDOR/BOLA tests look for.
+
+    The lock is the point. :attr:`~app.db.models.delivery.Notification.version` stops
+    two workers clobbering each other's row *state*, but both would still have reached
+    the transport before either committed — two emails, one recorded send. Taking the
+    row lock before the policy runs serialises them instead: the second request blocks,
+    then its locking read returns the *updated* row, now ``sent``, so the policy
+    refuses it with ``NOT_PENDING`` rather than sending twice. The lock is released by
+    the commit at the end of the request, so every route that mutates a notification
+    claims it through here.
     """
-    row = NotificationRepository(session, principal.tenant_id).get(Notification, notification_id)
+    row = NotificationRepository(session, principal.tenant_id).claim_for_dispatch(notification_id)
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notification not found")
     return row
+
+
+def _commit_or_conflict(session: Session, notification_id: int) -> None:
+    """Commit, mapping a lost optimistic-lock race onto the 409 it is.
+
+    ``version`` (gap 21) makes a stale write match zero rows, which SQLAlchemy raises
+    as :class:`~sqlalchemy.orm.exc.StaleDataError`. Left unhandled that is a 500 for a
+    request whose only real fault was arriving second. The code is deliberately not
+    ``NOT_PENDING``: that means the row was *already* sent when we looked, this means
+    it moved *while* we looked. The caller's fix is the same — reload — but an
+    operator investigating a double send needs to tell the two apart.
+    """
+    try:
+        session.commit()
+    except StaleDataError:
+        session.rollback()
+        raise refusal(
+            DispatchRefusedError(
+                REFUSAL_CONCURRENT_UPDATE,
+                "This notification changed while the request was in flight; reload and try again",
+                details={"notification_id": notification_id},
+            )
+        ) from None
 
 
 def _load_contract(session: Session, principal: Principal, contract_id: int) -> Contract:
@@ -406,7 +445,7 @@ def dispatch(
     before refusing: a spent retry budget parks the row ``failed`` and that
     transition must survive the 409.
     """
-    notification = _load_notification(session, principal, notification_id)
+    notification = _claim_notification(session, principal, notification_id)
     contract = _load_contract(session, principal, notification.contract_id)
     fields = ExtractedFieldRepository(session, principal.tenant_id).for_contract(contract.id)
     sender: MessageSender = build_sender(settings)
@@ -426,17 +465,21 @@ def dispatch(
             fields=fields,
         )
     except DispatchRefusedError as exc:
-        session.commit()
+        # Logged *before* the commit, deliberately: the verdict is what an operator
+        # needs, and it must survive the commit losing a race. The row is committed on
+        # this path too, because the policy can park a spent-budget row ``failed`` and
+        # that transition has to outlive the 409.
         logger.info(
             "notification_dispatch_refused",
-            notification_id=notification.id,
+            notification_id=notification_id,
             contract_id=contract.id,
             reason=exc.code,
             **exc.details,
         )
+        _commit_or_conflict(session, notification_id)
         raise refusal(exc) from None
 
-    session.commit()
+    _commit_or_conflict(session, notification_id)
     session.refresh(notification)
     logger.info(
         "notification_dispatched",
@@ -485,7 +528,7 @@ def retry(
     transport once should keep that evidence even after it is requeued for a second
     attempt, which is the same choice ``outbox`` replay makes for ``last_error``.
     """
-    notification = _load_notification(session, principal, notification_id)
+    notification = _claim_notification(session, principal, notification_id)
     if notification.status is not NotificationStatus.FAILED:
         raise refusal(
             DispatchRefusedError(
@@ -499,7 +542,7 @@ def retry(
     notification.status = NotificationStatus.PENDING
     notification.attempts = 0
     notification.last_error = None
-    session.commit()
+    _commit_or_conflict(session, notification_id)
     session.refresh(notification)
     logger.info(
         "notification_requeued",

@@ -97,6 +97,30 @@ class NotificationRepository(TenantScopedRepository[Notification]):
         )
         return self.session.execute(stmt).scalars().first()
 
+    def claim_for_dispatch(self, notification_id: int) -> Notification | None:
+        """Read one row *under a write lock*, for the dispatch path.
+
+        Optimistic locking alone is not enough here, and the distinction matters:
+        :attr:`~app.db.models.delivery.Notification.version` stops two workers
+        clobbering each other's *row state*, but both would still have reached the
+        transport before either committed. The customer would get two emails and the
+        database would report one send.
+
+        Taking the lock before the policy runs closes that. On MySQL this is
+        ``SELECT ... FOR UPDATE``: the second worker blocks until the first commits,
+        then its locking read returns the *updated* row — now ``sent`` — so the
+        policy refuses it with ``NOT_PENDING`` instead of sending again.
+
+        ``with_for_update`` degrades to a no-op on SQLite, which is correct rather
+        than merely convenient: SQLite serialises writers at the file level, so
+        there is no concurrent writer to lock out.
+
+        Still tenant-scoped: ``notification_id`` is a caller-supplied path parameter,
+        so the lock must not become a way to reach another tenant's row.
+        """
+        stmt = self.scoped(Notification).where(Notification.id == notification_id).with_for_update()
+        return self.session.execute(stmt).scalar_one_or_none()
+
     def create(
         self,
         *,

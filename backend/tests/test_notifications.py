@@ -32,14 +32,20 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
+# The conflict mapping for a lost optimistic-lock race (gap 21) is a module-private
+# helper on purpose — it is not part of the route surface. It is tested directly
+# because the shared in-memory connection this suite runs on cannot interleave a
+# second writer mid-request; see ``test_a_lost_race_is_reported_as_a_conflict``.
+from app.api.v1.notifications import _commit_or_conflict
 from app.core.config import Settings
 from app.db.base import utc_now
 from app.db.enums import (
@@ -1055,7 +1061,11 @@ def test_retry_requeues_a_parked_row(
     # keeps the error it replaced.
     assert body["provider_message_id"] == "provider-1"
     assert body["sent_at"] is not None
-    assert load_notification(session_factory, notification_id).status is NotificationStatus.PENDING
+    requeued = load_notification(session_factory, notification_id)
+    assert requeued.status is NotificationStatus.PENDING
+    # Gap 21: the requeue UPDATE carries a version predicate, so a competing write
+    # now matches zero rows instead of silently overwriting this one.
+    assert requeued.version == 2
 
 
 def test_retry_refuses_a_row_that_is_not_failed(
@@ -1082,6 +1092,48 @@ def test_retry_of_an_unknown_row_is_not_found(
     response = active_client.post(f"{NOTIFICATIONS_PATH}/9999/retry", headers=headers)
 
     assert response.status_code == 404
+
+
+def test_a_lost_race_is_reported_as_a_conflict(
+    session_factory: sessionmaker[Session], contract: Contract
+) -> None:
+    """Gap 21: a stale commit is a 409, not a 500.
+
+    Two workers dispatch the same row; the loser's ``UPDATE`` matches zero rows
+    because the winner already committed version 2. SQLAlchemy raises
+    ``StaleDataError`` for that, and left unhandled it would be an unhandled
+    exception — a 500 for a request whose only fault was arriving second.
+
+    Driven through the helper rather than over HTTP because every session in this
+    suite shares one in-memory connection (``StaticPool``), so a competing writer
+    cannot be committed behind an in-flight request. The race below is real: the
+    out-of-band ``UPDATE`` bumps the stored version, and the dirty row's commit is
+    what SQLAlchemy rejects.
+    """
+    notification_id = make_notification(session_factory, contract)
+    session = session_factory()
+    try:
+        notification = session.get(Notification, notification_id)
+        assert notification is not None
+        session.execute(
+            update(Notification)
+            .where(Notification.id == notification_id)
+            .values(version=notification.version + 1)
+            .execution_options(synchronize_session=False)
+        )
+        notification.attempts += 1
+
+        with pytest.raises(HTTPException) as refused:
+            _commit_or_conflict(session, notification_id)
+    finally:
+        session.close()
+
+    assert refused.value.status_code == 409
+    # ``HTTPException.detail`` is annotated ``str`` in starlette even though FastAPI
+    # accepts a JSON-able payload, so the shape has to be asserted, not assumed.
+    detail = cast(dict[str, Any], refused.value.detail)
+    assert detail["code"] == "CONCURRENT_UPDATE"
+    assert detail["details"] == {"notification_id": notification_id}
 
 
 # --- the policy itself: a configured transport -----------------------------

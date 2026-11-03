@@ -71,6 +71,19 @@ class AgentDecision(Base, TimestampMixin):
     schema_repair_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     mlflow_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    #: Optimistic-lock column, matching ``Contract``, ``ExtractedField`` and
+    #: ``Escalation`` (gap 19). Nothing mutates a decision today — a re-run
+    #: *appends* a new row rather than editing this one — so the column is inert
+    #: until an override or flag-review route exists. It is added now, in the same
+    #: revision as ``Notification``'s, because a table that cannot be locked is the
+    #: structural reason no override route could be written, and the second
+    #: migration that would otherwise be needed is exactly what this avoids.
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    #: See :class:`~app.db.models.contract.Contract` — a declarative directive, not
+    #: shared mutable state.
+    __mapper_args__ = {"version_id_col": version}  # noqa: RUF012
+
 
 class Notification(Base, TimestampMixin):
     """One attempted contact on one channel for one reminder milestone.
@@ -114,6 +127,19 @@ class Notification(Base, TimestampMixin):
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     provider_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    #: Optimistic-lock column (gap 21). ``idempotency_key`` above stops a duplicate
+    #: row being *created*; it says nothing about two workers mutating the same row
+    #: at once. Without this column the second dispatch's commit was a plain
+    #: last-writer-wins UPDATE, so a worker could overwrite another's ``attempts``
+    #: increment or revert a ``SENT`` transition. With it, the loser's write matches
+    #: zero rows and SQLAlchemy raises :class:`~sqlalchemy.orm.exc.StaleDataError`
+    #: instead of silently discarding the winner's state.
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    #: See :class:`~app.db.models.contract.Contract` — a declarative directive, not
+    #: shared mutable state.
+    __mapper_args__ = {"version_id_col": version}  # noqa: RUF012
 
 
 class CustomerResponse(Base, TimestampMixin):
