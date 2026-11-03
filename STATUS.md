@@ -4,7 +4,7 @@ Last updated: Phase 1 (real foundation) — **F1 committed (`f0e1eef`), F2 commi
 (`331a7b4`) plus one follow-up fix to the MySQL test harness (`a79d893`), F3
 committed (`8e6b927`) plus the bootstrap-path doc (`908f50d`), F4 committed
 (`b425ea7`), F5 committed (`21daffc`), F6 committed (`0c2d734`), F7
-committed (`90fd0e5`), F8 committed (`8c5e09f`), and F9 committed (`PENDING`) —
+committed (`90fd0e5`), F8 committed (`8c5e09f`), and F9 committed (`50dd0cd`) —
 all five steps of the pipeline slice landed (ingestion, the first real outbox
 producer, field extraction, human review, channel selection). GATE 2 now awaits
 human sign-off.**
@@ -668,7 +668,7 @@ just wrote it. Timestamps are now floored before writing.
 
 ## Next permitted step
 
-**F9 (step 5) is committed (`PENDING`) and gate-green; GATE 2 awaits human
+**F9 (step 5) is committed (`50dd0cd`) and gate-green; GATE 2 awaits human
 sign-off.** F1–F9 are all committed. The pipeline slice is complete, so what comes
 next is no longer inside it — the repo names the next aggregate: `Notification`.
 
