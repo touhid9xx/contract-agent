@@ -1,6 +1,7 @@
 # Status
 
-Last updated: Phase 1 (real foundation) — **F1 committed (`f0e1eef`), F2 committed
+Last updated: Phase 1 (real foundation), GATE 2 signed 2026-11-04 — **F1
+committed (`f0e1eef`), F2 committed
 (`331a7b4`) plus one follow-up fix to the MySQL test harness (`a79d893`), F3
 committed (`8e6b927`) plus the bootstrap-path doc (`908f50d`), F4 committed
 (`b425ea7`), F5 committed (`21daffc`), F6 committed (`0c2d734`), F7
@@ -37,8 +38,8 @@ The pipeline is now fully locked, self-draining and pageable, and it **sends** �
 `6f4cb0b` implements the transport decision this slice ended on, and the socket suite
 that followed proves the client speaks SMTP to a real server rather than only to a
 fake one. The shipped default still refuses (`NOTIFICATION_TRANSPORT=none`), which is
-the fail-closed choice rather than an unfinished one. GATE 2 now awaits human
-sign-off.
+the fail-closed choice rather than an unfinished one. **GATE 2 was signed on
+2026-11-04 at `5c3e077`** — see *GATE 2 — signed* below.
 
 ## Phase history
 
@@ -46,8 +47,8 @@ sign-off.
 | --- | --- |
 | Phase 0 — mocked demo | ✅ built, verified |
 | GATE 1 — human visual approval | ✅ **approved** ("I'm happy with demo functions and look") |
-| Phase 1 — real foundation | 🔄 in progress (F1 ✅, F2 ✅, F3 ✅, F4 ✅, F5 ✅, F6 ✅, F7 ✅, F8 ✅, F9 ✅, F10 ✅) |
-| GATE 2 — foundation verification | ⏳ pending human sign-off; **every automated check is green, including the MySQL half** (`c99c792`, see *The MySQL half, run*) |
+| Phase 1 — real foundation | ✅ complete (F1 ✅, F2 ✅, F3 ✅, F4 ✅, F5 ✅, F6 ✅, F7 ✅, F8 ✅, F9 ✅, F10 ✅) |
+| GATE 2 — foundation verification | ✅ **signed 2026-11-04 at `5c3e077`**; report below, with 9 items carried forward as open rather than signed |
 
 ## F1 — Repo & infra ✅
 
@@ -1222,7 +1223,7 @@ why the rows above record a run rather than an absence.
 (`0f5da36`, `4e7dd5c`, `c90423b`), the MySQL half that all of them deferred has now
 been run (`c99c792`) — including the concurrency proof that closes gap 23 — and the
 transport decision the slice ended on has been built and proven against a socket
-(`6f4cb0b`, and the socket suite that followed); GATE 2 awaits human sign-off.**
+(`6f4cb0b`, and the socket suite that followed); GATE 2 is signed (`5c3e077`).**
 F1–F10 are all committed and the pipeline slice is closed — every arrow in the Phase-0
 flow (ingest → extract → review → decide → notify) now has real code behind it, a due
 row is reached by a background poller rather than an operator, the review backlog is
@@ -1359,6 +1360,110 @@ One caveat carried forward rather than retired: the *number* of sends is now saf
 MySQL, but a row that parks `failed` or `suppressed` still raises no alert (gap 22).
 Correctness under concurrency and visibility of failure are different problems, and
 only the first one moved.
+
+## GATE 2 — signed
+
+**Signed 2026-11-04 at `5c3e077`**, by the project owner, on the report below.
+GATE 2's exit (README) is "foundation verification + feature menu": this section is
+the verification, and the menu is Phase 2.
+
+What it added over the earlier per-milestone reports is not a new claim but a
+**re-run**: every row below was produced against the tree at `5c3e077` with the
+MySQL 8.4 container live on `127.0.0.1:3307`, and each was run again before the
+sign-off was committed. The earlier records (`c99c792` and each milestone's own
+table) were not copied — a gate report in this project has been wrong before by
+being carried forward, and F9's first "MySQL gate green" skipped while claiming to
+pass.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Full suite, **real MySQL 8.4** | `pytest tests` with `MYSQL_TEST_URL` on `:3307` | **464 passed, 1 skipped**, exit 0 |
+| Integration only | `pytest -m integration tests` | **12 passed**, 453 deselected |
+| Full suite, SQLite | `pytest tests`, `MYSQL_TEST_URL` **unset** | **458 passed, 7 skipped** |
+| Migrations on MySQL | `alembic upgrade head && alembic check` | `0001 → 0002 → 0003`, **`0003 (head)`**, "No new upgrade operations detected." |
+| Lint | `ruff check .` (repo root) | All checks passed |
+| Format | `ruff format --check .` (repo root) | **82 files** already formatted |
+| Types | `mypy app` (strict) | clean, **49 source files** |
+| Security lint | `bandit -c pyproject.toml -r backend/app` | **0 issues** |
+
+The two suites reconcile rather than being two numbers: the total is **465** either
+way. Offline, 6 MySQL-dependent tests plus the opt-in `KAFKA_LIVE` test skip (7);
+online, the same 6 run and only `KAFKA_LIVE` skips (1). *A skip is not a pass* —
+which is exactly why the MySQL column was executed rather than declared, and why the
+migration check ran against a **freshly created** scratch database
+(`ca_alembic_check`), not the one the integration tests had just rewritten.
+
+Reproduce (PowerShell — there is **no `.env`** in this repo, so the credentials are
+read back out of the running container, and the port is read from the publish map
+rather than assumed: compose defaults to `:3306`, but this stack was started with
+`MYSQL_PORT=3307`, which is why every `:3306` URL written earlier in this file
+connects to nothing):
+
+```powershell
+$e = docker inspect contract-agent-mysql-1 --format '{{json .Config.Env}}' | ConvertFrom-Json
+$u = (($e | ? { $_ -like 'MYSQL_USER=*' }) -replace '^MYSQL_USER=','')
+$p = (($e | ? { $_ -like 'MYSQL_PASSWORD=*' }) -replace '^MYSQL_PASSWORD=','')
+$port = (docker port contract-agent-mysql-1 3306/tcp) -replace '.*:(\d+)$','$1'
+$env:MYSQL_TEST_URL = "mysql+pymysql://${u}:${p}@127.0.0.1:${port}/contract_agent_test?charset=utf8mb4"
+venv\Scripts\python.exe -m pytest backend\tests
+```
+
+The scratch database must already exist — the app user **lacks** `CREATE DATABASE`
+(measured: `ERROR 1044` for `contract_agent`), so `ca_alembic_check` was created as
+root and dropped afterwards. Inside the container, pass the password as `MYSQL_PWD`
+rather than with `-p`: PowerShell mangles `-p<value>`, and MySQL then answers
+`Access denied for user '$u'` — which reads like a bad password but is a quoting bug.
+
+Run the checks from the repository root as `.\venv\Scripts\python.exe -m …`. Writing
+`..\venv\Scripts\python.exe` at root resolves to `D:\Projects\venv` — an unrelated
+environment that does exist on this machine and carries ruff **0.8.6**, which reports
+2 errors and 2 unformatted files that this project's pinned ruff **0.17.3** does not.
+The "intermittent lint failure" recorded earlier was this path, not the code: resolve
+a green-that-turns-red to its interpreter before believing it either way.
+
+### What is signed, and what is not
+
+Signed: the foundation **works and is proven where it was claimed** — ingestion →
+outbox → relay, auth and tenant isolation from the principal, encryption at rest,
+review gating, deterministic channel selection, dispatch with consent/quiet-hours,
+a scheduler that reaches a due row, and an SMTP transport that authenticates the
+relay it hands credentials to. The MySQL-only guarantees (the dispatch lock, the
+scheduler claim skipping a held row, real `ENUM`s, the `NUMERIC(4,3)` scale, and a
+migration set that matches the models) are proven against a real MySQL 8.4 server.
+
+**Not signed, and carried forward as open — these are the conditions of the
+sign-off, not footnotes:**
+
+1. **No Kafka broker has ever been on the other end of a publish**, and **no
+   consumer exists**. The wire path is a contract test (`FakeProducer`); `KAFKA_LIVE`
+   skips. D4-03's accepted risk stands: a misconfigured production relay parks
+   events rather than failing the deploy.
+2. **No alert fires when a row parks** (`failed`) or is `suppressed`, and outbox
+   replay is operator-initiated (D5-03, gap 22's residue). Correctness under
+   concurrency moved at `c99c792`; *visibility of failure did not*.
+3. **Nothing has ever been sent to a real customer.** The shipped default transport
+   refuses; SMTP has only spoken to a loopback relay this suite started and
+   certified itself, so no handshake has chained to a public CA over a real network
+   (D10-10). `sent: true` over HTTP is proven against a relay of our own making.
+4. **No live Ollama has answered anything** (gap 17); `EXTRACTION_BACKEND=pattern`
+   is what runs.
+5. **No screen talks to the real API.** `frontend/` still calls the mocked demo
+   backend, so the `review`, `agent` and `notification` routes have only ever been
+   called by `TestClient`.
+6. **`normalized_value` is still plaintext** (gap 20) — the one place a shipped
+   column contradicts "no raw PII at rest", and it needs a decision (encrypt +
+   compare on a blind index, or keep it and record the exception), not a patch.
+7. **Every contract predating `0002` is un-contactable** until consent is set row by
+   row (gap 18), and an `AgentDecision` still cannot be overridden or flagged
+   (gap 19) even though the `version` column those routes need now exists.
+8. **`FOR UPDATE` is a no-op on SQLite.** The concurrency guarantees are
+   MySQL-only evidence by construction; the offline suite can never be the proof.
+9. **Missing pieces by design, not by defect:** `CustomerResponse` and `Escalation`
+   remain writer-less (gap 15) — nothing records a reply or opens an SLA clock.
+
+None of 1–9 is a green check described as complete. Each is visible in the code and
+in this file, which is the standard this project has held gates to: a caveat stated
+out loud is acceptable; a caveat buried under a green board is not.
 
 ## Non-negotiable reminders
 
