@@ -6,13 +6,19 @@ would store, not a record of anything it stored. This module is the writer, and
 it is deliberately thin — the *policy* lives in :mod:`app.workers.decision` and
 the route only composes the two, the same split F7 used for extraction.
 
-Two shapes worth stating:
+Three shapes worth stating:
 
-* **Decisions are history, not state.** There is no update path and no unique
-  constraint per contract: re-running the decision appends a row, so "why did we
-  email them in March?" is answerable after the consent flags have changed. The
-  newest row is what a caller acts on, and :meth:`latest_for_contract` is how it
-  is found without a second table.
+* **Decisions are history, not state.** There is no unique constraint per contract
+  and no delete: re-running the decision appends a row, so "why did we email them
+  in March?" is answerable after the consent flags have changed. The newest row is
+  what a caller acts on, and :meth:`latest_for_contract` is how it is found without
+  a second table.
+* **Except for the two operator corrections, which edit the newest row.** Override
+  and flag-review (gap 19) mutate ``channel``/``needs_review`` in place under the
+  ``version`` lock, because "a person disagrees with this recommendation" is a fact
+  about *that* recommendation rather than a new one. They preserve what the policy
+  said in ``original_channel`` and leave the older rows untouched, so an edit never
+  destroys the history it corrects.
 * **Reads are tenant-scoped, writes are tenant-stamped.** Both come free from
   :class:`~app.db.repositories.base.TenantScopedRepository`, which is why a
   contract id belonging to another organisation yields ``None`` rather than a
@@ -20,6 +26,8 @@ Two shapes worth stating:
 """
 
 from __future__ import annotations
+
+from sqlalchemy import func, select
 
 from app.db.enums import Channel
 from app.db.models import AgentDecision
@@ -73,9 +81,27 @@ class AgentDecisionRepository(TenantScopedRepository[AgentDecision]):
         return list(self.session.execute(stmt).scalars())
 
     def latest_for_contract(self, contract_id: int) -> AgentDecision | None:
-        """The most recent decision for one contract, or ``None`` if there is none."""
+        """The most recent decision for one contract, or ``None`` if there is none.
+
+        This is the row an operator corrects: the override and flag-review routes
+        act on the *current* recommendation, and the older rows stay as history.
+        """
         rows = self.for_contract(contract_id, limit=1)
         return rows[0] if rows else None
+
+    def count_for_contract(self, contract_id: int) -> int:
+        """How many decisions already exist for one contract.
+
+        Used to stamp ``rerun_count`` on the row a re-run appends, so "re-run for
+        the third time" is readable from the decision itself instead of being an
+        aggregate a caller has to reconstruct from the history listing.
+
+        Counted over :meth:`scoped`, so a ``contract_id`` from another tenant
+        counts zero rather than disclosing how busy someone else's contract is.
+        """
+        scoped = self.scoped(AgentDecision).where(AgentDecision.contract_id == contract_id)
+        stmt = select(func.count()).select_from(scoped.subquery())
+        return int(self.session.execute(stmt).scalar_one())
 
     def create(
         self,

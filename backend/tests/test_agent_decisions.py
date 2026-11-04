@@ -1013,3 +1013,419 @@ def test_consent_on_another_tenants_contract_is_not_found(
 
     assert response.status_code == 404
     assert audit_rows(session_factory) == []
+
+
+# --- operator corrections (gap 19) ---------------------------------------
+OVERRIDE_PATH = "/api/v1/agent/decisions/{contract_id}/override"
+FLAG_PATH = "/api/v1/agent/decisions/{contract_id}/flag-review"
+
+
+def reachable_contract(session_factory: sessionmaker[Session], tenant: Tenant) -> Contract:
+    """A contract that may be emailed *or* texted, so an override has somewhere to go."""
+    row = make_contract(session_factory, tenant, consent_email=True, consent_sms=True)
+    add_field(session_factory, row)
+    add_field(session_factory, row, field_name=FieldName.PHONE, value=CONTACT_PHONE)
+    return row
+
+
+def override(
+    client: TestClient,
+    contract_id: int,
+    headers: dict[str, str],
+    *,
+    channel: str,
+    version: int,
+    reason: str | None = None,
+) -> Any:
+    body: dict[str, Any] = {"channel": channel, "version": version}
+    if reason is not None:
+        body["reason"] = reason
+    return client.post(OVERRIDE_PATH.format(contract_id=contract_id), json=body, headers=headers)
+
+
+def flag(
+    client: TestClient,
+    contract_id: int,
+    headers: dict[str, str],
+    *,
+    version: int,
+    reason: str | None = None,
+) -> Any:
+    body: dict[str, Any] = {"version": version}
+    if reason is not None:
+        body["reason"] = reason
+    return client.post(FLAG_PATH.format(contract_id=contract_id), json=body, headers=headers)
+
+
+def test_an_override_replaces_the_channel_and_preserves_the_policys_choice(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    contract = reachable_contract(session_factory, tenant)
+    headers = auth(client, tenant, make_user)
+    decided = decide(client, contract.id, headers).json()
+    assert decided["channel"] == "email"
+
+    response = override(
+        client, contract.id, headers, channel="sms", version=decided["version"], reason="no email"
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["channel"] == "sms"
+    # The policy's own answer is kept, because "a person disagreed" is only
+    # meaningful next to what they disagreed with.
+    assert body["original_channel"] == "email"
+    assert body["overridden_by"] is not None
+    # The recommendation is edited, not re-created: same row, new generation.
+    assert body["id"] == decided["id"]
+    assert body["version"] == decided["version"] + 1
+
+
+def test_an_override_appends_no_decision_row(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    contract = reachable_contract(session_factory, tenant)
+    headers = auth(client, tenant, make_user)
+    decided = decide(client, contract.id, headers).json()
+
+    override(client, contract.id, headers, channel="sms", version=decided["version"])
+
+    # A correction is a fact about *that* recommendation, so history keeps its shape.
+    assert len(decisions(session_factory)) == 1
+
+
+def test_an_override_is_audited_with_both_channels(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    contract = reachable_contract(session_factory, tenant)
+    headers = auth(client, tenant, make_user)
+    decided = decide(client, contract.id, headers).json()
+
+    override(
+        client, contract.id, headers, channel="sms", version=decided["version"], reason="bounced"
+    )
+
+    rows = audit_rows(session_factory)
+    assert len(rows) == 1
+    assert rows[0].action == "agent_decision.overridden"
+    assert rows[0].entity == "agent_decisions"
+    assert rows[0].entity_id == str(decided["id"])
+    assert rows[0].actor_type == "user"
+    assert rows[0].reason == "bounced"
+    # Only channel names and flags live in the snapshot — never a contact value.
+    assert json.loads(rows[0].before_state or "{}")["channel"] == "email"
+    assert json.loads(rows[0].after_state or "{}")["channel"] == "sms"
+    assert CONTACT_EMAIL not in (rows[0].after_state or "")
+    assert CONTACT_PHONE not in (rows[0].after_state or "")
+
+
+def test_a_second_override_still_reports_the_policys_original_channel(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    contract = reachable_contract(session_factory, tenant)
+    headers = auth(client, tenant, make_user)
+    decided = decide(client, contract.id, headers).json()
+    first = override(client, contract.id, headers, channel="sms", version=decided["version"]).json()
+
+    second = override(
+        client, contract.id, headers, channel="email", version=first["version"]
+    ).json()
+
+    # ``original_channel`` is written once: the second operator's predecessor is not
+    # the policy, so overwriting it would lose the only record of what it decided.
+    assert second["channel"] == "email"
+    assert second["original_channel"] == "email"
+
+
+def test_an_override_to_an_unpermitted_channel_is_refused(
+    client: TestClient,
+    contract: Contract,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    # Email-only consent, but a perfectly approved phone number is on file: the
+    # value exists and still must not be usable, because nobody consented to SMS.
+    add_field(session_factory, contract)
+    add_field(session_factory, contract, field_name=FieldName.PHONE, value=CONTACT_PHONE)
+    headers = auth(client, tenant, make_user)
+    decided = decide(client, contract.id, headers).json()
+
+    response = override(client, contract.id, headers, channel="sms", version=decided["version"])
+
+    assert response.status_code == 409
+    error = response.json()["error"]
+    # Its own code, distinct from "no channel at all": the fix is to pick a
+    # permitted channel, not to go review a field.
+    assert error["code"] == "CHANNEL_NOT_PERMITTED"
+    assert error["details"]["permitted"] == ["email"]
+    assert decisions(session_factory)[0].channel.value == "email"
+    assert audit_rows(session_factory) == []
+
+
+def test_an_override_re_runs_the_contact_gates(
+    client: TestClient,
+    contract: Contract,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    add_field(session_factory, contract)
+    headers = auth(client, tenant, make_user)
+    decided = decide(client, contract.id, headers).json()
+    # The customer withdraws everything after the recommendation was made. A stored
+    # decision is a snapshot; the override must be judged against today's state.
+    client.put(
+        CONSENT_PATH.format(contract_id=contract.id),
+        json=consent_body(contract, do_not_contact=True),
+        headers=headers,
+    )
+
+    response = override(client, contract.id, headers, channel="email", version=decided["version"])
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "CONTACT_REFUSED"
+
+
+def test_a_stale_override_version_is_a_conflict(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    contract = reachable_contract(session_factory, tenant)
+    headers = auth(client, tenant, make_user)
+    decided = decide(client, contract.id, headers).json()
+    override(client, contract.id, headers, channel="sms", version=decided["version"])
+
+    # Replay the original version: another operator's correction is already in.
+    response = override(client, contract.id, headers, channel="sms", version=decided["version"])
+
+    assert response.status_code == 409
+    error = response.json()["error"]
+    assert error["code"] == "VERSION_CONFLICT"
+    # The winning row comes back, so the loser can re-render instead of guessing.
+    assert error["details"]["current"]["channel"] == "sms"
+    # Only the accepted correction is on record.
+    assert len(audit_rows(session_factory)) == 1
+
+
+def test_an_override_before_any_decision_is_a_conflict(
+    client: TestClient,
+    contract: Contract,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    add_field(session_factory, contract)
+    headers = auth(client, tenant, make_user)
+
+    response = override(client, contract.id, headers, channel="email", version=1)
+
+    # 409, not 404: the contract exists, there is just nothing to correct yet.
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "NO_DECISION"
+
+
+def test_flag_review_marks_the_current_recommendation(
+    client: TestClient,
+    contract: Contract,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    add_field(session_factory, contract)
+    headers = auth(client, tenant, make_user)
+    decided = decide(client, contract.id, headers).json()
+    assert decided["needs_review"] is False
+
+    response = flag(client, contract.id, headers, version=decided["version"], reason="looks wrong")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["needs_review"] is True
+    # Flagging takes the recommendation out of the send path without touching the
+    # channel, so nothing about the choice itself is lost.
+    assert body["channel"] == decided["channel"]
+    assert body["version"] == decided["version"] + 1
+
+
+def test_flag_review_is_audited(
+    client: TestClient,
+    contract: Contract,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    add_field(session_factory, contract)
+    headers = auth(client, tenant, make_user)
+    decided = decide(client, contract.id, headers).json()
+
+    flag(client, contract.id, headers, version=decided["version"], reason="call them instead")
+
+    rows = audit_rows(session_factory)
+    assert len(rows) == 1
+    assert rows[0].action == "agent_decision.flagged"
+    assert rows[0].entity == "agent_decisions"
+    assert rows[0].reason == "call them instead"
+    assert json.loads(rows[0].before_state or "{}")["needs_review"] is False
+    assert json.loads(rows[0].after_state or "{}")["needs_review"] is True
+
+
+def test_flag_review_does_not_re_run_the_contact_gates(
+    client: TestClient,
+    contract: Contract,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    add_field(session_factory, contract)
+    headers = auth(client, tenant, make_user)
+    decided = decide(client, contract.id, headers).json()
+    client.put(
+        CONSENT_PATH.format(contract_id=contract.id),
+        json=consent_body(contract, do_not_contact=True),
+        headers=headers,
+    )
+
+    response = flag(client, contract.id, headers, version=decided["version"])
+
+    # Every other refusal here answers "may we contact them?". Flagging is the
+    # opposite request, so requiring consent would withhold the safe action exactly
+    # when the contract looks worst.
+    assert response.status_code == 200, response.text
+
+
+def test_a_flagged_decision_is_visible_in_the_listing(
+    client: TestClient,
+    contract: Contract,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    add_field(session_factory, contract)
+    headers = auth(client, tenant, make_user)
+    decided = decide(client, contract.id, headers).json()
+    flag(client, contract.id, headers, version=decided["version"])
+
+    body = client.get(DECISIONS_PATH, params={"contract_id": contract.id}, headers=headers).json()
+
+    # ``dispatch`` refuses on this flag, so it has to be readable by the people who
+    # need to clear it.
+    assert body["items"][0]["needs_review"] is True
+
+
+def test_flagging_an_already_flagged_decision_changes_nothing(
+    client: TestClient,
+    contract: Contract,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    add_field(session_factory, contract)
+    headers = auth(client, tenant, make_user)
+    decided = decide(client, contract.id, headers).json()
+    first = flag(client, contract.id, headers, version=decided["version"]).json()
+
+    second = flag(client, contract.id, headers, version=first["version"])
+
+    # A retry is a retry, not a second flag: no UPDATE is emitted, so the version
+    # does not advance and the state stays where the first call put it.
+    assert second.status_code == 200
+    assert second.json()["version"] == first["version"]
+
+
+def test_a_viewer_cannot_override_or_flag(
+    client: TestClient,
+    contract: Contract,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    add_field(session_factory, contract)
+    operator_headers = auth(client, tenant, make_user)
+    decided = decide(client, contract.id, operator_headers).json()
+    viewer_headers = auth(client, tenant, make_user, role=UserRole.VIEWER, email="v@acme.test")
+
+    assert (
+        override(
+            client, contract.id, viewer_headers, channel="email", version=decided["version"]
+        ).status_code
+        == 403
+    )
+    assert flag(client, contract.id, viewer_headers, version=decided["version"]).status_code == 403
+    assert audit_rows(session_factory) == []
+
+
+def test_correcting_another_tenants_contract_is_not_found(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+    other_tenant: Tenant,
+) -> None:
+    foreign = reachable_contract(session_factory, other_tenant)
+    foreign_headers = auth(client, other_tenant, make_user, email="ops@globex.test")
+    decide(client, foreign.id, foreign_headers)
+    headers = auth(client, tenant, make_user)
+
+    # 404 rather than 409: the id must not be confirmed to exist elsewhere.
+    assert override(client, foreign.id, headers, channel="sms", version=1).status_code == 404
+    assert flag(client, foreign.id, headers, version=1).status_code == 404
+
+
+def test_a_rerun_count_records_how_many_recommendations_came_before(
+    client: TestClient,
+    contract: Contract,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    add_field(session_factory, contract)
+    headers = auth(client, tenant, make_user)
+
+    first = decide(client, contract.id, headers).json()
+    second = decide(client, contract.id, headers).json()
+
+    # Stamped at append time, so "re-rolled four times" is readable from the row
+    # itself rather than only from the history listing.
+    assert first["rerun_count"] == 0
+    assert second["rerun_count"] == 1
+
+
+def test_the_override_body_cannot_carry_a_contact_value(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    contract = reachable_contract(session_factory, tenant)
+    headers = auth(client, tenant, make_user)
+    decided = decide(client, contract.id, headers).json()
+
+    response = client.post(
+        OVERRIDE_PATH.format(contract_id=contract.id),
+        json={
+            "channel": "sms",
+            "version": decided["version"],
+            "recipient": CONTACT_PHONE,
+        },
+        headers=headers,
+    )
+
+    # Extra keys are ignored rather than persisted: the recipient is the approved
+    # field's value, and an override may only choose *among* permitted channels.
+    assert response.status_code == 200
+    assert CONTACT_PHONE not in response.text

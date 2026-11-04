@@ -29,7 +29,13 @@ from typing import Any
 from app.db.models import AuditLog
 from app.db.repositories.base import TenantScopedRepository
 
-__all__ = ["ACTOR_USER", "AUDIT_ENTITY_CONTRACT", "AUDIT_ENTITY_FIELD", "AuditLogRepository"]
+__all__ = [
+    "ACTOR_USER",
+    "AUDIT_ENTITY_CONTRACT",
+    "AUDIT_ENTITY_DECISION",
+    "AUDIT_ENTITY_FIELD",
+    "AuditLogRepository",
+]
 
 #: ``AuditLog.entity`` for extracted-field rows, matching the table name so the
 #: log joins back to what it describes without a lookup table of its own.
@@ -39,6 +45,12 @@ AUDIT_ENTITY_FIELD = "extracted_fields"
 #: rather than on a separate consent table: the flags are columns on the contract,
 #: and the audit row is what says who set them and when.
 AUDIT_ENTITY_CONTRACT = "contracts"
+
+#: ``AuditLog.entity`` for agent-decision rows, used by the override and
+#: flag-review routes (gap 19). Only *human* edits to a decision are audited: the
+#: row a policy creates is already append-only and carries its own provenance, so
+#: a "decision was created" entry would only narrate the record it duplicates.
+AUDIT_ENTITY_DECISION = "agent_decisions"
 
 #: ``AuditLog.actor_type`` value for a person acting through the API. The model
 #: also allows ``worker``/``system`` for actions that have no human actor.

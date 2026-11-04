@@ -933,6 +933,12 @@ committed together. That pairing is the milestone; extraction and review follow.
 
 ### D9-05 — `needs_review` is always `false`; override and flag-review wait (gap 19)
 
+> **Superseded in part by D9-06.** The two routes this entry deferred now exist.
+> One premise below — "`AgentDecision` has no `version` column" — was retired by
+> migration `0003` (`0f5da36`). The rest is kept as written, because the argument
+> that a deterministic selector cannot be *uncertain* is still why the policy
+> itself never sets the flag; D9-06 only adds who may.
+
 - **Decision:** `build_decision` sets `needs_review=False` unconditionally and
   stores no overridden/flagged state. Re-running the policy for a contract appends
   a second `AgentDecision` rather than editing the first. There is no override or
@@ -950,6 +956,37 @@ committed together. That pairing is the milestone; extraction and review follow.
   only partly met: re-run works by posting again (appending), the other two do not
   exist. Adding a version column later means backfilling `1` on an append-only
   table, which is cheap precisely because nothing edits these rows today.
+
+### D9-06 — Operator corrections edit the newest decision; an override chooses *among* permitted channels
+
+- **Decision:** two routes, both addressed by **contract** id rather than decision
+  id and both requiring an operator role:
+  `POST /agent/decisions/{contract_id}/override` (body: `channel`, `version`,
+  optional `reason`) and `POST /agent/decisions/{contract_id}/flag-review`
+  (body: `version`, optional `reason`). Each edits the newest `AgentDecision` for
+  that contract in place under the `version` column from `0003`, returning `409`
+  with the current row when the version is stale and `409 NO_DECISION` when the
+  contract has no decision yet. An override re-runs `permitted_channels` against
+  the contract's **current** state and refuses
+  (`CHANNEL_NOT_PERMITTED`) any channel outside it. `original_channel` is written
+  once, on the first override, from the value the policy chose, and never
+  rewritten; `overridden_by` holds the acting user's id.
+- **Why:** `0003` made the row lockable but left the correction unwritable, so the
+  only supported fix for a wrong decision was to append another one — which reads
+  as "the policy changed its mind" and loses the fact that a person disagreed.
+  Editing under an optimistic lock records that disagreement where a reader will
+  look. Re-deriving the permitted set at override time rather than trusting the
+  decision's own snapshot is the point of the least-privilege rule: an override
+  *redirects* a choice the rules already allow, and must never *create*
+  permission — a contract that revoked consent after the decision was taken
+  refuses the override rather than quietly honouring a stale allowance. Flagging
+  deliberately skips the contact gates, because taking a recommendation out of
+  the send path should never be blocked by policy.
+- **Trade-off:** this makes `AgentDecision` no longer append-only, so its history
+  is "appends plus two audited edits" rather than a pure log; `rerun_count` is
+  stamped at append time and is therefore a snapshot of history at that moment,
+  not a live aggregate. Every correction also needs an `AuditLog` row to be
+  reconstructable, which is why the routes write one and the policy does not.
 
 ## Phase 1 — F10 (notification dispatch)
 

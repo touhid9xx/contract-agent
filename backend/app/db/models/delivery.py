@@ -72,13 +72,30 @@ class AgentDecision(Base, TimestampMixin):
     mlflow_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     #: Optimistic-lock column, matching ``Contract``, ``ExtractedField`` and
-    #: ``Escalation`` (gap 19). Nothing mutates a decision today — a re-run
-    #: *appends* a new row rather than editing this one — so the column is inert
-    #: until an override or flag-review route exists. It is added now, in the same
-    #: revision as ``Notification``'s, because a table that cannot be locked is the
-    #: structural reason no override route could be written, and the second
-    #: migration that would otherwise be needed is exactly what this avoids.
+    #: ``Escalation``. It was added by ``0003`` while still inert, because a table
+    #: that cannot be locked is the structural reason no override route could be
+    #: written at all; the override and flag-review routes in
+    #: ``app/api/v1/agent.py`` are what finally use it.
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    # --- operator correction (gap 19) ------------------------------------
+    #: The channel the policy chose, preserved the first time a person overrides
+    #: this decision. NULL means "no override has happened", which is why it is not
+    #: backfilled with ``channel``: the two are equal until a person disagrees, and
+    #: a NULL says *nobody has* rather than *somebody agreed*.
+    original_channel: Mapped[Channel | None] = mapped_column(
+        enum_column(Channel, length=10), nullable=True
+    )
+    #: The authenticated operator who overrode the channel. A plain GUID rather than
+    #: a foreign key, matching ``ExtractedField.reviewed_by``: the audit log keeps
+    #: the durable record of who did what, and a deleted user must not cascade a
+    #: decision back to a channel it no longer has.
+    overridden_by: Mapped[uuid.UUID | None] = mapped_column(GUID(), nullable=True)
+    #: How many decisions already existed for this contract when this row was
+    #: written, so "re-run for the third time" is answerable from the row itself.
+    #: A re-run still *appends* — this is a counter of history, not a mutable
+    #: identity, and the previous rows remain readable (D9-05).
+    rerun_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     #: See :class:`~app.db.models.contract.Contract` — a declarative directive, not
     #: shared mutable state.

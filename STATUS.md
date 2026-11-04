@@ -38,8 +38,15 @@ The pipeline is now fully locked, self-draining and pageable, and it **sends** �
 `6f4cb0b` implements the transport decision this slice ended on, and the socket suite
 that followed proves the client speaks SMTP to a real server rather than only to a
 fake one. The shipped default still refuses (`NOTIFICATION_TRANSPORT=none`), which is
-the fail-closed choice rather than an unfinished one. **GATE 2 was signed on
-2026-11-04 at `5c3e077`** — see *GATE 2 — signed* below.
+the fail-closed choice rather than an unfinished one. The slice after the sign-off is
+`feat(g19)`, migration `0004`, and it closes gap 19: **operator override** and
+**flag-review** routes now exist on `/agent/decisions`, addressed by contract id,
+taking `version` and writing an `AuditLog` row for every correction (D9-06). An
+override re-runs the consent and opt-out gates against the contract's state *now*
+and chooses only *among* permitted channels, so it redirects a channel and never
+creates permission. **GATE 2 was signed on 2026-11-04 at `5c3e077`** — see *GATE 2
+— signed* below. That sign-off is unchanged by the later slice; what moved is the
+migration head, from `0003` to `0004`.
 
 ## Phase history
 
@@ -991,6 +998,71 @@ and the keyset page boundary would need a different answer than "quantise on wri
 unreachable, so the offline suite stays green — but a skip is not evidence, which is
 why the rows above record a run rather than an absence.
 
+## Operator overrides and flag-review ✅ (`feat(g19)`, migration `0004`)
+
+Gap 19, the last of the three-gap schema cluster. `0003` made the write *safe*
+(`version` + `__mapper_args__`), which is why the routes could not be written
+before it; this slice is the feature half.
+
+What lands:
+
+1. **Two routes on the contract, not the decision row:**
+   `POST /agent/decisions/{contract_id}/override` and
+   `POST /agent/decisions/{contract_id}/flag-review`. Addressed by contract id to
+   match the shapes `demo/backend/main.py` already defines, which is also the id
+   an operator actually has when they notice the wrong channel was chosen.
+2. **Two request models, not one with an optional field.** `DecisionOverrideRequest`
+   carries `channel`, `FlagReviewRequest` does not, so "flag-review that also
+   switches channel" is unrepresentable rather than merely rejected.
+3. **The gates are re-run, not re-implemented.** `permitted_channels()` was
+   extracted out of `select_channel()` so the override route evaluates the same
+   review/opt-out/consent predicate the policy uses — against the contract's state
+   *now*. An override therefore chooses **among** permitted channels and never
+   creates permission: a contract that revoked consent after the decision refuses
+   with `CHANNEL_NOT_PERMITTED` (`REFUSAL_CHANNEL_NOT_PERMITTED` in
+   `app/workers/decision.py`).
+4. **`original_channel` is written once and never backfilled.** `NULL` means "no
+   human overrode this", so the migration deliberately does not copy `channel`
+   into it — doing so would assert that a script's choice had been confirmed by a
+   person. `overridden_by` records the actor; `rerun_count` counts appends.
+5. **Every correction is audited** (`agent_decision.overridden` /
+   `agent_decision.flagged`) with before/after state, written through
+   `AuditLogRepository.record`. The row is mutated in place, so the audit row is
+   what makes the edit reconstructable.
+6. **Stale writes answer `409 VERSION_CONFLICT` with the current row**, a missing
+   decision answers `409 NO_DECISION`, and a `StaleDataError` raised at flush is
+   mapped to the same 409 rather than a 500.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Full suite, **real MySQL 8.4** | `pytest tests` with `MYSQL_TEST_URL` on `:3307` | **482 collected — 481 passed, 1 skipped**, exit 0 (JUnit-confirmed) |
+| Full suite, SQLite | `pytest tests`, `MYSQL_TEST_URL` **unset** | **482 collected — 475 passed, 7 skipped** |
+| Migration applies | `alembic upgrade head` on a **fresh** MySQL database | **`0001 → 0002 → 0003 → 0004`**, exit 0 |
+| `alembic check` | MySQL, fresh DB built by the chain | **"No new upgrade operations detected."** |
+| Alembic topology | `alembic current` | **`0004 (head)`** |
+| Lint | `ruff check .` (repo root) | All checks passed |
+| Format | `ruff format --check .` (repo root) | **83 files** already formatted |
+| Types | `mypy app` (strict) | clean, **49 source files** |
+| Security lint | `bandit -c pyproject.toml -r app` | **0 issues** (3 expected `nosec B104`) |
+
+The two suites reconcile rather than being two numbers: **482 either way**, which
+is GATE 2's 465 plus 17. Offline, 6 MySQL-dependent tests plus the opt-in
+`KAFKA_LIVE` test skip (7); online, the same 6 run and only `KAFKA_LIVE` skips (1).
+The scratch database was created as root because the app user lacks
+`CREATE DATABASE`, and it was dropped afterwards — verified absent, not assumed.
+
+**A real defect the gate caught, not the author.** `mypy` flagged a new `except`
+that rebound `exc` over the deleted binding from an earlier handler; left alone, a
+stale exception variable and a fresh policy refusal would have been
+indistinguishable in the log. It was renamed rather than suppressed. `ruff` also
+reformatted the new test module.
+
+Two residues are carried rather than hidden: a re-run is still a `POST` that
+**appends**, so `rerun_count` is a snapshot at append time and not a live
+aggregate; and `demo/fixtures/agent_decisions.json` still carries field names
+(`tokens_in`, `input_signals`, …) the real model does not have — a fixture-fidelity
+gap, not an unimplemented route.
+
 ## Known gaps / issues
 
 1. **`gitleaks` needs Docker** and is manual-stage only (D1-03). Run
@@ -1131,21 +1203,29 @@ why the rows above record a run rather than an absence.
     and the window (`[20:00, 08:00)` by default) is checked immediately before the
     transport is reached, on the customer's wall clock and DST-safely (D10-01,
     D10-02). The non-negotiable's third clause now has code behind it.
-19. **An `AgentDecision` cannot be overridden or flagged — the structural half is
-    closed, the routes are not.** ~~`AgentDecision` has no `version` column and no
-    `__mapper_args__`, so it cannot be optimistic-locked~~ — **retired by `0003`
-    (`0f5da36`).** The column and the declarative directive now exist, so the
-    collision two operators overriding the same decision would produce *is* now
-    detectable, which was the blocker. What remains is the feature itself: there is
-    still no `override` route and no `flag-review` route, the column is inert until
-    one exists, and a re-run is a new `POST` that **appends** rather than mutating —
-    that is still the only supported correction. The Phase-0 demo's
-    `POST /agent/decisions/{id}/rerun|override|flag-review` shapes and its
-    `original_channel` / `overridden_by` / `rerun_count` columns are therefore
-    **not** implemented, and `demo/fixtures/agent_decisions.json` carries field
-    names (`tokens_in`, `input_signals`, …) the real model does not have. The
-    override columns those shapes imply are still absent, so introducing them needs
-    a further migration — but the lock that made the route unwritable no longer is.
+19. ~~**An `AgentDecision` cannot be overridden or flagged.**~~ — **closed.** Two
+    halves. The structural half was `0003` (`0f5da36`), which added `version` +
+    `__mapper_args__` so two operators correcting the same decision collide
+    detectably. The feature half is this slice: migration `0004` adds
+    `original_channel`, `overridden_by` and `rerun_count`, and the router gains
+    `POST /agent/decisions/{contract_id}/override` and
+    `.../flag-review` (D9-06). Both are addressed by **contract** id, matching
+    `demo/backend/main.py`'s shapes, both require an operator role, both take
+    `version` and answer `409 VERSION_CONFLICT` with the current row on a stale
+    write and `409 NO_DECISION` when the contract has no decision. An override
+    re-runs `permitted_channels` against the contract's state *now* and refuses
+    `CHANNEL_NOT_PERMITTED` for anything outside it — so it redirects a permitted
+    channel and never creates permission; a contract that revoked consent after
+    the decision refuses the override. `original_channel` is written once, from
+    what the policy chose, and never rewritten; `overridden_by` records the actor;
+    each correction writes an `AuditLog` row (`agent_decision.overridden` /
+    `agent_decision.flagged`) carrying the before/after state, so the edit is
+    reconstructable even though the row is mutated in place. Two things remain
+    open and are named rather than hidden: a re-run is still a new `POST` that
+    **appends** — `rerun_count` is stamped at append time and is a snapshot, not a
+    live aggregate — and `demo/fixtures/agent_decisions.json` still carries field
+    names (`tokens_in`, `input_signals`, …) the real model does not have, which is
+    a fixture-fidelity gap rather than an unimplemented route.
 20. **`normalized_value` is plaintext PII, and it is the column the policy reads.**
     F7 encrypts `raw_value`, and the fields API never carries either column — but
     `ExtractedField.normalized_value` is a plain `Text` column holding the
@@ -1311,8 +1391,9 @@ is `.husky/_` and both hooks are live; the wiring was proven by a commit that gi
 One alternative remains, and it is gap-sized rather than milestone-sized:
 
 - **Decide what to do about `normalized_value` (gap 20).** This was a three-gap
-  schema cluster; gaps 19 and 21 are now closed by `0003` (`0f5da36`), so one
-  question is left and it is not a migration to slip in. `ExtractedField.raw_value`
+  schema cluster; gap 21 was closed by `0003` (`0f5da36`) and gap 19 by `0003` plus
+  `0004` (the `feat(g19)` slice), so one question is left and it is not a migration
+  to slip in. `ExtractedField.raw_value`
   is Fernet ciphertext, but `normalized_value` — the canonical email or E.164 phone
   the decision and dispatch policies actually read — is a plain `Text` column, so
   the "no raw PII at rest" non-negotiable is contradicted one column over. It needs
@@ -1333,9 +1414,16 @@ this suite started and certified itself — so `sent: true` over HTTP is proven 
 a relay of our own making, never against a provider, and never through a handshake
 chaining to a public CA over a real network (D10-10). From F9: **every contract that
 predates `0002` is un-contactable** until someone sets consent one row at a time
-(gap 18), and an `AgentDecision` still **cannot be overridden or flagged** — the
+(gap 18), and ~~an `AgentDecision` still **cannot be overridden or flagged** — the
 `version` column that blocked those routes now exists (`0f5da36`), but the routes
-themselves still do not (gap 19). The review queue pages now (`c90423b`, gap 16), so
+themselves still do not (gap 19)~~. **The struck clause is amended, not deleted:**
+the `feat(g19)` slice added both routes on top of migration `0004`, so an
+`AgentDecision` can now be overridden or flagged under a `version` check with an
+audit row behind it. Two narrow residues replace it, both recorded in gap 19 — a
+re-run **appends** a new decision rather than editing this one, so `rerun_count` is
+a snapshot taken at append time rather than a live aggregate, and
+`demo/fixtures/agent_decisions.json` still carries field names the real model does
+not have. The review queue pages now (`c90423b`, gap 16), so
 the backlog is reachable rather than truncated at 500 — but its `oldest_minutes` is
 only trustworthy on page one, and its cursor is a position rather than a capability,
 so neither should be presented to an operator as more than it is. Quiet hours — the
@@ -1385,6 +1473,14 @@ pass.
 | Format | `ruff format --check .` (repo root) | **82 files** already formatted |
 | Types | `mypy app` (strict) | clean, **49 source files** |
 | Security lint | `bandit -c pyproject.toml -r backend/app` | **0 issues** |
+
+**Head has moved since this table was produced, and the row above is left as
+measured.** Every row records the tree at `5c3e077`, when head was `0003`. The
+`feat(g19)` slice added `0004`, so that row is a date, not a description of the
+current tree. Re-measured after it, against a **freshly created** MySQL scratch
+database: `0001 → 0002 → 0003 → 0004` (exit 0), `alembic check` → "No new upgrade
+operations detected.", `alembic current` → **`0004 (head)`**. See *Operator
+overrides and flag-review* below for the full table.
 
 The two suites reconcile rather than being two numbers: the total is **465** either
 way. Offline, 6 MySQL-dependent tests plus the opt-in `KAFKA_LIVE` test skip (7);
@@ -1453,9 +1549,16 @@ sign-off, not footnotes:**
 6. **`normalized_value` is still plaintext** (gap 20) — the one place a shipped
    column contradicts "no raw PII at rest", and it needs a decision (encrypt +
    compare on a blind index, or keep it and record the exception), not a patch.
-7. **Every contract predating `0002` is un-contactable** until consent is set row by
-   row (gap 18), and an `AgentDecision` still cannot be overridden or flagged
-   (gap 19) even though the `version` column those routes need now exists.
+7. ~~**Every contract predating `0002` is un-contactable** until consent is set row
+   by row (gap 18), and an `AgentDecision` still cannot be overridden or flagged
+   (gap 19) even though the `version` column those routes need now exists.~~
+   **Amended after the sign-off, not deleted from it:** the gap 18 half stands
+   exactly as signed. The gap 19 half is superseded by the `feat(g19)` slice, which
+   added override and flag-review on top of migration `0004`. The two residues that
+   replace it are narrower and are carried here rather than buried — a re-run
+   appends a new decision instead of updating this one, so `rerun_count` is a
+   snapshot at append time, and the demo fixture still names fields the real model
+   does not have.
 8. **`FOR UPDATE` is a no-op on SQLite.** The concurrency guarantees are
    MySQL-only evidence by construction; the offline suite can never be the proof.
 9. **Missing pieces by design, not by defect:** `CustomerResponse` and `Escalation`

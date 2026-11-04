@@ -27,10 +27,13 @@ What is deliberately **not** here yet, so it is not mistaken for done:
   sending, not a *channel-selection* input. It needs `Contract.timezone` resolved
   against a tz database (absent at runtime — D6-03) and belongs to the dispatch
   slice (D9-03).
-* **Override and flag-review.** Both are operator edits to an existing decision.
-  ``AgentDecision`` has no ``version`` column, so an optimistic-locked edit has
-  nothing to lock against; adding one is a migration for the slice that needs it
-  (gap 19).
+* **Override and flag-review.** Both are operator edits to an existing decision,
+  so both live in the transport layer (``app/api/v1/agent.py``), not here. What
+  this module provides is :func:`permitted_channels` — the gate set an override
+  must respect — because a person choosing a channel chooses *among* the channels
+  the rules already allow. If the route re-implemented those gates, the operator
+  path and the policy path would eventually disagree about who may be contacted,
+  and the disagreement would be invisible until someone was contacted twice.
 """
 
 from __future__ import annotations
@@ -48,9 +51,11 @@ __all__ = [
     "CHANNEL_PRIORITY",
     "CLOSED_CONTRACT_STATUSES",
     "DETERMINISTIC_DECIDER",
+    "REFUSAL_CHANNEL_NOT_PERMITTED",
     "ChannelChoice",
     "DecisionRefusedError",
     "build_decision",
+    "permitted_channels",
     "select_channel",
 ]
 
@@ -115,6 +120,11 @@ REFUSAL_CONTACT_REFUSED = "CONTACT_REFUSED"
 REFUSAL_NO_CONSENT = "NO_CONSENT"
 #: Consent exists, but no approved value can satisfy a consented channel.
 REFUSAL_NO_CONTACT_VALUE = "NO_CONTACT_VALUE"
+#: An operator asked to override *to* a channel this contract cannot support.
+#: Distinct from the refusals above, which mean no channel at all is available:
+#: this one means the channel that was asked for is not among the permitted ones.
+#: An override chooses among permitted channels; it never creates permission.
+REFUSAL_CHANNEL_NOT_PERMITTED = "CHANNEL_NOT_PERMITTED"
 
 
 class DecisionRefusedError(Exception):
@@ -189,8 +199,17 @@ def _reasoning(
     )
 
 
-def select_channel(contract: Contract, fields: Sequence[ExtractedField]) -> ChannelChoice:
-    """Pick the channel this contract should be reminded on, or refuse.
+def permitted_channels(
+    contract: Contract, fields: Sequence[ExtractedField]
+) -> dict[Channel, ExtractedField]:
+    """Every channel a person may choose, and the field that makes each usable.
+
+    This is the same set the policy chooses *from*. An override picks a member of
+    it and nothing else: a person choosing a channel chooses among the channels the
+    rules already allow, and never widens them. The function exists so the override
+    route cannot re-implement these gates and get one of them subtly wrong — the
+    review gate, the ``do_not_contact`` opt-out and the consent veto all run here,
+    once, for both the policy and the operator.
 
     The gates run in a fixed order, and the order is part of the contract with the
     caller because it decides which refusal a caller with several problems at once
@@ -205,6 +224,9 @@ def select_channel(contract: Contract, fields: Sequence[ExtractedField]) -> Chan
 
     Steps 1-2 are about the contract's own state; 3-5 are the customer-contact
     policy, ordered from the strongest veto to the weakest reason.
+
+    The result is ordered by :data:`CHANNEL_PRIORITY`, so its first item is the
+    channel the deterministic policy itself would pick.
     """
     if contract.status in CLOSED_CONTRACT_STATUSES:
         raise DecisionRefusedError(
@@ -240,12 +262,16 @@ def select_channel(contract: Contract, fields: Sequence[ExtractedField]) -> Chan
         )
 
     usable = _usable_fields(fields)
-    eligible: list[tuple[Channel, ExtractedField]] = [
-        (channel, field)
-        for channel in CHANNEL_PRIORITY
-        if channel in consented
-        and (field := usable.get(CHANNEL_CONTACT_FIELDS[channel])) is not None
-    ]
+    # A plain loop rather than a comprehension with a walrus: the assigned name has
+    # to narrow to ``ExtractedField`` for the dict value, and an explicit loop says
+    # that without relying on a type checker to follow the assignment expression.
+    eligible: dict[Channel, ExtractedField] = {}
+    for channel in CHANNEL_PRIORITY:
+        if channel not in consented:
+            continue
+        field = usable.get(CHANNEL_CONTACT_FIELDS[channel])
+        if field is not None:
+            eligible[channel] = field
     if not eligible:
         raise DecisionRefusedError(
             REFUSAL_NO_CONTACT_VALUE,
@@ -258,12 +284,24 @@ def select_channel(contract: Contract, fields: Sequence[ExtractedField]) -> Chan
             },
         )
 
-    channel, field = eligible[0]
+    return eligible
+
+
+def select_channel(contract: Contract, fields: Sequence[ExtractedField]) -> ChannelChoice:
+    """Pick the channel this contract should be reminded on, or refuse.
+
+    The gates that decide whether any channel is available at all live in
+    :func:`permitted_channels`; this function only applies the documented priority
+    order to the survivors, so a channel refused for consent can never win by
+    being listed first.
+    """
+    eligible = permitted_channels(contract, fields)
+    channel, field = next(iter(eligible.items()))
     return ChannelChoice(
         channel=channel,
         field_name=field.field_name,
         confidence=float(field.confidence),
-        reasoning=_reasoning(channel, consented, eligible),
+        reasoning=_reasoning(channel, contract.consent_channels, list(eligible.items())),
     )
 
 
