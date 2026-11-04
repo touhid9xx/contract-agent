@@ -1112,8 +1112,10 @@ committed together. That pairing is the milestone; extraction and review follow.
 - **Trade-off:** the invariant "tenant scoping lives in the repository" now has one
   documented exception, and the guard that replaces it is application code that a
   future refactor could drop. It is the first thing the scheduler's test file covers
-  for that reason. Also accepted: `SKIP LOCKED` is a no-op on SQLite (gap 23), so on
-  the suite's database two pollers could claim the same row.
+  for that reason. Also accepted: `SKIP LOCKED` is a no-op on SQLite, so on the
+  suite's database two pollers could claim the same row. That was recorded as gap 23
+  and **closed against MySQL in D10-08** — the clause is still a no-op on SQLite, but
+  it is no longer unverified on the dialect where it does something.
 - **Companion decisions in the same slice, recorded here rather than as three
   entries:** `SENDER_UNAVAILABLE` is **not** suppressible (the shipped transport is
   `none`, so suppressing it would park every pending row in a human-only state for a
@@ -1122,3 +1124,45 @@ committed together. That pairing is the milestone; extraction and review follow.
   `notification_retry_max`'s floor moved `ge=0` → `ge=1` (at `0` the policy parks
   every row before the transport is ever consulted, so sending was impossible by
   configuration).
+
+### D10-08 — The dispatch lock is proven by a timeout, not by waiting
+
+- **Decision:** the two `FOR UPDATE` claims that stop a double send —
+  `NotificationRepository.claim_for_dispatch` (the dispatch route, `0f5da36`) and
+  `claim_next_due` (the scheduler, `4e7dd5c`) — are verified by two-connection
+  integration tests in `backend/tests/test_mysql_integration.py`, and the pair is
+  made to **raise** rather than to wait. Session `lock_wait_timeout` is shortened to
+  one second, and MySQL **errno 1205** is the *positive* assertion: the test passes
+  because a lock-wait timeout was raised. Gap 23 is closed on this evidence, not on a
+  re-reading of the SQL.
+- **Why a raised error and not a timing assertion:** "blocked" and "finished quickly"
+  are the same observation if you only measure wall-clock. A test that asserts
+  "B waited ≥ Nms" is flaky on a loaded machine and silently passes if the lock
+  degrades into a no-op under a fast commit. Forcing the timeout turns the two
+  hypotheses into distinguishable outcomes: a correctly-locking claim raises 1205
+  inside the bound, a broken one returns a row promptly and the test fails on
+  "DID NOT RAISE". The regression message names the defect rather than a duration.
+- **Why the second test asserts row identity, not a call count:** `SKIP LOCKED` means
+  *the other row is handed over*. Asserting that only one row was claimed would pass
+  even if both workers grabbed the same one and one of them lost a race later; the
+  test asserts worker B receives the *other* due row, which is only true if A's row
+  was actually skipped.
+- **Why only MySQL:** `with_for_update()` is a silent no-op on SQLite, and every
+  session in `test_notifications.py` shares one in-memory connection (`StaticPool`),
+  so a competing commit *cannot* land behind an in-flight request there. The offline
+  suite is not a weaker proof of this property — it is no proof at all, which is why
+  "the lock is untested" was recorded as a gap instead of as a passing table row.
+- **Trade-off:** these tests **skip, not fail**, when MySQL is unreachable, so the
+  default suite stays green on a machine with no Docker daemon and the guarantee
+  remains unverified there. A skip is not a pass, and CI without a MySQL service
+  reproduces exactly the condition gap 23 described. The gap is closed by a test that
+  *must be run*, and the status record has to carry the run rather than the command.
+- **Both claims were falsified before being trusted:** deleting `.with_for_update()`
+  makes the dispatch test fail at `test_mysql_integration.py:410` ("DID NOT RAISE"),
+  and deleting `skip_locked=True` makes the scheduler test report that the same row
+  went to two schedulers. Restoring each and re-running returned green.
+- **Corollary, measured rather than assumed:** the `CONFIDENCE_SCALE` quantiser from
+  D8-06 is a **no-op** on MySQL. A raw-SQL insert of `0.1 * 3` — bypassing the
+  `@validates` hook — reads back `Decimal('0.300')` because `NUMERIC(4, 3)` is
+  enforced there rather than merely declared. That quantiser is load-bearing only on
+  the dialect that ignores the scale, which is the dialect the offline suite runs.

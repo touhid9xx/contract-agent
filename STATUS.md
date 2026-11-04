@@ -25,6 +25,10 @@ something. `c90423b` (`feat(f8): page the review queue by cursor`) closed gap 16
 the review queue is now paged by keyset, so a backlog larger than the 500-row cap
 is reachable rather than truncated — and building it exposed a `NUMERIC(4, 3)`
 precision defect that had to be fixed for the page boundary to be honest (D8-06).
+The uncommitted MySQL slice below then **ran the half that had never run**: the
+`integration` suite, `alembic check` and `0003` against a real MySQL 8.4 server, and
+two concurrency tests that close gap 23 by proving the dispatch lock rather than
+arguing for it (D10-08).
 The pipeline is now fully locked, self-draining and pageable, and **still sends
 nothing**: the only transport refuses. GATE 2 now awaits human sign-off.
 
@@ -35,7 +39,7 @@ nothing**: the only transport refuses. GATE 2 now awaits human sign-off.
 | Phase 0 — mocked demo | ✅ built, verified |
 | GATE 1 — human visual approval | ✅ **approved** ("I'm happy with demo functions and look") |
 | Phase 1 — real foundation | 🔄 in progress (F1 ✅, F2 ✅, F3 ✅, F4 ✅, F5 ✅, F6 ✅, F7 ✅, F8 ✅, F9 ✅, F10 ✅) |
-| GATE 2 — foundation verification | ⏳ pending human sign-off; every automated check except the MySQL row (see F10) is green |
+| GATE 2 — foundation verification | ⏳ pending human sign-off; **every automated check is green, including the MySQL half** (`c99c792`, see *The MySQL half, run*) |
 
 ## F1 — Repo & infra ✅
 
@@ -504,7 +508,7 @@ is `404` and its decisions invisible. They do **not** prove the decision reaches
 anyone — there is no dispatcher, no notification row and no screen, so these routes
 have only ever been called by `TestClient`.
 
-## F10 — Notification dispatch ✅ (with one gate unrun — see below)
+## F10 — Notification dispatch ✅ (its one unrun gate has since been run)
 
 Step 6, and the arrow F9 left dangling. F9 produced a decision naming a channel;
 `Notification` — a table since F2 — still had **no writer at all**. This slice adds
@@ -543,7 +547,8 @@ before the transport is reached.
 - ~~**No row lock.** `Notification` has no `version` column, so two concurrent
   dispatches are not serialised; the unique `idempotency_key` is passed to the
   transport for provider-side dedupe (D10-05, gap 21).~~ — **closed by `0003`
-  (`0f5da36`)**, with the concurrency caveat still standing as gap 23.
+  (`0f5da36`)**; the concurrency caveat that remained (gap 23) is now closed against
+  a real MySQL server by two integration tests (D10-08).
 - **No content rendering and no outbox event.** `template` names the milestone; the
   body is the transport's job. A send emits no `contract.events` message, so nothing
   downstream learns that contact happened.
@@ -557,15 +562,18 @@ before the transport is reached.
 | Format | `ruff format --check app tests` | **69 files already formatted** |
 | Type check | `mypy app` (strict) | **clean, 47 source files** |
 | Security lint | `bandit -c pyproject.toml -r backend/app` | **0 issues** |
-| **Migration, real MySQL** | `alembic check` at head | **NOT RUN — Docker daemon was not running on this host.** F10 itself added no migration, so at the time of the F10 commit `0002` was still head. **Superseded by the delivery-lock slice below:** `0003` now exists, head is `0003`, and this row is *more* unrun than it was — there is now a new revision that has never been checked against MySQL either. Do not cite this row as verified |
-| **Full suite, real MySQL** | `pytest` with `MYSQL_TEST_URL` on `:3307` | **NOT RUN — same cause.** Expect `388 … skipped=1`; confirm `skipped="1"`, because a skip is not a pass (this is the mistake F9's first report made) |
+| **Migration, real MySQL** | `alembic check` at head | **NOT RUN — Docker daemon was not running on this host.** F10 itself added no migration, so at the time of the F10 commit `0002` was still head. **Superseded by the delivery-lock slice below:** `0003` now exists, head is `0003`, and this row is *more* unrun than it was — there is now a new revision that has never been checked against MySQL either. Do not cite this row as verified. **That has since been done:** `0003` runs on MySQL 8.4 with *no new upgrade operations* — see *The MySQL half, run* below (`c99c792`) |
+| **Full suite, real MySQL** | `pytest` with `MYSQL_TEST_URL` on `:3307` | **NOT RUN — same cause.** Expect `388 … skipped=1`; confirm `skipped="1"`, because a skip is not a pass (this is the mistake F9's first report made). **Since run:** `421 passed, 1 skipped` of 422 collected — see *The MySQL half, run* below |
 | Commit gate | `pre-commit run --files` on the 12 changed files | **all hooks passed**; the two frontend hooks (`tsc --noEmit`, `eslint`) reported `(no files to check)` because no frontend file changed in this slice. `--all-files` was not used, so the repo-wide tsc/eslint pass is **not** claimed here |
 | Alembic topology | `alembic heads` | Was **`0002 (head)`** at the F10 commit — one head, unchanged from F9. **Now `0003 (head)`** after the delivery-lock slice. This does **not** replace `alembic check` (row above), which needs a live server |
 
 The F9→F10 delta is **+46 SQLite tests** (`388` vs `342`). The two MySQL rows are
 left explicitly unrun rather than filled in from expectation: the harness that
 proves `SKIP LOCKED` and the real ENUM columns needs a server, and no server was
-reachable.
+reachable. **That was true of the F10 commit and is no longer true of the tree** —
+a Docker daemon answered in `c99c792`, both MySQL rows were run, and the row that
+matters most (`SKIP LOCKED`) now fails if the clause is removed. See *The MySQL
+half, run* below.
 
 #### Five defects the tests caught in my own work
 
@@ -620,9 +628,10 @@ SQLite. They are skipped — not failed — when MySQL is unreachable.
 > **Historical count, not a contradiction.** This table records what the F2 commit
 > actually reported. Two harness tests (the SQLAlchemy driver-error cases in
 > `test_mysql_integration.py`) landed afterwards in the follow-up `a79d893`
-> (`fix(f2): report the real cause when the mysql tests skip`), so running the
-> same `-m integration` command today reports **9 passed** — the F4 row above —
-> with the three real-MySQL tests unchanged.
+> (`fix(f2): report the real cause when the mysql tests skip`), so the same
+> `-m integration` command **reported 9 passed** at the time of that follow-up —
+> the F4 row above — with the three real-MySQL tests unchanged. It reports **12**
+> today, because the F10 slice added three more; see *The MySQL half, run* below.
 
 ```powershell
 docker compose up -d mysql
@@ -630,6 +639,12 @@ docker compose up -d mysql
 $env:MYSQL_TEST_URL = "mysql+pymysql://contract_agent:<MYSQL_PASSWORD>@127.0.0.1:3306/contract_agent_test"
 venv\Scripts\python.exe -m pytest -m integration backend/tests
 ```
+
+> **The `:3306` above is wrong for this compose file.** The service publishes
+> `127.0.0.1:3307->3306`, so every `:3306` URL in this file — this one included —
+> looks plausible and connects to nothing. The run recorded in *The MySQL half, run*
+> used `:3307` and read the password from the live container env, because there is
+> no `.env` in the repo root to copy it from.
 
 `MYSQL_TEST_URL` points at a **disposable** database — the tests drop and
 recreate the schema. A set-but-blank value falls back to the default rather than
@@ -700,7 +715,7 @@ The change is four parts, and the second is the one that is not just schema:
 | Migration applies | `alembic upgrade head` on a fresh database | **`0001 → 0002 → 0003`, exit 0** |
 | `alembic check` at head | SQLite, fresh DB built by the chain | **zero operations for either new `version` column.** The 13 reported diffs are all `modify_type` on enum columns created by `0001` — a pre-existing SQLite-vs-`ENUM` length artefact, not drift this slice introduced |
 | Alembic topology | `alembic heads` | **`0003 (head)`** — one head |
-| **`alembic check`, real MySQL** | needs a server | **NOT RUN — no Docker daemon on this host.** Unrun, not green |
+| **`alembic check`, real MySQL** | needs a server | **NOT RUN AT THIS COMMIT — no Docker daemon on this host.** Unrun then, not green then — **superseded: since run, see *The MySQL half, run* below**, where `0003` is verified at head against MySQL 8.4 with zero diffs |
 | Commit gate | husky pre-commit + commit-msg | **all 17 hooks Passed**, including `tsc --noEmit` and `eslint` |
 
 The three new tests are `test_models.py::test_notification_rejects_a_stale_write`,
@@ -771,7 +786,7 @@ Three judgements that could have been made silently and wrongly:
 | Migration applies | `alembic upgrade head` on a fresh database | **`0001 → 0002 → 0003`, exit 0** |
 | `alembic check` at head | SQLite | only the 13 pre-existing enum-length artefacts — **no new migration**, `SUPPRESSED` was already in `0001`'s ENUM definition |
 | Alembic topology | `alembic heads` | **`0003 (head)`** — unchanged, this slice added no revision |
-| **`alembic check` / full suite, real MySQL** | needs a server | **STILL NOT RUN.** Unrun, not green |
+| **`alembic check` / full suite, real MySQL** | needs a server | **NOT RUN AT THIS COMMIT.** Unrun then, not green then — **superseded: since run, see “The MySQL half, run” below** |
 | Commit gate | husky pre-commit + commit-msg | **all 17 hooks Passed**, including `tsc --noEmit` and `eslint` |
 
 Three ruff findings were fixed rather than suppressed: unsorted `__all__` in
@@ -820,8 +835,10 @@ page two re-served the last row of page one. The fix is `CONFIDENCE_SCALE` plus 
 `@validates("confidence")` quantiser on `ExtractedField`, which makes the declared
 scale true on both dialects for the same reason `truncate_to_second` floors
 timestamps (D2-06). It is the test being right about the code, not the other way
-round; on MySQL it should be a no-op, which is one more thing the unrun MySQL suite
-would confirm.
+round; on MySQL it should be a no-op — and it **is**: a raw-SQL insert of `0.1 * 3`
+against MySQL 8.4 reads back `Decimal('0.300')` on its own, so the fix is load-bearing
+only where the scale is merely declared. Measured, not assumed — see “The MySQL half,
+run” below.
 
 | Check | Command | Result |
 | --- | --- | --- |
@@ -831,13 +848,69 @@ would confirm.
 | Type check | `mypy app` (strict) | **clean, 48 source files** |
 | Security lint | `bandit` | **0 issues** (3 expected `nosec B104`) |
 | Migrations | — | **none added.** No model column changed shape, so `alembic heads` stays `0003 (head)` |
-| **`alembic check` / full suite, real MySQL** | needs a server | **STILL NOT RUN.** Unrun, not green |
+| **`alembic check` / full suite, real MySQL** | needs a server | **NOT RUN AT THIS COMMIT.** Unrun then, not green then — **superseded: since run, see “The MySQL half, run” below**; the quantiser was the claim tested |
 | Commit gate | husky pre-commit + commit-msg | **all 17 hooks Passed**, including `tsc --noEmit` and `eslint` |
 
 Three ruff findings were fixed rather than suppressed while landing it: an
 import-order error in the new test file, and two files that needed reformatting.
 `test_review.py` also had one exact-body assertion that `next_cursor` legitimately
 broke; the assertion was updated rather than the response.
+
+## The MySQL half, run ✅ (`c99c792` — `test(f10): prove the dispatch lock against a real mysql server`)
+
+Four slices carried the same open item: "the MySQL half is unrun, not green". A
+Docker daemon answered this time, so it is run.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| MySQL integration only | `pytest -m integration` vs. **MySQL 8.4.13** on `127.0.0.1:3307` | **12 passed**, 410 deselected |
+| Full suite, real MySQL | `pytest` with `MYSQL_TEST_URL` set | **421 passed, 1 skipped** (the live-Kafka opt-in) |
+| Full suite, no MySQL | `pytest` with `MYSQL_TEST_URL` unset | **415 passed, 7 skipped** |
+| `alembic current` | MySQL | **`0003 (head)`** |
+| `alembic check` | MySQL | **"No new upgrade operations detected."** — zero diffs |
+| `alembic check` | SQLite | 13 pre-existing enum-length artefacts, unchanged |
+| Lint / format / types / bandit | `ruff`, `mypy app`, `bandit -r app` | clean: **75 files**, **48 source files**, **0 issues** |
+
+**Why the container's address is `:3307`, not `:3306`.** The compose service
+publishes MySQL on `127.0.0.1:3307->3306`, and there is no `.env` in the repo root,
+so the credentials come from the running container's environment. Every earlier
+documented command in this file used `:3306`; that is why they looked plausible and
+failed.
+
+**Gap 23 is closed by two tests, not by a better argument.** Both live in
+`test_mysql_integration.py` and both need two real connections, which is exactly
+what the SQLite suite cannot offer:
+
+1. `test_the_dispatch_lock_blocks_a_second_worker` — worker B is proven to **block**
+   on worker A's `SELECT ... FOR UPDATE` (MySQL errno **1205**, with the session's
+   lock-wait timeout shortened to 1s so a regression fails fast), and after A commits
+   B's locking read returns the row as `sent`, which is the state the policy refuses
+   with `NOT_PENDING` instead of reaching the transport twice.
+2. `test_the_scheduler_claim_skips_a_row_another_worker_holds` — `4e7dd5c` added a
+   *second* caller of the lock, and `claim_next_due` must **skip** rather than
+   queue. The assertion is row *identity*: B must be handed the other due row.
+
+`errno 1205` is used as the **positive** assertion here, which is the unusual part:
+the test passes *because* a timeout was raised. A blocked claim and a concurrent
+read are the two hypotheses, and only the blocking one raises.
+
+**Both were falsified before being trusted.** Removing `.with_for_update()` from
+`claim_for_dispatch` makes the first test fail at `test_mysql_integration.py:410`
+("DID NOT RAISE"), and removing `skip_locked=True` from `claim_next_due` makes the
+second report that the same row went to two schedulers. A test that cannot fail
+proves nothing, and this pair was the one claim in the project resting on reasoning.
+
+**The quantiser from `c90423b` is a no-op here — shown, not argued.**
+`test_confidence_enforces_its_declared_scale_without_the_quantiser` inserts
+`0.1 * 3` with **raw SQL**, bypassing the `@validates` quantiser entirely, and MySQL
+stores and returns `Decimal('0.300')` because `NUMERIC(4, 3)` is enforced rather
+than merely declared. That is the falsifiable form of "MySQL did not need this fix":
+had MySQL stored the unrounded float, the fix would be load-bearing on both dialects
+and the keyset page boundary would need a different answer than "quantise on write".
+
+**Docker state is not a gate.** These tests skip, not fail, when MySQL is
+unreachable, so the offline suite stays green — but a skip is not evidence, which is
+why the rows above record a run rather than an absence.
 
 ## Known gaps / issues
 
@@ -1003,40 +1076,44 @@ broke; the assertion was updated rather than the response.
     then sees `sent` and refuses `NOT_PENDING` rather than reaching the transport
     twice. A version column alone would only have serialised the commit, after both
     sends had happened. The lost race now surfaces as `409 CONCURRENT_UPDATE`, not a
-    500. What remains unproven is stated as gap 23.
+    500. The concurrency half of that claim is no longer unproven: gap 23 is closed
+    by two tests against a real MySQL server (D10-08).
 22. ~~**No scheduler polls notifications.**~~ — **closed by `4e7dd5c`**.
     `NotificationScheduler` claims `pending` rows whose `scheduled_at` is null or
     past, so a quiet-hours deferral resumes on its own. What it is **not**: there is
     still no alerting — a row parked `failed` after exhausting
     `notification_retry_max`, or `suppressed` by a policy refusal, sits there until
     an operator looks. Retry stays operator-initiated, like DLQ replay (D5-03); the
-    difference is that a *deferred* row now recovers itself. The scheduler also
-    inherits gap 23's caveat: its claim lock is a no-op on SQLite. **No alert when
-    rows park** is still open, and it is a real weakness at GATE 2.
-23. **The double-send serialisation is proven by reasoning, not by a concurrent
-    test.** `0003` (`0f5da36`) makes the second dispatch block on
-    `SELECT ... FOR UPDATE` and then refuse `NOT_PENDING`. But `with_for_update()`
-    is a **silent no-op on SQLite**, and SQLite is what the suite runs on — so the
-    lock itself has never been exercised. Every session in `test_notifications.py`
-    shares one in-memory connection (`StaticPool`), which is why
+    difference is that a *deferred* row now recovers itself. The gap 23 caveat it
+    inherited — a claim lock that is a no-op on SQLite — is now **closed**: on MySQL
+    two schedulers are proven not to receive the same row (D10-08). On SQLite the
+    no-op remains true by construction, so the offline suite still cannot prove it.
+    **No alert when rows park** is still open, and it is a real weakness at GATE 2.
+23. ~~**The double-send serialisation is proven by reasoning, not by a concurrent
+    test.**~~ — **closed against MySQL (D10-08).** The gap was real and correctly
+    stated: `0003` (`0f5da36`) makes the second dispatch block on
+    `SELECT ... FOR UPDATE` and then refuse `NOT_PENDING`, but `with_for_update()`
+    is a **silent no-op on SQLite**, and every session in `test_notifications.py`
+    shares one in-memory connection (`StaticPool`) — a competing commit *cannot*
+    land behind an in-flight request there, which is why
     `test_a_lost_race_is_reported_as_a_conflict` drives `_commit_or_conflict`
-    directly instead of racing two real requests: a competing commit *cannot* land
-    behind an in-flight request there. What is proven is the `version` column
-    (the loser's `UPDATE` matches zero rows → `409`); what is *not* proven is the
-    lock that makes the loser lose **before** reaching the transport — the half
-    that actually prevents two emails. Closing this needs the MySQL suite
-    (row above in the F10 table, still unrun) plus a test that opens two real
-    connections and asserts the second blocks. Until then this is a design
-    argument, stated as one. **`4e7dd5c` widened the blast radius**: the same no-op
-    lock now guards two callers instead of one — the dispatch route *and* the
-    scheduler's `claim_next_due` — so on SQLite two pollers could in principle
-    dispatch the same row concurrently. Against MySQL they cannot; that is still
-    the unrun half.
+    directly. So the `version` column was proven and the lock was not.
+    It is now proven by two tests that open **two real MySQL connections**:
+    `test_the_dispatch_lock_blocks_a_second_worker` (B blocks — errno `1205` — then
+    sees `sent`, the state that refuses `NOT_PENDING`) and
+    `test_the_scheduler_claim_skips_a_row_another_worker_holds` (B is handed the
+    *other* due row, proving `SKIP LOCKED` skipped A's). `4e7dd5c` had widened the
+    blast radius to two callers; both callers are now covered. **What is still true:**
+    on the SQLite the offline suite runs, the clause remains a no-op, so that suite
+    can never be the proof — the guarantee is MySQL-specific and the integration
+    suite is where it lives.
 
 ## Next permitted step
 
-**F10 (step 6) is committed (`b344c17`), and three gap-closing slices have landed
-since (`0f5da36`, `4e7dd5c`, `c90423b`); GATE 2 awaits human sign-off.** F1–F10 are
+**F10 (step 6) is committed (`b344c17`), three gap-closing slices have landed since
+(`0f5da36`, `4e7dd5c`, `c90423b`), and the MySQL half that all of them deferred has
+now been run (`c99c792`) — including the concurrency proof that closes gap 23; GATE 2
+awaits human sign-off.** F1–F10 are
 all committed and the pipeline slice is closed — every arrow in the Phase-0 flow
 (ingest → extract → review → decide → notify) now has real code behind it, a due row
 is reached by a background poller rather than an operator, and the review backlog is
@@ -1149,17 +1226,24 @@ neither should be presented to an operator as more than it is. Quiet hours — t
 caveat F9 had to carry — are now enforced
 (D10-01/D10-02), so that one is retired rather than repeated. Two gate reports in
 this project were wrong the first time and both are recorded as such: F9's first
-"MySQL gate green" carried a bad password and skipped, and F10's two MySQL rows are
-**still unrun** because no Docker daemon answered on this host. The suite builds
-tables from `Base.metadata`, so `alembic check` is the only thing that proves a
-migration matches the models: it was green on SQLite for `0003` (zero operations for
-either new `version` column, the 13 remaining diffs being pre-existing enum-length
-artefacts), and it has **never** been run against MySQL since `0002` — so `0003` is
-a revision no real database has validated. The `confidence` quantiser from
-`c90423b` belongs to the same unrun half: it repairs a defect SQLite permits and
-MySQL already enforces, so MySQL is exactly where it should prove to be a no-op.
-The dispatch lock is also unproven under concurrency, because `FOR UPDATE` is a
-no-op on the SQLite the suite runs on (gap 23).
+"MySQL gate green" carried a bad password and skipped, and F10's two MySQL rows
+**were unrun at the F10 commit** because no Docker daemon answered then. That has
+since changed, and the correction cuts the other way: the suite builds tables from
+`Base.metadata`, so `alembic check` is the only thing that proves a migration matches
+the models — it was green on SQLite for `0003` and is now **green on MySQL too**
+("No new upgrade operations detected."), so `0003` is a revision a real database has
+validated. The `confidence` quantiser from `c90423b` was the one claim that could
+only be settled there, and MySQL confirms it is a **no-op**: the declared scale was
+already enforced. The dispatch lock is no longer unproven under concurrency either —
+two integration tests show the second worker blocking and then seeing `sent`, and two
+schedulers being handed different rows. What remains true is that this is
+**MySQL-only evidence**: `FOR UPDATE` is still a no-op on the SQLite the offline suite
+runs, so that suite can never be the proof, and a skip there is not a pass.
+
+One caveat carried forward rather than retired: the *number* of sends is now safe on
+MySQL, but a row that parks `failed` or `suppressed` still raises no alert (gap 22).
+Correctness under concurrency and visibility of failure are different problems, and
+only the first one moved.
 
 ## Non-negotiable reminders
 
