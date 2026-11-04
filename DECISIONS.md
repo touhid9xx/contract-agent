@@ -1027,6 +1027,13 @@ committed together. That pairing is the milestone; extraction and review follow.
 
 ### D10-04 — `NotificationTransport` has exactly one member: `none`
 
+> **Superseded in part by D10-09.** `smtp` is now a second member, added in the slice
+> that implemented it, so the rule this entry states is still the rule that was
+> followed; it is the *inventory* below that has moved. `sent: true` is now reachable
+> through the API **when `NOTIFICATION_TRANSPORT=smtp`** and the relay accepts the
+> message, and unreachable in the shipped default (`none`). Read the trade-off
+> paragraph here as the state at the F10 commit.
+
 - **Decision:** `notification_transport: Literal["none"] = "none"`, and
   `build_sender` returns `UnavailableSender` unconditionally. That stand-in reports
   `available = False`, and a dispatch against it raises `SENDER_UNAVAILABLE`, having
@@ -1166,3 +1173,64 @@ committed together. That pairing is the milestone; extraction and review follow.
   `@validates` hook — reads back `Decimal('0.300')` because `NUMERIC(4, 3)` is
   enforced there rather than merely declared. That quantiser is load-bearing only on
   the dialect that ignores the scale, which is the dialect the offline suite runs.
+
+### D10-09 — `smtp` is a real transport; the envelope is derived, not invented
+
+- **Decision:** `NotificationTransport` gains a second member, `smtp`, and
+  `build_sender` returns an `SmtpSender` for it. The adapter lives in the new
+  `app/workers/senders.py`, beside `publishers.py` and for the same reason: the
+  protocol (`MessageSender`) and the factory stay with the policy in `dispatch`, and
+  only the transport imports `smtplib`. `dispatch.py` still never imports `smtplib`,
+  which is what lets the consent and quiet-hours tests run with no transport at all.
+  `smtp` was added to the literal **after** the adapter existed, which is D10-04's
+  own rule — a literal naming a transport that does not exist is a lie a config file
+  can tell — kept rather than waived. This is the "addition, not a rewrite" D10-04
+  predicted.
+- **Why SMTP and not an email API or a portal stub:** `smtplib` is stdlib, so the
+  only new runtime dependency is none at all; the credentials fit the existing
+  fail-fast `Settings` style; and `DATA` being answered with a 2xx is a genuine
+  provider-side acceptance, which is what makes `sent: true` an observation instead of
+  a claim. A portal stub could not honestly set `sent` at all — it would have to mean
+  "a row exists", which is the state the row was already in.
+- **The Message-ID is derived from the idempotency key, not from
+  `email.utils.make_msgid`.** Delivery here is at-least-once: the row commits after
+  `send` returns, so a process dying in between re-sends on the next tick. A random
+  Message-ID would make the second attempt a *different message* to every relay that
+  de-duplicates on that header, so `make_msgid` would manufacture the one duplicate
+  this transport is able to make collapsible. The id is
+  `sha256(idempotency_key)@<sender domain>`, so both attempts are byte-identical in
+  the fields a provider can collapse them by. The `X-Idempotency-Key` header travels
+  alongside it; it is non-standard on purpose and free to add, because an unknown
+  `X-` header is ignored.
+- **Why one conversation per message:** the scheduler sends one row per tick, so a
+  pooled connection would mostly hold sockets open against a relay that had already
+  timed them out, and a broken connection could then affect a message it never
+  touched. `create_smtp_sender` therefore takes a *factory*. Building the sender
+  opens no socket, which is asserted: a sender that dialled on construction would
+  fail the API process when the relay was merely restarting.
+- **The socket timeout is a correctness bound, not tuning.** `SMTP_TIMEOUT_SECONDS`
+  reaches `smtplib` as the socket timeout, so connect, TLS, auth and `DATA` all share
+  one ceiling. The send happens *inside* the transaction holding the row's
+  `FOR UPDATE` lock (`claim_next_due` → `_dispatch_locked`, D10-08), so an unbounded
+  send would hold a locked row — and the serial tick loop behind it — open for as long
+  as a provider cared to stay silent. That is why the value is validated at start-up
+  (`gt=0, le=60`) rather than defaulted and forgotten.
+- **Relay refusals are redacted before they are stored.** A refusal routinely quotes
+  the failing address (`550 5.1.1 <someone@example.com>: recipient rejected`), and
+  that text goes to `Notification.last_error`, which `GET /notifications` renders to
+  any viewer — including one who may not see contact values anywhere else. The detail
+  is passed through `redact_text` before it is kept, while the SMTP status code and
+  the diagnostic survive it. An error column must not become a second place a contact
+  value leaks out of.
+- **Trade-off, stated rather than buried:** the transport implements **email only**.
+  `sms` and `voice` are *refused*, not substituted — delivering a voice reminder by
+  e-mail would be a different promise kept than the one the decision recorded. The
+  refusal is a `SenderError`, so the row spends its retry budget and parks `failed`
+  where an operator sees it. The body is also still a placeholder naming the contract
+  reference; it carries no extracted value, since the counterparty and the dates stay
+  in the database. Real rendering waits on a template table, as D10-06 already
+  recorded.
+- **What this does not prove:** the tests drive a fake client, so what is pinned is
+  the envelope, the call order, the timeout argument and the redaction — not a socket.
+  No test in this repo has spoken SMTP to a real relay. The first deployment does that
+  for the first time.

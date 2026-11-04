@@ -23,17 +23,23 @@ repo rather than invented here:
    in ``Contract.timezone`` against the ``tzdata`` IANA database, because 08:00 has
    to mean 08:00 where the customer is. An unresolvable zone is refused, never
    silently treated as UTC.
-4. **Nothing reaches a caller without a transport that exists.** ``notification_
-   transport`` has exactly one member, ``none``, and that member wires the refusing
-   stand-in. A dispatch against it records the attempt and fails visibly, which is
-   the same choice ``UnavailablePublisher`` makes for events.
+4. **Nothing reaches a caller without a transport that exists.** Every member of
+   ``notification_transport`` names an adapter that is really there: ``none`` wires
+   the refusing stand-in, and ``smtp`` — added with
+   :class:`~app.workers.senders.SmtpSender`, not before it — wires the only
+   transport this build implements. A dispatch against ``none`` records the
+   attempt and fails visibly, which is the same choice ``UnavailablePublisher``
+   makes for events.
 
 What is deliberately **not** here yet, so it is not mistaken for done:
 
-* **No transport.** There is no SMTP provider, no SMS gateway and no dialler, so
-  nothing can actually be sent by this build. Adding one is an adapter behind
-  :class:`MessageSender` — the seam exists so that adapter needs no change to this
-  policy.
+* **No SMS and no voice.** ``SmtpSender`` delivers ``email`` only, and refuses the
+  other two channels rather than substituting one for another. There is no
+  dialler and no gateway, so a customer who is only reachable by phone still
+  cannot be reached by this build.
+* **No transport code in this module.** The concrete adapter lives in
+  :mod:`app.workers.senders`, as ``KafkaPublisher`` lives in ``publishers``. This
+  module must stay importable, and testable, without ``smtplib`` or a relay.
 * **The row lock is the caller's, not this module's.** ``Notification`` carries a
   ``version`` column (gap 21) and the callers take a ``SELECT ... FOR UPDATE`` on
   the row *before* calling :func:`dispatch_notification` — the route through
@@ -81,7 +87,6 @@ __all__ = [
     "UnavailableSender",
     "assert_may_contact",
     "build_notification",
-    "build_sender",
     "dispatch_moment",
     "dispatch_notification",
     "in_quiet_hours",
@@ -262,26 +267,21 @@ class UnavailableSender:
     It refuses instead of pretending. A silent no-op sender would let a dispatch
     mark a row ``sent`` with nothing delivered — the failure mode this whole
     module is arranged to make impossible.
+
+    ``reason`` names the setting that produced this stand-in, so the 409 or the
+    stored ``last_error`` tells an operator which value to change instead of
+    restating that nothing is configured.
     """
+
+    def __init__(self, reason: str = "no notification transport is configured") -> None:
+        self._reason = reason
 
     @property
     def available(self) -> bool:
         return False
 
     def send(self, message: OutgoingMessage) -> str | None:
-        raise SenderUnavailableError("no notification transport is configured")
-
-
-def build_sender(_settings: Settings) -> MessageSender:
-    """Pick the transport for this deployment.
-
-    ``notification_transport`` has one legal member today, so this returns the
-    refusing stand-in unconditionally. It stays a function with a ``Settings``
-    argument because that is the seam an SMTP or SMS adapter plugs into, and
-    because a caller reading ``build_sender(settings)`` learns that the choice is
-    configuration-driven rather than accidental.
-    """
-    return UnavailableSender()
+        raise SenderUnavailableError(self._reason)
 
 
 # --- quiet hours ------------------------------------------------------------

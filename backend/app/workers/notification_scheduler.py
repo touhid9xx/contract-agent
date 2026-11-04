@@ -63,10 +63,10 @@ from app.workers.dispatch import (
     SUPPRESSING_REFUSALS,
     DispatchRefusedError,
     MessageSender,
-    build_sender,
     dispatch_notification,
     recipient_for,
 )
+from app.workers.senders import build_sender
 
 log = structlog.get_logger(__name__)
 

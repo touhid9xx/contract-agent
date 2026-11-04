@@ -26,10 +26,11 @@ EventTransport = Literal["none", "kafka"]
 ExtractionBackend = Literal["pattern", "ollama"]
 #: Transport a notification is sent through. ``none`` keeps the refusing
 #: stand-in, so a dispatch records an attempt and fails visibly instead of
-#: pretending a message left the building. There is no ``smtp`` member yet for
-#: the same reason ``EventTransport`` has no ``console``: a transport is added
-#: with the adapter that implements it, not ahead of it.
-NotificationTransport = Literal["none"]
+#: pretending a message left the building. ``smtp`` selects
+#: :class:`~app.workers.senders.SmtpSender`, and it exists only because that
+#: adapter does: a transport is never named here ahead of the code that
+#: implements it, which is why there is still no ``sms`` or ``voice`` member.
+NotificationTransport = Literal["none", "smtp"]
 
 #: The value shipped in .env.example. Never valid in staging/production.
 #: Not a credential: production validation below refuses to start when it is
@@ -160,6 +161,40 @@ class Settings(BaseSettings):
     #: sweep interval to be noticed.
     notification_poll_interval_seconds: float = Field(default=5.0, gt=0, le=300)
 
+    # --- smtp transport --------------------------------------------------
+    # Read only when ``notification_transport == "smtp"``. ``smtp_host`` is the
+    # one field with no usable default: every other setting below has a sane
+    # value for a submission relay, and a relay with no host is not a transport.
+    smtp_host: str = ""
+    #: 587 is the submission port — the one that expects STARTTLS. 465 (implicit
+    #: TLS) is deliberately not supported: the client has to pick ``SMTP_SSL``
+    #: before the first byte, so offering both would mean two connection shapes
+    #: behind one transport name, which is a setting most deployments would get
+    #: wrong exactly once and only in production.
+    smtp_port: int = Field(default=587, gt=0, le=65535)
+    #: The envelope sender (``MAIL FROM``, and the ``From:`` header). Required
+    #: for ``smtp``: a relay rejects a session with no sender, and without this
+    #: check that rejection would arrive at the first real send instead of at
+    #: start-up.
+    smtp_from: str = ""
+    smtp_username: str = ""
+    #: Never logged and never returned. A failed login is reported from the
+    #: relay's own response text, which the adapter scrubs before it is stored.
+    smtp_password: str = ""
+    #: STARTTLS. On by default and refused as ``False`` in staging/production —
+    #: without it the credentials below cross the network in clear text.
+    smtp_starttls: bool = True
+    #: Upper bound on ONE SMTP conversation: connect, TLS, auth and ``DATA``.
+    #:
+    #: This is a correctness bound rather than a tuning knob. ``smtplib`` applies
+    #: it as the socket timeout, so a relay that accepts the connection and then
+    #: says nothing cannot hold the caller open. That matters because the
+    #: scheduler sends *while it holds the row lock*: ``claim_next_due`` takes
+    #: ``FOR UPDATE`` and the transaction commits only after ``send`` returns, so
+    #: an unbounded send would pin the locked row — and the serial tick loop
+    #: behind it — for as long as the provider felt like it.
+    smtp_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+
     # --- http ------------------------------------------------------------
     cors_origins: str = "http://localhost:3000"
 
@@ -227,6 +262,25 @@ class Settings(BaseSettings):
                 "start > end (e.g. 20 and 8) for a window that wraps midnight"
             )
 
+        # An SMTP relay missing any of these three would read as "configured"
+        # while failing at the first real send — which, in the scheduler, means
+        # failing *inside* the row lock rather than at start-up. Each is a boot
+        # error instead.
+        if self.notification_transport == "smtp":
+            if not self.smtp_host.strip():
+                raise ValueError("SMTP_HOST must be set when NOTIFICATION_TRANSPORT=smtp")
+            if not _is_plausible_address(self.smtp_from):
+                raise ValueError(
+                    "SMTP_FROM must be an e-mail address when "
+                    f"NOTIFICATION_TRANSPORT=smtp; got {self.smtp_from!r}"
+                )
+            if bool(self.smtp_username) != bool(self.smtp_password):
+                raise ValueError(
+                    "SMTP_USERNAME and SMTP_PASSWORD must be set together; a relay "
+                    "that wants credentials needs both, and one half would only "
+                    "surface as a failed login at the first send"
+                )
+
         # A malformed key is worse than a missing one: it fails at the first
         # encrypt rather than at start-up, which is a write path, not a boot.
         # Empty stays legal here because the API process never stores field
@@ -262,6 +316,16 @@ class Settings(BaseSettings):
             )
         if self.log_json is False:
             raise ValueError("LOG_JSON must not be disabled in staging/production")
+        # Loopback origins are refused above for the same reason: a production
+        # shape that only works because nothing is listening should not boot.
+        # Here the exposure is worse than a misconfiguration — the SMTP
+        # credentials and the recipient's address would be sent in clear text.
+        if self.notification_transport == "smtp" and not self.smtp_starttls:
+            raise ValueError(
+                "SMTP_STARTTLS must not be disabled in "
+                f"{self.app_env}: the credentials and the recipient address would "
+                "cross the network unencrypted"
+            )
         insecure_origins = [origin for origin in self.cors_origin_list if _is_loopback(origin)]
         if insecure_origins:
             raise ValueError(
@@ -312,6 +376,22 @@ class Settings(BaseSettings):
         except (ValueError, UnicodeEncodeError):
             return False
         return len(decoded) == 32
+
+
+def _is_plausible_address(value: str) -> bool:
+    """A shape check on ``SMTP_FROM``, not an RFC 5322 parse.
+
+    Start-up validation is here to catch "nobody set this" and "somebody pasted a
+    display name", not to re-implement ``email.headerregistry``. A domain with no
+    dot is refused because it cannot be a deliverable public sender, and a value
+    containing whitespace is refused because that is the display-name mistake
+    (``Ops Team <ops@example.com>``) which the envelope sender cannot hold.
+    """
+    candidate = value.strip()
+    if not candidate or any(char.isspace() for char in candidate):
+        return False
+    local, _, domain = candidate.partition("@")
+    return bool(local) and "." in domain and not domain.startswith(".") and not domain.endswith(".")
 
 
 def _is_loopback(origin: str) -> bool:

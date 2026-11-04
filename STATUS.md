@@ -11,9 +11,13 @@ human review, channel selection, notification dispatch). The hooks commit closes
 13: root `node_modules` was installed, `prepare` → `husky` set `core.hooksPath`, and
 `4a9e8e9` is **the first commit in this project that git itself gated** — every
 earlier one was gated by a hand-run `pre-commit run --all-files` and nothing more.
-F10 closes the last structural gap in the arrow chain but
-**does not contact anybody**: it ships a row, a state machine and a contact policy,
-and no transport. Since then two gap-closing slices have landed. `0f5da36`
+F10 closes the last structural gap in the arrow chain but, as committed,
+**did not contact anybody**: it shipped a row, a state machine and a contact policy,
+and no transport. **That is no longer true of the tree.** An SMTP adapter now
+delivers when `NOTIFICATION_TRANSPORT=smtp` is configured (D10-09), so `sent: true` is
+reachable through the API for the first time — and still unreachable in the shipped
+default, where the stand-in refuses. Since `b344c17` a run of gap-closing slices has
+landed. `0f5da36`
 (`fix(f10): lock agent decisions and notifications against lost writes`, migration
 `0003`) closed gaps 19 and 21 by giving `AgentDecision` and `Notification` a
 `version` column and taking the notification row under `SELECT ... FOR UPDATE`
@@ -523,7 +527,7 @@ before the transport is reached.
 | Consent, re-read | `assert_may_contact` runs at *plan* time and again at *send* time against the current contract row. An `AgentDecision` is history: a customer who withdrew consent an hour ago must not be emailed by a decision made yesterday (D10-03) |
 | Quiet hours | Evaluated as **local wall clock in `Contract.timezone`** via `zoneinfo` + `tzdata` (`[20:00, 08:00)` by default, half-open, wrapping midnight). DST is handled by doing the arithmetic on local time and converting to UTC once, so a transition moves the *instant*, not the hour the customer is called. An unresolvable zone refuses (`UNKNOWN_TIMEZONE`) rather than assuming UTC — a guess can authorise a 03:00 call (D10-01) |
 | Deferral, not refusal | Inside the window the row keeps its slot, keeps `pending`, and `scheduled_at` moves to the window opening; the response is `200` with `deferred_until` and the transport is never reached (D10-02). A future `scheduled_at` is the separate `NOT_YET_DUE` `409` |
-| Transport seam | `MessageSender` protocol + `UnavailableSender` + `build_sender(settings)`, mirroring `EventPublisher` and `DocumentExtractor`. `notification_transport` has **exactly one member, `none`**, so the stand-in refuses instead of marking a row `sent` with nothing delivered (D10-04) |
+| Transport seam | `MessageSender` protocol + `UnavailableSender` + `build_sender(settings)`, mirroring `EventPublisher` and `DocumentExtractor`. At the F10 commit `notification_transport` had **exactly one member, `none`**, so the stand-in refused instead of marking a row `sent` with nothing delivered (D10-04). **It now has two:** `smtp` selects `SmtpSender` in `app/workers/senders.py`, which delivers over a real relay (D10-09) |
 | Routes | `GET /api/v1/notifications` (filters `status`/`channel`/`contract_id`, bounded 1–200, viewer allowed — the row carries no recipient), `POST /api/v1/notifications` (schedule from the newest decision, or a `decision_id` the caller names; `409 NOTIFICATION_EXISTS` on a taken slot), `POST /{id}/dispatch`, `POST /{id}/retry` (`409 NOT_FAILED`) |
 | Repository | `app/db/repositories/notifications.py` — `for_contract`, `recent` (status/channel filters), `find_slot` (the read side of the unique `(contract_id, template, scheduled_date)` slot), `create`. Tenant-stamped from the base class; another tenant's id is `404` |
 | Refusals | Fourteen dispatch codes, one shape: the F9 vocabulary (`CONTRACT_CLOSED`, `CONTACT_REFUSED`, `NO_CONSENT`, `PIPELINE_BLOCKED`) plus `NOT_PENDING`, `NOT_YET_DUE`, `NOT_IN_WINDOW`, `MISSING_END_DATE`, `UNKNOWN_TIMEZONE`, `NEEDS_REVIEW`, `CHANNEL_NOT_CONSENTED`, `ATTEMPTS_EXHAUSTED`, `SENDER_UNAVAILABLE`, `RECIPIENT_UNAVAILABLE`. `DispatchRefusedError` subclasses `DecisionRefusedError` so both map through **one** envelope (`refusal()` in `api/v1/agent.py` became public rather than growing a second vocabulary) |
@@ -534,11 +538,17 @@ before the transport is reached.
 
 ### What F10 does **not** do — state it, do not bury it
 
-- **Nothing is sent.** `build_sender` returns the refusing stand-in, so
+- ~~**Nothing is sent.** `build_sender` returns the refusing stand-in, so
   **`sent: true` is unreachable through the API**: every HTTP dispatch is either
   `409 SENDER_UNAVAILABLE` or a quiet-hours deferral. The send path is exercised
   only by calling `dispatch_notification` with an injected fake in tests. "F10 sends
-  notifications" is false until an adapter exists (gap 15).
+  notifications" is false until an adapter exists (gap 15).~~ — **closed by the SMTP
+  slice (D10-09).** With `NOTIFICATION_TRANSPORT=smtp` and a relay configured, a
+  dispatch reaches `sent`, and only after `DATA` was accepted with a 2xx. In the
+  shipped default (`none`) the stand-in still refuses exactly as described, so
+  "unreachable" was true of *that* configuration, not of the tree. That the send path
+  is proven against a fake client and not a socket remains true — see *The transport,
+  built* below.
 - ~~**No scheduler.** A deferred row is retried only when something dispatches it
   again — the outbox relay polls *events*, not notifications. Same
   operator-initiated shape as DLQ replay (D5-03, gap 22).~~ — **closed by
@@ -574,6 +584,40 @@ reachable. **That was true of the F10 commit and is no longer true of the tree**
 a Docker daemon answered in `c99c792`, both MySQL rows were run, and the row that
 matters most (`SKIP LOCKED`) now fails if the clause is removed. See *The MySQL
 half, run* below.
+
+#### The transport, built (D10-09)
+
+`app/workers/senders.py` implements `MessageSender` over SMTP, so `build_sender`
+now returns `SmtpSender` when `NOTIFICATION_TRANSPORT=smtp`. The protocol and the
+factory stayed where D10-04 put them; this is the addition that entry predicted.
+
+| Area | Detail |
+| --- | --- |
+| Adapter | `SmtpClient` protocol (the slice of `smtplib.SMTP` actually used), `SmtpSender`, `open_smtp_client`, `create_smtp_sender`, `build_sender`. `dispatch.py` still never imports `smtplib`, so the consent and quiet-hours tests need no transport at all |
+| Envelope | Sender, recipient, a constant `SUBJECT`, `Message-ID` and `X-Idempotency-Key`. The body is a placeholder naming the contract reference and carries **no extracted value** — the counterparty and the dates stay in the database |
+| Message-ID | `sha256(idempotency_key)@<sender domain>`, **not** `email.utils.make_msgid`. At-least-once delivery is only survivable if the re-send is byte-identical in the field a provider de-duplicates on; a random id would make the retry a different message |
+| Timeout | `SMTP_TIMEOUT_SECONDS` (default 10, `gt=0, le=60`) reaches `smtplib` as the socket timeout, so connect, TLS, auth and `DATA` share one ceiling. It is a correctness bound: the send runs *inside* the transaction holding the row's `FOR UPDATE` lock |
+| Refusals | `sms` and `voice` are **refused, not substituted** — a voice reminder must not arrive as an e-mail. The refusal is a `SenderError`, so the row spends its retry budget and parks `failed` where an operator sees it |
+| Redaction | Relay error text passes through `redact_text` before it can reach `Notification.last_error`, because `GET /notifications` renders that column to viewers who cannot see contact values elsewhere |
+| Settings | `SMTP_HOST` required, `SMTP_FROM` shape-checked (a display name is refused), username/password both-or-neither, `SMTP_STARTTLS=false` refused in staging/production. All six are boot errors, so a half-configured relay fails at start-up rather than at the first send inside the row lock |
+| Tests | `test_senders.py` (29 tests: selection, envelope, Message-ID stability, channel refusal, refusal redaction, TLS-before-auth ordering, conversation closing on failure, timeout argument, and the six settings rules) |
+
+**Verification actually run, this slice:**
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Full suite, SQLite | `pytest tests` (`MYSQL_TEST_URL` cleared) | **444 passed, 7 skipped, 0 failed** |
+| Lint | `ruff check .` | **All checks passed** |
+| Format | `ruff format --check .` | **77 files already formatted** |
+| Type check | `mypy app` (strict) | **clean, 49 source files** |
+| Security lint | `bandit -r app` | **0 issues** (3 expected `nosec B104`) |
+
+**What this does not prove.** Every test above drives a fake client. The envelope,
+the call order, the timeout argument and the redaction are pinned; a socket is not.
+No test in this repo has spoken SMTP to a real relay, so the first deployment is the
+first real conversation. TLS is also exercised as a *call* — `starttls()` was asked
+for before `login()` — not as a negotiated handshake.
+
 
 #### Five defects the tests caught in my own work
 
@@ -992,18 +1036,21 @@ why the rows above record a run rather than an absence.
     no longer a dead end; it is a row an operator can accept, reject, mark
     unreadable or correct, with a version-checked `409` if two reviewers collide
     and one `AuditLog` row per decision.
-15. **Nothing leaves the building — narrowed by F10, not closed.** F9 gave an
+15. **Nothing leaves the building — closed by the SMTP transport (D10-09).** F9 gave an
     `approved` field its first consumer and F10 gave the decision its own, so the
     Phase-0 arrow chain is now real end to end *inside the database*:
     `POST /agent/decisions` writes an `AgentDecision`, `POST /notifications` writes
     a `Notification` from it, and `POST /{id}/dispatch` moves that row
     `pending` → `sent`/`failed` with retries that park exhausted rows. What no
-    adapter exists for is the send itself. `build_sender` returns the refusing
-    stand-in and `notification_transport` has exactly one member, `none`, so
-    **`sent: true` is unreachable through the API**: every HTTP dispatch is either
-    `409 SENDER_UNAVAILABLE` or a quiet-hours deferral, and the send path is proven
-    only by injecting a fake into `dispatch_notification`. "F10 sends
-    notifications" is false until a real transport lands. Separately,
+    adapter exists for is the send itself. ~~`build_sender` returned the refusing
+    stand-in and `notification_transport` had exactly one member, `none`, so
+    **`sent: true` was unreachable through the API**~~ — **closed by the SMTP slice
+    (D10-09):** with `NOTIFICATION_TRANSPORT=smtp` and a relay configured, a dispatch
+    reaches `sent` on the relay's own 2xx, so the arrow chain now leaves the process.
+    Two limits remain, and neither is the transport's: the send path is proven against
+    a fake client rather than a socket, and no test drives a real relay end to end, so
+    the first deployment holds the first real SMTP conversation this repo has had.
+    Separately,
     `CustomerResponse` and `Escalation` still have **no writer**, so nothing records
     a reply or opens an SLA clock; and no *screen* talks to the real API:
     `frontend/src/app/*` still calls the mocked demo backend, so the F8, F9 and F10
@@ -1171,25 +1218,24 @@ build.
    `tzdata` (DST-safe), re-reads consent at send time, and moves the row
    `pending` → `sent`/`failed` under a unique idempotency key. It imports
    `blocks_pipeline` and the consent refusals from F9 rather than restating them.
-   `MessageSender` has exactly one implementation — `UnavailableSender`, which
-   refuses — so the send path is proven only against an injected fake.
+   `MessageSender` has two implementations: `UnavailableSender` — the shipped
+   default, which refuses — and `SmtpSender` (`D10-09`), which delivers over a real
+   relay and reports `sent` only on a 2xx. The SMTP path is proven against a fake
+   client, not a socket.
 
-**Next, and it is a decision rather than a build order.** The pipeline is complete
-inside the database and nothing leaves it. The one change that would make F10's
-state machine mean something is a real `MessageSender` adapter, and it cannot be
-improvised: it needs a provider (SMTP relay, an email API, or a portal stub) and
-credentials supplied through `Settings` in the fail-fast style the rest of the
-config already uses. Three consequences follow *from* that choice rather than
-preceding it: whether a send also emits a `contract.events` event (F10 emits none,
-so nothing downstream learns that contact happened); how a provider failure maps
-onto the existing `failed` / `attempts` / `notification_retry_max` rules; and
-whether `sent` may ever be asserted without a provider-side receipt — the honest
-default is that it may not, which is exactly why the stand-in refuses today. The
-scheduler (`4e7dd5c`) makes this the *only* thing left between a due row and a
-customer: a due row is now reached without an operator, and refused at the last
-line by the transport stand-in. That makes gap 15 a firebreak rather than an
-afterthought — the moment an adapter is configured, the poller will start calling
-it.
+~~**Next, and it is a decision rather than a build order.**~~ — **decided: SMTP
+(D10-09).** The pipeline is no longer complete-inside-only. With
+`NOTIFICATION_TRANSPORT=smtp` and a relay configured, a due row reaches a customer and
+`sent` is recorded only after `DATA` was accepted. The three consequences that the
+choice opened are answered rather than pending: a send still emits **no**
+`contract.events` message, so nothing downstream learns that contact happened — a
+deferral, not an oversight; a provider failure maps onto the existing `failed` /
+`attempts` / `notification_retry_max` rules unchanged, because the adapter raises the
+`SenderError` the policy already understood; and `sent` is asserted only on the relay's
+own 2xx, which is the honest default this paragraph predicted. The scheduler
+(`4e7dd5c`) is what made the decision urgent: it reaches a due row with no operator in
+the loop, so the moment an adapter was configured the poller would start calling it.
+That is now the shipped behaviour whenever SMTP is on.
 
 ~~Close the harness gate first (gap 13).~~ — **done** in `4a9e8e9`. `core.hooksPath`
 is `.husky/_` and both hooks are live; the wiring was proven by a commit that git
