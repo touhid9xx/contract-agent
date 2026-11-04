@@ -72,11 +72,13 @@ log = structlog.get_logger(__name__)
 
 #: Recorded on the row when its contract is not in the row's own tenant.
 #:
-#: :func:`claim_next_due` is the one unscoped read in the codebase, so it can only
-#: be safe if the very next read is scoped by the tenant *the row* names and any
-#: disagreement stops the row. A dangling ``contract_id`` and a cross-tenant one
-#: are the same verdict here on purpose: neither is dispatchable, and telling them
-#: apart would need a second unscoped query — which is the thing being avoided.
+#: :func:`claim_next_due` is one of the codebase's two unscoped reads — the other is
+#: :func:`~app.db.repositories.outbox.OutboxRepository.claim_due`, unscoped for the
+#: same structural reason — so it can only be safe if the very next read is scoped
+#: by the tenant *the row* names and any disagreement stops the row. A dangling
+#: ``contract_id`` and a cross-tenant one are the same verdict here on purpose:
+#: neither is dispatchable, and telling them apart would need a second unscoped
+#: query — which is the thing being avoided.
 REFUSAL_TENANT_MISMATCH = "TENANT_MISMATCH"
 
 #: ``notifications.last_error`` is written in the same shape the policy uses.
