@@ -10,7 +10,7 @@ consequences that are the point of doing it this way: the policy module never
 imports ``smtplib``, and a test of the consent and quiet-hours rules never needs a
 transport at all.
 
-Three properties this adapter is built around:
+Four properties this adapter is built around:
 
 1. **A normal return means the relay accepted the message.** ``send`` returns only
    after ``DATA`` was answered with a 2xx, which is the same rule the outbox relay
@@ -27,6 +27,11 @@ Three properties this adapter is built around:
 
 3. **The Message-ID is derived, not random.** ``email.utils.make_msgid`` is the
    obvious call and would be wrong here; see :meth:`SmtpSender._message_id`.
+
+4. **The relay is authenticated, not merely encrypted.** ``starttls()`` is given an
+   explicit verifying context, because smtplib's default accepts *any*
+   certificate — see :func:`build_ssl_context`. Encryption without that check
+   protects a conversation with whoever is in the middle of it.
 
 What is deliberately **not** here: SMS and voice. There is no gateway to send them
 through, so :meth:`SmtpSender.send` refuses any non-e-mail channel rather than
@@ -46,6 +51,7 @@ from __future__ import annotations
 
 import hashlib
 import smtplib
+import ssl
 from collections.abc import Callable
 from email.message import EmailMessage
 from typing import Protocol, cast
@@ -65,6 +71,7 @@ __all__ = [
     "SmtpClient",
     "SmtpSender",
     "build_sender",
+    "build_ssl_context",
     "create_smtp_sender",
     "open_smtp_client",
 ]
@@ -100,7 +107,7 @@ class SmtpClient(Protocol):
     without a broker.
     """
 
-    def starttls(self) -> tuple[int, bytes]: ...
+    def starttls(self, *, context: ssl.SSLContext | None = None) -> tuple[int, bytes]: ...
 
     def login(self, user: str, password: str) -> tuple[int, bytes] | None: ...
 
@@ -128,12 +135,22 @@ class SmtpSender:
         username: str = "",
         password: str = "",
         starttls: bool = True,
+        ssl_context: ssl.SSLContext | None = None,
     ) -> None:
         self._connect = connect
         self._sender_address = sender_address
         self._username = username
         self._password = password
         self._starttls = starttls
+        # A verifying context, always, and never smtplib's own default. Passing
+        # ``context=None`` to ``starttls()`` lets smtplib build
+        # ``ssl._create_stdlib_context()`` — ``CERT_NONE``, ``check_hostname``
+        # off — which encrypts to whatever answered the socket and would hand the
+        # credentials to a machine in the middle. ``None`` here therefore means
+        # "verify against the system trust store", not "do not verify".
+        self._context: ssl.SSLContext | None = None
+        if starttls:
+            self._context = ssl_context if ssl_context is not None else ssl.create_default_context()
         # Taken from the From address so the Message-ID sits in the same domain
         # as the envelope sender, which is what receiving MTAs expect of it.
         self._domain = sender_address.rpartition("@")[2] or "localhost"
@@ -171,7 +188,10 @@ class SmtpSender:
         try:
             with self._connect() as client:
                 if self._starttls:
-                    client.starttls()
+                    # Explicit, so the relay's certificate and hostname are both
+                    # checked. See ``__init__``: the argument is not optional in
+                    # spirit, only in signature.
+                    client.starttls(context=self._context)
                 if self._username:
                     client.login(self._username, self._password)
                 client.send_message(composed)
@@ -247,12 +267,26 @@ def open_smtp_client(settings: Settings) -> SmtpClient:
     return cast(SmtpClient, client)
 
 
+def build_ssl_context(settings: Settings) -> ssl.SSLContext:
+    """The TLS context the relay must satisfy.
+
+    ``ssl.create_default_context()`` verifies the chain *and* the hostname, which
+    are the two things a machine in the middle cannot forge. ``SMTP_CA_BUNDLE``
+    replaces the system trust store rather than disabling verification, so an
+    internal relay with a private CA is trusted by naming that CA.
+    """
+    cafile = settings.smtp_ca_bundle.strip()
+    return ssl.create_default_context(cafile=cafile or None)
+
+
 def create_smtp_sender(settings: Settings) -> SmtpSender:
     """Build the sender for the configured relay.
 
     The connection is opened per send, so what is passed in is a factory rather
     than a connection: a client captured here would be a socket held open from
-    process start until the first message.
+    process start until the first message. The TLS context, by contrast, is built
+    once here: it is not tied to a socket, and loading a CA bundle per message
+    would be cost paid on the send path for no gain.
     """
 
     def connect() -> SmtpClient:
@@ -264,6 +298,7 @@ def create_smtp_sender(settings: Settings) -> SmtpSender:
         username=settings.smtp_username,
         password=settings.smtp_password,
         starttls=settings.smtp_starttls,
+        ssl_context=build_ssl_context(settings) if settings.smtp_starttls else None,
     )
 
 

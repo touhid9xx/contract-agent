@@ -550,8 +550,11 @@ before the transport is reached.
   slice (D10-09).** With `NOTIFICATION_TRANSPORT=smtp` and a relay configured, a
   dispatch reaches `sent`, and only after `DATA` was accepted with a 2xx. In the
   shipped default (`none`) the stand-in still refuses exactly as described, so
-  "unreachable" was true of *that* configuration, not of the tree. That the send path
-  is proven against a fake client and not a socket remains true — see *The transport,
+  "unreachable" was true of *that* configuration, not of the tree. ~~That the send
+  path is proven against a fake client and not a socket remains true~~ — **also
+  closed:** `test_smtp_socket.py` drives the adapter against a real loopback relay,
+  and since D10-10 the handshake *authenticates* that relay rather than merely
+  completing. What no test can supply is a real provider — see *The transport,
   built* below.
 - ~~**No scheduler.** A deferred row is retried only when something dispatches it
   again — the outbox relay polls *events*, not notifications. Same
@@ -603,41 +606,51 @@ factory stayed where D10-04 put them; this is the addition that entry predicted.
 | Timeout | `SMTP_TIMEOUT_SECONDS` (default 10, `gt=0, le=60`) reaches `smtplib` as the socket timeout, so connect, TLS, auth and `DATA` share one ceiling. It is a correctness bound: the send runs *inside* the transaction holding the row's `FOR UPDATE` lock |
 | Refusals | `sms` and `voice` are **refused, not substituted** — a voice reminder must not arrive as an e-mail. The refusal is a `SenderError`, so the row spends its retry budget and parks `failed` where an operator sees it |
 | Redaction | Relay error text passes through `redact_text` before it can reach `Notification.last_error`, because `GET /notifications` renders that column to viewers who cannot see contact values elsewhere |
-| Settings | `SMTP_HOST` required, `SMTP_FROM` shape-checked (a display name is refused), username/password both-or-neither, `SMTP_STARTTLS=false` refused in staging/production. All six are boot errors, so a half-configured relay fails at start-up rather than at the first send inside the row lock |
-| Tests, unit | `test_senders.py` (29 tests: selection, envelope, Message-ID stability, channel refusal, refusal redaction, TLS-before-auth ordering, conversation closing on failure, timeout argument, and the six settings rules). All of them drive a **fake** client, so they pin what we ask `smtplib` to do, not what it does |
-| Tests, socket | `test_smtp_socket.py` (7 tests) against a loopback relay built from `socket` + `threading` — no container, no new dependency. It observes the real `EHLO → MAIL → RCPT → DATA → QUIT` conversation, a body that crosses only after `354`, a genuine `SMTPRecipientsRefused` whose text keeps `550` and drops the address, a re-send byte-identical **on the wire**, the timeout as a real ceiling, and a real `STARTTLS` handshake where `AUTH` reaches the relay only over the encrypted socket (the relay refuses auth in the clear with `530`) |
+| TLS | `starttls(context=...)` receives a **verifying** context from `build_ssl_context`. `SMTP_CA_BUNDLE` replaces the trust store; no bundle means the system store. `None` resolves to `ssl.create_default_context()`, so no argument ever means "skip checks" — `smtplib`'s own default for `context=None` is `CERT_NONE`, which is what gap 24 was |
+| Settings | `SMTP_HOST` required, `SMTP_FROM` shape-checked (a display name is refused), username/password both-or-neither, `SMTP_CA_BUNDLE` must be a file `ssl` can actually load, a bundle with `SMTP_STARTTLS=false` is refused (a CA never consulted would read as "TLS on"), and `SMTP_STARTTLS=false` is refused in staging/production. All seven are boot errors, so a half-configured relay fails at start-up rather than at the first send inside the row lock |
+| Tests, unit | `test_senders.py` (35 tests: selection, envelope, Message-ID stability, channel refusal, refusal redaction, TLS-before-auth ordering, the verifying context handed to `starttls` and its system-store default, conversation closing on failure, timeout argument, and the eight settings rules). All of them drive a **fake** client, so they pin what we ask `smtplib` to do, not what it does |
+| Tests, socket | `test_smtp_socket.py` (8 tests) against a loopback relay built from `socket` + `threading` — no container, no new dependency. It observes the real `EHLO → MAIL → RCPT → DATA → QUIT` conversation, a body that crosses only after `354`, a genuine `SMTPRecipientsRefused` whose text keeps `550` and drops the address, a re-send byte-identical **on the wire**, the timeout as a real ceiling, a real `STARTTLS` handshake where `AUTH` reaches the relay only over the encrypted socket (the relay refuses auth in the clear with `530`), and — the one that proves peer authentication — **the same relay refused** when its self-signed certificate is not in the configured bundle |
 
 **Verification actually run, this slice:**
 
 | Check | Command | Result |
 | --- | --- | --- |
-| Full suite, SQLite | `pytest tests` (`MYSQL_TEST_URL` cleared) | **451 passed, 7 skipped, 0 failed** |
+| Full suite, SQLite | `pytest tests` (`MYSQL_TEST_URL` cleared) | **458 passed, 7 skipped, 0 failed** |
 | Lint | `ruff check .` | **All checks passed** |
-| Format | `ruff format --check .` | **78 files already formatted** |
+| Format | `ruff format --check .` | **82 files already formatted** |
 | Type check | `mypy app` (strict) | **clean, 49 source files** |
 | Security lint | `bandit -r app` | **0 issues** (3 expected `nosec B104`) |
 
-The suite grew by exactly the socket module: `451 − 444 = 7`. `ruff format --check`
-went `77 → 78` for the same reason, which is a useful check in itself — a new file that
-is *not* reported would mean it was not being scanned.
+The suite grew by exactly the TLS slice: `458 − 451 = 7`, which is `29 → 35` in
+`test_senders.py` (+6) and `7 → 8` in `test_smtp_socket.py` (+1). The format count went
+`78 → 82`, but that is **scope, not files**: this run measured from the repo root, while
+the earlier figure counted `backend/` alone — and `backend/` holds exactly 78 `.py`
+files, so the two numbers are not comparable. Every gate was also re-run through
+`pre-commit` with its own pinned toolchain (`ruff` 0.17.3, `mypy` 2.4.1, `bandit`
+1.9.4) rather than the venv, and all four hooks passed.
 
-**Two of the socket claims were falsified before they were believed**, and both edits
-were reverted (`git diff` confirms `senders.py` is byte-identical to `HEAD`):
+**Three claims were falsified before they were believed.** The first two were reverted
+and `senders.py` was confirmed byte-identical to `HEAD`; the third was removed from the
+working tree after it failed, and the tree since differs from `HEAD` only by this
+slice's intended change:
 
 | Falsification | Expected | Observed |
 | --- | --- | --- |
 | `if self._starttls and False:` (never call `starttls()`) | encrypted-socket test fails | **FAILED** — the relay advertised no AUTH, because auth in the clear is refused with `530` |
 | `timeout=None` (drop the socket timeout) | timeout test fails | **FAILED** — the send sat for the relay's full 30 s instead of failing under 2 s |
+| remove `context=self._context` from the `starttls` call | the refusal test fails | **FAILED** — and, the point of it, the *encrypted-socket* test still **passed**: a handshake it observed proves nothing about who answered it. Four unit tests failed alongside it |
 
 **What this does not prove.** The relay is ours, so what the socket tests show is that
 the client speaks SMTP to something that answers SMTP — not that it is compatible with
-a particular provider's quirks. The certificate is self-signed and `smtplib` negotiates
-TLS through an **unverified** context, so the handshake and the ordering are proven
-while authentication *of the relay* is not; that matches the code, where `starttls()`
-is called with no context (gap 24). Everything beyond the relay's own answers — a real
-provider's greylisting, rate limits, spam scoring, `Message-ID` de-duplication in
-practice — is still unobserved, and the first deployment will be the first real
-conversation with a real relay.
+a particular provider's quirks. Peer authentication **is** now proven in the direction
+that matters: with the relay's self-signed certificate absent from the bundle the send
+is refused, and with it present the handshake completes, so the client is genuinely
+checking rather than merely calling `starttls()`. What is not proven is the other
+direction — a certificate issued by a public CA over a real network, and a hostname
+mismatch against a provider — because a loopback test cannot be its own third party.
+Everything beyond the relay's own answers — greylisting, rate limits, spam scoring,
+`Message-ID` de-duplication in practice — is still unobserved, and the first deployment
+will be the first real conversation with a real relay.
 
 
 #### Five defects the tests caught in my own work
@@ -1075,10 +1088,12 @@ why the rows above record a run rather than an absence.
     byte-identical body, a relay refusal, the timeout ceiling and a real `STARTTLS`
     handshake with `AUTH` crossing only the encrypted socket are all observed rather
     than reasoned about.
-    What is still not proven is compatibility with a *particular* provider's quirks,
-    and — the one that matters — relay authentication: `starttls()` is called with no
-    context, so `smtplib` uses an unverified one and a man in the middle between us and
-    a real relay would not be caught (gap 24). Separately,
+    What is still not proven is compatibility with a *particular* provider's quirks.
+    Relay authentication is **no longer** among the gaps: `starttls()` is now handed a
+    verifying context (`build_ssl_context`), so a relay whose certificate the client
+    cannot chain to the configured bundle or the system store is refused — proven by
+    the socket suite, which fails when the bundle is withheld and passes when it is
+    supplied (gap 24, closed by D10-10). Separately,
     `CustomerResponse` and `Escalation` still have **no writer**, so nothing records
     a reply or opens an SLA clock; and no *screen* talks to the real API:
     `frontend/src/app/*` still calls the mocked demo backend, so the F8, F9 and F10
@@ -1182,19 +1197,24 @@ why the rows above record a run rather than an absence.
     on the SQLite the offline suite runs, the clause remains a no-op, so that suite
     can never be the proof — the guarantee is MySQL-specific and the integration
     suite is where it lives.
-24. **The SMTP transport does not authenticate the relay.** `SmtpSender.send` calls
-    `client.starttls()` with **no context** (`senders.py:174`), so `smtplib` negotiates
-    TLS through its default *unverified* context: the connection is encrypted, the
-    credentials do not cross in the clear, and a man in the middle presenting any
-    certificate would still be believed. The socket suite proves the handshake and the
-    ordering, and cannot prove peer authentication for exactly this reason — the test's
-    certificate is self-signed and would be *rejected* by a verifying client, so
-    asserting verification would mean changing the code first. Closing it is a code
-    change, not a test: `starttls(context=ssl.create_default_context(cafile=...))` plus
-    a CA-bundle setting beside `smtp_host`, decided together with whether the default is
-    system trust or a pinned file. Until then the honest reading of "encrypted" on this
-    path is *confidential, not authenticated* — which is why the SMTP slice's
-    verification claims stop at what the relay answered.
+24. ~~**The SMTP transport does not authenticate the relay.**~~ — **closed by D10-10.**
+    `SmtpSender.send` called `client.starttls()` with **no context** (`senders.py:174`),
+    so `smtplib` negotiated TLS through its default context:
+    `ssl._create_stdlib_context()` with `verify_mode=CERT_NONE` and
+    `check_hostname=False` — measured, not assumed. The connection was encrypted and the
+    peer was whoever answered, which then received the credentials. Now `starttls` is
+    called with a context from `build_ssl_context(settings)`: `SMTP_CA_BUNDLE` replaces
+    the trust store, and an unset bundle means `ssl.create_default_context()`, i.e. the
+    system store — there is no path to an unchecked handshake, because `None` is
+    *resolved* rather than forwarded. Settings refuses a bundle that is not a loadable
+    PEM, and a bundle paired with `SMTP_STARTTLS=false` (a CA that is never consulted
+    would read as "TLS on"), both at boot rather than inside the row lock where the
+    context is built. The socket suite carries the proof: the same loopback relay is
+    **refused** without its certificate in the bundle and accepted with it, and removing
+    `context=` makes that refusal test fail while the encrypted-socket test still
+    passes — which is why the encrypted-socket test alone was never the proof. **What is
+    still true:** no test here has verified a public-CA certificate over a real network,
+    so provider hostname and chain behaviour remains unobserved.
 
 ## Next permitted step
 
@@ -1208,9 +1228,10 @@ flow (ingest → extract → review → decide → notify) now has real code beh
 row is reached by a background poller rather than an operator, the review backlog is
 walkable end to end rather than truncated at the cap, and with
 `NOTIFICATION_TRANSPORT=smtp` plus a relay configured the last arrow leaves the
-process. The pipeline now **does** send, so what is left is not a missing feature but
-three decisions and a hardening pass (gaps 18, 19, 20 and 24), none of which changes
-whether the flow runs.
+process. The pipeline now **does** send, and the relay it talks to is now
+*authenticated* as well as encrypted (gap 24, D10-10) — so what is left is not a
+missing feature and not a hardening pass either, but three decisions (gaps 18, 19
+and 20), none of which changes whether the flow runs.
 
 - `app/db/models/` — every table in the flow now has a writer: `Contract`
   (`POST /contracts`), `ExtractedField` (`python -m app.cli extract`,
@@ -1265,7 +1286,8 @@ whether the flow runs.
    `MessageSender` has two implementations: `UnavailableSender` — the shipped
    default, which refuses — and `SmtpSender` (`D10-09`), which delivers over a real
    relay and reports `sent` only on a 2xx. The SMTP path is proven against a fake
-   client, not a socket.
+   client **and** against a real loopback socket, certificate verification included
+   (`D10-10`); a real provider is the thing still unobserved.
 
 ~~**Next, and it is a decision rather than a build order.**~~ — **decided: SMTP
 (D10-09).** The pipeline is no longer complete-inside-only. With
@@ -1304,31 +1326,34 @@ row by itself, but a row parked `failed` or `suppressed` still sits until a huma
 looks, and nothing alerts when it does (the residue of gap 22); no live
 Ollama has answered anything; and the `review`, `agent` and `notification` routes
 have only ever been called by `TestClient`, because no screen talks to them yet.
-**Nothing has ever been sent to a customer** (gap 15): the only transport refuses,
-so `sent: true` is unreachable over HTTP. From F9: **every contract that predates
-`0002` is un-contactable** until someone sets consent one row at a time (gap 18),
-and an `AgentDecision` still **cannot be overridden or flagged** — the `version`
-column that blocked those routes now exists (`0f5da36`), but the routes themselves
-still do not (gap 19). The review queue pages now (`c90423b`, gap 16), so the backlog
-is reachable rather than truncated at 500 — but its `oldest_minutes` is only
-trustworthy on page one, and its cursor is a position rather than a capability, so
-neither should be presented to an operator as more than it is. Quiet hours — the
-caveat F9 had to carry — are now enforced
-(D10-01/D10-02), so that one is retired rather than repeated. Two gate reports in
-this project were wrong the first time and both are recorded as such: F9's first
-"MySQL gate green" carried a bad password and skipped, and F10's two MySQL rows
-**were unrun at the F10 commit** because no Docker daemon answered then. That has
-since changed, and the correction cuts the other way: the suite builds tables from
-`Base.metadata`, so `alembic check` is the only thing that proves a migration matches
-the models — it was green on SQLite for `0003` and is now **green on MySQL too**
-("No new upgrade operations detected."), so `0003` is a revision a real database has
-validated. The `confidence` quantiser from `c90423b` was the one claim that could
-only be settled there, and MySQL confirms it is a **no-op**: the declared scale was
-already enforced. The dispatch lock is no longer unproven under concurrency either —
-two integration tests show the second worker blocking and then seeing `sent`, and two
-schedulers being handed different rows. What remains true is that this is
-**MySQL-only evidence**: `FOR UPDATE` is still a no-op on the SQLite the offline suite
-runs, so that suite can never be the proof, and a skip there is not a pass.
+**Nothing has ever been sent to a real customer** (gap 15): the shipped default
+transport still refuses, and the SMTP path has only ever spoken to a loopback relay
+this suite started and certified itself — so `sent: true` over HTTP is proven against
+a relay of our own making, never against a provider, and never through a handshake
+chaining to a public CA over a real network (D10-10). From F9: **every contract that
+predates `0002` is un-contactable** until someone sets consent one row at a time
+(gap 18), and an `AgentDecision` still **cannot be overridden or flagged** — the
+`version` column that blocked those routes now exists (`0f5da36`), but the routes
+themselves still do not (gap 19). The review queue pages now (`c90423b`, gap 16), so
+the backlog is reachable rather than truncated at 500 — but its `oldest_minutes` is
+only trustworthy on page one, and its cursor is a position rather than a capability,
+so neither should be presented to an operator as more than it is. Quiet hours — the
+caveat F9 had to carry — are now enforced (D10-01/D10-02), so that one is retired
+rather than repeated. Two gate reports in this project were wrong the first time and
+both are recorded as such: F9's first "MySQL gate green" carried a bad password and
+skipped, and F10's two MySQL rows **were unrun at the F10 commit** because no Docker
+daemon answered then. That has since changed, and the correction cuts the other way:
+the suite builds tables from `Base.metadata`, so `alembic check` is the only thing
+that proves a migration matches the models — it was green on SQLite for `0003` and
+is now **green on MySQL too** ("No new upgrade operations detected."), so `0003` is
+a revision a real database has validated. The `confidence` quantiser from `c90423b`
+was the one claim that could only be settled there, and MySQL confirms it is a
+**no-op**: the declared scale was already enforced. The dispatch lock is no longer
+unproven under concurrency either — two integration tests show the second worker
+blocking and then seeing `sent`, and two schedulers being handed different rows. What
+remains true is that this is **MySQL-only evidence**: `FOR UPDATE` is still a no-op on
+the SQLite the offline suite runs, so that suite can never be the proof, and a skip
+there is not a pass.
 
 One caveat carried forward rather than retired: the *number* of sends is now safe on
 MySQL, but a row that parks `failed` or `suppressed` still raises no alert (gap 22).

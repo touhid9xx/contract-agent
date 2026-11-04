@@ -16,10 +16,17 @@ second place a contact value leaks out of.
 from __future__ import annotations
 
 import smtplib
+import ssl
+from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
+from pathlib import Path
 from typing import Any
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 
 from app.core.config import Settings
 from app.core.logging import MASK
@@ -34,6 +41,7 @@ from app.workers.senders import (
     SUBJECT,
     SmtpSender,
     build_sender,
+    build_ssl_context,
     create_smtp_sender,
     open_smtp_client,
 )
@@ -51,8 +59,11 @@ class FakeClient:
     def __init__(self, relay: FakeRelay) -> None:
         self._relay = relay
 
-    def starttls(self) -> tuple[int, bytes]:
+    def starttls(self, *, context: ssl.SSLContext | None = None) -> tuple[int, bytes]:
         self._relay.calls.append("starttls")
+        # Kept so a test can assert what the client was asked to verify, rather
+        # than trusting that an argument was passed somewhere.
+        self._relay.tls_contexts.append(context)
         return (220, b"ready to start TLS")
 
     def login(self, user: str, password: str) -> tuple[int, bytes] | None:
@@ -83,6 +94,7 @@ class FakeRelay:
     def __init__(self, failure: BaseException | None = None) -> None:
         self.calls: list[str] = []
         self.messages: list[EmailMessage] = []
+        self.tls_contexts: list[ssl.SSLContext | None] = []
         self.failure = failure
 
     def __call__(self) -> FakeClient:
@@ -336,6 +348,98 @@ def test_starttls_is_skipped_when_the_relay_does_not_offer_it() -> None:
     make_sender(relay, smtp_starttls=False).send(message())
 
     assert "starttls" not in relay.calls
+    assert relay.tls_contexts == []
+
+
+def test_the_relay_is_asked_to_prove_itself_not_merely_to_encrypt() -> None:
+    """The context handed to ``starttls`` verifies, because smtplib's does not.
+
+    ``SMTP.starttls()`` with no ``context`` builds ``ssl._create_stdlib_context()``
+    — ``verify_mode=CERT_NONE``, ``check_hostname=False``. The session would be
+    encrypted to whatever answered the socket, and the credentials would go with
+    it. Asserting on the flags rather than on "a context was passed" is deliberate:
+    a context built with ``CERT_NONE`` would satisfy the weaker claim.
+    """
+    relay = FakeRelay()
+
+    make_sender(relay).send(message())
+
+    assert len(relay.tls_contexts) == 1
+    context = relay.tls_contexts[0]
+    assert context is not None
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+
+
+def test_the_sender_never_falls_back_to_an_unverified_context() -> None:
+    """``ssl_context=None`` means "system trust store", not "do not verify".
+
+    ``SmtpSender`` is constructed directly in several places, so the safe default
+    has to live in the class rather than only in the settings-driven factory.
+    """
+    relay = FakeRelay()
+    sender = SmtpSender(relay, sender_address=SENDER_ADDRESS)
+
+    sender.send(message())
+
+    context = relay.tls_contexts[0]
+    assert context is not None
+    assert context.verify_mode == ssl.CERT_REQUIRED
+
+
+def _ca_pem(common_name: str = "internal-ca.test") -> str:
+    """A real, throwaway certificate to name as the CA bundle.
+
+    Generated rather than stubbed: ``ssl`` refuses to build a context from an empty
+    PEM file outright (``no certificate or crl found``), so a placeholder would fail
+    here for a reason unrelated to what is under test. Committing one is not an
+    option either — a PEM carrying a private key is exactly what the ``gitleaks``
+    hook is for.
+    """
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+    now = datetime.now(UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=1))
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(serialization.Encoding.PEM).decode("ascii")
+
+
+def test_a_configured_ca_bundle_builds_a_verifying_context(tmp_path: Path) -> None:
+    """``SMTP_CA_BUNDLE`` replaces the trust store; it never disables checking.
+
+    The socket suite is what proves a bundle changes what is *accepted*. This is
+    the half a unit test can see: naming a bundle does not weaken the context.
+    """
+    bundle = tmp_path / "internal-ca.pem"
+    bundle.write_text(_ca_pem(), encoding="utf-8")
+
+    context = build_ssl_context(smtp_settings(smtp_ca_bundle=str(bundle)))
+
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+
+
+def test_a_bundle_that_ssl_cannot_load_is_a_boot_error(tmp_path: Path) -> None:
+    """Existing is not the same as loadable, and the difference is a boot error.
+
+    An empty file passes ``is_file`` and then makes ``ssl`` raise when the context
+    is built. The context is built on the *send* path, inside the row lock, so a
+    bundle that cannot be parsed would surface as a relay fault on the first
+    message instead of as a start-up failure. ``Settings`` therefore loads it.
+    """
+    bundle = tmp_path / "internal-ca.pem"
+    bundle.write_text("", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="SMTP_CA_BUNDLE must be a PEM file"):
+        smtp_settings(smtp_ca_bundle=str(bundle))
 
 
 # --- the socket bound ------------------------------------------------------
@@ -407,6 +511,21 @@ def test_settings_accept_a_credential_pair() -> None:
     settings = smtp_settings(smtp_username="mailer", smtp_password="hunter2")
 
     assert settings.smtp_username == "mailer"
+
+
+def test_settings_refuse_a_ca_bundle_that_is_not_there(tmp_path: Path) -> None:
+    """A mistyped path must be a boot error, not a failure inside the row lock."""
+    with pytest.raises(ValueError, match="SMTP_CA_BUNDLE"):
+        smtp_settings(smtp_ca_bundle=str(tmp_path / "no-such-bundle.pem"))
+
+
+def test_settings_refuse_a_ca_bundle_without_tls(tmp_path: Path) -> None:
+    """Trusting a CA that is never consulted reads as "TLS configured" and is not."""
+    bundle = tmp_path / "internal-ca.pem"
+    bundle.write_text("", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="SMTP_CA_BUNDLE has no effect"):
+        smtp_settings(smtp_ca_bundle=str(bundle), smtp_starttls=False)
 
 
 def test_settings_ignore_the_smtp_block_when_the_transport_is_none() -> None:

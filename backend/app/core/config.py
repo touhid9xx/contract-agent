@@ -9,7 +9,9 @@ fail-fast requirement. Nothing here ever logs a secret value.
 from __future__ import annotations
 
 import base64
+import ssl
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, field_validator, model_validator
@@ -194,6 +196,19 @@ class Settings(BaseSettings):
     #: an unbounded send would pin the locked row — and the serial tick loop
     #: behind it — for as long as the provider felt like it.
     smtp_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    #: PEM bundle of the CAs that may vouch for the relay. Empty means the
+    #: operating system's trust store, which is right for a public relay and for
+    #: a relay whose certificate chains to a public CA.
+    #:
+    #: It exists because ``smtplib``'s own default is not safe. ``starttls()``
+    #: called without a ``context`` builds ``ssl._create_stdlib_context()``, whose
+    #: ``verify_mode`` is ``CERT_NONE`` and whose ``check_hostname`` is ``False``:
+    #: the session is encrypted, but a machine in the middle of the connection is
+    #: accepted without a word, and the credentials below are handed to it. The
+    #: adapter therefore always passes an explicit *verifying* context, and this
+    #: setting is how an internal relay with a private CA is trusted instead of
+    #: switching verification off.
+    smtp_ca_bundle: str = ""
 
     # --- http ------------------------------------------------------------
     cors_origins: str = "http://localhost:3000"
@@ -280,6 +295,42 @@ class Settings(BaseSettings):
                     "that wants credentials needs both, and one half would only "
                     "surface as a failed login at the first send"
                 )
+            # Trusting a CA that is never consulted reads as "TLS configured"
+            # while the session is not even encrypted, so the pair is refused
+            # rather than silently half-applied. Checked before the bundle is
+            # parsed: when both are wrong, "this setting does nothing" is the
+            # fix the operator needs, not a complaint about the file it names.
+            if self.smtp_ca_bundle and not self.smtp_starttls:
+                raise ValueError(
+                    "SMTP_CA_BUNDLE has no effect with SMTP_STARTTLS=false: the "
+                    "session is not encrypted, so no certificate is verified"
+                )
+            # A CA bundle that cannot be loaded would otherwise be discovered when
+            # the first context is built — inside the row lock, on the send path.
+            # Checked here so a mistyped path, or an empty or truncated file, is a
+            # boot error like the rest.
+            if self.smtp_ca_bundle:
+                bundle = Path(self.smtp_ca_bundle)
+                if not bundle.is_file():
+                    raise ValueError(
+                        "SMTP_CA_BUNDLE must name a readable PEM bundle when set; "
+                        f"got {self.smtp_ca_bundle!r}. Leave it empty to use the "
+                        "system trust store."
+                    )
+                # Existing is not the same as loadable: an empty or non-PEM file
+                # passes ``is_file`` and then makes ``ssl`` raise when the context
+                # is built. Parsed here so the failure lands at start-up rather
+                # than at the first send, which would be under the row lock and
+                # look like a relay fault.
+                try:
+                    ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT).load_verify_locations(
+                        cafile=str(bundle)
+                    )
+                except (ssl.SSLError, OSError) as exc:
+                    raise ValueError(
+                        "SMTP_CA_BUNDLE must be a PEM file ssl can load; "
+                        f"got {self.smtp_ca_bundle!r}: {exc}"
+                    ) from exc
 
         # A malformed key is worse than a missing one: it fails at the first
         # encrypt rather than at start-up, which is a write path, not a boot.

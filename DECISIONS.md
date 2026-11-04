@@ -1263,3 +1263,62 @@ committed together. That pairing is the milestone; extraction and review follow.
   verification is off by default and a man in the middle between us and a real relay
   would not be caught. Tightening that is a code change (`starttls(context=...)` with
   a CA bundle) and therefore a decision, not a test.
+
+> **Superseded in part by D10-10.** That last paragraph described the code as it
+> stood at `6f4cb0b`. `starttls()` now receives a verifying context; the residue it
+> named — that the socket test proves a handshake but not peer authentication — is
+> what D10-10 closes and re-measures. The rest of this entry still holds.
+
+### D10-10 — TLS verifies the relay; `None` means the system trust store, never "no checks"
+
+- **Decision:** `SmtpSender` builds a verifying `ssl.SSLContext` and passes it to
+  `starttls(context=...)`. The context comes from `build_ssl_context(settings)`, which
+  returns `ssl.create_default_context(cafile=SMTP_CA_BUNDLE)` when a bundle is
+  configured and `ssl.create_default_context()` otherwise. `None` — the constructor
+  default, and the only value a caller who does not care will pass — resolves to the
+  *system trust store*, so there is no state in which this transport falls back to an
+  unchecked handshake. `SMTP_CA_BUNDLE` **replaces** the trust store rather than
+  disabling verification.
+- **The defect this closes was measured, not assumed.** `SMTP.starttls` is declared
+  `starttls(self, *, context=None)`, and `smtplib` turns `None` into
+  `ssl._create_stdlib_context()`, whose `verify_mode` is `CERT_NONE` and whose
+  `check_hostname` is `False`. So the pre-D10-10 code encrypted the session to
+  *whatever answered the socket* and then handed it `SMTP_USERNAME`/`SMTP_PASSWORD`.
+  The connection was confidential and the peer was unauthenticated — confidential to
+  an unknown party is the shape of failure that reads as success in a log.
+- **Why a bundle and not a "verify" switch:** a boolean would have offered
+  `verify=False` as a supported configuration, which is the same defect with a config
+  key in front of it. Naming a CA bundle is the only way to say "trust this instead"
+  without also saying "trust nothing". The socket suite depends on this: its
+  certificate is self-signed, so a verifying client rejects the relay the test needs
+  unless the test hands over the certificate it generated.
+- **Both misconfigurations are boot errors, because the context is built on the send
+  path.** `build_sender` runs inside the request or the scheduler tick, and the
+  scheduler's send happens under the row's `FOR UPDATE` lock (D10-08), so a context
+  that throws would surface as a relay fault on the first message with a row held
+  open. `Settings` therefore refuses, at start-up: a bundle path that is not a file; a
+  file `ssl` cannot load (checked with an actual `load_verify_locations`, since an
+  empty or truncated PEM passes `is_file` and then raises when the context is built);
+  and a bundle set while `SMTP_STARTTLS=false`, where the CA would never be consulted
+  and the configuration would read as "TLS on". The pairing check runs **before** the
+  bundle is parsed: when both are wrong, "this setting does nothing" is the fix the
+  operator needs.
+- **The falsification is the reason the new test exists.** Deleting
+  `context=self._context` from the `starttls` call makes
+  `test_a_relay_with_an_untrusted_certificate_is_refused` fail with
+  `DID NOT RAISE` — while `test_the_credentials_cross_only_an_encrypted_socket`
+  **still passes**. That is direct evidence that the encrypted-socket test, which
+  `6f4cb0b` treated as the TLS proof, never proved peer authentication at all: it
+  observed a handshake and always would. The refusal test is the one that can fail.
+- **Trade-off, stated rather than buried:** the default is the system trust store, so
+  an internal relay behind a private CA needs `SMTP_CA_BUNDLE` set or every send
+  fails. That is the correct direction to fail — a misconfigured trust store stops
+  reminders rather than silently accepting any certificate — and it is a boot error
+  only when the file is unloadable, not when the relay simply is not trusted yet.
+- **What this still does not prove:** no test here has verified a certificate issued
+  by a public CA over a real network, and none exercises hostname mismatch against a
+  provider. What is proven is that a client configured without the matching CA
+  refuses the relay (socket suite) and that the context handed to `starttls` is
+  `CERT_REQUIRED` with hostname checking on (unit suite). The rest is a provider
+  agreeing with `ssl`'s opinion of it, which the first deployment will be first to
+  observe.

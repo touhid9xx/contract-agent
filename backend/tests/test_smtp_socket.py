@@ -26,18 +26,22 @@ What it adds over the fake client:
   locked ``Notification`` row open (D10-09).
 * STARTTLS is a real handshake over a real certificate, and the credentials are
   proven to cross only after it — not merely *called* in that order.
+* The relay's certificate is *verified*, against a CA named by ``SMTP_CA_BUNDLE``.
+  The relay presents a self-signed certificate that the system store does not
+  know, so the same relay is accepted when the bundle names it and refused when
+  it does not: authentication is proven by a send that fails, not by one that
+  succeeds.
 
-Two honest limits, stated rather than hidden. The relay is ours, so this proves
-the client speaks SMTP to something that answers SMTP, not that it is compatible
-with every provider's quirks. And the certificate is self-signed: ``smtplib``
-negotiates TLS through an unverified context, so what is proven is the handshake
-and the ordering, not authentication of the relay.
+One honest limit, stated rather than hidden: the relay is ours, so this proves the
+client speaks SMTP to something that answers SMTP, not that it is compatible with
+every provider's quirks.
 """
 
 from __future__ import annotations
 
 import base64
 import email
+import ipaddress
 import re
 import socket
 import ssl
@@ -270,7 +274,16 @@ def certificate(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
         .not_valid_before(now - timedelta(days=1))
         .not_valid_after(now + timedelta(days=1))
         .add_extension(
-            x509.SubjectAlternativeName([x509.DNSName("loopback.test")]),
+            # The IP entry is the one the client actually matches: it connects to
+            # ``127.0.0.1``, and hostname verification checks SANs against the
+            # string it dialled. Without it the handshake would fail for
+            # "wrong host" and prove nothing about the chain.
+            x509.SubjectAlternativeName(
+                [
+                    x509.DNSName("loopback.test"),
+                    x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
+                ]
+            ),
             critical=False,
         )
         .sign(key, hashes.SHA256())
@@ -460,15 +473,29 @@ def test_a_silent_relay_cannot_hold_the_row_open() -> None:
 
 
 # --- TLS and credentials ---------------------------------------------------
-def test_the_credentials_cross_only_an_encrypted_socket(tls_relay: LoopbackRelay) -> None:
+def test_the_credentials_cross_only_an_encrypted_socket(
+    tls_relay: LoopbackRelay, certificate: tuple[Path, Path]
+) -> None:
     """TLS before auth, proven at the relay rather than at the call site.
 
     The relay records for every command whether the socket was already encrypted,
     and refuses ``AUTH`` on an unencrypted one, so this cannot pass by the client
     merely *calling* ``starttls`` first: a handshake has to have completed.
+
+    ``SMTP_CA_BUNDLE`` names the relay's own certificate, so the handshake also
+    proves the chain and the hostname were checked: the relay is trusted here only
+    because it was named, which is what ``test_a_relay_with_an_untrusted_
+    certificate_is_refused`` then withdraws.
     """
+    cert_path, _ = certificate
     sender = create_smtp_sender(
-        settings_for(tls_relay, smtp_starttls=True, smtp_username="mailer", smtp_password=PASSWORD)
+        settings_for(
+            tls_relay,
+            smtp_starttls=True,
+            smtp_username="mailer",
+            smtp_password=PASSWORD,
+            smtp_ca_bundle=str(cert_path),
+        )
     )
 
     sender.send(message())
@@ -503,3 +530,28 @@ def test_a_relay_that_offers_no_tls_fails_rather_than_sending_in_the_clear(
 
     assert "STARTTLS" in str(raised.value)
     assert plaintext_relay.payloads == []
+
+
+def test_a_relay_with_an_untrusted_certificate_is_refused(tls_relay: LoopbackRelay) -> None:
+    """The same relay, minus the CA bundle: the send must fail, not continue.
+
+    This is what makes the previous test mean something. Without it, a client that
+    verified nothing would pass there exactly as well — the relay would still
+    accept the message — so the proof of verification is a send that *fails*.
+
+    It also fixes the shape of the failure: ``CERTIFICATE_VERIFY_FAILED`` arrives
+    before ``AUTH``, so the configured password was never handed to an unverified
+    peer. That ordering is the reason D10-10 exists.
+    """
+    sender = create_smtp_sender(
+        settings_for(tls_relay, smtp_starttls=True, smtp_username="mailer", smtp_password=PASSWORD)
+    )
+
+    with pytest.raises(SenderError) as raised:
+        sender.send(message())
+
+    assert "CERTIFICATE_VERIFY_FAILED" in str(raised.value)
+    # Nothing was delivered, and — the point of the ordering — no credential left
+    # the process for a peer whose identity was never established.
+    assert tls_relay.authenticated == []
+    assert tls_relay.payloads == []
