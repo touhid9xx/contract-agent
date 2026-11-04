@@ -13,12 +13,16 @@ human review, channel selection, notification dispatch). The hooks commit closes
 earlier one was gated by a hand-run `pre-commit run --all-files` and nothing more.
 F10 closes the last structural gap in the arrow chain but
 **does not contact anybody**: it ships a row, a state machine and a contact policy,
-and no transport. Since then one gap-closing slice has landed — `0f5da36`
+and no transport. Since then two gap-closing slices have landed. `0f5da36`
 (`fix(f10): lock agent decisions and notifications against lost writes`, migration
-`0003`) — closing gaps 19 and 21 by giving `AgentDecision` and `Notification` a
+`0003`) closed gaps 19 and 21 by giving `AgentDecision` and `Notification` a
 `version` column and taking the notification row under `SELECT ... FOR UPDATE`
-*before* the dispatch policy runs. The pipeline is now fully locked and still sends
-nothing. GATE 2 now awaits human sign-off.**
+*before* the dispatch policy runs. `4e7dd5c`
+(`feat(f10): schedule due and deferred notifications`) closed gap 22: a
+`NotificationScheduler` now claims and dispatches due rows — including ones a
+quiet-hours deferral wrote into the future — so `scheduled_at` is finally read by
+something. The pipeline is now fully locked, self-draining, and **still sends
+nothing**: the only transport refuses. GATE 2 now awaits human sign-off.**
 
 ## Phase history
 
@@ -527,12 +531,15 @@ before the transport is reached.
   `409 SENDER_UNAVAILABLE` or a quiet-hours deferral. The send path is exercised
   only by calling `dispatch_notification` with an injected fake in tests. "F10 sends
   notifications" is false until an adapter exists (gap 15).
-- **No scheduler.** A deferred row is retried only when something dispatches it
+- ~~**No scheduler.** A deferred row is retried only when something dispatches it
   again — the outbox relay polls *events*, not notifications. Same
-  operator-initiated shape as DLQ replay (D5-03, gap 22).
-- **No row lock.** `Notification` has no `version` column, so two concurrent
+  operator-initiated shape as DLQ replay (D5-03, gap 22).~~ — **closed by
+  `4e7dd5c`** (gap 22): a poller now claims due rows itself. At the F10 commit
+  this was true.
+- ~~**No row lock.** `Notification` has no `version` column, so two concurrent
   dispatches are not serialised; the unique `idempotency_key` is passed to the
-  transport for provider-side dedupe (D10-05, gap 21).
+  transport for provider-side dedupe (D10-05, gap 21).~~ — **closed by `0003`
+  (`0f5da36`)**, with the concurrency caveat still standing as gap 23.
 - **No content rendering and no outbox event.** `template` names the milestone; the
   body is the transport's job. A send emits no `contract.events` message, so nothing
   downstream learns that contact happened.
@@ -700,6 +707,75 @@ that suite shares one in-memory connection (`StaticPool`) so a competing commit
 cannot land behind an in-flight request; the out-of-band `UPDATE` still bumps the
 stored version, so the dirty row's commit is genuinely rejected.
 
+## A scheduler for due and deferred notifications ✅ (`4e7dd5c`)
+
+Gap-closing slice, no migration. Gap 22 was that `scheduled_at` was **written and
+never read**: a quiet-hours deferral stores a future timestamp and stops, and the
+outbox relay polls *events*, not notifications — so a deferred row moved only when
+an operator POSTed `/dispatch` again. The deferral was therefore not a delay, it was
+a stop.
+
+`app/workers/notification_scheduler.py` closes it, mirroring `outbox_relay`'s shape
+(`run_once()` / `run_forever(stop)` / `main()`, `python -m
+app.workers.notification_scheduler`):
+
+1. **`NotificationRepository.claim_next_due`** — `SELECT ... FOR UPDATE SKIP LOCKED
+   LIMIT 1` over `status = pending AND (scheduled_at IS NULL OR scheduled_at <=
+   now)`. That predicate *is* the gap: "due" is exactly what makes a deferral resume.
+   It is deliberately **not** tenant-scoped — the second unscoped read in the
+   repositories, after `OutboxRepository.claim_due`, which is unscoped for the same
+   reason: a poller is one process serving every tenant, so it cannot know the tenant
+   before it has picked the row (D10-07).
+2. **The tenant guard is the scoped read itself.** The worker never compares tenant
+   ids: it reads the contract through `ContractRepository(session, row.tenant_id)`,
+   so a contract belonging to a different tenant is simply *not found* and the row is
+   parked `TENANT_MISMATCH` rather than dispatched. That is what keeps the unscoped
+   claim safe, and it is tested.
+3. **Claim and send share one transaction**, so the `FOR UPDATE` taken by
+   `claim_next_due` still spans the send and the commit lands after the transport
+   returns. A crash between send and commit re-sends rather than losing the row —
+   at-least-once, the same rule the relay uses.
+4. **`recipient_for` moved out of the route into `app/workers/dispatch.py`.** The
+   poller resolves a recipient with no HTTP request in sight; leaving the rule in
+   the router would have forced a second copy of it into the worker, which is the
+   duplication that module exists to prevent.
+5. **`POST /{id}/retry` now lifts `suppressed`, not just `failed`.** The scheduler
+   parks permanent policy refusals as `suppressed`; without this they would have
+   been unreachable by the one route meant to recover them.
+
+Three judgements that could have been made silently and wrongly:
+
+- **`SENDER_UNAVAILABLE` is deliberately not suppressible.** The shipped transport
+  is `none`, so suppressing it would let one scheduler start move *every* pending
+  row into a human-only state, for a cause an operator fixes with a single env var.
+  `run_once()` returns early, and `run_forever` warns once, when no sender is
+  available.
+- **A failed send stops the drain.** Otherwise the loop re-claims the same still-due
+  row and burns the whole retry budget inside one tick; `TickResult.resolved`
+  enforces "attempts, not attempts per drain".
+- **`notification_retry_max` floor moved `ge=0` → `ge=1`.** At `0` the policy parks
+  every row before reaching the transport, so sending was impossible by
+  configuration.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Full suite, SQLite | `pytest tests` | **408 tests, 0 failures, 4 skipped** (JUnit-confirmed; `+15` scheduler, `+2` config) |
+| Lint | `ruff check app tests migrations` | **All checks passed** |
+| Format | `ruff format --check app tests migrations` | **75 files already formatted** (2 needed reformatting first) |
+| Type check | `mypy app` (strict) | **clean, 48 source files** |
+| Security lint | `bandit` | **0 issues** (3 expected `nosec B104`) |
+| Migration applies | `alembic upgrade head` on a fresh database | **`0001 → 0002 → 0003`, exit 0** |
+| `alembic check` at head | SQLite | only the 13 pre-existing enum-length artefacts — **no new migration**, `SUPPRESSED` was already in `0001`'s ENUM definition |
+| Alembic topology | `alembic heads` | **`0003 (head)`** — unchanged, this slice added no revision |
+| **`alembic check` / full suite, real MySQL** | needs a server | **STILL NOT RUN.** Unrun, not green |
+| Commit gate | husky pre-commit + commit-msg | **all 17 hooks Passed**, including `tsc --noEmit` and `eslint` |
+
+Three ruff findings were fixed rather than suppressed: unsorted `__all__` in
+`dispatch.py`, a `field` loop variable shadowing the `dataclasses.field` import, and
+a missing `Any` import in the new test file. `mypy tests` reports 12 errors in
+`test_crypto.py` / `test_extraction.py` — pre-existing and outside the gate's `app`
+scope; this slice did not touch them.
+
 ## Known gaps / issues
 
 1. **`gitleaks` needs Docker** and is manual-stage only (D1-03). Run
@@ -858,12 +934,15 @@ stored version, so the dirty row's commit is genuinely rejected.
     twice. A version column alone would only have serialised the commit, after both
     sends had happened. The lost race now surfaces as `409 CONCURRENT_UPDATE`, not a
     500. What remains unproven is stated as gap 23.
-22. **No scheduler polls notifications.** The outbox relay claims *events*, not
-    notifications. A row deferred by quiet hours, or one parked `failed` after
-    exhausting `notification_retry_max`, moves again only when an operator calls
-    `POST /{id}/dispatch` or `/retry`. Same operator-initiated shape as DLQ replay
-    (D5-03) and the same weakness: nothing alerts when rows sit deferred or parked,
-    so a quiet-hours deferral can stay deferred indefinitely.
+22. ~~**No scheduler polls notifications.**~~ — **closed by `4e7dd5c`**.
+    `NotificationScheduler` claims `pending` rows whose `scheduled_at` is null or
+    past, so a quiet-hours deferral resumes on its own. What it is **not**: there is
+    still no alerting — a row parked `failed` after exhausting
+    `notification_retry_max`, or `suppressed` by a policy refusal, sits there until
+    an operator looks. Retry stays operator-initiated, like DLQ replay (D5-03); the
+    difference is that a *deferred* row now recovers itself. The scheduler also
+    inherits gap 23's caveat: its claim lock is a no-op on SQLite. **No alert when
+    rows park** is still open, and it is a real weakness at GATE 2.
 23. **The double-send serialisation is proven by reasoning, not by a concurrent
     test.** `0003` (`0f5da36`) makes the second dispatch block on
     `SELECT ... FOR UPDATE` and then refuse `NOT_PENDING`. But `with_for_update()`
@@ -878,23 +957,30 @@ stored version, so the dirty row's commit is genuinely rejected.
     that actually prevents two emails. Closing this needs the MySQL suite
     (row above in the F10 table, still unrun) plus a test that opens two real
     connections and asserts the second blocks. Until then this is a design
-    argument, stated as one.
+    argument, stated as one. **`4e7dd5c` widened the blast radius**: the same no-op
+    lock now guards two callers instead of one — the dispatch route *and* the
+    scheduler's `claim_next_due` — so on SQLite two pollers could in principle
+    dispatch the same row concurrently. Against MySQL they cannot; that is still
+    the unrun half.
 
 ## Next permitted step
 
-**F10 (step 6) is committed (`b344c17`); GATE 2 awaits human sign-off.** F1–F10 are
+**F10 (step 6) is committed (`b344c17`), and two gap-closing slices have landed
+since (`0f5da36`, `4e7dd5c`); GATE 2 awaits human sign-off.** F1–F10 are
 all committed and the pipeline slice is closed — every arrow in the Phase-0 flow
-(ingest → extract → review → decide → notify) now has real code behind it. What F10
-does **not** do is send, so the next step is a decision rather than an obvious
+(ingest → extract → review → decide → notify) now has real code behind it, and a
+due row is reached by a background poller rather than an operator. What the pipeline
+still does **not** do is send, so the next step is a decision rather than an obvious
 feature to build.
 
 - `app/db/models/` — every table in the flow now has a writer: `Contract`
   (`POST /contracts`), `ExtractedField` (`python -m app.cli extract`,
   `PATCH /review/{id}`), `AuditLog` (review, reveal, consent), `AgentDecision`
   (`POST /agent/decisions`) and `Notification` (`POST /notifications`,
-  `POST /{id}/dispatch`, `POST /{id}/retry`). `CustomerResponse` and `Escalation`
-  remain writer-less (gap 15), which is why nothing records a reply or opens an SLA
-  clock.
+  `POST /{id}/dispatch`, `POST /{id}/retry`, and now the scheduler itself, which
+  dispatches without a request at all — `4e7dd5c`). `CustomerResponse` and
+  `Escalation` remain writer-less (gap 15), which is why nothing records a reply or
+  opens an SLA clock.
 - `app/api/v1/` — `auth`, `health`, `contracts`, `agent`, `review` and now
   `notifications`. The backend is no longer *behind* the UI contract by a route; on
   the notification path it is ahead of it. No screen talks to the real API yet:
@@ -950,7 +1036,12 @@ preceding it: whether a send also emits a `contract.events` event (F10 emits non
 so nothing downstream learns that contact happened); how a provider failure maps
 onto the existing `failed` / `attempts` / `notification_retry_max` rules; and
 whether `sent` may ever be asserted without a provider-side receipt — the honest
-default is that it may not, which is exactly why the stand-in refuses today.
+default is that it may not, which is exactly why the stand-in refuses today. The
+scheduler (`4e7dd5c`) makes this the *only* thing left between a due row and a
+customer: a due row is now reached without an operator, and refused at the last
+line by the transport stand-in. That makes gap 15 a firebreak rather than an
+afterthought — the moment an adapter is configured, the poller will start calling
+it.
 
 ~~Close the harness gate first (gap 13).~~ — **done** in `4a9e8e9`. `core.hooksPath`
 is `.husky/_` and both hooks are live; the wiring was proven by a commit that git
@@ -969,8 +1060,10 @@ One alternative remains, and it is gap-sized rather than milestone-sized:
 
 **Open at GATE 2 — say these out loud, do not bury them:** no Kafka broker has
 ever been on the other end of a publish (no compose service; `live` test opt-in);
-no consumer exists; DLQ replay is operator-initiated with no alerting, and nothing
-polls notifications either, so a deferred row can stay deferred (gap 22); no live
+no consumer exists; DLQ replay is operator-initiated with no alerting, and
+notification **retry** is too — the scheduler (`4e7dd5c`) now recovers a *deferred*
+row by itself, but a row parked `failed` or `suppressed` still sits until a human
+looks, and nothing alerts when it does (the residue of gap 22); no live
 Ollama has answered anything; and the `review`, `agent` and `notification` routes
 have only ever been called by `TestClient`, because no screen talks to them yet.
 **Nothing has ever been sent to a customer** (gap 15): the only transport refuses,

@@ -948,11 +948,16 @@ committed together. That pairing is the milestone; extraction and review follow.
   caller needs to reschedule, which is exactly `deferred_until`. Deferral happens
   before the transport is consulted, so quiet hours cannot be bypassed by a
   provider that would have accepted the message.
-- **Trade-off:** nothing loops the deferred row. There is no scheduler in this repo
+- **Trade-off:** nothing loops the deferred row. ~~There is no scheduler in this repo
   (the outbox relay polls events, not notifications), so a deferred row is resent
-  only when something dispatches it again — the same "operator-initiated" shape as
-  DLQ replay (D5-03). A day-long quiet window therefore means a `pending` row that
-  nobody retries automatically; recorded as a gap rather than implied to be a queue.
+  only when something dispatches it again~~ — **superseded by `4e7dd5c`**
+  (`STATUS.md`, "A scheduler for due and deferred notifications"): a
+  `NotificationScheduler` now claims `pending` rows whose `scheduled_at` is past, so
+  the deferral this decision writes is what makes the row resume. The decision
+  itself is unchanged and still correct; only its consequence was temporary. What
+  survives of the trade-off is narrower: a row parked `failed` or `suppressed` is
+  still only moved by an operator, and nothing alerts when this happens — the same
+  "operator-initiated" shape as DLQ replay (D5-03).
 
 ### D10-03 — Consent is re-read at send time, never trusted from the decision
 
@@ -1013,4 +1018,60 @@ committed together. That pairing is the milestone; extraction and review follow.
   `ExtractedField.normalized_value` (**gap 20**) that `_recipient_for` reads — the
   recipient is taken from an unencrypted column while `raw_value` beside it is
   Fernet-ciphertext, which is a PII-at-rest inconsistency this slice inherits and
-  does not fix.
+  does not fix. **Superseded in part by `0f5da36`:** the `version` column and the
+  `FOR UPDATE` claim *were* added, in the slice that needed them, so the "not a
+  migration mid-slice" reasoning expired with F10 and the gap it recorded is closed.
+  The idempotency-key argument above stands on its own and was kept — the key is
+  still what a real provider dedupes on, and the lock is the second mechanism, not a
+  replacement for it. Two details in this entry are now stale: `_recipient_for`
+  became `recipient_for` in `app/workers/dispatch.py` (`4e7dd5c`), and the
+  "dispatcher loop does not exist yet" clause was true until that same commit.
+  Gap 20 — the plaintext `normalized_value` — is **still open and untouched**.
+
+### D10-06 — No template table; the transport renders the body
+
+- **Decision:** `Notification.template` stores the milestone name (`T-60` / `T-30` /
+  `T-14`) and nothing else. There is no `templates` table, no rendering step, and no
+  stored body in this build. Composing the message is the transport adapter's job.
+- **Why:** a template table is a content-management feature, and content decisions
+  (tone, locale, legal wording) belong to the slice that first sends something real.
+  Building it now would produce a schema whose shape is guesswork, and the demo's
+  fixture bodies are not an approved source of customer-facing copy. The milestone
+  name is enough for a transport to select from its own configuration, and it is
+  already one of the `idempotency_key` hash inputs (D10-05).
+- **Trade-off:** a real adapter cannot be written without deciding where the body
+  comes from — it will need config-supplied templates or a new migration. This is
+  the same "decision, not a patch" shape as D10-04: the seam exists, the content
+  does not. **The reference is live in code** (`app/api/v1/notifications.py` docstring
+  names D10-06); this entry exists to keep that reference resolvable.
+
+### D10-07 — The scheduler claims unscoped, and enforces tenancy in the worker
+
+- **Decision:** `NotificationRepository.claim_next_due` is **not** tenant-scoped —
+  `SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1` over `status = pending AND
+  (scheduled_at IS NULL OR scheduled_at <= now)`, globally. It is the second
+  unscoped read in the repositories, following the precedent set by
+  `OutboxRepository.claim_due`. The tenant check moves
+  into the worker, where it is **not** an explicit id comparison: the contract is
+  read through `ContractRepository(session, row.tenant_id)`, so a contract belonging
+  to another tenant is not found, and the row is parked `TENANT_MISMATCH`.
+- **Why:** `TenantScopedRepository` derives its predicate from an authenticated
+  principal, and a background poller has no principal — there is no tenant to scope
+  by until a row has been claimed and its contract resolved. The alternatives were
+  worse: a `tenant_id` column duplicated onto `Notification` (denormalisation to
+  satisfy a query shape), or iterating tenants and claiming once per tenant (N
+  queries per tick, and a hot tenant starves the rest). Moving the *check* rather
+  than the *predicate* keeps the isolation guarantee without inventing either.
+- **Trade-off:** the invariant "tenant scoping lives in the repository" now has one
+  documented exception, and the guard that replaces it is application code that a
+  future refactor could drop. It is the first thing the scheduler's test file covers
+  for that reason. Also accepted: `SKIP LOCKED` is a no-op on SQLite (gap 23), so on
+  the suite's database two pollers could claim the same row.
+- **Companion decisions in the same slice, recorded here rather than as three
+  entries:** `SENDER_UNAVAILABLE` is **not** suppressible (the shipped transport is
+  `none`, so suppressing it would park every pending row in a human-only state for a
+  one-env-var fix); a **failed** send stops the drain (otherwise the loop re-claims
+  the same still-due row and burns the whole retry budget in one tick); and
+  `notification_retry_max`'s floor moved `ge=0` → `ge=1` (at `0` the policy parks
+  every row before the transport is ever consulted, so sending was impossible by
+  configuration).
