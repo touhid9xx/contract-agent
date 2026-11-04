@@ -145,7 +145,20 @@ class Settings(BaseSettings):
     #: Dispatch attempts before a row is parked ``failed`` for an operator. The
     #: same role ``outbox_max_attempts`` plays for a parked event row: a retry
     #: loop has to be bounded, and a bound has to be visible.
-    notification_retry_max: int = Field(default=3, ge=0, le=20)
+    #:
+    #: The floor is 1, not 0. ``dispatch_notification`` parks the row when
+    #: ``attempts >= notification_retry_max`` *before* the transport is reached, so
+    #: 0 would park every row on its first attempt and make a send impossible — a
+    #: configuration that looks like "no retries" and behaves like "never".
+    notification_retry_max: int = Field(default=3, ge=1, le=20)
+    #: Rows the scheduler claims per tick. Each row is its own transaction, so this
+    #: bounds the work of one tick, not the size of a lock.
+    notification_batch_size: int = Field(default=50, gt=0, le=1000)
+    #: How long the scheduler waits after draining the due queue. Kept well under a
+    #: minute so a quiet-hours deferral resumes promptly once its window opens; a
+    #: row deferred to 08:00 customer time would otherwise wait for an arbitrary
+    #: sweep interval to be noticed.
+    notification_poll_interval_seconds: float = Field(default=5.0, gt=0, le=300)
 
     # --- http ------------------------------------------------------------
     cors_origins: str = "http://localhost:3000"

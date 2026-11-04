@@ -31,7 +31,6 @@ table (D10-06).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from datetime import date, datetime
 from typing import Any
 
@@ -48,7 +47,7 @@ from app.core.config import Settings
 from app.core.principal import Principal
 from app.db.base import as_utc, utc_now
 from app.db.enums import Channel, NotificationStatus, UserRole
-from app.db.models import AgentDecision, Contract, ExtractedField, Notification
+from app.db.models import AgentDecision, Contract, Notification
 from app.db.repositories import (
     AgentDecisionRepository,
     ContractRepository,
@@ -59,7 +58,6 @@ from app.db.repositories.notifications import (
     DEFAULT_NOTIFICATION_LIMIT,
     MAX_NOTIFICATION_LIMIT,
 )
-from app.workers.decision import CHANNEL_CONTACT_FIELDS, USABLE_FIELD_STATUSES
 from app.workers.dispatch import (
     DispatchOutcome,
     DispatchRefusedError,
@@ -67,6 +65,7 @@ from app.workers.dispatch import (
     build_notification,
     build_sender,
     dispatch_notification,
+    recipient_for,
 )
 
 logger = structlog.get_logger(__name__)
@@ -82,7 +81,8 @@ REFUSAL_NOTIFICATION_EXISTS = "NOTIFICATION_EXISTS"
 REFUSAL_NO_DECISION = "NO_DECISION"
 #: The decision exists but belongs to a different contract.
 REFUSAL_DECISION_MISMATCH = "DECISION_MISMATCH"
-#: ``retry`` was asked for on a row that is not parked ``failed``.
+#: ``retry`` was asked for on a row that is neither parked ``failed`` nor
+#: ``suppressed``.
 REFUSAL_NOT_FAILED = "NOT_FAILED"
 #: Another writer changed this row between our read and our commit, so the update
 #: matched zero rows (gap 21). Distinct from ``NOT_PENDING``: that means the row was
@@ -90,6 +90,14 @@ REFUSAL_NOT_FAILED = "NOT_FAILED"
 #: fix is identical — reload — but an operator debugging a double send needs to tell
 #: the two apart in the logs.
 REFUSAL_CONCURRENT_UPDATE = "CONCURRENT_UPDATE"
+
+#: The states ``/retry`` may lift. ``failed`` is a spent retry budget; ``suppressed``
+#: is a policy refusal the scheduler recorded (gap 22) — a contract that was closed,
+#: or a field that was rejected before the send. Both are an operator's call to undo,
+#: and neither may be undone by the scheduler itself.
+RETRYABLE_STATUSES: frozenset[NotificationStatus] = frozenset(
+    {NotificationStatus.FAILED, NotificationStatus.SUPPRESSED}
+)
 
 
 class NotificationView(BaseModel):
@@ -172,29 +180,6 @@ def _view(row: Notification) -> NotificationView:
         provider_message_id=row.provider_message_id,
         idempotency_key=row.idempotency_key,
     )
-
-
-def _recipient_for(channel: Channel, fields: Sequence[ExtractedField]) -> str:
-    """The approved value this channel would contact, or raise.
-
-    Deliberately the same rule F9 used to choose the channel (``USABLE_FIELD_STATUSES``
-    plus a present ``normalized_value``): if this function could accept a field the
-    decision rejected, the send would go somewhere the decision never approved.
-
-    Raises rather than returning ``None`` so the caller in
-    :func:`~app.workers.dispatch.dispatch_notification` has one failure to map onto
-    ``RECIPIENT_UNAVAILABLE``, and so a missing value cannot be mistaken for an empty
-    string address.
-    """
-    wanted = CHANNEL_CONTACT_FIELDS[channel]
-    for field in fields:
-        if (
-            field.field_name is wanted
-            and field.status in USABLE_FIELD_STATUSES
-            and field.normalized_value
-        ):
-            return field.normalized_value
-    raise LookupError(f"no usable {wanted.value} value for channel {channel.value}")
 
 
 def _claim_notification(
@@ -452,7 +437,7 @@ def dispatch(
 
     def resolve_recipient() -> str:
         """Read the approved value late — only once the gates have all passed."""
-        return _recipient_for(notification.channel, fields)
+        return recipient_for(notification.channel, fields)
 
     try:
         outcome = dispatch_notification(
@@ -517,24 +502,30 @@ def retry(
     principal: Principal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
     session: Session = Depends(get_request_session),
 ) -> NotificationView:
-    """Reset a ``failed`` row to ``pending`` with a fresh attempt budget.
+    """Reset a ``failed`` or ``suppressed`` row to ``pending`` with a fresh budget.
 
     Separate from ``/dispatch`` on purpose: dispatching a parked row is refused by
     the policy (``ATTEMPTS_EXHAUSTED``), and lifting that refusal is an operator
     decision. Folding it into dispatch would give every transient network blip an
     unlimited retry loop and no way to tell a stuck row from a retried one.
 
+    ``suppressed`` is retryable for the same reason. The scheduler suppresses a row
+    whose refusal will not resolve on its own — a rejected field, a withdrawn
+    consent — and every one of those can be resolved by a person (the field is
+    re-approved, the customer opts back in). Without this route the scheduler's
+    verdict would be final and unwinding it would need a hand-written ``UPDATE``.
+
     ``sent_at``/``provider_message_id`` are left alone — a row that reached a
     transport once should keep that evidence even after it is requeued for a second
     attempt, which is the same choice ``outbox`` replay makes for ``last_error``.
     """
     notification = _claim_notification(session, principal, notification_id)
-    if notification.status is not NotificationStatus.FAILED:
+    if notification.status not in RETRYABLE_STATUSES:
         raise refusal(
             DispatchRefusedError(
                 REFUSAL_NOT_FAILED,
-                f"This notification is {notification.status.value}; only a failed "
-                "notification is retried",
+                f"This notification is {notification.status.value}; only a failed or "
+                "suppressed notification is retried",
                 details={"status": notification.status.value},
             )
         )

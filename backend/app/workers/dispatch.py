@@ -34,11 +34,14 @@ What is deliberately **not** here yet, so it is not mistaken for done:
   nothing can actually be sent by this build. Adding one is an adapter behind
   :class:`MessageSender` — the seam exists so that adapter needs no change to this
   policy.
-* **No row lock around the send.** ``Notification`` has no ``version`` column, so
-  two concurrent dispatches of the same pending row cannot be serialised the way
-  ``Contract`` and ``ExtractedField`` writes are. The unique ``idempotency_key``
-  is passed to the transport so a real provider can dedupe; the missing lock is
-  recorded as a gap rather than papered over.
+* **The row lock is the caller's, not this module's.** ``Notification`` carries a
+  ``version`` column (gap 21) and the callers take a ``SELECT ... FOR UPDATE`` on
+  the row *before* calling :func:`dispatch_notification` — the route through
+  :meth:`~app.db.repositories.notifications.NotificationRepository.claim_for_dispatch`,
+  the scheduler through :func:`~app.db.repositories.notifications.claim_next_due`.
+  That ordering is the enforcement: the second worker blocks, then reads the row
+  already ``sent`` and refuses with ``NOT_PENDING`` instead of sending twice. The
+  lock is a no-op on SQLite, so the serialisation is proven on MySQL only — gap 23.
 * **No content rendering.** ``template`` names the milestone; composing the email
   or script body is the transport's job until there is a template table.
 """
@@ -55,17 +58,20 @@ from app.core.config import Settings
 from app.db.enums import Channel, NotificationStatus
 from app.db.models import Contract, ExtractedField, Notification
 from app.workers.decision import (
+    CHANNEL_CONTACT_FIELDS,
     CLOSED_CONTRACT_STATUSES,
     REFUSAL_CONTACT_REFUSED,
     REFUSAL_CONTRACT_CLOSED,
     REFUSAL_NO_CONSENT,
     REFUSAL_PIPELINE_BLOCKED,
+    USABLE_FIELD_STATUSES,
     DecisionRefusedError,
 )
 
 __all__ = [
     "DEFAULT_MILESTONE_DAYS",
     "DISPATCH_POLICY_VERSION",
+    "SUPPRESSING_REFUSALS",
     "DispatchOutcome",
     "DispatchRefusedError",
     "MessageSender",
@@ -82,6 +88,7 @@ __all__ = [
     "milestone_for",
     "notification_idempotency_key",
     "quiet_hours_until",
+    "recipient_for",
 ]
 
 #: Reminder milestones, loosest first (the documented T-60 / T-30 / T-14 cadence).
@@ -117,6 +124,51 @@ REFUSAL_ATTEMPTS_EXHAUSTED = "ATTEMPTS_EXHAUSTED"
 REFUSAL_SENDER_UNAVAILABLE = "SENDER_UNAVAILABLE"
 #: The approved contact value could not be decrypted, so there is nothing to send to.
 REFUSAL_RECIPIENT_UNAVAILABLE = "RECIPIENT_UNAVAILABLE"
+
+#: Refusals that will **not** clear on their own, so a background caller should
+#: park the row rather than retry it on the next tick (gap 22).
+#:
+#: The distinction is not cosmetic — an unattended scheduler has to tell "wait"
+#: from "stop", and getting it wrong fails in one of two ways. Retrying a
+#: permanent refusal forever burns a query per row per tick and, because the due
+#: queue is ordered by ``scheduled_at``, leaves the poisoned row at the head
+#: starving every row behind it. Suppressing a *transient* refusal instead loses
+#: the send permanently, which is worse.
+#:
+#: Every code here is a state a person has to change: the contract closed or was
+#: opted out, consent was never given or was withdrawn, a reviewer flagged the
+#: field or the decision, the contract has no end date, the time zone cannot be
+#: resolved, or the approved contact value is missing. Each is recoverable — and
+#: the recovery route is ``POST /notifications/{id}/retry``, which is why it
+#: accepts ``suppressed`` and not only ``failed``.
+#:
+#: Deliberately **absent**:
+#:
+#: * ``NOT_YET_DUE`` — time alone resolves it. This is the deferral path.
+#: * ``SENDER_UNAVAILABLE`` — a transport may be configured later. Suppressing it
+#:   would be actively destructive here: the shipped transport is ``none``, so the
+#:   first tick of a running scheduler would move every pending row into a state
+#:   that only a human can lift, for a reason an operator fixes with one env var.
+#: * ``ATTEMPTS_EXHAUSTED`` — the policy already parks that row ``failed``, and a
+#:   second parking would overwrite the retry evidence with a policy verdict.
+#: * ``NOT_PENDING`` — the row is not this caller's to change.
+SUPPRESSING_REFUSALS: frozenset[str] = frozenset(
+    {
+        REFUSAL_CONTRACT_CLOSED,
+        REFUSAL_CONTACT_REFUSED,
+        REFUSAL_NO_CONSENT,
+        REFUSAL_CHANNEL_NOT_CONSENTED,
+        REFUSAL_PIPELINE_BLOCKED,
+        REFUSAL_NEEDS_REVIEW,
+        REFUSAL_MISSING_END_DATE,
+        REFUSAL_UNKNOWN_TIMEZONE,
+        REFUSAL_RECIPIENT_UNAVAILABLE,
+        # Unreachable from ``dispatch_notification`` today — the milestone is
+        # computed at scheduling time, not send time — but listed so a future
+        # caller that does check the window does not spin on it.
+        REFUSAL_NOT_IN_WINDOW,
+    }
+)
 
 
 class DispatchRefusedError(DecisionRefusedError):
@@ -382,6 +434,34 @@ def assert_may_contact(contract: Contract, *, channel: Channel) -> None:
             f"Consent for {channel.value} is not on record for this contract",
             details={"channel": channel.value, "consented": sorted(m.value for m in consented)},
         )
+
+
+def recipient_for(channel: Channel, fields: Sequence[ExtractedField]) -> str:
+    """The approved value this channel would contact, or raise.
+
+    Deliberately the same rule F9 used to choose the channel (``USABLE_FIELD_STATUSES``
+    plus a present ``normalized_value``): if this function could accept a field the
+    decision rejected, the send would go somewhere the decision never approved.
+
+    Raises rather than returning ``None`` so the caller in
+    :func:`dispatch_notification` has one failure to map onto
+    :data:`REFUSAL_RECIPIENT_UNAVAILABLE`, and so a missing value cannot be mistaken
+    for an empty string address.
+
+    It lives in this policy module rather than in the route that first needed it
+    because the scheduler (gap 22) resolves a recipient with no HTTP request in
+    sight. Two copies of this rule is how a background send starts disagreeing with
+    the API about who is contactable.
+    """
+    wanted = CHANNEL_CONTACT_FIELDS[channel]
+    for candidate in fields:
+        if (
+            candidate.field_name is wanted
+            and candidate.status in USABLE_FIELD_STATUSES
+            and candidate.normalized_value
+        ):
+            return candidate.normalized_value
+    raise LookupError(f"no usable {wanted.value} value for channel {channel.value}")
 
 
 # --- planning ---------------------------------------------------------------

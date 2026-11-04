@@ -124,3 +124,26 @@ def test_a_malformed_encryption_key_is_refused_at_startup() -> None:
     short_key = base64.urlsafe_b64encode(bytes(16)).decode("ascii")
     with pytest.raises(ValidationError, match="ENCRYPTION_KEY"):
         Settings(app_env="development", encryption_key=short_key)
+
+
+def test_a_zero_dispatch_budget_is_refused_at_startup() -> None:
+    """0 reads as "no retries" and behaves as "never sends".
+
+    ``dispatch_notification`` parks the row when ``attempts >= retry_max`` before
+    the transport is reached, so a budget of 0 would park every row on its first
+    attempt. It is refused at boot rather than left to look configured.
+    """
+    with pytest.raises(ValidationError, match="greater than or equal to 1"):
+        Settings(app_env="development", notification_retry_max=0)
+
+
+def test_the_scheduler_batch_and_interval_are_bounded() -> None:
+    with pytest.raises(ValidationError, match="greater than 0"):
+        Settings(app_env="development", notification_batch_size=0)
+    with pytest.raises(ValidationError, match="less than or equal to 300"):
+        Settings(app_env="development", notification_poll_interval_seconds=301)
+
+    # Defaults are usable without configuration, so the worker boots out of the box.
+    settings = Settings(app_env="development")
+    assert settings.notification_batch_size == 50
+    assert settings.notification_poll_interval_seconds == 5.0

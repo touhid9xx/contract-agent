@@ -22,6 +22,10 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
+from sqlalchemy import and_, or_, select
+from sqlalchemy.orm import Session
+
+from app.db.base import utc_now
 from app.db.enums import Channel, NotificationStatus
 from app.db.models import Notification
 from app.db.repositories.base import TenantScopedRepository
@@ -148,3 +152,40 @@ class NotificationRepository(TenantScopedRepository[Notification]):
             attempts=0,
         )
         return self.add(notification)
+
+
+def claim_next_due(session: Session, *, now: datetime | None = None) -> Notification | None:
+    """The next row the scheduler may dispatch, **read under a write lock**.
+
+    The one query in this module that is *not* tenant-scoped, and the reason is
+    structural rather than convenient: a scheduler is one process serving every
+    tenant, so it cannot know the tenant before it has picked the row. The tenant is
+    therefore taken **from the row** — ``dispatch_notification`` is then handed that
+    row's own ``tenant_id`` for every follow-up read, and the contract's tenant is
+    checked against it before the policy runs (see
+    :mod:`app.workers.notification_scheduler`). :func:`~app.db.repositories.outbox.
+    claim_due` is unscoped for exactly the same reason.
+
+    "Due" is ``pending`` and either no due time or one that has passed. A row
+    deferred by quiet hours carries a future ``scheduled_at``, so this predicate is
+    also what makes a deferral *resume* — nothing else has to remember it.
+
+    ``SKIP LOCKED`` lets N schedulers share the table without blocking. SQLite has no
+    ``FOR UPDATE``; SQLAlchemy omits the clause there, which is acceptable because the
+    suite is single-writer and the real locking is covered by the MySQL integration
+    test — the same trade-off ``claim_for_dispatch`` documents.
+    """
+    due = and_(
+        Notification.status == NotificationStatus.PENDING,
+        or_(Notification.scheduled_at.is_(None), Notification.scheduled_at <= (now or utc_now())),
+    )
+    stmt = (
+        select(Notification)
+        .where(due)
+        # NULLs sort first on both MySQL and SQLite, so "no due time" (send now) is
+        # preferred over every dated row — which is the order an operator expects.
+        .order_by(Notification.scheduled_at, Notification.id)
+        .limit(1)
+        .with_for_update(skip_locked=True)
+    )
+    return session.execute(stmt).scalars().first()
