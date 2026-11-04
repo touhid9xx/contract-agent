@@ -791,6 +791,53 @@ committed together. That pairing is the milestone; extraction and review follow.
   operator, so an installation staffed only by viewers accumulates blocked
   contracts.
 
+### D8-06 — The queue pages by keyset, and the cursor is deliberately unsigned
+
+- **Decision:** `GET /review/queue` accepts `?cursor=` and returns `next_cursor`
+  (`app/api/v1/review.py`). The token names the sort key of the last row on the
+  page — `(confidence, created_at, field_id)` — and
+  `ExtractedFieldRepository.awaiting_review(after=...)` applies it as a keyset
+  predicate over exactly the triple the query orders by. It is not an offset. A
+  token that does not decode is a `422`, never a silent return to page one. The
+  token is URL-safe base64 over versioned JSON, and **unsigned**: it carries no
+  secret, no tenant and no HMAC.
+- **Why:** the queue is *written to while it is read*. A reviewer deciding a field
+  removes it from the predicate, so every later row shifts up by one and an
+  `OFFSET` skips an item nobody ever saw — the failure mode is silent, and it is
+  the normal case rather than a race. Re-reading the sort key is stable under
+  those writes, and stable under insertion too, which is why it beats a
+  "snapshot then page" scheme. The predicate is three `OR` terms rather than a
+  row-value comparison `(a,b,c) > (?,?,?)` because row-constructor support differs
+  between SQLite and MySQL versions and the two must read identically; the terms
+  mirror the `ORDER BY` term for term, because a predicate that disagrees with the
+  sort order silently drops or repeats rows *at the boundary*, which is the one
+  place a paging bug hides. Whether a next page exists is answered by fetching
+  `limit + 1`, not by a second `COUNT()`: a count over a moving set is a number
+  from a different instant than the page, so it can promise a page that is not
+  there. Signing the cursor would imply it grants something; forging one can only
+  move within your own queue, because the tenant predicate is applied by the query
+  regardless of what the token says — `test_review.py` pins that a *forged
+  foreign-tenant cursor* returns `[]`, i.e. it proves the query-level predicate
+  rather than cursor integrity, which is the property that actually matters.
+- **Trade-off:** three real limits. `oldest_minutes` is a max over the rows
+  returned, so on page two it no longer describes the queue's oldest item — a
+  client displaying "oldest waiting" must read page one (stated in the response
+  docstring, because it is a trap otherwise). There is no total count and no page
+  number, by construction. And the cursor is not a capability, so it must never be
+  used to authorise anything: it is a position, and the only thing that protects
+  the row behind it is the tenant scope on the query.
+- **Found while building it — a `NUMERIC(4, 3)` defect, not a bad test.**
+  `confidence` is declared at scale 3. MySQL enforces that; SQLite stores the float
+  it is handed. `0.1 * 3` is `0.30000000000000004`, so it was stored in full and
+  read back rounded, and the keyset term `confidence == cursor.confidence` then
+  matched a row whose stored value differed from its read value — page two
+  re-served the last row of page one. The paging test caught it, and the fix is
+  `CONFIDENCE_SCALE` + a `@validates("confidence")` quantiser on `ExtractedField`
+  (`app/db/models/contract.py`), which makes the declared scale true on both
+  dialects for the same reason `truncate_to_second` floors timestamps (D2-06).
+  Precision was never read by any policy, so this narrows no behaviour; on MySQL it
+  should be a no-op, which is what the unrun MySQL suite would confirm.
+
 ## Phase 1 — F9 (agent channel decision)
 
 ### D9-01 — Consent is a column set on `Contract`, and one `PUT` writes it

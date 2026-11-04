@@ -21,8 +21,12 @@ and no transport. Since then two gap-closing slices have landed. `0f5da36`
 (`feat(f10): schedule due and deferred notifications`) closed gap 22: a
 `NotificationScheduler` now claims and dispatches due rows — including ones a
 quiet-hours deferral wrote into the future — so `scheduled_at` is finally read by
-something. The pipeline is now fully locked, self-draining, and **still sends
-nothing**: the only transport refuses. GATE 2 now awaits human sign-off.**
+something. `c90423b` (`feat(f8): page the review queue by cursor`) closed gap 16:
+the review queue is now paged by keyset, so a backlog larger than the 500-row cap
+is reachable rather than truncated — and building it exposed a `NUMERIC(4, 3)`
+precision defect that had to be fixed for the page boundary to be honest (D8-06).
+The pipeline is now fully locked, self-draining and pageable, and **still sends
+nothing**: the only transport refuses. GATE 2 now awaits human sign-off.
 
 ## Phase history
 
@@ -389,15 +393,15 @@ write `AuditLog` — a table that had existed since F2 with no writer.
 | Area | Detail |
 | --- | --- |
 | Policy | `app/api/v1/review.py` — `ReviewAction` is a `Literal["accept","reject","mark_unreadable","edit"]`, so an unknown action is a schema `422` rather than a silent no-op. Each action maps to exactly one `FieldStatus`; `accept` and `edit` are the only paths to `approved`, and both are operator-only and audited (D8-05) |
-| Queue | `GET /api/v1/review/queue` — lowest confidence first, ties broken by `created_at` then `id` so the order is stable for someone working through it. Bounded at the query (`DEFAULT_REVIEW_QUEUE_LIMIT` 100, `MAX_REVIEW_QUEUE_LIMIT` 500) rather than in the route, so no caller can ask for the whole table. Reports `count`, `oldest_minutes` (a queue that is not draining shows it) and the `threshold` that put each item there |
+| Queue | `GET /api/v1/review/queue` — lowest confidence first, ties broken by `created_at` then `id` so the order is stable for someone working through it. Bounded at the query (`DEFAULT_REVIEW_QUEUE_LIMIT` 100, `MAX_REVIEW_QUEUE_LIMIT` 500) rather than in the route, so no caller can ask for the whole table. Reports `count`, `oldest_minutes` (a queue that is not draining shows it — but it is a max over *this page*, so only page one is a trustworthy reading) and the `threshold` that put each item there. Paged by `?cursor=` → `next_cursor` (`c90423b`, D8-06), so the whole backlog is reachable; a cursor that does not decode is a `422`, never a silent page one |
 | Decision | `PATCH /api/v1/review/{field_id}` — carries the `version` the reviewer was looking at; a mismatch is a `409` whose body contains the **winning row**, so a reviewer sees what changed instead of only that they lost. `StaleDataError` closes the read-to-flush race the version check cannot. Response reports the decided item plus the contract's remaining `blocking` count |
 | Correction | `action="edit"` normalizes the replacement for that field's type, encrypts it, and stores it — the same two rules F7 applies to an extracted value. An unparseable correction is a `422` and **writes nothing**, and the error never echoes the value back. The extractor's `confidence` is deliberately left alone (D8-02) |
 | Reveal | `POST /api/v1/review/{field_id}/reveal` — the only route in the API that returns a decrypted value, and the only caller of `decrypt_for_review`, which closes gap 14. `POST` because it writes an audit row, so a refresh, prefetch or cache cannot produce a reveal that left no trace (D8-03). `503` when `ENCRYPTION_KEY` is unset, `409` when the field stores no value, `500` on a rotated key without echoing the token |
 | Audit writer | `app/db/repositories/audit.py` — `AuditLogRepository.record(...)`, append-only by construction (no update, no delete), tenant stamped from the repository. Snapshots are built by the caller and carry `field_name`/`status`/`version`/`confidence` — **never a value**, because `AuditLog` has no column encryption (D8-04) |
-| Repository | `app/db/repositories/fields.py` — `by_id()` (tenant-scoped `get`, so another tenant's id reads as missing) and `awaiting_review()`, which joins `Contract` in the same statement and carries the tenant predicate on **both** sides |
+| Repository | `app/db/repositories/fields.py` — `by_id()` (tenant-scoped `get`, so another tenant's id reads as missing), `awaiting_review()` (paged by the `ReviewCursor` keyset, carrying the tenant predicate on **both** sides of the `Contract` join) and the `encode_review_cursor`/`decode_review_cursor` pair, which is strict about what it did not mint |
 | Shared shape | `_field_summary` → public `field_summary` in `api/v1/contracts.py`; `ReviewItem` extends the value-free `ExtractedFieldSummary` instead of re-declaring it, so there is one definition of "a field without its PII" for a new route to inherit. `correlation_id_or_new` moved from a private helper in `contracts.py` to `core/middleware.py` because two routers now need it |
 | Error envelope | `main.py`'s HTTP-exception handler now fills the `details` slot `error_payload` has had since F1, when a route raises with a `{"message","details"}` dict. The envelope is byte-identical for every existing route — the F6 `409` from ingestion is covered by its own regression test |
-| Tests | `test_review.py` (34): queue ordering/tenant isolation/bounds/limit validation/viewer read/value absence; accept→`approved` with blocking cleared; reject keeps blocking; `mark_unreadable` unblocks; edit normalized and encrypted at rest; stale version→`409` carrying the winning row; one audit row per decision with snapshots that never contain the value; viewer `403` writing nothing; cross-tenant `404`; reveal round-trip with exactly one `field.value_revealed` row; `503` with no key; `409` with no stored value; `500` on a rotated key without leaking the token |
+| Tests | `test_review.py` (34 at F8, **43 after `c90423b`**): queue ordering/tenant isolation/bounds/limit validation/viewer read/value absence; accept→`approved` with blocking cleared; reject keeps blocking; `mark_unreadable` unblocks; edit normalized and encrypted at rest; stale version→`409` carrying the winning row; one audit row per decision with snapshots that never contain the value; viewer `403` writing nothing; cross-tenant `404`; reveal round-trip with exactly one `field.value_revealed` row; `503` with no key; `409` with no stored value; `500` on a rotated key without leaking the token. The paging slice adds 9 — every row past the cap reaches a reviewer exactly once, a cursor survives an intervening `PATCH`, tied confidence falls through to `created_at`/`id`, the last page returns `next_cursor: None`, four malformed cursors are `422`, and a forged foreign-tenant cursor returns `[]`. `test_models.py` gains 2 pinning the confidence quantiser |
 
 `main.py` also gained the only change in this milestone that touches existing
 behaviour: a route may now raise `HTTPException(detail={"message": ..., "details":
@@ -776,6 +780,65 @@ a missing `Any` import in the new test file. `mypy tests` reports 12 errors in
 `test_crypto.py` / `test_extraction.py` — pre-existing and outside the gate's `app`
 scope; this slice did not touch them.
 
+## A cursor for the review queue ✅ (`c90423b`)
+
+Gap 16. `GET /review/queue` was bounded at 500 rows and had no way to ask for the
+next 500, so on a backlog larger than the cap the lowest-confidence items were
+returned forever and everything past them was invisible. That is the right *order*
+and the wrong *reach*.
+
+What lands:
+
+1. **Keyset paging, not `OFFSET`.** `ReviewCursor` names the sort key of the last
+   row on the page — `(confidence, created_at, field_id)` — and
+   `awaiting_review(after=...)` applies it as a predicate over exactly the triple
+   the query orders by. The queue is written while it is read: a reviewer deciding
+   a field removes it from the predicate, every later row shifts up by one, and an
+   offset would skip an item nobody ever saw — silently, and as the normal case
+   rather than a race (D8-06).
+2. **An opaque token that is deliberately unsigned.** URL-safe base64 over
+   versioned JSON, carrying no secret and no tenant. Everything it names is already
+   on the page it came from, and the tenant predicate is applied by the query
+   regardless, so a hand-edited cursor can only move within the caller's own queue.
+   A token that does not decode is a `422`, never a silent page one — a client
+   paging by cursor would otherwise loop over page one and report a server bug.
+3. **`limit + 1` answers "is there more".** No second `COUNT`: a count over a
+   moving set is a number from a different instant than the page, so it can promise
+   a page that is not there.
+4. **The keyset predicate is three `OR` terms, not a row-value comparison.**
+   Row-constructor support differs between SQLite and MySQL versions and the two
+   must read identically; the terms mirror the `ORDER BY` term for term, because a
+   predicate that disagrees with the sort order drops or repeats rows exactly at
+   the page boundary.
+
+**A real defect, found by the paging test rather than by review.** `confidence` is
+`NUMERIC(4, 3)`. MySQL enforces that scale; **SQLite does not**, and stores the
+float it is handed. `0.1 * 3` is `0.30000000000000004`, so it was stored in full
+and read back rounded to `0.300` — and the boundary term `confidence ==
+cursor.confidence` then matched a row whose stored and read values differed, so
+page two re-served the last row of page one. The fix is `CONFIDENCE_SCALE` plus a
+`@validates("confidence")` quantiser on `ExtractedField`, which makes the declared
+scale true on both dialects for the same reason `truncate_to_second` floors
+timestamps (D2-06). It is the test being right about the code, not the other way
+round; on MySQL it should be a no-op, which is one more thing the unrun MySQL suite
+would confirm.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Full suite, SQLite | `pytest tests` | **415 passed, 0 failures, 4 skipped** — `+11` collected over the post-scheduler 408 (9 review paging, 2 model quantiser) |
+| Lint | `ruff check app tests migrations` | **All checks passed** |
+| Format | `ruff format --check app tests migrations` | **75 files already formatted** |
+| Type check | `mypy app` (strict) | **clean, 48 source files** |
+| Security lint | `bandit` | **0 issues** (3 expected `nosec B104`) |
+| Migrations | — | **none added.** No model column changed shape, so `alembic heads` stays `0003 (head)` |
+| **`alembic check` / full suite, real MySQL** | needs a server | **STILL NOT RUN.** Unrun, not green |
+| Commit gate | husky pre-commit + commit-msg | **all 17 hooks Passed**, including `tsc --noEmit` and `eslint` |
+
+Three ruff findings were fixed rather than suppressed while landing it: an
+import-order error in the new test file, and two files that needed reformatting.
+`test_review.py` also had one exact-body assertion that `next_cursor` legitimately
+broke; the assertion was updated rather than the response.
+
 ## Known gaps / issues
 
 1. **`gitleaks` needs Docker** and is manual-stage only (D1-03). Run
@@ -872,12 +935,19 @@ scope; this slice did not touch them.
     a reply or opens an SLA clock; and no *screen* talks to the real API:
     `frontend/src/app/*` still calls the mocked demo backend, so the F8, F9 and F10
     routes have only ever been called by `TestClient`.
-16. **The review queue paginates by `limit` only.** `awaiting_review()` takes a
-    bounded `limit` (100 default, 500 max) with no cursor or offset, so a queue
-    longer than the cap cannot be paged past — the oldest, lowest-confidence items
-    are always the ones returned, which is the right order but means items beyond
-    the cap are invisible. Fine at the volumes a single operator drains; it needs a
-    cursor before a portfolio-scale queue.
+16. ~~**The review queue paginates by `limit` only.**~~ — **closed by `c90423b`.**
+    `awaiting_review()` takes an `after=ReviewCursor` keyset and the route accepts
+    `?cursor=` / returns `next_cursor`, so a backlog longer than the 500-row cap is
+    reachable rather than truncated: lowest-confidence-first order is preserved and
+    an operator can now walk the whole queue. Paging by sort key rather than
+    `OFFSET` is what makes it correct while reviewers are *deciding* — a decision
+    removes a row and shifts every later one (D8-06). Two honest residues: the
+    cursor is unsigned, so it must never be treated as authorising anything (it is
+    a position, and the tenant predicate on the query is what protects the row), and
+    `oldest_minutes` remains a max over the returned page, so only page one is a
+    trustworthy "how stale is the backlog" reading. Building it also surfaced and
+    fixed a `NUMERIC(4, 3)` precision defect in `confidence` that no test had
+    covered before.
 17. **The default `pattern` backend reaches 5 of the 7 field types.** Email, phone,
     `start_date`, `end_date` and `contract_value` have regexes; `address` and
     `dob` are reachable only through the opt-in `ollama` backend, which has no
@@ -965,13 +1035,14 @@ scope; this slice did not touch them.
 
 ## Next permitted step
 
-**F10 (step 6) is committed (`b344c17`), and two gap-closing slices have landed
-since (`0f5da36`, `4e7dd5c`); GATE 2 awaits human sign-off.** F1–F10 are
+**F10 (step 6) is committed (`b344c17`), and three gap-closing slices have landed
+since (`0f5da36`, `4e7dd5c`, `c90423b`); GATE 2 awaits human sign-off.** F1–F10 are
 all committed and the pipeline slice is closed — every arrow in the Phase-0 flow
-(ingest → extract → review → decide → notify) now has real code behind it, and a
-due row is reached by a background poller rather than an operator. What the pipeline
-still does **not** do is send, so the next step is a decision rather than an obvious
-feature to build.
+(ingest → extract → review → decide → notify) now has real code behind it, a due row
+is reached by a background poller rather than an operator, and the review backlog is
+walkable end to end rather than truncated at the cap. What the pipeline still does
+**not** do is send, so the next step is a decision rather than an obvious feature to
+build.
 
 - `app/db/models/` — every table in the flow now has a writer: `Contract`
   (`POST /contracts`), `ExtractedField` (`python -m app.cli extract`,
@@ -1071,7 +1142,11 @@ so `sent: true` is unreachable over HTTP. From F9: **every contract that predate
 `0002` is un-contactable** until someone sets consent one row at a time (gap 18),
 and an `AgentDecision` still **cannot be overridden or flagged** — the `version`
 column that blocked those routes now exists (`0f5da36`), but the routes themselves
-still do not (gap 19). Quiet hours — the caveat F9 had to carry — are now enforced
+still do not (gap 19). The review queue pages now (`c90423b`, gap 16), so the backlog
+is reachable rather than truncated at 500 — but its `oldest_minutes` is only
+trustworthy on page one, and its cursor is a position rather than a capability, so
+neither should be presented to an operator as more than it is. Quiet hours — the
+caveat F9 had to carry — are now enforced
 (D10-01/D10-02), so that one is retired rather than repeated. Two gate reports in
 this project were wrong the first time and both are recorded as such: F9's first
 "MySQL gate green" carried a bad password and skipped, and F10's two MySQL rows are
@@ -1080,9 +1155,11 @@ tables from `Base.metadata`, so `alembic check` is the only thing that proves a
 migration matches the models: it was green on SQLite for `0003` (zero operations for
 either new `version` column, the 13 remaining diffs being pre-existing enum-length
 artefacts), and it has **never** been run against MySQL since `0002` — so `0003` is
-a revision no real database has validated. The dispatch lock is also unproven under
-concurrency, because `FOR UPDATE` is a no-op on the SQLite the suite runs on
-(gap 23).
+a revision no real database has validated. The `confidence` quantiser from
+`c90423b` belongs to the same unrun half: it repairs a defect SQLite permits and
+MySQL already enforces, so MySQL is exactly where it should prove to be a no-op.
+The dispatch lock is also unproven under concurrency, because `FOR UPDATE` is a
+no-op on the SQLite the suite runs on (gap 23).
 
 ## Non-negotiable reminders
 
