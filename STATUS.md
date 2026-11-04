@@ -29,12 +29,16 @@ something. `c90423b` (`feat(f8): page the review queue by cursor`) closed gap 16
 the review queue is now paged by keyset, so a backlog larger than the 500-row cap
 is reachable rather than truncated — and building it exposed a `NUMERIC(4, 3)`
 precision defect that had to be fixed for the page boundary to be honest (D8-06).
-The uncommitted MySQL slice below then **ran the half that had never run**: the
+The MySQL slice (`c99c792`) then **ran the half that had never run**: the
 `integration` suite, `alembic check` and `0003` against a real MySQL 8.4 server, and
 two concurrency tests that close gap 23 by proving the dispatch lock rather than
 arguing for it (D10-08).
-The pipeline is now fully locked, self-draining and pageable, and **still sends
-nothing**: the only transport refuses. GATE 2 now awaits human sign-off.
+The pipeline is now fully locked, self-draining and pageable, and it **sends** —
+`6f4cb0b` implements the transport decision this slice ended on, and the socket suite
+that followed proves the client speaks SMTP to a real server rather than only to a
+fake one. The shipped default still refuses (`NOTIFICATION_TRANSPORT=none`), which is
+the fail-closed choice rather than an unfinished one. GATE 2 now awaits human
+sign-off.
 
 ## Phase history
 
@@ -600,23 +604,40 @@ factory stayed where D10-04 put them; this is the addition that entry predicted.
 | Refusals | `sms` and `voice` are **refused, not substituted** — a voice reminder must not arrive as an e-mail. The refusal is a `SenderError`, so the row spends its retry budget and parks `failed` where an operator sees it |
 | Redaction | Relay error text passes through `redact_text` before it can reach `Notification.last_error`, because `GET /notifications` renders that column to viewers who cannot see contact values elsewhere |
 | Settings | `SMTP_HOST` required, `SMTP_FROM` shape-checked (a display name is refused), username/password both-or-neither, `SMTP_STARTTLS=false` refused in staging/production. All six are boot errors, so a half-configured relay fails at start-up rather than at the first send inside the row lock |
-| Tests | `test_senders.py` (29 tests: selection, envelope, Message-ID stability, channel refusal, refusal redaction, TLS-before-auth ordering, conversation closing on failure, timeout argument, and the six settings rules) |
+| Tests, unit | `test_senders.py` (29 tests: selection, envelope, Message-ID stability, channel refusal, refusal redaction, TLS-before-auth ordering, conversation closing on failure, timeout argument, and the six settings rules). All of them drive a **fake** client, so they pin what we ask `smtplib` to do, not what it does |
+| Tests, socket | `test_smtp_socket.py` (7 tests) against a loopback relay built from `socket` + `threading` — no container, no new dependency. It observes the real `EHLO → MAIL → RCPT → DATA → QUIT` conversation, a body that crosses only after `354`, a genuine `SMTPRecipientsRefused` whose text keeps `550` and drops the address, a re-send byte-identical **on the wire**, the timeout as a real ceiling, and a real `STARTTLS` handshake where `AUTH` reaches the relay only over the encrypted socket (the relay refuses auth in the clear with `530`) |
 
 **Verification actually run, this slice:**
 
 | Check | Command | Result |
 | --- | --- | --- |
-| Full suite, SQLite | `pytest tests` (`MYSQL_TEST_URL` cleared) | **444 passed, 7 skipped, 0 failed** |
+| Full suite, SQLite | `pytest tests` (`MYSQL_TEST_URL` cleared) | **451 passed, 7 skipped, 0 failed** |
 | Lint | `ruff check .` | **All checks passed** |
-| Format | `ruff format --check .` | **77 files already formatted** |
+| Format | `ruff format --check .` | **78 files already formatted** |
 | Type check | `mypy app` (strict) | **clean, 49 source files** |
 | Security lint | `bandit -r app` | **0 issues** (3 expected `nosec B104`) |
 
-**What this does not prove.** Every test above drives a fake client. The envelope,
-the call order, the timeout argument and the redaction are pinned; a socket is not.
-No test in this repo has spoken SMTP to a real relay, so the first deployment is the
-first real conversation. TLS is also exercised as a *call* — `starttls()` was asked
-for before `login()` — not as a negotiated handshake.
+The suite grew by exactly the socket module: `451 − 444 = 7`. `ruff format --check`
+went `77 → 78` for the same reason, which is a useful check in itself — a new file that
+is *not* reported would mean it was not being scanned.
+
+**Two of the socket claims were falsified before they were believed**, and both edits
+were reverted (`git diff` confirms `senders.py` is byte-identical to `HEAD`):
+
+| Falsification | Expected | Observed |
+| --- | --- | --- |
+| `if self._starttls and False:` (never call `starttls()`) | encrypted-socket test fails | **FAILED** — the relay advertised no AUTH, because auth in the clear is refused with `530` |
+| `timeout=None` (drop the socket timeout) | timeout test fails | **FAILED** — the send sat for the relay's full 30 s instead of failing under 2 s |
+
+**What this does not prove.** The relay is ours, so what the socket tests show is that
+the client speaks SMTP to something that answers SMTP — not that it is compatible with
+a particular provider's quirks. The certificate is self-signed and `smtplib` negotiates
+TLS through an **unverified** context, so the handshake and the ordering are proven
+while authentication *of the relay* is not; that matches the code, where `starttls()`
+is called with no context (gap 24). Everything beyond the relay's own answers — a real
+provider's greylisting, rate limits, spam scoring, `Message-ID` de-duplication in
+practice — is still unobserved, and the first deployment will be the first real
+conversation with a real relay.
 
 
 #### Five defects the tests caught in my own work
@@ -1047,10 +1068,17 @@ why the rows above record a run rather than an absence.
     **`sent: true` was unreachable through the API**~~ — **closed by the SMTP slice
     (D10-09):** with `NOTIFICATION_TRANSPORT=smtp` and a relay configured, a dispatch
     reaches `sent` on the relay's own 2xx, so the arrow chain now leaves the process.
-    Two limits remain, and neither is the transport's: the send path is proven against
-    a fake client rather than a socket, and no test drives a real relay end to end, so
-    the first deployment holds the first real SMTP conversation this repo has had.
-    Separately,
+    One limit remains from that report and it has since been narrowed rather than
+    closed by assertion: the send path **now speaks SMTP to a real socket** in
+    `test_smtp_socket.py` (a loopback relay built from `socket`, no container, no new
+    dependency), so the envelope, the `DATA`/`QUIT` conversation, a re-send's
+    byte-identical body, a relay refusal, the timeout ceiling and a real `STARTTLS`
+    handshake with `AUTH` crossing only the encrypted socket are all observed rather
+    than reasoned about.
+    What is still not proven is compatibility with a *particular* provider's quirks,
+    and — the one that matters — relay authentication: `starttls()` is called with no
+    context, so `smtplib` uses an unverified one and a man in the middle between us and
+    a real relay would not be caught (gap 24). Separately,
     `CustomerResponse` and `Escalation` still have **no writer**, so nothing records
     a reply or opens an SLA clock; and no *screen* talks to the real API:
     `frontend/src/app/*` still calls the mocked demo backend, so the F8, F9 and F10
@@ -1154,19 +1182,35 @@ why the rows above record a run rather than an absence.
     on the SQLite the offline suite runs, the clause remains a no-op, so that suite
     can never be the proof — the guarantee is MySQL-specific and the integration
     suite is where it lives.
+24. **The SMTP transport does not authenticate the relay.** `SmtpSender.send` calls
+    `client.starttls()` with **no context** (`senders.py:174`), so `smtplib` negotiates
+    TLS through its default *unverified* context: the connection is encrypted, the
+    credentials do not cross in the clear, and a man in the middle presenting any
+    certificate would still be believed. The socket suite proves the handshake and the
+    ordering, and cannot prove peer authentication for exactly this reason — the test's
+    certificate is self-signed and would be *rejected* by a verifying client, so
+    asserting verification would mean changing the code first. Closing it is a code
+    change, not a test: `starttls(context=ssl.create_default_context(cafile=...))` plus
+    a CA-bundle setting beside `smtp_host`, decided together with whether the default is
+    system trust or a pinned file. Until then the honest reading of "encrypted" on this
+    path is *confidential, not authenticated* — which is why the SMTP slice's
+    verification claims stop at what the relay answered.
 
 ## Next permitted step
 
 **F10 (step 6) is committed (`b344c17`), three gap-closing slices have landed since
-(`0f5da36`, `4e7dd5c`, `c90423b`), and the MySQL half that all of them deferred has
-now been run (`c99c792`) — including the concurrency proof that closes gap 23; GATE 2
-awaits human sign-off.** F1–F10 are
-all committed and the pipeline slice is closed — every arrow in the Phase-0 flow
-(ingest → extract → review → decide → notify) now has real code behind it, a due row
-is reached by a background poller rather than an operator, and the review backlog is
-walkable end to end rather than truncated at the cap. What the pipeline still does
-**not** do is send, so the next step is a decision rather than an obvious feature to
-build.
+(`0f5da36`, `4e7dd5c`, `c90423b`), the MySQL half that all of them deferred has now
+been run (`c99c792`) — including the concurrency proof that closes gap 23 — and the
+transport decision the slice ended on has been built and proven against a socket
+(`6f4cb0b`, and the socket suite that followed); GATE 2 awaits human sign-off.**
+F1–F10 are all committed and the pipeline slice is closed — every arrow in the Phase-0
+flow (ingest → extract → review → decide → notify) now has real code behind it, a due
+row is reached by a background poller rather than an operator, the review backlog is
+walkable end to end rather than truncated at the cap, and with
+`NOTIFICATION_TRANSPORT=smtp` plus a relay configured the last arrow leaves the
+process. The pipeline now **does** send, so what is left is not a missing feature but
+three decisions and a hardening pass (gaps 18, 19, 20 and 24), none of which changes
+whether the flow runs.
 
 - `app/db/models/` — every table in the flow now has a writer: `Contract`
   (`POST /contracts`), `ExtractedField` (`python -m app.cli extract`,

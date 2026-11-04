@@ -1230,7 +1230,36 @@ committed together. That pairing is the milestone; extraction and review follow.
   reference; it carries no extracted value, since the counterparty and the dates stay
   in the database. Real rendering waits on a template table, as D10-06 already
   recorded.
-- **What this does not prove:** the tests drive a fake client, so what is pinned is
-  the envelope, the call order, the timeout argument and the redaction — not a socket.
-  No test in this repo has spoken SMTP to a real relay. The first deployment does that
-  for the first time.
+- **Proven against a socket, not only against a double.** `test_senders.py` drives a
+  fake client and pins the envelope, the call order, the timeout argument and the
+  redaction. That is not the same as completing a conversation, so
+  `test_smtp_socket.py` runs a loopback SMTP server built from `socket` and
+  `threading` — no container and no new dependency, because the claim is that the
+  client speaks the protocol, not that a particular mail server is installed. Five
+  things the fake client could not show, and this does:
+  - The body goes out only after the relay answered `354`, and the run ends with a
+    real `QUIT`: `EHLO → MAIL → RCPT → DATA → QUIT`.
+  - A refused recipient arrives as `smtplib.SMTPRecipientsRefused`, which is a
+    *different* exception class from the `SMTPResponseException` the unit tests
+    raise. Its text is the relay's own words with `<address>` quoted inside, so the
+    redaction is now proven against the exception a relay actually produces: the
+    stored string keeps `550` and `recipient address rejected` and loses the address.
+  - A re-send is **byte-identical on the wire**, not merely equal in Message-ID.
+  - The timeout is a real ceiling. A relay that accepts and then says nothing for
+    30 s fails the send in well under 2 s, so a silent provider cannot hold a locked
+    row open. Falsified: dropping the `timeout=` argument makes that test take the
+    relay's full 30 s and fail.
+  - `STARTTLS` is a real handshake over a real certificate, and `AUTH PLAIN` is
+    proven to cross only the encrypted socket — the loopback relay refuses
+    authentication in the clear with a `530`, so the test cannot pass by the client
+    merely *calling* `starttls()` first. Falsified: removing the `starttls()` call
+    makes the conversation fail with no AUTH advertised.
+- **What this still does not prove,** stated rather than buried. The relay is ours,
+  so what is proven is that the client speaks SMTP to something that answers SMTP,
+  not that it is compatible with a particular provider's quirks. The certificate is
+  self-signed and `smtplib` negotiates TLS through an unverified context, so the
+  handshake and the ordering are proven but authentication of the relay is not —
+  which matches the code: `SMTP.starttls()` is called with no context, so peer
+  verification is off by default and a man in the middle between us and a real relay
+  would not be caught. Tightening that is a code change (`starttls(context=...)` with
+  a CA bundle) and therefore a decision, not a test.
