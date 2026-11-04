@@ -1,13 +1,21 @@
 """Integration tests that need a real MySQL 8 server.
 
-Everything else in the suite runs on in-memory SQLite, which cannot prove two
-things this project depends on:
+Everything else in the suite runs on in-memory SQLite, which cannot prove the
+four things below that this project depends on:
 
 1. ``SELECT ... FOR UPDATE SKIP LOCKED`` actually isolates concurrent outbox
    claiming. SQLite has no ``FOR UPDATE``; SQLAlchemy silently omits the clause,
    so the SQLite suite would pass even if the clause were removed entirely.
 2. Enum columns are real MySQL ``ENUM`` types carrying the expected values, and
    the Alembic baseline migration applies cleanly to MySQL.
+3. The notification dispatch lock — gap 23. ``claim_for_dispatch`` takes the row
+   under ``SELECT ... FOR UPDATE`` *before* the policy runs, so a second worker
+   blocks and then sees ``sent`` instead of sending a second email. Both halves
+   of that sentence are only observable with two real connections; on SQLite the
+   clause is a silent no-op, which is why the SQLite suite cannot be the proof.
+4. ``confidence``'s declared scale. ``NUMERIC(4, 3)`` is enforced by MySQL and
+   only *declared* by SQLite, so the quantiser from ``c90423b`` must be a no-op
+   here — this file is where that can be shown rather than argued.
 
 These are skipped, not failed, when no MySQL is reachable, so the default
 ``pytest`` run stays offline. To run them against the compose stack::
@@ -25,6 +33,8 @@ import os
 import re
 import uuid
 from collections.abc import Iterator
+from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -32,10 +42,13 @@ from alembic import command
 from alembic.config import Config as AlembicConfig
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine, make_url
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.db.base import Base, utc_now
-from app.db.models import Tenant
+from app.db.enums import Channel, FieldName, FieldStatus, NotificationStatus
+from app.db.models import Contract, Notification, Tenant
+from app.db.repositories.notifications import NotificationRepository, claim_next_due
 from app.db.repositories.outbox import OutboxRepository, enqueue_event
 
 pytestmark = pytest.mark.integration
@@ -307,3 +320,188 @@ def test_skip_locked_lets_two_workers_claim_disjoint_rows(
         worker_b.rollback()
         worker_a.close()
         worker_b.close()
+
+
+#: MySQL's errno for "lock wait timeout exceeded". Seeing it is the *positive*
+#: result below: it is the proof that the second worker waited on the first
+#: rather than reading the row alongside it.
+LOCK_WAIT_TIMEOUT = 1205
+
+#: MySQL waits 50s by default. Shortened so a regression fails fast instead of
+#: stalling the suite — the timeout is the assertion, not the delay.
+LOCK_WAIT_SECONDS = 1
+
+
+def _seed_contract(engine: Engine) -> tuple[uuid.UUID, int]:
+    """A clean tenant with one contactable contract, and no other rows.
+
+    Emptied first because ``claim_next_due`` is deliberately *unscoped*: a
+    pending row left behind by an earlier test would be a legitimate thing for
+    it to return, so "which row did the claim pick" would prove nothing.
+    """
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory() as session:
+        session.execute(text("DELETE FROM extracted_fields"))
+        session.execute(text("DELETE FROM notifications"))
+        session.execute(text("DELETE FROM agent_decisions"))
+        session.execute(text("DELETE FROM contracts"))
+        session.execute(text("DELETE FROM tenants"))
+
+        tenant = Tenant(name="Lock Tenant", slug=f"it-lock-{uuid.uuid4().hex[:8]}")
+        session.add(tenant)
+        session.flush()
+        contract = Contract(
+            tenant_id=tenant.id,
+            customer_ref="A. Rahman",
+            end_date=utc_now().date() + timedelta(days=40),
+            timezone="UTC",
+        )
+        session.add(contract)
+        session.flush()
+        tenant_id, contract_id = tenant.id, int(contract.id)
+        session.commit()
+    return tenant_id, contract_id
+
+
+def _pending(
+    engine: Engine, tenant_id: uuid.UUID, contract_id: int, *, template: str = "T-60"
+) -> int:
+    """One committed ``pending`` row that is already due (no ``scheduled_at``)."""
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory() as session:
+        row = Notification(
+            tenant_id=tenant_id,
+            contract_id=contract_id,
+            channel=Channel.EMAIL,
+            template=template,
+            status=NotificationStatus.PENDING,
+            scheduled_date=utc_now().date() - timedelta(days=20),
+            scheduled_at=None,
+            idempotency_key=f"it-lock-{uuid.uuid4().hex}",
+            attempts=0,
+        )
+        session.add(row)
+        session.flush()
+        notification_id = int(row.id)
+        session.commit()
+    return notification_id
+
+
+def test_the_dispatch_lock_blocks_a_second_worker(migrated: Engine) -> None:
+    """Gap 23: the half of the double-send guard SQLite cannot exercise.
+
+    ``claim_for_dispatch`` takes the row under ``SELECT ... FOR UPDATE`` *before*
+    the policy runs. Two claims are what prove it: the second worker must
+    **block** (not read the row concurrently), and once the first commits it must
+    see ``sent`` — which is the state the policy refuses with ``NOT_PENDING``
+    instead of reaching the transport a second time.
+    """
+    tenant_id, contract_id = _seed_contract(migrated)
+    notification_id = _pending(migrated, tenant_id, contract_id)
+    factory = sessionmaker(bind=migrated, expire_on_commit=False)
+    worker_a = factory()
+    worker_b = factory()
+    try:
+        claimed = NotificationRepository(worker_a, tenant_id).claim_for_dispatch(notification_id)
+        assert claimed is not None, "worker A should hold the row"
+        assert claimed.status == NotificationStatus.PENDING
+
+        worker_b.execute(text(f"SET SESSION innodb_lock_wait_timeout = {LOCK_WAIT_SECONDS}"))
+        with pytest.raises(OperationalError) as blocked:
+            NotificationRepository(worker_b, tenant_id).claim_for_dispatch(notification_id)
+        assert _driver_error(blocked.value).startswith(f"MySQL error {LOCK_WAIT_TIMEOUT}"), (
+            "worker B must wait on worker A's lock; without FOR UPDATE it would have "
+            f"read the row alongside it instead ({_driver_error(blocked.value)})"
+        )
+        worker_b.rollback()
+
+        claimed.status = NotificationStatus.SENT
+        claimed.sent_at = utc_now()
+        worker_a.commit()
+
+        seen = NotificationRepository(worker_b, tenant_id).claim_for_dispatch(notification_id)
+        assert seen is not None
+        assert seen.status == NotificationStatus.SENT, (
+            "once the lock is released the second worker must see the send that already "
+            "happened, so the policy refuses it rather than sending again"
+        )
+        worker_b.rollback()
+    finally:
+        worker_a.rollback()
+        worker_b.rollback()
+        worker_a.close()
+        worker_b.close()
+
+
+def test_the_scheduler_claim_skips_a_row_another_worker_holds(migrated: Engine) -> None:
+    """``4e7dd5c`` added a *second* caller of the lock; it must skip, not block.
+
+    ``claim_next_due`` asks for ``SKIP LOCKED``, so N schedulers share the table
+    without queueing behind each other. The assertion is the row *identity*: B
+    must be handed the other due row, which is only possible if A's locked row was
+    skipped. A blocked or duplicated claim both fail here.
+    """
+    tenant_id, contract_id = _seed_contract(migrated)
+    seeded = {
+        _pending(migrated, tenant_id, contract_id, template="T-60"),
+        _pending(migrated, tenant_id, contract_id, template="T-30"),
+    }
+
+    factory = sessionmaker(bind=migrated, expire_on_commit=False)
+    worker_a = factory()
+    worker_b = factory()
+    try:
+        claimed_a = claim_next_due(worker_a)
+        assert claimed_a is not None, "the scheduler should claim a due row"
+        claimed_b = claim_next_due(worker_b)
+        assert claimed_b is not None, "worker B must not block on worker A's locked row"
+        assert claimed_a.id != claimed_b.id, "the same row was handed to two schedulers"
+        assert {int(claimed_a.id), int(claimed_b.id)} == seeded
+    finally:
+        worker_a.rollback()
+        worker_b.rollback()
+        worker_a.close()
+        worker_b.close()
+
+
+def test_confidence_enforces_its_declared_scale_without_the_quantiser(migrated: Engine) -> None:
+    """``c90423b`` repairs a SQLite defect, so on MySQL it should be a no-op.
+
+    That is a falsifiable claim, and this is the only place it can be tested: the
+    value is inserted with **raw SQL**, bypassing :meth:`ExtractedField._quantise_confidence`,
+    so what is measured is MySQL's own behaviour rather than the fix. If MySQL
+    stored the unrounded float, the fix would be load-bearing here too — and the
+    keyset page boundary would need a different answer than "quantise on write".
+    """
+    assert _column_type(migrated, "extracted_fields", "confidence") == "decimal(4,3)"
+
+    tenant_id, contract_id = _seed_contract(migrated)
+    noisy = 0.1 * 3
+    assert noisy != 0.3, "the whole point is a value that is not exactly representable"
+
+    with migrated.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO extracted_fields "
+                "(tenant_id, contract_id, field_name, confidence, status, version, "
+                "created_at, updated_at) "
+                "VALUES (:tenant_id, :contract_id, :field_name, :confidence, :status, 1, "
+                ":now, :now)"
+            ),
+            {
+                "tenant_id": str(tenant_id),
+                "contract_id": contract_id,
+                "field_name": FieldName.EMAIL.value,
+                "confidence": noisy,
+                "status": FieldStatus.APPROVED.value,
+                "now": utc_now(),
+            },
+        )
+        stored = connection.execute(
+            text("SELECT confidence FROM extracted_fields WHERE contract_id = :contract_id"),
+            {"contract_id": contract_id},
+        ).scalar_one()
+
+    assert stored == Decimal("0.300"), (
+        f"MySQL should round to the declared scale on write, got {stored!r}"
+    )
