@@ -16,9 +16,10 @@ row, ever contains the stored value.
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Callable, Iterator
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 import pytest
@@ -99,11 +100,15 @@ def add_field(
     value: str | None = PLAINTEXT,
     confidence: float = 0.4,
     status: FieldStatus = FieldStatus.PENDING_REVIEW,
+    created_at: datetime | None = None,
 ) -> int:
     """Store one extracted field and return its id.
 
     Committed rather than flushed: the request under test runs in its own session
     and must see the row.
+
+    ``created_at`` is settable so a test can pin the *second* term of the review
+    queue's sort key and force a tie all the way down to the id.
     """
     with session_scope(session_factory) as session:
         row = ExtractedField(
@@ -115,6 +120,8 @@ def add_field(
             confidence=confidence,
             status=status,
         )
+        if created_at is not None:
+            row.created_at = created_at
         session.add(row)
         session.flush()
         return int(row.id)
@@ -277,7 +284,13 @@ def test_the_queue_is_tenant_scoped(
 
     # Both sides of the join carry the tenant predicate, so another
     # organisation's backlog is invisible rather than merely filtered out.
-    assert body == {"items": [], "count": 0, "oldest_minutes": 0, "threshold": THRESHOLD}
+    assert body == {
+        "items": [],
+        "count": 0,
+        "oldest_minutes": 0,
+        "threshold": THRESHOLD,
+        "next_cursor": None,
+    }
 
 
 def test_the_queue_respects_its_bounds(
@@ -348,6 +361,241 @@ def test_the_queue_never_contains_a_value(
 
 def test_reading_the_queue_requires_a_token(secured_client: TestClient) -> None:
     assert secured_client.get(QUEUE_PATH).status_code == 401
+
+
+# --- paging (gap 16) ------------------------------------------------------
+def seed_queue(
+    session_factory: sessionmaker[Session],
+    contract: Contract,
+    cipher: FieldCipher,
+    *,
+    count: int,
+    confidence: float = 0.3,
+    created_at: datetime | None = None,
+) -> list[int]:
+    """Store ``count`` pending fields on one contract and return their ids in queue order.
+
+    The table allows one row per ``(contract, field_name)``, so each row takes the
+    next enum member — which is also what keeps the ids increasing in queue order
+    while every other sort term ties.
+    """
+    names = list(FieldName)
+    assert count <= len(names), "the queue seed needs a distinct field name per row"
+    return [
+        add_field(
+            session_factory,
+            contract,
+            cipher,
+            field_name=names[index],
+            value=PLAINTEXT if index == 0 else f"value-{index}",
+            confidence=confidence,
+            created_at=created_at,
+        )
+        for index in range(count)
+    ]
+
+
+def page_through(
+    client: TestClient,
+    headers: dict[str, str],
+    *,
+    limit: int,
+) -> tuple[list[int], int]:
+    """Follow ``next_cursor`` to the end and return (every field id seen, page count)."""
+    seen: list[int] = []
+    cursor: str | None = None
+    pages = 0
+    while True:
+        params: dict[str, Any] = {"limit": limit}
+        if cursor is not None:
+            params["cursor"] = cursor
+        response = client.get(QUEUE_PATH, params=params, headers=headers)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        pages += 1
+        seen.extend(item["field_id"] for item in body["items"])
+        cursor = body["next_cursor"]
+        if cursor is None:
+            return seen, pages
+        assert pages < 20, "the cursor did not terminate"
+
+
+def test_a_queue_longer_than_the_limit_is_reachable_page_by_page(
+    secured_client: TestClient,
+    contract: Contract,
+    cipher: FieldCipher,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    # Seven rows against a page size of three: before the cursor existed, the
+    # queue was capped at one page and everything past item three was invisible.
+    ids = [
+        add_field(
+            session_factory,
+            contract,
+            cipher,
+            field_name=list(FieldName)[index],
+            value=PLAINTEXT if index == 0 else f"value-{index}",
+            confidence=0.1 * (index + 1),
+        )
+        for index in range(7)
+    ]
+    headers = auth(secured_client, tenant, make_user)
+
+    seen, pages = page_through(secured_client, headers, limit=3)
+
+    assert seen == ids, "every queued field is reachable, worst confidence first"
+    assert len(seen) == len(set(seen)), "a cursor must not repeat a row"
+    assert pages == 3
+
+
+def test_a_cursor_resumes_by_sort_key_not_by_offset(
+    secured_client: TestClient,
+    contract: Contract,
+    cipher: FieldCipher,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    ids = seed_queue(session_factory, contract, cipher, count=6)
+    headers = auth(secured_client, tenant, make_user)
+
+    first = secured_client.get(QUEUE_PATH, params={"limit": 3}, headers=headers).json()
+    assert [item["field_id"] for item in first["items"]] == ids[:3]
+    assert first["next_cursor"] is not None
+
+    # A reviewer decides one of the rows the first page already returned, which
+    # takes it out of the queue and shifts every later row up by one. An
+    # ``OFFSET 3`` would now hand back rows 5 and 6 of the original queue and
+    # silently skip row 4 — a field nobody ever saw.
+    decided = secured_client.patch(
+        FIELD_PATH.format(field_id=ids[1]),
+        json={"action": "accept", "version": 1},
+        headers=headers,
+    )
+    assert decided.status_code == 200, decided.text
+
+    second = secured_client.get(
+        QUEUE_PATH,
+        params={"limit": 3, "cursor": first["next_cursor"]},
+        headers=headers,
+    ).json()
+
+    assert [item["field_id"] for item in second["items"]] == ids[3:]
+    assert second["next_cursor"] is None
+
+
+def test_a_tied_confidence_falls_through_to_creation_time_and_id(
+    secured_client: TestClient,
+    contract: Contract,
+    cipher: FieldCipher,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    # Every sort term except the id ties here, so a cursor that compared only
+    # confidence would either loop on the first row or skip its tied neighbours.
+    pinned = datetime(2026, 1, 1, 12, 0, 0)
+    ids = seed_queue(session_factory, contract, cipher, count=4, confidence=0.3, created_at=pinned)
+    headers = auth(secured_client, tenant, make_user)
+
+    seen, pages = page_through(secured_client, headers, limit=1)
+
+    assert seen == ids
+    assert pages == 4
+
+
+def test_the_last_page_hands_back_no_cursor(
+    secured_client: TestClient,
+    contract: Contract,
+    cipher: FieldCipher,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    seed_queue(session_factory, contract, cipher, count=2)
+    headers = auth(secured_client, tenant, make_user)
+
+    body = secured_client.get(QUEUE_PATH, params={"limit": 2}, headers=headers).json()
+
+    # Exactly one full page and nothing behind it: a cursor here would make every
+    # client spend a round trip discovering an empty page.
+    assert body["count"] == 2
+    assert body["next_cursor"] is None
+
+
+@pytest.mark.parametrize(
+    "cursor",
+    [
+        pytest.param("not-base64-%%%", id="not-base64"),
+        pytest.param(base64.urlsafe_b64encode(b"{}").decode().rstrip("="), id="not-a-cursor"),
+        pytest.param(
+            base64.urlsafe_b64encode(b'{"v":2,"c":"0.5","t":"2026-01-01T00:00:00","i":1}')
+            .decode()
+            .rstrip("="),
+            id="future-version",
+        ),
+        pytest.param(
+            base64.urlsafe_b64encode(b'{"v":1,"c":"0.5","t":"2026-01-01T00:00:00"}')
+            .decode()
+            .rstrip("="),
+            id="no-field-id",
+        ),
+    ],
+)
+def test_a_malformed_cursor_is_refused(
+    secured_client: TestClient,
+    contract: Contract,
+    cipher: FieldCipher,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+    cursor: str,
+) -> None:
+    seed_queue(session_factory, contract, cipher, count=1)
+    headers = auth(secured_client, tenant, make_user)
+
+    response = secured_client.get(QUEUE_PATH, params={"cursor": cursor}, headers=headers)
+
+    # A 422 rather than a silent first page: a client paging by cursors would
+    # otherwise loop over page one forever and call it a server bug.
+    assert response.status_code == 422, response.text
+    assert "cursor is not recognised" in response.json()["error"]["message"]
+
+
+def test_a_cursor_from_another_tenant_cannot_reach_their_queue(
+    secured_client: TestClient,
+    cipher: FieldCipher,
+    session_factory: sessionmaker[Session],
+    other_tenant: Tenant,
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    with session_scope(session_factory) as session:
+        foreign = Contract(tenant_id=other_tenant.id, customer_ref="Globex")
+        session.add(foreign)
+        session.flush()
+    foreign_ids = seed_queue(session_factory, foreign, cipher, count=2)
+    headers = auth(secured_client, tenant, make_user)
+
+    # The cursor is deliberately unsigned and carries no tenant (D8-06), so the
+    # only thing standing between it and another organisation's backlog is the
+    # query-level tenant predicate. Forge exactly that situation.
+    foreign_cursor = (
+        base64.urlsafe_b64encode(
+            json.dumps(
+                {"v": 1, "c": "0.300", "t": "2000-01-01T00:00:00", "i": foreign_ids[0]}
+            ).encode()
+        )
+        .decode()
+        .rstrip("=")
+    )
+
+    body = secured_client.get(QUEUE_PATH, params={"cursor": foreign_cursor}, headers=headers).json()
+
+    assert body["items"] == []
+    assert body["next_cursor"] is None
 
 
 # --- deciding -------------------------------------------------------------

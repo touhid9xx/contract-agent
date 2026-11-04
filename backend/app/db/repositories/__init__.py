@@ -11,7 +11,12 @@ from app.db.repositories.agent import AgentDecisionRepository
 from app.db.repositories.audit import AuditLogRepository
 from app.db.repositories.base import MissingTenantContextError, TenantScopedRepository
 from app.db.repositories.contracts import ContractRepository, contract_for_operator
-from app.db.repositories.fields import ExtractedFieldRepository
+from app.db.repositories.fields import (
+    ExtractedFieldRepository,
+    ReviewCursor,
+    decode_review_cursor,
+    encode_review_cursor,
+)
 from app.db.repositories.notifications import (
     DEFAULT_NOTIFICATION_LIMIT,
     MAX_NOTIFICATION_LIMIT,
@@ -39,11 +44,14 @@ __all__ = [
     "MissingTenantContextError",
     "NotificationRepository",
     "OutboxRepository",
+    "ReviewCursor",
     "TenantScopedRepository",
     "UserRepository",
     "backoff_seconds",
     "contract_for_operator",
     "dead_lettered",
+    "decode_review_cursor",
+    "encode_review_cursor",
     "enqueue_event",
     "normalize_email",
     "replay_dead_lettered",

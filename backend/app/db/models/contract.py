@@ -17,7 +17,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from app.db.base import Base, TimestampMixin
 from app.db.enums import (
@@ -30,6 +30,11 @@ from app.db.enums import (
     enum_column,
 )
 from app.db.types import GUID
+
+#: Decimal places of ``confidence``, matching ``NUMERIC(4, 3)``. Named so the
+#: model can enforce the scale SQLite does not (see
+#: :meth:`ExtractedField._quantise_confidence`).
+CONFIDENCE_SCALE = 3
 
 
 class Contract(Base, TimestampMixin):
@@ -200,3 +205,18 @@ class ExtractedField(Base, TimestampMixin):
         POLICY), and having one definition prevents the two from drifting.
         """
         return self.status in {FieldStatus.PENDING_REVIEW, FieldStatus.REJECTED}
+
+    @validates("confidence")
+    def _quantise_confidence(self, _key: str, value: float) -> float:
+        """Keep ``confidence`` at the precision its column declares.
+
+        ``NUMERIC(4, 3)`` is enforced by MySQL, which stores exactly three
+        decimals, but **not** by SQLite, which stores the float it is handed. Any
+        value with more precision than that — ``0.1 * 3`` is
+        ``0.30000000000000004`` — is therefore stored in full and read back
+        rounded, so a page boundary in the review queue compares a rounded key
+        against an unrounded row and serves that row twice. Quantising on write
+        makes the declared scale true on both dialects, for the same reason
+        :func:`~app.db.base.truncate_to_second` floors timestamps (D2-06).
+        """
+        return round(float(value), CONFIDENCE_SCALE)

@@ -30,6 +30,7 @@ Deliberate limits, recorded in ``DECISIONS.md`` (D8-01…D8-05):
 from __future__ import annotations
 
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any, Literal
 
 import structlog
@@ -56,6 +57,9 @@ from app.db.repositories import (
     AuditLogRepository,
     ContractRepository,
     ExtractedFieldRepository,
+    ReviewCursor,
+    decode_review_cursor,
+    encode_review_cursor,
 )
 from app.db.repositories.audit import ACTOR_USER, AUDIT_ENTITY_FIELD
 from app.db.repositories.fields import DEFAULT_REVIEW_QUEUE_LIMIT, MAX_REVIEW_QUEUE_LIMIT
@@ -115,13 +119,24 @@ class ReviewItem(ExtractedFieldSummary):
 
 
 class ReviewQueueResponse(BaseModel):
-    """Everything waiting for a person, lowest confidence first."""
+    """Everything waiting for a person, lowest confidence first.
+
+    One page of it, anyway: the queue is paged by sort key, so a portfolio whose
+    backlog exceeds ``MAX_REVIEW_QUEUE_LIMIT`` is reachable rather than truncated
+    (gap 16).
+    """
 
     items: list[ReviewItem]
+    #: How many items this page carries, not how many the queue holds.
     count: int
-    #: Age of the oldest item. Anything above zero means the queue is not draining.
+    #: Age of the oldest item *on this page*. Anything above zero means the queue is
+    #: not draining — but only the first page is a trustworthy reading, because a
+    #: later page starts after the oldest items by construction.
     oldest_minutes: int
     threshold: float
+    #: Pass back as ``?cursor=`` to read the next page. ``None`` means this is the
+    #: last page. Opaque by design: a client must not parse it.
+    next_cursor: str | None = None
 
 
 class ReviewDecisionRequest(BaseModel):
@@ -234,6 +249,11 @@ def _blocking(session: Session, principal: Principal, contract_id: int) -> int:
 )
 def review_queue(
     limit: int = Query(default=DEFAULT_REVIEW_QUEUE_LIMIT, ge=1, le=MAX_REVIEW_QUEUE_LIMIT),
+    cursor: str | None = Query(
+        default=None,
+        max_length=512,
+        description="The ``next_cursor`` of the previous page. Omit for the first page.",
+    ),
     principal: Principal = Depends(
         require_roles(UserRole.ADMIN, UserRole.OPERATOR, UserRole.VIEWER)
     ),
@@ -246,14 +266,53 @@ def review_queue(
     contract fields route. Revealing a value is a separate, audited, role-gated call.
     """
     threshold = settings.extraction_review_threshold
-    rows = ExtractedFieldRepository(session, principal.tenant_id).awaiting_review(limit=limit)
+    after = _cursor_or_422(cursor)
+    # One row beyond the page: whether a next page exists is answered by the same
+    # query rather than by a second ``COUNT`` that could disagree with it.
+    rows = ExtractedFieldRepository(session, principal.tenant_id).awaiting_review(
+        limit=limit + 1, after=after
+    )
+    has_more = len(rows) > limit
+    page = rows[:limit]
     now = utc_now()
-    items = [_item(field, contract, threshold=threshold, now=now) for field, contract in rows]
+    items = [_item(field, contract, threshold=threshold, now=now) for field, contract in page]
     return ReviewQueueResponse(
         items=items,
         count=len(items),
         oldest_minutes=max((item.age_minutes for item in items), default=0),
         threshold=threshold,
+        # Only when a further row is known to exist: handing back a cursor that
+        # leads to an empty page makes every client do one pointless round trip.
+        next_cursor=_cursor_of(page[-1][0]) if has_more and page else None,
+    )
+
+
+def _cursor_or_422(token: str | None) -> ReviewCursor | None:
+    """Decode a caller's page marker, or refuse it loudly.
+
+    A malformed cursor is a ``422`` rather than a silent first page: a client that
+    pages by cursors would otherwise loop over page one forever, which looks like a
+    server bug from the outside.
+    """
+    if token is None:
+        return None
+    try:
+        return decode_review_cursor(token)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="The review cursor is not recognised; restart from the first page",
+        ) from None
+
+
+def _cursor_of(field: ExtractedField) -> str:
+    """The page marker that resumes the queue after ``field``."""
+    return encode_review_cursor(
+        ReviewCursor(
+            confidence=Decimal(field.confidence),
+            created_at=field.created_at,
+            field_id=field.id,
+        )
     )
 
 

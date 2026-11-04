@@ -18,6 +18,16 @@ Two rules the write helpers enforce, both from
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
+from typing import Any
+
+from sqlalchemy import ColumnElement, and_, or_
+
 from app.db.enums import FieldName, FieldStatus
 from app.db.models import Contract, ExtractedField
 from app.db.repositories.base import TenantScopedRepository
@@ -26,6 +36,91 @@ from app.db.repositories.base import TenantScopedRepository
 #: Bounded at the query, not in the route, so no caller can ask for the whole table.
 DEFAULT_REVIEW_QUEUE_LIMIT = 100
 MAX_REVIEW_QUEUE_LIMIT = 500
+
+#: A cursor is a page marker, not a capability: it is opaque so callers do not
+#: start parsing it, but it carries no secret and needs no signature. Everything
+#: it names (confidence, creation time, field id) is already visible in the page
+#: it came from, and the tenant predicate is applied by the query regardless, so a
+#: hand-edited cursor can only move within the caller's own queue.
+_CURSOR_VERSION = 1
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewCursor:
+    """The sort key of the last row a review-queue page returned.
+
+    Kept as the triple the query orders by rather than as an offset: an operator
+    deciding fields between two requests shifts every row *after* their decision,
+    so ``OFFSET`` would skip or repeat work. Re-reading the key is stable under
+    those writes.
+
+    ``confidence`` is a :class:`~decimal.Decimal`, not a float: the column is
+    ``NUMERIC(4, 3)`` and the page boundary compares it for equality, so the value
+    has to survive the round trip exactly.
+    """
+
+    confidence: Decimal
+    created_at: datetime
+    field_id: int
+
+
+def encode_review_cursor(cursor: ReviewCursor) -> str:
+    """Render a page marker as an opaque, URL-safe token."""
+    payload = json.dumps(
+        {
+            "v": _CURSOR_VERSION,
+            "c": str(cursor.confidence),
+            "t": cursor.created_at.isoformat(),
+            "i": cursor.field_id,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def decode_review_cursor(token: str) -> ReviewCursor:
+    """Parse a token produced by :func:`encode_review_cursor`.
+
+    Raises :class:`ValueError` for anything else — a truncated token, a token from
+    a future cursor version, or a hand-edited one. The caller turns that into a
+    422; treating it as "no cursor" would silently re-serve page one and a client
+    that pages through a queue would loop forever.
+    """
+    padded = token + "=" * (-len(token) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(padded.encode("ascii"))
+    except (binascii.Error, UnicodeEncodeError, ValueError):
+        raise ValueError("cursor is not URL-safe base64") from None
+    try:
+        payload: Any = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise ValueError("cursor is not JSON") from None
+    if not isinstance(payload, dict) or payload.get("v") != _CURSOR_VERSION:
+        raise ValueError("cursor version is not recognised")
+
+    confidence = payload.get("c")
+    created_at = payload.get("t")
+    field_id = payload.get("i")
+    if not isinstance(confidence, str) or not isinstance(created_at, str):
+        raise ValueError("cursor is missing its sort key")
+    if not isinstance(field_id, int) or isinstance(field_id, bool) or field_id < 1:
+        raise ValueError("cursor has no field id")
+    try:
+        score = Decimal(confidence)
+    except InvalidOperation:
+        raise ValueError("cursor confidence is not a number") from None
+    if not score.is_finite():
+        raise ValueError("cursor confidence is not a number")
+    try:
+        moment = datetime.fromisoformat(created_at)
+    except ValueError:
+        raise ValueError("cursor timestamp is not a datetime") from None
+    # Stored timestamps are naive UTC (D2-01). An aware value is accepted only by
+    # converting it, so a hand-written cursor cannot compare against local time.
+    if moment.tzinfo is not None:
+        moment = moment.astimezone(UTC).replace(tzinfo=None)
+    return ReviewCursor(confidence=score, created_at=moment, field_id=field_id)
 
 
 class ExtractedFieldRepository(TenantScopedRepository[ExtractedField]):
@@ -42,13 +137,23 @@ class ExtractedFieldRepository(TenantScopedRepository[ExtractedField]):
         return self.get(ExtractedField, field_id)
 
     def awaiting_review(
-        self, *, limit: int = DEFAULT_REVIEW_QUEUE_LIMIT
+        self,
+        *,
+        limit: int = DEFAULT_REVIEW_QUEUE_LIMIT,
+        after: ReviewCursor | None = None,
     ) -> list[tuple[ExtractedField, Contract]]:
         """Fields waiting for a person, each with the contract it belongs to.
 
         Lowest confidence first: the least trustworthy extractions are the ones a
         reviewer should meet first. ``created_at``/``id`` break ties so the order
         is stable across calls, which matters for a queue someone works through.
+
+        ``after`` resumes the queue past the last row of the previous page, which
+        is what closes gap 16: a queue longer than the cap used to be unreachable
+        past its first ``limit`` items. It resumes by sort key rather than by
+        ``OFFSET`` because the queue is written to while it is read — a reviewer
+        deciding a field removes it, which shifts every later row by one and makes
+        an offset skip an item nobody ever saw.
 
         The contract is joined here rather than fetched per row — the queue shows
         which contract a field blocks, and one query beats N. Both sides carry the
@@ -61,13 +166,14 @@ class ExtractedFieldRepository(TenantScopedRepository[ExtractedField]):
             .join(Contract, ExtractedField.contract_id == Contract.id)
             .where(ExtractedField.status == FieldStatus.PENDING_REVIEW)
             .where(Contract.tenant_id == self.tenant_id)
-            .order_by(
-                ExtractedField.confidence.asc(),
-                ExtractedField.created_at.asc(),
-                ExtractedField.id.asc(),
-            )
-            .limit(limit)
         )
+        if after is not None:
+            stmt = stmt.where(_after(after))
+        stmt = stmt.order_by(
+            ExtractedField.confidence.asc(),
+            ExtractedField.created_at.asc(),
+            ExtractedField.id.asc(),
+        ).limit(limit)
         return [(field, contract) for field, contract in self.session.execute(stmt).all()]
 
     def for_contract(self, contract_id: int) -> list[ExtractedField]:
@@ -138,3 +244,25 @@ class ExtractedFieldRepository(TenantScopedRepository[ExtractedField]):
         field.source_page = source_page
         field.source_line = source_line
         return field
+
+
+def _after(cursor: ReviewCursor) -> ColumnElement[bool]:
+    """The keyset predicate: strictly after the cursor, in queue order.
+
+    Spelled out as three ``OR`` terms instead of a row-value comparison
+    (``(a, b, c) > (?, ?, ?)``) so it reads the same on SQLite and MySQL, where
+    row-constructor support differs by version. The terms mirror the ``ORDER BY``
+    exactly — a predicate that disagrees with the sort order silently drops or
+    repeats rows at a page boundary.
+    """
+    confidence = ExtractedField.confidence
+    created_at = ExtractedField.created_at
+    return or_(
+        confidence > cursor.confidence,
+        and_(confidence == cursor.confidence, created_at > cursor.created_at),
+        and_(
+            confidence == cursor.confidence,
+            created_at == cursor.created_at,
+            ExtractedField.id > cursor.field_id,
+        ),
+    )

@@ -290,3 +290,40 @@ def test_email_is_unique_per_tenant_not_globally(
     with pytest.raises(IntegrityError):
         db_session.commit()
     db_session.rollback()
+
+
+def test_confidence_keeps_the_precision_its_column_declares(
+    db_session: Session, tenant: Tenant
+) -> None:
+    contract = make_contract(tenant)
+    db_session.add(contract)
+    db_session.flush()
+
+    # ``0.1 * 3`` is 0.30000000000000004. MySQL's NUMERIC(4, 3) would store
+    # 0.300; SQLite stores the float it is handed, so without the model's
+    # quantiser the row keeps a value the API reports rounded — and the review
+    # queue's page boundary then serves that row twice.
+    field = make_field(tenant, contract, confidence=0.1 * 3)
+    db_session.add(field)
+    db_session.commit()
+
+    assert float(field.confidence) == pytest.approx(0.3)
+    assert repr(float(field.confidence)) == "0.3"
+
+
+def test_confidence_rounding_survives_a_round_trip(db_session: Session, tenant: Tenant) -> None:
+    contract = make_contract(tenant)
+    db_session.add(contract)
+    db_session.flush()
+    field = make_field(tenant, contract, confidence=0.12345)
+    db_session.add(field)
+    db_session.commit()
+    field_id = field.id
+
+    db_session.expire_all()
+    reloaded = db_session.get(ExtractedField, field_id)
+
+    assert reloaded is not None
+    # Three places, as declared — never the value that was handed in. Compared as
+    # a float because SQLite hands NUMERIC back as a wider ``Decimal``.
+    assert float(reloaded.confidence) == 0.123
