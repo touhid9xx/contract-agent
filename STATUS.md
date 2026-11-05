@@ -1376,7 +1376,7 @@ sending.
 
 ## The MySQL half, run at the rotation head ✅ (`9b6cf0f`)
 
-Three slices in a row recorded `NOT RUN` against a real MySQL server because the Docker
+Four slices in a row recorded `NOT RUN` against a real MySQL server because the Docker
 daemon did not answer on this host. It answers now (`29.8.1`), and the compose MySQL 8.4
 container was already up and healthy on `127.0.0.1:3307`, so the row was executed for
 real at the tree this file currently ends on. **This verifies `9b6cf0f`, not the trees the
