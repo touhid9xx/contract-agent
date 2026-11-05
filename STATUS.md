@@ -77,7 +77,7 @@ interpreter" and failed *open*, the same failure class as gap 13. Measured befor
 and after (14 CR → 0), with `git add --renormalize .` staging nothing, so the rule
 pins the checkout without rewriting a byte of content (D1-10). The migration head is
 unchanged at `0004`, and no test count moved.
-**The sixth slice is the residue gap 20 explicitly deferred** (`feat(crypto)`):
+**The sixth slice is the residue gap 20 explicitly deferred** (`3cddfab`, `feat(crypto)`):
 `ENCRYPTION_KEY` can now be rotated. `FieldCipher` holds a key *ring* — one current key
 that seals, plus `ENCRYPTION_KEY_PREVIOUS` keys that can only unseal — and
 `reseal-fields` gains a `rewrapped` count, so the old key can be retired once the log
