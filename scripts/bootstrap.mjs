@@ -67,6 +67,9 @@ function main() {
   if (!skipNode) {
     run("npm", ["install", "--no-audit", "--fund=false"]);
     run("npm", ["--prefix", "frontend", "install", "--no-audit", "--fund=false"]);
+    // The Phase 0 demo is typechecked by a pre-commit hook, so its dependencies
+    // are part of the gate rather than an optional extra for `npm run demo`.
+    run("npm", ["--prefix", "demo/frontend", "install", "--no-audit", "--fund=false"]);
   }
 
   const preCommit = path.join(

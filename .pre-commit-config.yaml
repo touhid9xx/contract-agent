@@ -104,3 +104,14 @@ repos:
         language: system
         files: ^frontend/.*\.(ts|tsx|mjs)$
         pass_filenames: false
+
+      # The Phase 0 demo is a shipped deliverable (GATE 1) with its own Next.js
+      # app. It has a typecheck script but no eslint config, so only the former
+      # is gated here. Without this hook nothing checked demo/frontend at all,
+      # which is how its fixtures drifted away from the real wire shape.
+      - id: demo-frontend-typecheck
+        name: demo frontend typecheck (tsc --noEmit)
+        entry: node scripts/run-frontend-check.mjs typecheck demo/frontend
+        language: system
+        files: ^demo/frontend/.*\.(ts|tsx)$
+        pass_filenames: false
