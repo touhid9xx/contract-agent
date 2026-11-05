@@ -60,9 +60,9 @@ Pre-existing plaintext rows are repaired by a new `reseal-fields` CLI (`--ids`,
 `--limit`, `--dry-run`) rather than by a data migration, and a row sealed under a
 key that has since been rotated refuses to send rather than sending garbage
 (D10-11).
-**The slice on top of that is `doctor`** — a read-only command that counts the two
-states in this system that fail *silently*: notifications parked `failed` or
-`suppressed`, and field rows still holding plaintext. It needs no
+**The slice on top of that is `doctor`** (`028b8b3`) — a read-only command that
+counts the two states in this system that fail *silently*: notifications parked
+`failed` or `suppressed`, and field rows still holding plaintext. It needs no
 `ENCRYPTION_KEY` (sealing is judged by envelope shape, so a rotated key still reads
 as sealed rather than as plaintext), it writes nothing, and it exits
 `EXIT_ATTENTION` (5) when either count is non-zero, so a cron entry or a CI step can
@@ -1162,7 +1162,7 @@ acts on it yet. And `ENCRYPTION_KEY` rotation is
 unsupported: a rotated key makes every stored recipient unreadable until the old one
 is restored, which is the fail-closed behaviour above, not a bug, but it is unhandled.
 
-## Two silent states now have a check ✅ (gap 22 + gap 20 residue, `D10-12`)
+## Two silent states now have a check ✅ (gap 22 + gap 20 residue, `D10-12`, `028b8b3`)
 
 Both residues above are the same defect stated twice: a state that needs a person and
 raises nothing. `python -m app.cli doctor` counts them in one read-only pass and exits
