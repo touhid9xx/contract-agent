@@ -1117,7 +1117,10 @@ committed together. That pairing is the milestone; extraction and review follow.
   replacement for it. Two details in this entry are now stale: `_recipient_for`
   became `recipient_for` in `app/workers/dispatch.py` (`4e7dd5c`), and the
   "dispatcher loop does not exist yet" clause was true until that same commit.
-  Gap 20 — the plaintext `normalized_value` — is **still open and untouched**.
+  Gap 20 — the plaintext `normalized_value` — was **still open and untouched** when
+  this entry was signed, and has since been closed by **D10-11**, which seals the
+  column on both write paths and adds the `reseal-fields` repair path. Read the
+  sentence above as the state at the F10 commit.
 
 ### D10-06 — No template table; the transport renders the body
 
@@ -1359,3 +1362,66 @@ committed together. That pairing is the milestone; extraction and review follow.
   `CERT_REQUIRED` with hostname checking on (unit suite). The rest is a provider
   agreeing with `ssl`'s opinion of it, which the first deployment will be first to
   observe.
+
+### D10-11 — `normalized_value` is sealed too, and a token is recognised by shape
+
+- **Decision:** `ExtractedField.normalized_value` holds Fernet ciphertext, like the
+  `raw_value` beside it. Both write paths seal it — `extract_contract`'s create *and*
+  overwrite branches, and `_apply_correction` in `app/api/v1/review.py` — and the one
+  reader that needs the plaintext, `recipient_for` in `app/workers/dispatch.py`,
+  decrypts it through a cipher it now takes as a parameter. The decision policy
+  (`_usable_fields` in `app/workers/decision.py`) still reads the column directly, but
+  only to ask *"is a value present?"*: it tests `normalized_value is not None` and
+  never consumes the text, so ciphertext satisfies it and the decision path stays out
+  of the PII entirely. Only the send sees an address.
+- **Why encrypting this column and not building the blind index gap 20 proposed:** the
+  alternative recorded was "encrypt it and compare on a hash". No blind index was
+  built, because nothing in this build searches fields by value — the review queue
+  orders by confidence and dispatch resolves a recipient for a row already chosen — so
+  an index column would have no reader, double the write cost, and imply a
+  searchability that does not exist. What encrypting actually costs is SQL
+  comparability, which this codebase never used for this column.
+  `extraction.py`'s docstring, which described `normalized_value` as "the column
+  downstream code compares against in SQL", was corrected rather than left standing:
+  it was true when written, and this entry is the change that made it false.
+- **Why shape and not a failed decrypt:** `is_sealed()` recognises a token by its
+  Fernet shape — `gAAAAA` prefix, minimum length, base64url alphabet — instead of
+  attempting decryption and inspecting the exception. A failed decrypt is ambiguous
+  between two states that need *opposite* handling: plaintext written before this
+  slice (seal it) and a token sealed under a different key (leave it alone, because
+  sealing a token wraps ciphertext in ciphertext and destroys the value). Only the
+  shape distinguishes them before the key is applied. Ten cases in
+  `backend/tests/test_crypto.py` pin the boundary, including a `gAAAAA`-prefixed
+  string too short to be a token.
+- **The repair path is operator-initiated, and it is deliberately not a migration.**
+  Databases that predate this entry hold plaintext in that column.
+  `python -m app.cli reseal-fields` (`--ids`, `--limit`, `--dry-run`) seals them.
+  Three outcomes are counted separately because they need different answers: plaintext
+  is sealed, already-sealed-and-readable is left alone, and already-sealed-but-
+  unreadable is reported and left untouched, with the run exiting `EXIT_UNREADABLE`
+  (4) instead of continuing — continuing past it would rewrite a correct database with
+  the wrong key's output. A data migration was rejected on two grounds: it would need
+  `ENCRYPTION_KEY` inside Alembic, and a migration that runs on `upgrade head` cannot
+  be dry-run against production. Fifteen tests in `backend/tests/test_reseal.py`
+  cover the outcomes, including second-run idempotency and the wrong-key refusal.
+- **Fail-closed, and what that costs.** A process without `ENCRYPTION_KEY` can no
+  longer read a recipient, and each layer answers in its own vocabulary rather than
+  crashing: `cipher_or_503` in `app/api/deps.py` — shared by `review` and
+  `notifications` so the two routes answer the same status instead of one 500 where
+  the other says 503 — turns a missing key into 503 on the reveal and dispatch routes;
+  `dispatch_notification` raises `REFUSAL_RECIPIENT_UNAVAILABLE`, which is a member of
+  `SUPPRESSING_REFUSALS`, so a scheduler tick parks the row `suppressed` rather than
+  burning the retry budget; and `NotificationScheduler.run_once` returns before
+  claiming anything when `has_encryption_key` is false, mirroring the early return the
+  no-transport case already had. The cost is stated plainly: a misconfigured key stops
+  reminders instead of sending them somewhere unintended.
+- **Trade-off, stated rather than buried: key rotation is unsupported.** A changed key
+  makes every stored value unreadable, and `reseal-fields` will refuse rather than
+  repair it. Re-encryption needs a two-key read window, which is a slice of its own;
+  nothing here claims it, and an operator who rotates `ENCRYPTION_KEY` today loses
+  every recipient until the old key is restored.
+- **What this closes and what it does not.** Gap 20's contradiction — a cleartext copy
+  of the same PII one column over from the ciphertext — is gone, and the write path can
+  no longer reintroduce it. Not closed: existing rows stay plaintext until the operator
+  runs `reseal-fields`, and nothing schedules or alerts on that; and the SMTP path still
+  has only ever spoken to a relay this suite started (D10-10).

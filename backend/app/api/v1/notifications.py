@@ -41,7 +41,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
-from app.api.deps import app_settings, get_request_session, require_roles
+from app.api.deps import app_settings, cipher_or_503, get_request_session, require_roles
 from app.api.v1.agent import refusal
 from app.core.config import Settings
 from app.core.principal import Principal
@@ -434,10 +434,14 @@ def dispatch(
     contract = _load_contract(session, principal, notification.contract_id)
     fields = ExtractedFieldRepository(session, principal.tenant_id).for_contract(contract.id)
     sender: MessageSender = build_sender(settings)
+    # Asked for up front rather than inside ``resolve_recipient``: without a key no
+    # dispatch on this deployment can succeed, and answering 503 there beats letting
+    # the policy map a missing setting onto a 409 that reads as a data problem.
+    cipher = cipher_or_503(settings)
 
     def resolve_recipient() -> str:
         """Read the approved value late — only once the gates have all passed."""
-        return recipient_for(notification.channel, fields)
+        return recipient_for(notification.channel, fields, cipher)
 
     try:
         outcome = dispatch_notification(

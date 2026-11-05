@@ -1,4 +1,4 @@
-"""Operator entry points (F5, F7).
+"""Operator entry points (F5, F7, gap 20).
 
 Run from ``backend/``::
 
@@ -6,6 +6,8 @@ Run from ``backend/``::
     python -m app.cli outbox-replay --dry-run
     python -m app.cli outbox-replay --ids 12,14
     python -m app.cli extract --contract-id 12 --text-file contract.txt
+    python -m app.cli reseal-fields --dry-run
+    python -m app.cli reseal-fields
 
 Why a command rather than an HTTP endpoint: republishing parked events is a
 privileged, rare operation. Over HTTP it would become a "republish any tenant's
@@ -35,9 +37,15 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings, get_settings
-from app.core.crypto import MissingEncryptionKeyError, build_cipher
+from app.core.crypto import (
+    DecryptionError,
+    MissingEncryptionKeyError,
+    build_cipher,
+    is_sealed,
+)
 from app.core.logging import configure_logging
 from app.db.repositories.contracts import contract_for_operator
+from app.db.repositories.fields import DEFAULT_RESEAL_LIMIT, fields_for_reseal
 from app.db.repositories.outbox import (
     DEFAULT_REPLAY_LIMIT,
     DeadLetterReplay,
@@ -61,6 +69,15 @@ EXIT_NOTHING_EXTRACTED = 2
 #: The run could not start or could not finish: missing key, unreadable document,
 #: or a backend that did not answer.
 EXIT_FAILED = 3
+#: Every value that needed sealing was left alone because its stored token cannot
+#: be read with the configured key. Non-zero because it almost always means the
+#: operator ran with the wrong ``ENCRYPTION_KEY``, and silently "succeeding" while
+#: a database stays half-migrated is the failure mode this command exists to end.
+EXIT_UNREADABLE = 4
+
+#: The two columns on :class:`~app.db.models.ExtractedField` that hold PII, and so
+#: must be sealed. Named once, here, so "did we miss a column?" has one answer.
+_RESEAL_COLUMNS = ("raw_value", "normalized_value")
 
 
 def _ids_arg(value: str) -> list[int]:
@@ -69,7 +86,7 @@ def _ids_arg(value: str) -> list[int]:
         return [int(part) for part in value.split(",") if part.strip()]
     except ValueError as exc:
         raise argparse.ArgumentTypeError(
-            "expected a comma-separated list of outbox ids, e.g. --ids 12,14"
+            "expected a comma-separated list of ids, e.g. --ids 12,14"
         ) from exc
 
 
@@ -143,6 +160,38 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     extract.set_defaults(handler=_extract)
+
+    reseal = commands.add_parser(
+        "reseal-fields",
+        help="encrypt field values that were stored as plaintext",
+        description=(
+            "Seal extracted-field values written before gap 20 closed: "
+            "'raw_value' was always encrypted, 'normalized_value' was not. "
+            "Values that are already sealed are left alone, and a value that "
+            "cannot be read with the configured ENCRYPTION_KEY is reported "
+            "rather than re-encrypted."
+        ),
+    )
+    reseal.add_argument(
+        "--ids",
+        type=_ids_arg,
+        default=None,
+        metavar="N[,N...]",
+        help="seal only these field ids (default: every row, up to --limit)",
+    )
+    reseal.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_RESEAL_LIMIT,
+        metavar="N",
+        help=f"maximum rows to examine in one run (default: {DEFAULT_RESEAL_LIMIT})",
+    )
+    reseal.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report what would be sealed without writing anything",
+    )
+    reseal.set_defaults(handler=_reseal_fields)
     return parser
 
 
@@ -306,6 +355,107 @@ def _extract(
             discarded=outcome.discarded,
         )
         return EXIT_NOTHING_EXTRACTED
+
+    return EXIT_OK
+
+
+def _reseal_fields(
+    args: argparse.Namespace,
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+) -> int:
+    """``reseal-fields``: encrypt field values that were stored as plaintext.
+
+    Gap 20 was that ``normalized_value`` held the same PII as ``raw_value`` but in
+    the clear, while the decision and dispatch policies read it. The write paths
+    now seal it; this is the repair path for rows written before they did.
+
+    Three outcomes per value, and the distinction matters:
+
+    - **already sealed and readable** — left alone. Re-sealing would wrap a token
+      in a second token and lose the value for good.
+    - **already sealed but unreadable** — reported, never touched, and the run
+      exits :data:`EXIT_UNREADABLE`. This is what a wrong ``ENCRYPTION_KEY`` looks
+      like, and continuing past it would rewrite a correct database with garbage.
+    - **plaintext** — sealed. Recognised by *shape* rather than by a failed
+      decryption, for the reason :func:`~app.core.crypto.is_sealed` documents.
+
+    Nothing here logs a value: a field's ``id`` and column name identify the row
+    to the operator without putting PII in the log stream.
+    """
+    field_ids: list[int] | None = args.ids
+    # Explicit ids replace the limit rather than being filtered by it, exactly as
+    # in ``outbox-replay``: silently dropping some of the requested rows would
+    # look like success.
+    limit = len(field_ids) if field_ids is not None else int(args.limit)
+    dry_run = bool(args.dry_run)
+
+    try:
+        cipher = build_cipher(settings)
+    except MissingEncryptionKeyError as exc:
+        # Without a key every plaintext row would be reported as "cannot seal" and
+        # nothing would change, so refuse before reading anything.
+        log.error("reseal_refused_without_encryption_key", error=str(exc))
+        return EXIT_FAILED
+
+    sealed = 0
+    already_sealed = 0
+    unreadable = 0
+    changed: list[int] = []
+
+    with session_scope(session_factory) as session:
+        rows = fields_for_reseal(session, field_ids=field_ids, limit=limit)
+        for field in rows:
+            sealed_here = 0
+            for column in _RESEAL_COLUMNS:
+                value: Any = getattr(field, column)
+                if value is None:
+                    continue
+                if is_sealed(str(value)):
+                    try:
+                        cipher.decrypt(str(value))
+                    except DecryptionError:
+                        unreadable += 1
+                        log.warning(
+                            "reseal_value_unreadable",
+                            field_id=field.id,
+                            column=column,
+                        )
+                        continue
+                    already_sealed += 1
+                    continue
+                if not dry_run:
+                    setattr(field, column, cipher.encrypt(str(value)))
+                sealed += 1
+                sealed_here += 1
+            if sealed_here:
+                changed.append(field.id)
+
+    log.info(
+        "fields_resealed",
+        dry_run=dry_run,
+        examined=len(rows),
+        sealed=sealed,
+        already_sealed=already_sealed,
+        unreadable=unreadable,
+        field_ids=changed,
+    )
+
+    if field_ids is not None:
+        missing = sorted(set(field_ids) - {field.id for field in rows})
+        if missing:
+            # Same reasoning as ``outbox-replay``: a wrong id usually means the
+            # operator read a different database, not that the row is fine.
+            log.warning("reseal_ids_not_found", ids=missing)
+            return EXIT_NO_MATCH
+
+    if unreadable:
+        log.error(
+            "reseal_left_values_unreadable",
+            unreadable=unreadable,
+            hint="check that ENCRYPTION_KEY is the key these rows were sealed with",
+        )
+        return EXIT_UNREADABLE
 
     return EXIT_OK
 

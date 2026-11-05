@@ -27,10 +27,12 @@ from datetime import date
 from typing import Any
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.core.crypto import FieldCipher
 from app.db.enums import ContractStatus, FieldName, FieldStatus, UserRole
 from app.db.models import AgentDecision, AuditLog, Contract, ExtractedField, Tenant, User
 from app.db.session import session_scope
@@ -48,6 +50,13 @@ EMAIL = "ops@acme.test"
 #: which field leaked.
 CONTACT_EMAIL = "a.rahman@example.test"
 CONTACT_PHONE = "+442079460958"
+
+#: One key for the whole module, so the value a helper seals is the value the app
+#: under test would unseal. The decision policy only asks whether a value is
+#: present, but fixtures that write the column in the clear would go stale the
+#: moment a dispatch assertion were added here.
+ENCRYPTION_KEY = Fernet.generate_key().decode("ascii")
+CIPHER = FieldCipher(ENCRYPTION_KEY)
 
 
 # --- fixtures and helpers -------------------------------------------------
@@ -111,10 +120,13 @@ def add_field(
 ) -> int:
     """Store one extracted field and return its id.
 
-    ``normalized_value`` is written in the clear here on purpose: encryption at rest
-    is F7's guarantee and is proven in ``test_crypto``/``test_extraction``. This
-    suite is about whether a *usable* value exists, and the policy reads the
-    normalized column for exactly that.
+    ``normalized_value`` is sealed with :data:`CIPHER`, matching what the extraction
+    worker writes since gap 20. The policy reads the column only to ask "is a value
+    present?" — ``decision.py`` compares against ``None``, and a Fernet token is
+    just as non-``None`` as the plaintext was — so sealing changes no assertion
+    here. It keeps the fixture honest: a plaintext row is a shape no real writer
+    produces, and it would silently disagree with ``test_notifications`` if an
+    end-to-end dispatch were ever asserted from this suite.
     """
     with session_scope(session_factory) as session:
         row = ExtractedField(
@@ -122,7 +134,7 @@ def add_field(
             contract_id=contract.id,
             field_name=field_name,
             raw_value=None,
-            normalized_value=value,
+            normalized_value=CIPHER.encrypt(value) if value is not None else None,
             confidence=confidence,
             status=status,
         )

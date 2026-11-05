@@ -30,10 +30,12 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pytest
+from cryptography.fernet import Fernet
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
+from app.core.crypto import FieldCipher
 from app.db.enums import Channel, ContractStatus, FieldName, FieldStatus, NotificationStatus
 from app.db.models import Contract, ExtractedField, Notification, Tenant
 from app.db.session import session_scope
@@ -50,6 +52,13 @@ from app.workers.notification_scheduler import (
 
 #: The value no row may ever hold, and the address a send must go to.
 CONTACT_EMAIL = "a.rahman@example.test"
+
+#: One key for the whole module, so the value a helper seals is the value the
+#: scheduler unseals. Since gap 20 the recipient is Fernet ciphertext, and a
+#: scheduler built without a key refuses to tick at all — so every settings copy
+#: below carries this key explicitly.
+ENCRYPTION_KEY = Fernet.generate_key().decode("ascii")
+CIPHER = FieldCipher(ENCRYPTION_KEY)
 
 
 # --- doubles ---------------------------------------------------------------
@@ -121,15 +130,26 @@ def add_contact_field(
     *,
     value: str | None = CONTACT_EMAIL,
     status: FieldStatus = FieldStatus.APPROVED,
+    cipher: FieldCipher = CIPHER,
 ) -> int:
-    """Store the approved email the policy resolves a recipient from."""
+    """Store the approved email the policy resolves a recipient from.
+
+    Sealed with :data:`CIPHER`, because the scheduler decrypts this column to build
+    the recipient (gap 20). A row written in the clear is refused as unreadable
+    rather than sent to, so a plaintext fixture would make every send test fail for
+    a reason unrelated to what it asserts.
+
+    ``cipher`` is overridable for the wrong-key case: a row sealed under a key this
+    process does not hold is the shape of a botched key rotation, and it must refuse
+    rather than deliver.
+    """
     with session_scope(session_factory) as session:
         row = ExtractedField(
             tenant_id=contract.tenant_id,
             contract_id=contract.id,
             field_name=FieldName.EMAIL,
             raw_value=None,
-            normalized_value=value,
+            normalized_value=cipher.encrypt(value) if value is not None else None,
             confidence=0.93,
             status=status,
         )
@@ -194,10 +214,19 @@ def defer_due_time_into_the_past(
 
 
 def open_window(settings: Settings) -> Settings:
-    """Settings whose quiet window does not contain the current hour."""
+    """Settings whose quiet window does not contain the current hour.
+
+    Carries :data:`ENCRYPTION_KEY` because every scheduler built from this helper
+    decrypts a recipient; without it ``run_once`` returns immediately and every
+    send test would assert on a no-op.
+    """
     hour = datetime.now(UTC).hour
     return settings.model_copy(
-        update={"quiet_hours_start": (hour + 2) % 24, "quiet_hours_end": (hour + 3) % 24}
+        update={
+            "quiet_hours_start": (hour + 2) % 24,
+            "quiet_hours_end": (hour + 3) % 24,
+            "encryption_key": ENCRYPTION_KEY,
+        }
     )
 
 
@@ -205,7 +234,11 @@ def quiet_now(settings: Settings) -> Settings:
     """Settings whose quiet window contains the current hour."""
     hour = datetime.now(UTC).hour
     return settings.model_copy(
-        update={"quiet_hours_start": hour, "quiet_hours_end": (hour + 1) % 24}
+        update={
+            "quiet_hours_start": hour,
+            "quiet_hours_end": (hour + 1) % 24,
+            "encryption_key": ENCRYPTION_KEY,
+        }
     )
 
 
@@ -428,6 +461,57 @@ def test_an_empty_queue_is_a_no_op(
     settings: Settings, session_factory: sessionmaker[Session]
 ) -> None:
     assert scheduler(session_factory, open_window(settings), RecordingSender()).run_once() == 0
+
+
+def test_no_encryption_key_claims_nothing_at_all(
+    settings: Settings,
+    session_factory: sessionmaker[Session],
+    contract: Contract,
+    contact_field: int,
+) -> None:
+    """Without a key no recipient can be read, so no row is worth claiming.
+
+    Claiming and then refusing would spend an attempt — or suppress the row — for a
+    reason an operator fixes by setting one environment variable. The build this
+    replaces behaved the same way with no transport configured, for the same reason.
+    """
+    notification_id = make_notification(session_factory, contract)
+    no_key = open_window(settings).model_copy(update={"encryption_key": ""})
+
+    assert scheduler(session_factory, no_key, RecordingSender()).run_once() == 0
+
+    row = load(session_factory, notification_id)
+    assert row.status is NotificationStatus.PENDING
+    assert row.attempts == 0
+    assert row.last_error is None
+
+
+def test_a_value_sealed_under_another_key_is_suppressed_not_sent(
+    settings: Settings,
+    session_factory: sessionmaker[Session],
+    contract: Contract,
+) -> None:
+    """A botched key rotation must park the row, never mail the ciphertext.
+
+    The refusal is permanent from this process's point of view — retrying with the
+    same key cannot succeed — so the row is suppressed and left for
+    ``POST /notifications/{id}/retry`` once the key is restored.
+    """
+    notification_id = make_notification(session_factory, contract)
+    rotated = FieldCipher(Fernet.generate_key().decode("ascii"))
+    add_contact_field(session_factory, contract, cipher=rotated)
+
+    sender = RecordingSender()
+    tick = scheduler(session_factory, open_window(settings), sender)._tick()
+
+    assert tick.suppressed is True
+    assert tick.refusal == "RECIPIENT_UNAVAILABLE"
+    assert sender.sent == []
+    stored = load(session_factory, notification_id)
+    assert stored.status is NotificationStatus.SUPPRESSED
+    # The row explains itself without repeating the value it could not read.
+    assert stored.last_error is not None
+    assert CONTACT_EMAIL not in stored.last_error
 
 
 def test_rows_are_drained_up_to_the_batch_size(

@@ -16,6 +16,7 @@ from app.db.repositories.fields import (
     ReviewCursor,
     decode_review_cursor,
     encode_review_cursor,
+    fields_for_reseal,
 )
 from app.db.repositories.notifications import (
     DEFAULT_NOTIFICATION_LIMIT,
@@ -53,6 +54,7 @@ __all__ = [
     "decode_review_cursor",
     "encode_review_cursor",
     "enqueue_event",
+    "fields_for_reseal",
     "normalize_email",
     "replay_dead_lettered",
 ]

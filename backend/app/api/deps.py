@@ -28,6 +28,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
+from app.core.crypto import FieldCipher, MissingEncryptionKeyError, build_cipher
 from app.core.principal import Principal
 from app.core.security import InvalidTokenError, TokenExpiredError, decode_access_token
 from app.db.enums import UserRole
@@ -50,6 +51,28 @@ _UNAUTHENTICATED = "Not authenticated"
 def app_settings(request: Request) -> Settings:
     """The settings the running app was built with (not a fresh singleton)."""
     return cast(Settings, request.app.state.settings)
+
+
+def cipher_or_503(settings: Settings) -> FieldCipher:
+    """The configured field cipher, or a 503 explaining what is missing.
+
+    ``ENCRYPTION_KEY`` is optional at start-up (an installation that only ingests
+    does not need it), so a missing key is a deployment state rather than a bug.
+    Failing closed here means an unconfigured installation cannot decrypt — and,
+    on the write side, cannot quietly store a value in plaintext.
+
+    It lives here rather than in a router because two do the same thing: ``review``
+    reveals and stores field values, and ``notifications`` must decrypt one to
+    address a message. Two copies of this mapping is how one route starts
+    answering 500 for a missing key while the other answers 503.
+    """
+    try:
+        return build_cipher(settings)
+    except MissingEncryptionKeyError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Field values cannot be read: ENCRYPTION_KEY is not configured",
+        ) from None
 
 
 def _unauthorized() -> HTTPException:

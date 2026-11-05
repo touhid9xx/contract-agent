@@ -60,7 +60,7 @@ def add_field(
                 contract_id=contract.id,
                 field_name=field_name,
                 raw_value=cipher.encrypt(value),
-                normalized_value=value,
+                normalized_value=cipher.encrypt(value),
                 confidence=confidence,
                 status=status,
             )

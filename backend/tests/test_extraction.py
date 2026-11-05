@@ -338,9 +338,30 @@ def test_re_running_updates_the_same_row_in_place(
     assert len(rows) == 1
     assert outcome.created == 0
     assert outcome.updated == 1
-    assert rows[FieldName.EMAIL].normalized_value == "second@example.test"
+    stored = rows[FieldName.EMAIL].normalized_value
+    assert stored is not None
+    assert cipher.decrypt(stored) == "second@example.test"
     # The optimistic lock makes a stale reviewer lose the race rather than win it.
     assert rows[FieldName.EMAIL].version == 2
+
+
+def test_the_normalized_value_is_sealed_as_well_as_the_raw_one(
+    db_session: Session, contract: Contract, cipher: FieldCipher
+) -> None:
+    # Gap 20: the column the decision and dispatch policies read held the same PII
+    # as ``raw_value`` but in the clear, so encrypting only one of them left the
+    # value readable in the same row.
+    run(
+        db_session,
+        contract,
+        StubExtractor(FieldCandidate(FieldName.EMAIL, "a.rahman@example.test", 0.95)),
+        cipher,
+    )
+
+    row = field_rows(db_session, contract)[FieldName.EMAIL]
+    assert row.normalized_value is not None
+    assert "a.rahman@example.test" not in row.normalized_value
+    assert cipher.decrypt(row.normalized_value) == "a.rahman@example.test"
 
 
 def test_a_field_a_human_decided_is_never_overwritten(
@@ -352,7 +373,7 @@ def test_a_field_a_human_decided_is_never_overwritten(
             contract_id=contract.id,
             field_name=FieldName.EMAIL,
             raw_value=cipher.encrypt("reviewed@example.test"),
-            normalized_value="reviewed@example.test",
+            normalized_value=cipher.encrypt("reviewed@example.test"),
             confidence=0.55,
             status=FieldStatus.APPROVED,
         )
@@ -369,7 +390,8 @@ def test_a_field_a_human_decided_is_never_overwritten(
     row = field_rows(db_session, contract)[FieldName.EMAIL]
     assert outcome.skipped_reviewed == 1
     assert outcome.stored == 0
-    assert row.normalized_value == "reviewed@example.test"
+    assert row.normalized_value is not None
+    assert cipher.decrypt(row.normalized_value) == "reviewed@example.test"
     assert row.status is FieldStatus.APPROVED
 
 
@@ -387,9 +409,9 @@ def test_the_most_confident_candidate_wins_for_a_field(
         cipher,
     )
 
-    assert field_rows(db_session, contract)[FieldName.EMAIL].normalized_value == (
-        "contact@example.test"
-    )
+    stored = field_rows(db_session, contract)[FieldName.EMAIL].normalized_value
+    assert stored is not None
+    assert cipher.decrypt(stored) == "contact@example.test"
 
 
 def test_an_unusable_value_is_discarded_and_the_rest_survive(

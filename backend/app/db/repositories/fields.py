@@ -21,12 +21,14 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from sqlalchemy import ColumnElement, and_, or_
+from sqlalchemy import ColumnElement, and_, or_, select
+from sqlalchemy.orm import Session
 
 from app.db.enums import FieldName, FieldStatus
 from app.db.models import Contract, ExtractedField
@@ -36,6 +38,10 @@ from app.db.repositories.base import TenantScopedRepository
 #: Bounded at the query, not in the route, so no caller can ask for the whole table.
 DEFAULT_REVIEW_QUEUE_LIMIT = 100
 MAX_REVIEW_QUEUE_LIMIT = 500
+
+#: How many field rows one ``reseal-fields`` run rewrites. Bounded like every other
+#: operator batch, so a mistake cannot rewrite an unbounded table in one transaction.
+DEFAULT_RESEAL_LIMIT = 500
 
 #: A cursor is a page marker, not a capability: it is opaque so callers do not
 #: start parsing it, but it carries no secret and needs no signature. Everything
@@ -244,6 +250,30 @@ class ExtractedFieldRepository(TenantScopedRepository[ExtractedField]):
         field.source_page = source_page
         field.source_line = source_line
         return field
+
+
+def fields_for_reseal(
+    session: Session,
+    *,
+    field_ids: Sequence[int] | None = None,
+    limit: int = DEFAULT_RESEAL_LIMIT,
+) -> list[ExtractedField]:
+    """Fetch field rows for ``python -m app.cli reseal-fields``, **unscoped**.
+
+    This is the third audited exception to tenant scoping, alongside
+    ``dead_lettered`` and ``contract_for_operator``. An operator running the CLI has
+    a database connection, not a principal, so there is no tenant to be scoped to —
+    and scoping it to one tenant would be actively wrong: every tenant's plaintext
+    has to be sealed, and a per-tenant run leaves the others behind while looking
+    like it succeeded.
+
+    Ordered by id so ``--limit`` takes a stable prefix and a second run continues
+    where the first stopped instead of re-reading the same rows.
+    """
+    stmt = select(ExtractedField).order_by(ExtractedField.id.asc()).limit(limit)
+    if field_ids is not None:
+        stmt = stmt.where(ExtractedField.id.in_(list(field_ids)))
+    return list(session.execute(stmt).scalars())
 
 
 def _after(cursor: ReviewCursor) -> ColumnElement[bool]:

@@ -117,11 +117,15 @@ _MAX_PHONE_DIGITS = 15
 def normalize_value(field_name: FieldName, value: str) -> str:
     """Return the canonical comparison form of ``value``.
 
-    ``ExtractedField.normalized_value`` is the column downstream code compares
-    against ("does this contract's end date fall inside the window?"), so the
-    canonical form is defined here and nowhere else. A value that cannot be
-    normalized raises ``ValueError``; the caller discards the candidate rather
-    than storing something a later query would silently never match.
+    The canonical form is defined here and nowhere else. A value that cannot be
+    normalized raises ``ValueError``; the caller discards the candidate rather than
+    storing something a later reader would have to guess at.
+
+    The returned string is *plaintext* and is encrypted by the caller before it
+    reaches the database (gap 20, D10-11). That is why the result is no longer
+    comparable in SQL: ``ExtractedField.normalized_value`` is ciphertext, so
+    "find the contract with this email" is not a query the schema offers. Nothing
+    in the codebase asked for one; a blind index is what to add if something does.
     """
     text = _WHITESPACE.sub(" ", value).strip()
     if not text:
@@ -267,14 +271,18 @@ def extract_contract(
 
         confidence = _quantize(candidate.confidence)
         status = _status_for(confidence, review_threshold)
+        # Both value columns are encrypted, and both are encrypted here rather than
+        # in the repository: this is the stage that already refuses to run without a
+        # key, so no write path can reach storage with plaintext in either column.
         raw_value = cipher.encrypt(candidate.value.strip())
+        sealed_normalized = cipher.encrypt(normalized)
 
         if row is None:
             existing[candidate.field_name] = repository.create(
                 contract_id=contract.id,
                 field_name=candidate.field_name,
                 raw_value=raw_value,
-                normalized_value=normalized,
+                normalized_value=sealed_normalized,
                 confidence=confidence,
                 status=status,
                 source_page=candidate.source_page,
@@ -285,7 +293,7 @@ def extract_contract(
             repository.overwrite(
                 row,
                 raw_value=raw_value,
-                normalized_value=normalized,
+                normalized_value=sealed_normalized,
                 confidence=confidence,
                 status=status,
                 source_page=candidate.source_page,

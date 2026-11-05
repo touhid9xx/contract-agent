@@ -9,6 +9,7 @@ string is the easiest way for PII to reach a log.
 from __future__ import annotations
 
 import base64
+from typing import Any
 
 import pytest
 from cryptography.fernet import Fernet
@@ -20,12 +21,13 @@ from app.core.crypto import (
     FieldCipher,
     MissingEncryptionKeyError,
     build_cipher,
+    is_sealed,
 )
 
 PLAINTEXT = "a.rahman@example.test"
 
 
-def make_settings(**overrides: object) -> Settings:
+def make_settings(**overrides: Any) -> Settings:
     return Settings(app_env="test", log_json=False, **overrides)
 
 
@@ -116,3 +118,58 @@ def test_a_key_of_the_wrong_length_is_rejected_at_startup() -> None:
 
     with pytest.raises(ValidationError):
         make_settings(encryption_key=short)
+
+
+# --- telling a token from a plaintext value (gap 20) ----------------------
+# ``is_sealed`` answers the one question a failed decryption cannot: is this value
+# plaintext that needs sealing, or a token sealed under a key this process does
+# not hold? Re-sealing the second destroys it, so the shape test is what protects
+# a rotated database from the repair script.
+def test_a_real_token_is_recognised(cipher: FieldCipher) -> None:
+    assert is_sealed(cipher.encrypt(PLAINTEXT))
+
+
+def test_a_tampered_token_is_still_recognised_as_a_token(cipher: FieldCipher) -> None:
+    # It must be *left alone*, not sealed on top of: decryption will refuse it and
+    # the reseal run reports it, which is the correct outcome for a wrong key.
+    token = cipher.encrypt(PLAINTEXT)
+    replacement = "A" if token[10] != "A" else "B"
+
+    assert is_sealed(f"{token[:10]}{replacement}{token[11:]}")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        PLAINTEXT,
+        "",
+        "+442079460958",
+        "2025-01-01",
+        "1 Test Street",
+        # Right prefix and length would be the dangerous case; this one is short.
+        "gAAAAA",
+        # Long enough and base64url, but the prefix is wrong.
+        "A" * 120,
+    ],
+)
+def test_a_plaintext_value_is_not_mistaken_for_a_token(value: str) -> None:
+    assert not is_sealed(value)
+
+
+def test_a_plaintext_that_mimics_a_token_is_left_alone(cipher: FieldCipher) -> None:
+    """The error is deliberately one-directional: leave it alone, never seal twice.
+
+    A value can satisfy the shape test without being a real token. Choosing to read
+    it as a token costs us a plaintext row that the reseal run silently skips — a
+    visible, repairable state, since the column still reads as plaintext. Choosing
+    the other way would mean re-sealing a token from a key we no longer hold, which
+    overwrites the only copy of the value with ciphertext-of-ciphertext. The
+    unrecoverable mistake is the one this direction avoids.
+
+    It is also unreachable for the values this column actually stores: ``@`` and
+    ``.`` are outside the base64url alphabet, so an email or E.164 phone can never
+    pass the alphabet check.
+    """
+    looks_like_a_token = "gAAAAA" + "A" * 100
+
+    assert is_sealed(looks_like_a_token) is True

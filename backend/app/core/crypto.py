@@ -26,6 +26,7 @@ __all__ = [
     "FieldCipher",
     "MissingEncryptionKeyError",
     "build_cipher",
+    "is_sealed",
 ]
 
 
@@ -73,6 +74,35 @@ class FieldCipher:
             raise DecryptionError(
                 "stored value could not be decrypted with the configured ENCRYPTION_KEY"
             ) from exc
+
+
+#: A Fernet token is ``base64url(0x80 || 8-byte timestamp || IV || ciphertext ||
+#: HMAC)``. The version byte ``0x80`` plus the always-zero high bytes of a
+#: timestamp (every instant before 2106 fits in five) encode to this prefix.
+_SEALED_PREFIX = "gAAAAA"
+#: 1 version byte + 8 timestamp bytes + 16 IV + 32 HMAC, base64url-encoded.
+_SEALED_MIN_LENGTH = 76
+_SEALED_ALPHABET = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_=")
+
+
+def is_sealed(value: str) -> bool:
+    """Whether ``value`` is already a Fernet token rather than a plaintext value.
+
+    Recognised by **shape**, deliberately not by attempting a decryption. A value
+    that fails to decrypt is ambiguous: it is either plaintext written before gap
+    20 was closed, or a token sealed with a key this process does not have. The
+    two need opposite responses — seal the first, leave the second strictly alone
+    — and re-sealing the second would wrap the ciphertext in a new token and
+    destroy the value for good. The token's own format answers the question the
+    decryption cannot.
+
+    The test errs in the safe direction: a one-in-a-trillion plaintext that
+    happens to look like base64url is encrypted (harmless), while a real token is
+    never mistaken for plaintext (which would be data loss).
+    """
+    if len(value) < _SEALED_MIN_LENGTH or not value.startswith(_SEALED_PREFIX):
+        return False
+    return all(character in _SEALED_ALPHABET for character in value)
 
 
 def build_cipher(settings: Settings) -> FieldCipher:

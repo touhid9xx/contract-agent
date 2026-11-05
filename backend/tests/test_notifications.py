@@ -36,6 +36,7 @@ from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import select, update
@@ -47,6 +48,7 @@ from sqlalchemy.orm import Session, sessionmaker
 # second writer mid-request; see ``test_a_lost_race_is_reported_as_a_conflict``.
 from app.api.v1.notifications import _commit_or_conflict
 from app.core.config import Settings
+from app.core.crypto import FieldCipher
 from app.db.base import utc_now
 from app.db.enums import (
     Channel,
@@ -80,6 +82,12 @@ EMAIL = "ops@acme.test"
 #: The value no response and no row may disclose. Distinct string so a leak is
 #: greppable in a failure message.
 CONTACT_EMAIL = "a.rahman@example.test"
+
+#: One key for the whole module, so the value a helper seals is the value the app
+#: under test unseals. A per-test key would make every send fail with a decryption
+#: error that looks like a policy refusal.
+ENCRYPTION_KEY = Fernet.generate_key().decode("ascii")
+CIPHER = FieldCipher(ENCRYPTION_KEY)
 
 
 # --- fixtures and helpers -------------------------------------------------
@@ -133,8 +141,9 @@ def add_field(
 ) -> int:
     """Store one extracted field and return its id.
 
-    ``normalized_value`` is written in the clear because encryption at rest applies
-    to ``raw_value`` (F7) and the policy reads the normalized column — see gap 20.
+    Sealed with :data:`CIPHER` because the dispatch policy reads
+    ``normalized_value`` and decrypts it (gap 20): a row written in the clear is
+    refused as unreadable rather than sent.
     """
     with session_scope(session_factory) as session:
         row = ExtractedField(
@@ -142,7 +151,7 @@ def add_field(
             contract_id=contract.id,
             field_name=field_name,
             raw_value=None,
-            normalized_value=value,
+            normalized_value=CIPHER.encrypt(value) if value is not None else None,
             confidence=0.93,
             status=status,
         )
@@ -273,9 +282,16 @@ def _client(
     The window has to be moved per test rather than trusted to the default, because
     a suite that ran at 03:00 UTC would otherwise fail the "a message is sent" cases
     for a reason that has nothing to do with the code under test.
+
+    The encryption key is pinned to :data:`ENCRYPTION_KEY` so the routes unseal what
+    :func:`add_field` sealed; without it every dispatch is a ``503``.
     """
     tuned = settings.model_copy(
-        update={"quiet_hours_start": quiet_start, "quiet_hours_end": quiet_end}
+        update={
+            "quiet_hours_start": quiet_start,
+            "quiet_hours_end": quiet_end,
+            "encryption_key": ENCRYPTION_KEY,
+        }
     )
     with TestClient(create_app(tuned, session_factory=session_factory)) as test_client:
         yield test_client

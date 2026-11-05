@@ -1069,6 +1069,75 @@ in place where the real route appends. Still open: `llm_model` legitimately read
 `qwen2:7b` in the fixture against `deterministic` in a real row — demo narrative,
 not drift.
 
+## `normalized_value` is sealed, and a repair path exists ✅ (gap 20, `D10-11`)
+
+The column the decision and dispatch policies read was plain `Text`. This slice makes
+it ciphertext on both write paths and gives an operator a way to fix rows written
+before it. No migration: the column type does not change, only what is stored in it.
+
+What lands:
+
+1. **One seam for "a cipher or a refusal to start".** `cipher_or_503(settings)` in
+   `app/api/deps.py` was extracted out of `review.py`, so a route that needs the key
+   answers `503` for a missing key rather than improvising per-router. The reveal
+   route and the notifications router both go through it.
+2. **Both write paths seal.** `extract_contract` seals on the create *and* the
+   overwrite branch (the second is the one that would have leaked a corrected value),
+   and `_apply_correction` seals in `review.py`. `raw_value` already did.
+3. **Presence still reads the column; sending decrypts.** `decision.py` asks only
+   whether a value exists, so it needs no cipher — an encrypted token is as
+   non-`None` as a plaintext one. `recipient_for(channel, fields, cipher)` is the one
+   reader that needs the text, and it decrypts at send time.
+4. **`is_sealed(value)` recognises a token by shape**, not by attempting a decrypt:
+   an unreadable row and a plaintext row are different problems, and the repair
+   command must be able to tell them apart. Shape is `gAAAAA` prefix, ≥76 chars,
+   base64url body — Fernet's own envelope, not a guess.
+5. **The repair path is a CLI, not a data migration.** `python -m app.cli
+   reseal-fields` (with `--ids`, `--limit`, `--dry-run`) seals unsealed rows, skips
+   ones already sealed, counts `DecryptionError` separately and exits `4`
+   (`EXIT_UNREADABLE`) rather than re-sealing a token it cannot read. This is the
+   command `dispatch.py` already promised; it now exists.
+6. **Fail-closed everywhere it matters.** No key: the scheduler claims nothing
+   (`notification_scheduler.py` returns before claiming), routes answer `503`, and the
+   CLI exits `3`. A value sealed under a *different* key decrypts to
+   `REFUSAL_RECIPIENT_UNAVAILABLE`, which is in `SUPPRESSING_REFUSALS`, so the row
+   parks `suppressed` instead of retrying forever — and the plaintext never reaches
+   `last_error`.
+7. **Six test helpers sealed rather than five.** The last one
+   (`test_contract_fields.py`) passed while writing plaintext, because the route it
+   exercises returns no values — a green suite over a stale fixture.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Full suite, SQLite | `pytest` in `backend/`, `MYSQL_TEST_URL` **unset** | **510 collected — 503 passed, 7 skipped, 0 failed** (JUnit: `tests=510 failures=0 errors=0 skipped=7`) |
+| Full suite, **real MySQL 8.4** | `pytest` with `MYSQL_TEST_URL` on `:3307` | **NOT RUN — see below** |
+| Lint | `ruff check .` (repo root) | All checks passed |
+| Format | `ruff format --check .` (repo root) | **84 files** already formatted |
+| Types | `mypy app` (strict) | clean, **49 source files** |
+| Security lint | `bandit -q -r app` | **0 issues** (exit 0; 3 expected `nosec B104`) |
+
+**The MySQL row is not green, it is unrun, and that is recorded rather than papered
+over.** On the machine this slice was prepared on, the Docker daemon was down
+(`npipe:////./pipe/dockerDesktopLinuxEngine` unreachable), `Docker Desktop.exe` was
+absent from its standard install path, and `127.0.0.1:3306` **and** `:3307` both
+refused TCP. So the 6 MySQL-dependent tests — the `FOR UPDATE SKIP LOCKED` claim, the
+ENUM columns, the `NUMERIC(4,3)` confidence scale — have not been executed against
+this tree, and neither has an `alembic upgrade head` / `alembic check` (there is no
+migration here to apply, but the topology claim is still unverified on this tree).
+The SQLite column above is a real run; the MySQL column is the gap the earlier F9
+report made the mistake of filling in by expectation. Reproduce with the block under
+*GATE 2 — signed*; the expectation is **509 passed, 1 skipped** (only `KAFKA_LIVE`).
+
+The collected total grew by **28** over GATE 2's 482: `tests/test_reseal.py` is a new
+module of **15**, and `tests/test_crypto.py` (**20** now) and
+`tests/test_notification_scheduler.py` (**17** now) carry the rest.
+
+**Two residues, stated rather than buried.** Rows written before this slice stay
+plaintext until an operator runs `reseal-fields`, and **nothing schedules or alerts on
+that** — there is no probe that counts unsealed rows. And `ENCRYPTION_KEY` rotation is
+unsupported: a rotated key makes every stored recipient unreadable until the old one
+is restored, which is the fail-closed behaviour above, not a bug, but it is unhandled.
+
 ## Known gaps / issues
 
 1. **`gitleaks` needs Docker** and is manual-stage only (D1-03). Run
@@ -1238,7 +1307,9 @@ not drift.
     flag-review body cannot carry a channel, `original_channel` is written once,
     and a re-run appends instead of overwriting. The frontend now calls the routes
     that exist instead of narrating fields no route returns.
-20. **`normalized_value` is plaintext PII, and it is the column the policy reads.**
+20. ~~**`normalized_value` is plaintext PII, and it is the column the policy reads.**~~
+    — **closed by D10-11.** The paragraph below is the defect as it was found; how it
+    was resolved follows it.
     F7 encrypts `raw_value`, and the fields API never carries either column — but
     `ExtractedField.normalized_value` is a plain `Text` column holding the
     *canonical* form of the same data (a lowercased email, an E.164 phone), and
@@ -1251,6 +1322,16 @@ not drift.
     patch: encrypt this column too and compare on a hash, or keep it and state the
     exception openly. It is not a migration to slip in — it changes how the decision
     and dispatch policies read fields.
+
+    **How it was closed:** the column is ciphertext on both write paths
+    (`extract_contract`'s create and overwrite branches, and `_apply_correction` in
+    `review.py`), and the one reader that needs the text — `recipient_for` — decrypts
+    it at send time. The decision policy's presence check needs no cipher, because it
+    asks only whether a value exists. The second option offered above, a blind index
+    to compare on a hash, was **declined**: nothing in this build searches fields by
+    value, so the index would have had no reader (D10-11). Rows written before the
+    slice are repaired by an operator running `python -m app.cli reseal-fields`,
+    which recognises a token by shape and refuses to re-seal one it cannot read.
 21. ~~**A `Notification` cannot be locked against a concurrent dispatch.**~~ —
     **closed by `0003` (`0f5da36`).** Two mechanisms, because one was not enough:
     `version` + `__mapper_args__` makes the loser's `UPDATE` match zero rows, and
@@ -1400,17 +1481,22 @@ That is now the shipped behaviour whenever SMTP is on.
 is `.husky/_` and both hooks are live; the wiring was proven by a commit that git
 *refused*, not by reading config. Every commit from here on is gated for real.
 
-One alternative remains, and it is gap-sized rather than milestone-sized:
+One gap-sized question stood here rather than a milestone-sized one, and it has since
+been answered:
 
-- **Decide what to do about `normalized_value` (gap 20).** This was a three-gap
-  schema cluster; gap 21 was closed by `0003` (`0f5da36`) and gap 19 by `0003` plus
-  `0004` (the `feat(g19)` slice), so one question is left and it is not a migration
-  to slip in. `ExtractedField.raw_value`
+- ~~**Decide what to do about `normalized_value` (gap 20).**~~ — **decided and
+  implemented after this record was signed (D10-11).** This was a three-gap
+  schema cluster, and all three are now closed: gap 21 by `0003` (`0f5da36`), gap 19
+  by `0003` plus `0004` (the `feat(g19)` slice), and gap 20 by the slice that sealed
+  the column on both write paths and added the `reseal-fields` repair command. The
+  text below is the question as it stood, kept rather than deleted because the answer
+  is only meaningful against it. `ExtractedField.raw_value`
   is Fernet ciphertext, but `normalized_value` — the canonical email or E.164 phone
-  the decision and dispatch policies actually read — is a plain `Text` column, so
-  the "no raw PII at rest" non-negotiable is contradicted one column over. It needs
+  the decision and dispatch policies actually read — was a plain `Text` column, so
+  the "no raw PII at rest" non-negotiable was contradicted one column over. It needed
   a decision (encrypt it and compare on a hash, or keep it and record the exception
-  openly), because either answer changes how those two policies read fields.
+  openly), because either answer changes how those two policies read fields. It got
+  one: **encrypt**, and the blind index was declined as an index with no reader.
 
 **Open at GATE 2 — say these out loud, do not bury them:** no Kafka broker has
 ever been on the other end of a publish (no compose service; `live` test opt-in);
@@ -1558,9 +1644,16 @@ sign-off, not footnotes:**
 5. **No screen talks to the real API.** `frontend/` still calls the mocked demo
    backend, so the `review`, `agent` and `notification` routes have only ever been
    called by `TestClient`.
-6. **`normalized_value` is still plaintext** (gap 20) — the one place a shipped
+6. ~~**`normalized_value` is still plaintext** (gap 20) — the one place a shipped
    column contradicts "no raw PII at rest", and it needs a decision (encrypt +
-   compare on a blind index, or keep it and record the exception), not a patch.
+   compare on a blind index, or keep it and record the exception), not a patch.~~
+   **Amended after the sign-off, not deleted from it:** gap 20 is closed by D10-11
+   after this record was signed. The column is ciphertext on both write paths and is
+   decrypted only by the send. Two residues remain, stated rather than buried — rows
+   written before that slice stay plaintext until an operator runs
+   `python -m app.cli reseal-fields`, and **nothing schedules or alerts on that**; and
+   `ENCRYPTION_KEY` rotation is unsupported, so a rotated key makes every stored
+   recipient unreadable until the old key is restored.
 7. ~~**Every contract predating `0002` is un-contactable** until consent is set row
    by row (gap 18), and an `AgentDecision` still cannot be overridden or flagged
    (gap 19) even though the `version` column those routes need now exists.~~

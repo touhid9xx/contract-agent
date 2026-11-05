@@ -61,6 +61,7 @@ from typing import Any, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.core.config import Settings
+from app.core.crypto import FieldCipher
 from app.db.enums import Channel, NotificationStatus
 from app.db.models import Contract, ExtractedField, Notification
 from app.workers.decision import (
@@ -222,11 +223,12 @@ class OutgoingMessage:
     a debug log or a pytest failure that echoes the dataclass must not print an
     email address or a phone number into a log sink.
 
-    It is read from ``ExtractedField.normalized_value``, which is the column F9
-    already used to decide reachability, rather than by decrypting ``raw_value``.
-    Reading the same column the decision rested on is what makes "the value we
-    sent to" and "the value we chose on" one fact; see gap 20 in ``STATUS.md`` for
-    the encryption consequence of that column being plain text.
+    It is decrypted from ``ExtractedField.normalized_value``, which is the column
+    F9 already used to decide reachability, rather than from ``raw_value``. Reading
+    the same column the decision rested on is what makes "the value we sent to" and
+    "the value we chose on" one fact. That column is ciphertext (gap 20, D10-11), so
+    this value exists in the clear only between :func:`recipient_for` and the
+    transport — which is why it is ``repr=False``.
     """
 
     channel: Channel
@@ -436,17 +438,26 @@ def assert_may_contact(contract: Contract, *, channel: Channel) -> None:
         )
 
 
-def recipient_for(channel: Channel, fields: Sequence[ExtractedField]) -> str:
+def recipient_for(channel: Channel, fields: Sequence[ExtractedField], cipher: FieldCipher) -> str:
     """The approved value this channel would contact, or raise.
 
     Deliberately the same rule F9 used to choose the channel (``USABLE_FIELD_STATUSES``
     plus a present ``normalized_value``): if this function could accept a field the
-    decision rejected, the send would go somewhere the decision never approved.
+    decision rejected, the send would go somewhere the decision never approved. That
+    presence test still reads the column directly — "is there a value?" is a
+    question the ciphertext answers, and asking it without decrypting is what keeps
+    the decision path out of the PII.
+
+    Returns the *plaintext* value, decrypted here and nowhere else, so the
+    recipient exists in the clear only for the span of one send.
 
     Raises rather than returning ``None`` so the caller in
     :func:`dispatch_notification` has one failure to map onto
     :data:`REFUSAL_RECIPIENT_UNAVAILABLE`, and so a missing value cannot be mistaken
-    for an empty string address.
+    for an empty string address. A row written before gap 20 was closed still holds
+    plaintext, which ``decrypt`` rejects as a ``DecryptionError``: that lands in the
+    same refusal, so an unmigrated row refuses to send instead of sending either
+    ciphertext or nothing — ``python -m app.cli reseal-fields`` is the migration.
 
     It lives in this policy module rather than in the route that first needed it
     because the scheduler (gap 22) resolves a recipient with no HTTP request in
@@ -460,7 +471,7 @@ def recipient_for(channel: Channel, fields: Sequence[ExtractedField]) -> str:
             and candidate.status in USABLE_FIELD_STATUSES
             and candidate.normalized_value
         ):
-            return candidate.normalized_value
+            return cipher.decrypt(candidate.normalized_value)
     raise LookupError(f"no usable {wanted.value} value for channel {channel.value}")
 
 

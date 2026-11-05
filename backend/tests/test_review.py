@@ -116,7 +116,7 @@ def add_field(
             contract_id=contract.id,
             field_name=field_name,
             raw_value=cipher.encrypt(value) if value is not None else None,
-            normalized_value=value,
+            normalized_value=cipher.encrypt(value) if value is not None else None,
             confidence=confidence,
             status=status,
         )
@@ -724,7 +724,9 @@ def test_editing_stores_the_corrected_value_normalized_and_encrypted(
     stored = load_field(session_factory, field_id)
     # Normalized for the field it belongs to, not stored as typed: an
     # unparseable correction would pass review and fail at send time.
-    assert stored.normalized_value == "a.rahman@example.test"
+    assert stored.normalized_value is not None
+    assert "a.rahman@example.test" not in stored.normalized_value
+    assert cipher.decrypt(stored.normalized_value) == "a.rahman@example.test"
     # Encrypted at rest, exactly like an extracted value (D7-01).
     assert stored.raw_value != "A.Rahman@Example.TEST"
     assert cipher.decrypt(stored.raw_value or "") == "A.Rahman@Example.TEST"
@@ -759,7 +761,8 @@ def test_an_unparseable_correction_is_refused_and_changes_nothing(
 
     stored = load_field(session_factory, field_id)
     assert stored.status is FieldStatus.PENDING_REVIEW
-    assert stored.normalized_value == "+442079460958"
+    assert stored.normalized_value is not None
+    assert cipher.decrypt(stored.normalized_value) == "+442079460958"
     assert stored.version == 1
     assert audit_rows(session_factory) == []
 

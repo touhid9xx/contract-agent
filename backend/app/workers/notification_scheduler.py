@@ -51,6 +51,7 @@ import structlog
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings, get_settings
+from app.core.crypto import FieldCipher, build_cipher
 from app.core.logging import configure_logging
 from app.db.base import utc_now
 from app.db.enums import NotificationStatus
@@ -125,16 +126,32 @@ class NotificationScheduler:
         settings: Settings,
         batch_size: int | None = None,
         poll_interval_seconds: float | None = None,
+        cipher: FieldCipher | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._sender = sender
         self._settings = settings
+        # Built on first use, not here: an installation with no ``ENCRYPTION_KEY``
+        # should fail at the tick that needs it (with a log line naming the reason)
+        # rather than refuse to construct a worker that might never be asked to send.
+        self._cipher = cipher
         self._batch_size = settings.notification_batch_size if batch_size is None else batch_size
         self._poll_interval = (
             settings.notification_poll_interval_seconds
             if poll_interval_seconds is None
             else poll_interval_seconds
         )
+
+    def _field_cipher(self) -> FieldCipher:
+        """The cipher used to read a recipient, built once and reused.
+
+        ``build_cipher`` fails closed on a missing or malformed key; that raises out
+        of the tick, where :meth:`run_forever` logs it as a failed tick instead of
+        mistaking it for a per-row refusal.
+        """
+        if self._cipher is None:
+            self._cipher = build_cipher(self._settings)
+        return self._cipher
 
     def run_once(self) -> int:
         """One tick: dispatch up to ``batch_size`` rows, returning how many sent.
@@ -148,6 +165,15 @@ class NotificationScheduler:
             log.debug(
                 "notification_scheduler_no_transport",
                 sender=type(self._sender).__name__,
+            )
+            return 0
+        if not self._settings.has_encryption_key:
+            # Same shape of early return as the missing transport above, for the same
+            # reason: since gap 20, no recipient can be read without the key, so every
+            # row would refuse and the batch would spend its attempts on that alone.
+            log.debug(
+                "notification_scheduler_no_encryption_key",
+                effect="recipient values cannot be decrypted",
             )
             return 0
 
@@ -225,7 +251,7 @@ class NotificationScheduler:
                 row,
                 contract,
                 self._sender,
-                lambda: recipient_for(row.channel, fields),
+                lambda: recipient_for(row.channel, fields, self._field_cipher()),
                 now=utc_now(),
                 settings=self._settings,
                 fields=fields,

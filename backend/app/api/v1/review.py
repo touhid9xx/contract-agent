@@ -39,15 +39,10 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
-from app.api.deps import app_settings, get_request_session, require_roles
+from app.api.deps import app_settings, cipher_or_503, get_request_session, require_roles
 from app.api.v1.contracts import ExtractedFieldSummary, field_summary
 from app.core.config import Settings
-from app.core.crypto import (
-    DecryptionError,
-    FieldCipher,
-    MissingEncryptionKeyError,
-    build_cipher,
-)
+from app.core.crypto import DecryptionError, FieldCipher
 from app.core.middleware import correlation_id_or_new
 from app.core.principal import Principal
 from app.db.base import utc_now
@@ -177,23 +172,6 @@ class FieldValueResponse(BaseModel):
     field_name: FieldName
     value: str
     version: int
-
-
-def _cipher_or_503(settings: Settings) -> FieldCipher:
-    """The configured cipher, or a 503 explaining what is missing.
-
-    ``ENCRYPTION_KEY`` is optional at start-up (an installation that only ingests
-    does not need it), so a missing key is a deployment state rather than a bug.
-    Failing closed here means an unconfigured installation cannot decrypt, and also
-    cannot quietly store a correction in plaintext.
-    """
-    try:
-        return build_cipher(settings)
-    except MissingEncryptionKeyError:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Field values cannot be read: ENCRYPTION_KEY is not configured",
-        ) from None
 
 
 def _state(field: ExtractedField) -> dict[str, Any]:
@@ -364,7 +342,7 @@ def review_field(
     before = _state(field)
     try:
         if payload.action == "edit":
-            _apply_correction(field, payload, _cipher_or_503(settings))
+            _apply_correction(field, payload, cipher_or_503(settings))
         field.status = _DECISION_STATUS[payload.action]
         field.reviewed_by = principal.user_id
         field.reviewed_at = utc_now()
@@ -417,6 +395,11 @@ def _apply_correction(
     The value is normalized for the field it belongs to, not stored as typed: a
     correction that ends up as an unparseable phone number would pass review and then
     fail at send time, which is the failure this whole gate exists to prevent.
+
+    Both columns written here are ciphertext (gap 20, D10-11). ``raw_value`` always
+    was; ``normalized_value`` became one when the plaintext copy of the same email
+    address turned out to be the contradiction of the "no raw PII at rest" rule that
+    F7's encryption was supposed to close.
     """
     raw = (payload.value or "").strip()
     try:
@@ -429,7 +412,7 @@ def _apply_correction(
             detail=f"The value is not a valid {field.field_name.value}",
         ) from None
     field.raw_value = cipher.encrypt(raw)
-    field.normalized_value = normalized
+    field.normalized_value = cipher.encrypt(normalized)
 
 
 @router.post(
@@ -457,7 +440,7 @@ def reveal_field_value(
     if field is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Field not found")
 
-    cipher = _cipher_or_503(settings)
+    cipher = cipher_or_503(settings)
     try:
         value = decrypt_for_review(field, cipher)
     except DecryptionError:
