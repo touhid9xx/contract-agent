@@ -192,8 +192,10 @@ including the Phase 0 demo files. D0-08 is closed.
 
 ## D1-10 — Line endings are pinned in `.gitattributes`, because `core.autocrlf` outranks the hook
 
-- **Decision:** the repo carries a `.gitattributes` whose whole content is
-  `* text=auto eol=lf`. One rule; git's own binary detection is left on.
+- **Decision:** the repo carries a `.gitattributes` whose only rule is
+  `* text=auto eol=lf` — one line, plus the comment explaining why. Git's own
+  binary detection is left on rather than enumerated per extension, because the
+  tree currently holds no binary files at all and a list would rot.
 - **Why:** `mixed-line-ending --fix=lf` normalizes the worktree *after* checkout,
   but `core.autocrlf` decides what the checkout writes in the first place, and it
   is `true` on a default Windows install. The hook therefore rewrites files git

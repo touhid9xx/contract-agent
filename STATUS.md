@@ -67,7 +67,7 @@ counts the two states in this system that fail *silently*: notifications parked
 as sealed rather than as plaintext), it writes nothing, and it exits
 `EXIT_ATTENTION` (5) when either count is non-zero, so a cron entry or a CI step can
 watch it (D10-12). **Nothing schedules it yet** — it is a check, not an alarm.
-**The fifth slice is tooling, not product code.** A new `.gitattributes` pins
+**The fifth slice is tooling, not product code** (`16e8bb5`). A new `.gitattributes` pins
 `* text=auto eol=lf`, because `core.autocrlf` (a *checkout* setting, `true` on this
 host both locally and globally) and `mixed-line-ending --fix=lf` (a *post-checkout*
 hook) had been disagreeing: the tree only looked LF because the hook had already
@@ -1224,7 +1224,7 @@ answers are narrowed, not closed. **Nothing schedules it**: no cron entry, no al
 route, no pager is added, and a command nobody runs is worth little more than the log
 line it replaces. That limit is stated in `D10-12` rather than left to be discovered.
 
-## Checkout line endings pinned to LF ✅ (`D1-10`)
+## Checkout line endings pinned to LF ✅ (`D1-10`, `16e8bb5`)
 
 This closes the item carried as "`core.autocrlf=true` vs `mixed-line-ending
 --fix=lf`". It was not a style disagreement — the two settings operate at different
@@ -1258,7 +1258,7 @@ than left to a hook that may or may not have run.
 | Full suite, SQLite | `pytest`, `MYSQL_TEST_URL` **unset** | **522 passed, 7 skipped, 0 failed** (exit 0) — **unchanged**, which is the expected evidence for a config-only change |
 | Full suite, **real MySQL 8.4** | `pytest` with `MYSQL_TEST_URL` on `:3307` | **NOT RUN** — the Docker daemon did not answer on this host; recorded as unrun rather than filled in |
 
-The change is 22 lines in one new file and touches no Python, TypeScript or SQL. The
+The change is 21 lines in one new file and touches no Python, TypeScript or SQL. The
 suite count being *identical* to the previous slice (522/7) is the point: nothing
 should move, and nothing did.
 
