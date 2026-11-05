@@ -48,6 +48,27 @@ creates permission. **GATE 2 was signed on 2026-11-04 at `5c3e077`** — see *GA
 — signed* below. That sign-off is unchanged by the later slice; what moved is the
 migration head, from `0003` to `0004`.
 
+Four slices have landed on top of the sign-off, none of which moves the schema.
+`ddd4db9` (`fix(demo)`) repairs Phase-0 fixture drift against the real
+`AgentDecisionView` wire contract, and `a29f925` (`chore(gate)`) closes the last
+untypechecked project in the tree by running the demo frontend's `tsc` in
+pre-commit. `99b5c4b` (`fix(pii)`) closes gap 20: `normalized_value` is now sealed
+with the same Fernet key as `raw_value`, sealed on **both** write paths, and
+decrypted only at the moment a recipient address is actually needed — so an
+extracted address is no longer readable by anyone who can read the table.
+Pre-existing plaintext rows are repaired by a new `reseal-fields` CLI (`--ids`,
+`--limit`, `--dry-run`) rather than by a data migration, and a row sealed under a
+key that has since been rotated refuses to send rather than sending garbage
+(D10-11).
+**The slice on top of that is `doctor`** — a read-only command that counts the two
+states in this system that fail *silently*: notifications parked `failed` or
+`suppressed`, and field rows still holding plaintext. It needs no
+`ENCRYPTION_KEY` (sealing is judged by envelope shape, so a rotated key still reads
+as sealed rather than as plaintext), it writes nothing, and it exits
+`EXIT_ATTENTION` (5) when either count is non-zero, so a cron entry or a CI step can
+watch it (D10-12). **Nothing schedules it yet** — it is a check, not an alarm. The
+migration head is unchanged at `0004`.
+
 ## Phase history
 
 | Phase | State |
@@ -1133,10 +1154,66 @@ module of **15**, and `tests/test_crypto.py` (**20** now) and
 `tests/test_notification_scheduler.py` (**17** now) carry the rest.
 
 **Two residues, stated rather than buried.** Rows written before this slice stay
-plaintext until an operator runs `reseal-fields`, and **nothing schedules or alerts on
-that** — there is no probe that counts unsealed rows. And `ENCRYPTION_KEY` rotation is
+plaintext until an operator runs `reseal-fields`, and ~~**nothing schedules or alerts on
+that** — there is no probe that counts unsealed rows~~. **Narrowed after this slice, not
+erased:** `python -m app.cli doctor` now counts unsealed rows and exits non-zero (next
+section, `D10-12`) — but **nothing schedules it**, so the number is available and nobody
+acts on it yet. And `ENCRYPTION_KEY` rotation is
 unsupported: a rotated key makes every stored recipient unreadable until the old one
 is restored, which is the fail-closed behaviour above, not a bug, but it is unhandled.
+
+## Two silent states now have a check ✅ (gap 22 + gap 20 residue, `D10-12`)
+
+Both residues above are the same defect stated twice: a state that needs a person and
+raises nothing. `python -m app.cli doctor` counts them in one read-only pass and exits
+**non-zero** when anything is found — `EXIT_ATTENTION` (5), so a cron entry or a CI step
+can act on it without parsing a log line.
+
+What lands:
+
+1. **Three counts, one report.** Outbox rows parked `failed` (gap 22's residue),
+   notifications that ended `failed` or `suppressed` (the same residue one layer up),
+   and extracted-field values still stored as plaintext (gap 20's residue).
+   `dead_letter_count()` is an exact table-wide `COUNT` — `dead_lettered()` returns a
+   bounded page and cannot answer "how much is parked"; `undelivered_counts()`
+   zero-fills both statuses so one can never quietly stop being reported.
+2. **The field scan is a floor, and says so.** One ordered pass capped by `--limit`,
+   with `field_scan_truncated` true on a full page. A truncated scan reported as clean
+   is the one failure mode that would make the command worse than nothing, so it is
+   asserted (including the acknowledged weakness — a plaintext row beyond the limit
+   reads clean at `--limit 1` and is found at `--limit 2`).
+3. **No `ENCRYPTION_KEY` required.** `is_sealed` is shape-based (D10-11), so a keyless
+   run still reports plaintext as plaintext. The mirror case is pinned too: a token
+   sealed under a *rotated* key is **not** reported, because flagging it would send the
+   operator to `reseal-fields`, which would refuse with `EXIT_UNREADABLE`.
+4. **Read-only.** It seals nothing, retries nothing, resolves nothing;
+   `test_running_it_changes_nothing` asserts the plaintext row is still plaintext after
+   a run. Sealing stays `reseal-fields`' job, where it needs a key and a `--dry-run`.
+5. **Ids, never values.** `unsealed_field_ids` is the only row-level detail, which is
+   exactly what `reseal-fields --ids` takes. The rest of this CLI is careful about PII
+   in the log stream and a check has no reason to be the exception.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Full suite, SQLite | `pytest` in `backend/`, `MYSQL_TEST_URL` **unset** | **529 collected — 522 passed, 7 skipped, 0 failed** (JUnit: `tests=529 failures=0 errors=0 skipped=7`) |
+| Full suite, **real MySQL 8.4** | `pytest` with `MYSQL_TEST_URL` on `:3307` | **NOT RUN — Docker daemon down again, see above** |
+| Lint | `ruff check .` (repo root) | All checks passed (2 findings fixed: `RUF022`, `C420`) |
+| Format | `ruff format --check .` (repo root) | **85 files** already formatted |
+| Types | `mypy` (strict, config `files = backend/app`) | clean, **49 source files** |
+| Security lint | `bandit -q -r backend/app` | **0 issues** (exit 0; 3 expected `nosec B104`) |
+
+The collected total grew by **19** over the gap-20 slice's 510, all of them
+`tests/test_doctor.py` — a new module, so nothing earlier changed count. The MySQL row is
+unrun for the same reason as the slice above it (the daemon did not answer on this host),
+and it is left as `NOT RUN` rather than filled in with the expected number: those six
+tests exercise `FOR UPDATE SKIP LOCKED` and the ENUM/NUMERIC columns, none of which this
+slice touches, but "not touched" is not "verified".
+
+**What this narrows and what it does not.** The state is now observable and
+machine-checkable instead of requiring a hand-written query — the two GATE 2 clauses it
+answers are narrowed, not closed. **Nothing schedules it**: no cron entry, no alert
+route, no pager is added, and a command nobody runs is worth little more than the log
+line it replaces. That limit is stated in `D10-12` rather than left to be discovered.
 
 ## Known gaps / issues
 
@@ -1353,6 +1430,11 @@ is restored, which is the fail-closed behaviour above, not a bug, but it is unha
     two schedulers are proven not to receive the same row (D10-08). On SQLite the
     no-op remains true by construction, so the offline suite still cannot prove it.
     **No alert when rows park** is still open, and it is a real weakness at GATE 2.
+    **Amended, not closed:** `python -m app.cli doctor` now counts parked outbox rows and
+    `failed`/`suppressed` notifications and exits `EXIT_ATTENTION` (5) on any of them
+    (`D10-12`), so the state is machine-checkable instead of requiring a hand-written
+    query. What is still missing is the thing that makes a check useful — a scheduler
+    running it and a route for the exit code to reach a person.
 23. ~~**The double-send serialisation is proven by reasoning, not by a concurrent
     test.**~~ — **closed against MySQL (D10-08).** The gap was real and correctly
     stated: `0003` (`0f5da36`) makes the second dispatch block on
@@ -1503,7 +1585,10 @@ ever been on the other end of a publish (no compose service; `live` test opt-in)
 no consumer exists; DLQ replay is operator-initiated with no alerting, and
 notification **retry** is too — the scheduler (`4e7dd5c`) now recovers a *deferred*
 row by itself, but a row parked `failed` or `suppressed` still sits until a human
-looks, and nothing alerts when it does (the residue of gap 22); no live
+looks, and ~~nothing alerts when it does~~ — the residue of gap 22 is **narrowed after
+this record was signed** by `python -m app.cli doctor` (`D10-12`), which counts those
+rows and exits non-zero; what is still absent is anything that *runs* it, so a human
+still has to look; no live
 Ollama has answered anything; and the `review`, `agent` and `notification` routes
 have only ever been called by `TestClient`, because no screen talks to them yet.
 **Nothing has ever been sent to a real customer** (gap 15): the shipped default
@@ -1545,7 +1630,10 @@ there is not a pass.
 One caveat carried forward rather than retired: the *number* of sends is now safe on
 MySQL, but a row that parks `failed` or `suppressed` still raises no alert (gap 22).
 Correctness under concurrency and visibility of failure are different problems, and
-only the first one moved.
+only the first one moved. The second one has since moved a little: `doctor` (`D10-12`)
+makes the parked row **countable by a machine** and gives it an exit code, which is the
+half that was missing from the code. The half that is still missing is outside it — a
+schedule, and somewhere for the exit code to go.
 
 ## GATE 2 — signed
 
@@ -1635,6 +1723,11 @@ sign-off, not footnotes:**
 2. **No alert fires when a row parks** (`failed`) or is `suppressed`, and outbox
    replay is operator-initiated (D5-03, gap 22's residue). Correctness under
    concurrency moved at `c99c792`; *visibility of failure did not*.
+   **Amended after the sign-off, not deleted from it:** `python -m app.cli doctor`
+   (`D10-12`) now counts parked outbox rows and `failed`/`suppressed` notifications and
+   exits `EXIT_ATTENTION`, so failure is at least *observable by a machine*. The clause
+   as signed stands in the part that matters — nothing runs that command, and no alert
+   reaches a person.
 3. **Nothing has ever been sent to a real customer.** The shipped default transport
    refuses; SMTP has only spoken to a loopback relay this suite started and
    certified itself, so no handshake has chained to a public CA over a real network
@@ -1651,9 +1744,13 @@ sign-off, not footnotes:**
    after this record was signed. The column is ciphertext on both write paths and is
    decrypted only by the send. Two residues remain, stated rather than buried — rows
    written before that slice stay plaintext until an operator runs
-   `python -m app.cli reseal-fields`, and **nothing schedules or alerts on that**; and
-   `ENCRYPTION_KEY` rotation is unsupported, so a rotated key makes every stored
-   recipient unreadable until the old key is restored.
+   `python -m app.cli reseal-fields`, and ~~**nothing schedules or alerts on that**~~;
+   and `ENCRYPTION_KEY` rotation is unsupported, so a rotated key makes every stored
+   recipient unreadable until the old key is restored. **The struck clause is narrowed
+   by `D10-12`:** `python -m app.cli doctor` counts unsealed rows (without needing the
+   key, since `is_sealed` is shape-based) and exits non-zero, so the state is now
+   machine-checkable. Nothing schedules the command, so an operator still has to look —
+   which is why the residue is narrowed here rather than struck out.
 7. ~~**Every contract predating `0002` is un-contactable** until consent is set row
    by row (gap 18), and an `AgentDecision` still cannot be overridden or flagged
    (gap 19) even though the `version` column those routes need now exists.~~

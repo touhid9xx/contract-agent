@@ -276,6 +276,26 @@ def dead_lettered(session: Session, *, limit: int = DEFAULT_REPLAY_LIMIT) -> lis
     return list(session.execute(stmt).scalars())
 
 
+def dead_letter_count(session: Session) -> int:
+    """How many rows are parked in the dead-letter state, table-wide.
+
+    :func:`dead_lettered` returns a bounded *page*, because replay is bounded — an
+    operator requeues a batch, not the whole table. A count is the different
+    question an attention check asks ("is anything parked at all, and how much"),
+    and a page cannot answer it: once the backlog exceeds the page size the page
+    stops moving while the number an alerting script needs keeps growing.
+
+    Unscoped, for the fourth time and the same reason as :func:`dead_lettered`:
+    parked events belong to every tenant, and a relay problem is not a tenant's.
+    """
+    stmt = (
+        select(func.count())
+        .select_from(OutboxEvent)
+        .where(OutboxEvent.status == OutboxStatus.FAILED)
+    )
+    return int(session.execute(stmt).scalar_one())
+
+
 def replay_dead_lettered(
     session: Session,
     *,

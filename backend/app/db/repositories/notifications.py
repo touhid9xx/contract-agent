@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.db.base import utc_now
@@ -189,3 +189,42 @@ def claim_next_due(session: Session, *, now: datetime | None = None) -> Notifica
         .with_for_update(skip_locked=True)
     )
     return session.execute(stmt).scalars().first()
+
+
+#: The statuses that mean "this row stopped without reaching the customer".
+#: ``failed`` exhausted its retry budget; ``suppressed`` was refused by a policy
+#: gate. Both need a human, and both currently sit silent — that is gap 22's
+#: residue, and naming the set once here is what makes the attention check and
+#: any future alarm agree about which rows count as undelivered.
+UNDELIVERED_STATUSES: tuple[NotificationStatus, ...] = (
+    NotificationStatus.FAILED,
+    NotificationStatus.SUPPRESSED,
+)
+
+
+def undelivered_counts(session: Session) -> dict[NotificationStatus, int]:
+    """Count rows that stopped without being delivered, **unscoped**.
+
+    The second unscoped query in this module, for the reason :func:`claim_next_due`
+    already gives: an attention check is run by an operator or a cron entry, serves
+    every tenant at once, and has no principal to be scoped to. Scoping it to one
+    tenant would be actively misleading — it would report a clean board while
+    another organisation's sends sat parked.
+
+    Both statuses are **always** present in the result, zero-filled. A missing key
+    would force every caller to distinguish "no such row" from "no rows of that
+    status", and the natural slip — ``.get(status, 0)`` in one place and a loop
+    over ``.items()`` in another — is how one status quietly stops being reported.
+
+    No row content is read: a count is all an alarm needs, and a count cannot leak
+    a recipient.
+    """
+    stmt = (
+        select(Notification.status, func.count())
+        .where(Notification.status.in_(UNDELIVERED_STATUSES))
+        .group_by(Notification.status)
+    )
+    counts: dict[NotificationStatus, int] = dict.fromkeys(UNDELIVERED_STATUSES, 0)
+    for status, total in session.execute(stmt).all():
+        counts[status] = int(total)
+    return counts

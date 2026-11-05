@@ -21,12 +21,15 @@ from app.db.repositories.fields import (
 from app.db.repositories.notifications import (
     DEFAULT_NOTIFICATION_LIMIT,
     MAX_NOTIFICATION_LIMIT,
+    UNDELIVERED_STATUSES,
     NotificationRepository,
+    undelivered_counts,
 )
 from app.db.repositories.outbox import (
     DeadLetterReplay,
     OutboxRepository,
     backoff_seconds,
+    dead_letter_count,
     dead_lettered,
     enqueue_event,
     replay_dead_lettered,
@@ -36,6 +39,7 @@ from app.db.repositories.users import IdentityDirectory, UserRepository, normali
 __all__ = [
     "DEFAULT_NOTIFICATION_LIMIT",
     "MAX_NOTIFICATION_LIMIT",
+    "UNDELIVERED_STATUSES",
     "AgentDecisionRepository",
     "AuditLogRepository",
     "ContractRepository",
@@ -50,6 +54,7 @@ __all__ = [
     "UserRepository",
     "backoff_seconds",
     "contract_for_operator",
+    "dead_letter_count",
     "dead_lettered",
     "decode_review_cursor",
     "encode_review_cursor",
@@ -57,4 +62,5 @@ __all__ = [
     "fields_for_reseal",
     "normalize_email",
     "replay_dead_lettered",
+    "undelivered_counts",
 ]

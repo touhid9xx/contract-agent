@@ -1425,3 +1425,45 @@ committed together. That pairing is the milestone; extraction and review follow.
   no longer reintroduce it. Not closed: existing rows stay plaintext until the operator
   runs `reseal-fields`, and nothing schedules or alerts on that; and the SMTP path still
   has only ever spoken to a relay this suite started (D10-10).
+
+### D10-12 — Two silent states get one read-only `doctor`, and it exits non-zero
+
+- **Decision:** `python -m app.cli doctor` counts the three states that need a human and
+  currently raise nothing: outbox rows parked `failed` (gap 22's residue), notifications
+  that ended `failed` or `suppressed` (gap 20/22's shared residue), and extracted-field
+  values still stored as plaintext (gap 20's residue). It prints one report and returns
+  `EXIT_ATTENTION` (5) when any count is non-zero, `EXIT_OK` otherwise. It writes
+  nothing, and it never logs a value — only ids and columns.
+- **Why one command and not three checks:** they are one defect wearing three hats — a
+  state that needs a person and is invisible until someone hand-writes a query. Three
+  commands means three cron entries, three alerts and three things to forget; one exit
+  code means a single scheduled run either fails loudly or does not.
+- **Why the exit code carries the signal, not the log line:** the log already said
+  `doctor_clean` before this existed, and nobody was watching. A non-zero exit is the
+  only thing an external alerter, a CI step or `&&` can act on without parsing text.
+  Zero is the *clean* answer, not the default one — the inversion matters, because a
+  command that exits 0 on "found something" is a command nobody can schedule.
+- **Why counts for the outbox, and pages for the fields:** `dead_lettered()` returns a
+  bounded page, which cannot answer "how much is parked"; `dead_letter_count()` is an
+  exact table-wide `COUNT`. The field scan is the opposite and says so: it is a single
+  ordered pass capped by `--limit`, so a full page means the unsealed number is a
+  **floor**. That is reported as `field_scan_truncated` rather than rounded away,
+  because "0 unsealed" from a truncated scan is the one answer this command must never
+  give confidently. `test_the_scan_limit_can_hide_a_plaintext_row_beyond_it` asserts the
+  weakness instead of glossing it.
+- **Why it runs without `ENCRYPTION_KEY`:** `is_sealed` is shape-based (D10-11), so a
+  keyless run still reports plaintext as plaintext. A key-dependent check would go
+  silent at exactly the moment the key was wrong — the moment the database was least
+  trustworthy. The mirror property is also pinned: a token sealed under a rotated key
+  must **not** be reported, because flagging it would send the operator to
+  `reseal-fields`, which would then refuse with `EXIT_UNREADABLE` and teach them to
+  ignore the command.
+- **Why read-only:** an inspection command that seals, retries or resolves on its own
+  initiative is a repair script wearing the wrong name. Sealing is `reseal-fields`'
+  job; it needs a key, a decision and a dry run. `test_running_it_changes_nothing`
+  asserts the plaintext row is still plaintext afterwards.
+- **Trade-off, stated rather than buried: nothing schedules it.** The state is now
+  observable and machine-checkable instead of requiring a hand-written query; it is not
+  *delivered*. No cron entry, no alert route, no pager is added here, and a command
+  nobody runs is worth little more than the log line it replaces. This narrows the GATE
+  2 clauses; it does not close them.

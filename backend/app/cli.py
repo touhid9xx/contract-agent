@@ -8,6 +8,7 @@ Run from ``backend/``::
     python -m app.cli extract --contract-id 12 --text-file contract.txt
     python -m app.cli reseal-fields --dry-run
     python -m app.cli reseal-fields
+    python -m app.cli doctor
 
 Why a command rather than an HTTP endpoint: republishing parked events is a
 privileged, rare operation. Over HTTP it would become a "republish any tenant's
@@ -44,11 +45,14 @@ from app.core.crypto import (
     is_sealed,
 )
 from app.core.logging import configure_logging
+from app.db.enums import NotificationStatus
 from app.db.repositories.contracts import contract_for_operator
 from app.db.repositories.fields import DEFAULT_RESEAL_LIMIT, fields_for_reseal
+from app.db.repositories.notifications import undelivered_counts
 from app.db.repositories.outbox import (
     DEFAULT_REPLAY_LIMIT,
     DeadLetterReplay,
+    dead_letter_count,
     dead_lettered,
     replay_dead_lettered,
 )
@@ -74,10 +78,18 @@ EXIT_FAILED = 3
 #: operator ran with the wrong ``ENCRYPTION_KEY``, and silently "succeeding" while
 #: a database stays half-migrated is the failure mode this command exists to end.
 EXIT_UNREADABLE = 4
+#: Something needs a human and nothing else was going to say so: an outbox row
+#: parked, a notification that failed or was suppressed, or a field value still
+#: stored in the clear. Non-zero so a cron entry or a CI step fails loudly on it —
+#: a zero exit code would make the one state that needs attention the one state
+#: that looks exactly like a clean database.
+EXIT_ATTENTION = 5
 
 #: The two columns on :class:`~app.db.models.ExtractedField` that hold PII, and so
-#: must be sealed. Named once, here, so "did we miss a column?" has one answer.
-_RESEAL_COLUMNS = ("raw_value", "normalized_value")
+#: must be sealed. Named once, here, so "did we miss a column?" has one answer —
+#: ``reseal-fields`` seals this set and ``doctor`` checks it, and a column added to
+#: one without the other is the failure this constant exists to prevent.
+_PII_COLUMNS = ("raw_value", "normalized_value")
 
 
 def _ids_arg(value: str) -> list[int]:
@@ -192,6 +204,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="report what would be sealed without writing anything",
     )
     reseal.set_defaults(handler=_reseal_fields)
+
+    doctor = commands.add_parser(
+        "doctor",
+        help="report rows that need a human and are otherwise silent",
+        description=(
+            "Read-only. Counts the states that need an operator and currently "
+            "raise no alert: outbox events parked in the dead-letter state, "
+            "notifications that failed or were suppressed, and extracted-field "
+            "values still stored as plaintext. Exits non-zero when anything is "
+            "found, so a scheduled run can act on it."
+        ),
+    )
+    doctor.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_RESEAL_LIMIT,
+        metavar="N",
+        help=(
+            "maximum field rows to scan for unsealed values (default: "
+            f"{DEFAULT_RESEAL_LIMIT}); a full page makes the count a floor"
+        ),
+    )
+    doctor.set_defaults(handler=_doctor)
     return parser
 
 
@@ -407,7 +442,7 @@ def _reseal_fields(
         rows = fields_for_reseal(session, field_ids=field_ids, limit=limit)
         for field in rows:
             sealed_here = 0
-            for column in _RESEAL_COLUMNS:
+            for column in _PII_COLUMNS:
                 value: Any = getattr(field, column)
                 if value is None:
                     continue
@@ -457,6 +492,102 @@ def _reseal_fields(
         )
         return EXIT_UNREADABLE
 
+    return EXIT_OK
+
+
+def _attention_report(session: Session, *, limit: int) -> dict[str, Any]:
+    """Count the states that need a human, on an open session.
+
+    Split out from :func:`_doctor` so the numbers can be asserted directly. The
+    command's value is entirely in *what* it counts; a test that could only see an
+    exit code would prove "something was found" while telling us nothing about
+    whether the right thing was found, or whether the count was exact.
+
+    ``unsealed_field_ids`` is deliberately the only row-level detail returned, and
+    there is no companion list of values: an id plus a column name is enough to run
+    ``reseal-fields --ids``, and nothing here should be able to put PII on a log
+    line even by accident.
+    """
+    parked_events = dead_letter_count(session)
+    undelivered = undelivered_counts(session)
+    fields = fields_for_reseal(session, limit=limit)
+
+    unsealed = [
+        field.id
+        for field in fields
+        if any(
+            getattr(field, column) is not None and not is_sealed(str(getattr(field, column)))
+            for column in _PII_COLUMNS
+        )
+    ]
+
+    return {
+        "outbox_parked": parked_events,
+        "notifications_failed": undelivered[NotificationStatus.FAILED],
+        "notifications_suppressed": undelivered[NotificationStatus.SUPPRESSED],
+        "unsealed_field_values": len(unsealed),
+        "unsealed_field_ids": unsealed,
+        "fields_scanned": len(fields),
+        # ``fields_for_reseal`` stops at the limit, so a full page means the
+        # unsealed count is a floor rather than the table's total. Recorded rather
+        # than rounded away: "0 unsealed" from a truncated scan is the one answer
+        # this command must never report confidently.
+        "field_scan_truncated": len(fields) == limit,
+    }
+
+
+def _doctor(
+    args: argparse.Namespace,
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+) -> int:
+    """``doctor``: report the states that need a human and raise no alert.
+
+    The signed GATE 2 record names two of these as conditions of the sign-off
+    rather than footnotes: a notification that parks ``failed`` or is
+    ``suppressed`` raises no alert (gap 22's residue), and a field value written
+    before gap 20 stays plaintext with nothing pointing at it. They are one defect
+    wearing two hats — a state that needs a person and is invisible until somebody
+    goes looking — so one read-only check answers both.
+
+    What this **is**: the machine-readable half. A cron entry or a CI step runs it
+    and acts on a non-zero exit code, which is the hook an external alerter needs
+    and this stack did not have.
+
+    What it is **not**: delivery. Nothing here pages anyone, and a command nobody
+    schedules is worth little more than the log line it replaces. The condition is
+    narrowed — the state is now observable and machine-checkable instead of
+    requiring a hand-written query — not closed.
+
+    Read-only, and deliberately usable **without** an ``ENCRYPTION_KEY``:
+    :func:`~app.core.crypto.is_sealed` recognises a token by its shape, so a run
+    with the wrong key still reports a plaintext database as plaintext. A check
+    that needed the key would go quiet at exactly the moment the key was wrong.
+    """
+    limit = int(args.limit)
+
+    with session_scope(session_factory) as session:
+        report = _attention_report(session, limit=limit)
+
+    if report["field_scan_truncated"]:
+        log.warning(
+            "doctor_field_scan_truncated",
+            scanned=report["fields_scanned"],
+            limit=limit,
+            hint="the unsealed count is a floor; raise --limit above the field-table size",
+        )
+
+    needs_attention = (
+        report["outbox_parked"]
+        or report["notifications_failed"]
+        or report["notifications_suppressed"]
+        or report["unsealed_field_values"]
+    )
+    if needs_attention:
+        log.error("doctor_needs_attention", **report)
+        return EXIT_ATTENTION
+
+    log.info("doctor_clean", **report)
     return EXIT_OK
 
 
