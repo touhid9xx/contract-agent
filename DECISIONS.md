@@ -1453,6 +1453,13 @@ committed together. That pairing is the milestone; extraction and review follow.
   runs `reseal-fields`, and nothing schedules or alerts on that; and the SMTP path still
   has only ever spoken to a relay this suite started (D10-10).
 
+> **Superseded in part by D10-13.** The trade-off above described the code as it stood
+> at `99b5c4b`. The two-key read window it named — `ENCRYPTION_KEY_PREVIOUS`, retired
+> keys that unseal but never seal, and a `rewrap` outcome in `reseal-fields` — now
+> exists, so a rotated `ENCRYPTION_KEY` no longer strands stored recipients. The rest of
+> this entry still holds, including the shape-based `is_sealed`, the decision to seal
+> `normalized_value`, and the fail-closed path for a process with no key at all.
+
 ### D10-12 — Two silent states get one read-only `doctor`, and it exits non-zero
 
 - **Decision:** `python -m app.cli doctor` counts the three states that need a human and
@@ -1494,3 +1501,70 @@ committed together. That pairing is the milestone; extraction and review follow.
   *delivered*. No cron entry, no alert route, no pager is added here, and a command
   nobody runs is worth little more than the log line it replaces. This narrows the GATE
   2 clauses; it does not close them.
+
+### D10-13 — `ENCRYPTION_KEY` can be rotated, through a ring of decrypt-only keys
+
+- **Decision:** `FieldCipher` takes a *ring*: one current key plus zero or more retired
+  ones. The current key seals everything; retired keys can only unseal.
+  `ENCRYPTION_KEY_PREVIOUS` carries the retired keys as a comma-separated list, oldest
+  first, and `Settings` validates it at start-up. `reseal-fields` gains a fourth outcome
+  beside seal / leave-alone / unreadable: a token sealed under a retired key is
+  **re-wrapped** under the current one and counted as `rewrapped`. This supersedes the
+  trade-off D10-11 recorded — rotation was "a slice of its own", and this is that slice.
+- **Why retired keys are decrypt-only:** if a retired key could also encrypt, then two
+  processes running different configurations would write tokens under different keys,
+  and "which key sealed this row?" would stop having one answer. Worse, the end of a
+  rotation — clearing `ENCRYPTION_KEY_PREVIOUS` — would be unsafe, because a stale
+  process could still be minting tokens with the key about to be dropped. Sealing from
+  exactly one key means the moment `rewrapped` reaches zero, the retired keys are
+  provably unused by stored data, and clearing the variable is a fact rather than a
+  hope. `has_retired_keys` exists for the same reason: it is a property of the
+  *configuration*, never of a token.
+- **Why `rewrap` lives in `reseal-fields` and not in a second command:** that command
+  already owns the question "make the stored tokens conform to the current key". It
+  already resolves the cipher, already has `--dry-run`, `--ids` and `--limit`, and
+  already has an exit code per outcome. A `rotate-key` command would need its own copy
+  of the key parsing, its own dry run and its own unreadable exit — three chances to
+  disagree with the repair path about what an unreadable token is. The four outcomes
+  are counted in one `reseal_run` log line, so one run answers both "is any plaintext
+  left?" and "does anything still depend on the old key?".
+- **Rotation is two steps, not one, because a restart is not atomic.** The order is:
+  set `ENCRYPTION_KEY` to the new key *and* `ENCRYPTION_KEY_PREVIOUS` to the old one;
+  deploy and restart; run `reseal-fields` until its log says `rewrapped=0`; then clear
+  `ENCRYPTION_KEY_PREVIOUS` and restart again. The documented sequence in
+  `.env.example` says the same thing. A single-step rotation is not offered because it
+  would require every process to switch keys at the same instant, and the failing
+  state — a process holding only the new key while rows are still under the old one —
+  is exactly the outage this entry exists to prevent.
+- **The ring is validated at boot, and the errors name positions, not values.** A
+  retired key with no current key, the current key also listed as retired, a duplicate
+  entry, and more than `MAX_RETIRED_ENCRYPTION_KEYS` (4) are all start-up failures. A
+  malformed entry is reported as *which* entry (`ENCRYPTION_KEY_PREVIOUS[2]`), never by
+  quoting it — a validation message is a log line, and this file's logging rule is that
+  key material never reaches one. The cap is 4 rather than unbounded because the ring
+  is walked on every failing decrypt: an unbounded list would turn a config that never
+  shrinks into permanent work on the error path, and "I will clean up the old keys
+  later" is the habit the cap is meant to interrupt.
+- **A row sealed under a key that is no longer in the ring stays readable as
+  *unreadable*.** Dropping a key before re-wrapping its rows is not repaired and not
+  re-sealed: `rewrap` raises `DecryptionError`, the run counts it and exits
+  `EXIT_UNREADABLE` (4). Sealing a token it cannot read would wrap ciphertext in
+  ciphertext and destroy the value, which is the same reasoning D10-11 used for the
+  plaintext case. The handler's message names `ENCRYPTION_KEY_PREVIOUS` as the fix,
+  matching what `decrypt` already said.
+- **Trade-off, stated rather than buried:** rotation is a manual, operator-driven
+  procedure with no audit trail of who rotated or when, and no hosted-KMS integration —
+  keys are still environment variables in the process's memory. The ring also widens the
+  blast radius of a *misconfigured* rotation: pasting the wrong key into
+  `ENCRYPTION_KEY_PREVIOUS` does not break reads of current rows (retired keys are tried
+  last), but it does mean a run can look tidy while an older key is silently absent.
+- **What this proves and what it does not.** Ten crypto tests and six CLI tests
+  cover the ring: decrypting through a retired key, refusing an unknown key, trying
+  several retired keys in order, encrypting with the current key only, both `rewrap`
+  paths, a real end-to-end rotation of a stored row, byte-identical output when the row
+  is already current, `--dry-run` reporting without writing, and the dropped-key case
+  still exiting `EXIT_UNREADABLE`. Not proven: rotation under concurrent writers (no
+  test runs `reseal-fields` against a live API process), and interoperability with any
+  key service. And as with `doctor`'s field scan, `rewrapped=0` is a statement about
+  the rows one run saw — under `--limit` it is a floor, so the command to clear
+  `ENCRYPTION_KEY_PREVIOUS` is only earned by a run that was not truncated.

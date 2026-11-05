@@ -120,6 +120,109 @@ def test_a_key_of_the_wrong_length_is_rejected_at_startup() -> None:
         make_settings(encryption_key=short)
 
 
+# --- the key ring: rotating ENCRYPTION_KEY without losing rows ------------
+# Before the ring existed, rotation was not a procedure, it was an outage: every
+# stored token became unreadable the moment the key changed, and `reseal-fields`
+# could not help because it had nothing to decrypt with. The ring splits the job
+# in two — retired keys keep old rows *readable*, `rewrap` makes them stop
+# *needing* the old key — and these tests pin both halves.
+
+
+@pytest.fixture
+def old_key() -> str:
+    return Fernet.generate_key().decode("ascii")
+
+
+@pytest.fixture
+def new_key() -> str:
+    return Fernet.generate_key().decode("ascii")
+
+
+def test_a_token_sealed_with_a_retired_key_is_still_readable(old_key: str, new_key: str) -> None:
+    token = FieldCipher(old_key).encrypt(PLAINTEXT)
+
+    assert FieldCipher(new_key, [old_key]).decrypt(token) == PLAINTEXT
+
+
+def test_a_retired_key_does_not_make_an_unknown_key_readable(old_key: str, new_key: str) -> None:
+    stranger = FieldCipher(Fernet.generate_key().decode("ascii")).encrypt(PLAINTEXT)
+
+    with pytest.raises(DecryptionError):
+        FieldCipher(new_key, [old_key]).decrypt(stranger)
+
+
+def test_several_retired_keys_are_tried_until_one_opens_the_token(
+    old_key: str, new_key: str
+) -> None:
+    token = FieldCipher(old_key).encrypt(PLAINTEXT)
+    ring = FieldCipher(new_key, [Fernet.generate_key().decode("ascii"), old_key])
+
+    assert ring.decrypt(token) == PLAINTEXT
+
+
+def test_the_key_ring_reports_whether_rotation_is_still_in_progress(
+    old_key: str, new_key: str
+) -> None:
+    assert FieldCipher(new_key).has_retired_keys is False
+    assert FieldCipher(new_key, [old_key]).has_retired_keys is True
+
+
+def test_new_values_are_always_sealed_with_the_current_key(old_key: str, new_key: str) -> None:
+    """A rotation that kept writing old tokens would never finish."""
+    ring = FieldCipher(new_key, [old_key])
+
+    token = ring.encrypt(PLAINTEXT)
+
+    # Readable with the current key alone, i.e. not wrapped in the retired one.
+    assert FieldCipher(new_key).decrypt(token) == PLAINTEXT
+
+
+def test_a_token_already_under_the_current_key_needs_no_rewrap(new_key: str) -> None:
+    cipher = FieldCipher(new_key)
+
+    assert cipher.rewrap(cipher.encrypt(PLAINTEXT)) is None
+
+
+def test_a_token_under_a_retired_key_is_rewrapped_under_the_current_one(
+    old_key: str, new_key: str
+) -> None:
+    token = FieldCipher(old_key).encrypt(PLAINTEXT)
+
+    rewrapped = FieldCipher(new_key, [old_key]).rewrap(token)
+
+    assert rewrapped is not None
+    assert rewrapped != token
+    # The point: the old key is no longer needed to read this row.
+    assert FieldCipher(new_key).decrypt(rewrapped) == PLAINTEXT
+
+
+def test_rewrap_refuses_a_token_no_key_on_the_ring_can_open(old_key: str, new_key: str) -> None:
+    stranger = FieldCipher(Fernet.generate_key().decode("ascii")).encrypt(PLAINTEXT)
+
+    with pytest.raises(DecryptionError) as caught:
+        FieldCipher(new_key, [old_key]).rewrap(stranger)
+
+    # Never the token, and both variables, because "rotation is supported" is
+    # what the operator needs to hear when this fires.
+    message = str(caught.value)
+    assert stranger not in message
+    assert "ENCRYPTION_KEY_PREVIOUS" in message
+
+
+def test_build_cipher_carries_the_retired_keys_into_the_ring(old_key: str, new_key: str) -> None:
+    """One seam: every process that reads a stored value gets rotation for free."""
+    token = FieldCipher(old_key).encrypt(PLAINTEXT)
+
+    cipher = build_cipher(make_settings(encryption_key=new_key, encryption_key_previous=old_key))
+
+    assert cipher.has_retired_keys is True
+    assert cipher.decrypt(token) == PLAINTEXT
+
+
+def test_build_cipher_with_no_retired_keys_is_the_steady_state(new_key: str) -> None:
+    assert build_cipher(make_settings(encryption_key=new_key)).has_retired_keys is False
+
+
 # --- telling a token from a plaintext value (gap 20) ----------------------
 # ``is_sealed`` answers the one question a failed decryption cannot: is this value
 # plaintext that needs sealing, or a token sealed under a key this process does

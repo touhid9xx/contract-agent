@@ -7,7 +7,7 @@ import base64
 import pytest
 from pydantic import ValidationError
 
-from app.core.config import DEV_SECRET_PLACEHOLDER, Settings
+from app.core.config import DEV_SECRET_PLACEHOLDER, MAX_RETIRED_ENCRYPTION_KEYS, Settings
 
 VALID_PRODUCTION_SECRET = "a" * 40
 VALID_PRODUCTION_ORIGINS = "https://app.example.com"
@@ -124,6 +124,92 @@ def test_a_malformed_encryption_key_is_refused_at_startup() -> None:
     short_key = base64.urlsafe_b64encode(bytes(16)).decode("ascii")
     with pytest.raises(ValidationError, match="ENCRYPTION_KEY"):
         Settings(app_env="development", encryption_key=short_key)
+
+
+# --- retired encryption keys (rotation) -----------------------------------
+# ``ENCRYPTION_KEY_PREVIOUS`` is the difference between "rotating the key is
+# possible" and "rotating the key silently orphans every stored address". It is
+# decrypt-only, so a bad entry cannot corrupt a write — it makes a readable row
+# unreadable, which is why it is validated at boot rather than at first use.
+
+
+def _key(seed: int) -> str:
+    """A structurally valid Fernet key, distinct per seed."""
+    return base64.urlsafe_b64encode(bytes([seed]) * 32).decode("ascii")
+
+
+def test_retired_keys_are_split_and_trimmed() -> None:
+    settings = Settings(
+        app_env="development",
+        encryption_key=_key(1),
+        encryption_key_previous=f" {_key(2)} , {_key(3)}, ",
+    )
+
+    assert settings.retired_encryption_keys == [_key(2), _key(3)]
+
+
+def test_no_retired_keys_is_the_steady_state() -> None:
+    assert Settings(app_env="development", encryption_key=_key(1)).retired_encryption_keys == []
+
+
+def test_a_malformed_retired_key_is_refused_at_startup() -> None:
+    # Named by position, never by value: an old key is still a secret.
+    with pytest.raises(ValidationError, match="entry 2"):
+        Settings(
+            app_env="development",
+            encryption_key=_key(1),
+            encryption_key_previous=f"{_key(2)}, not-a-key",
+        )
+
+
+def test_retired_keys_without_a_current_key_are_refused() -> None:
+    # Retired keys only decrypt, so this configuration could read rows and never
+    # seal one — including the rows a reseal run was about to re-wrap.
+    with pytest.raises(ValidationError, match="ENCRYPTION_KEY is empty"):
+        Settings(app_env="development", encryption_key="", encryption_key_previous=_key(2))
+
+
+def test_the_current_key_cannot_also_be_retired() -> None:
+    with pytest.raises(ValidationError, match="appears in ENCRYPTION_KEY_PREVIOUS"):
+        Settings(
+            app_env="development",
+            encryption_key=_key(1),
+            encryption_key_previous=f"{_key(1)},{_key(2)}",
+        )
+
+
+def test_the_same_retired_key_cannot_be_listed_twice() -> None:
+    with pytest.raises(ValidationError, match="same key twice"):
+        Settings(
+            app_env="development",
+            encryption_key=_key(1),
+            encryption_key_previous=f"{_key(2)},{_key(2)}",
+        )
+
+
+def test_more_retired_keys_than_the_cap_is_refused() -> None:
+    # Every decrypt walks the list, and it sits on the send path. A rotation that
+    # is finished carries none, so exceeding the cap means one never finished.
+    too_many = ",".join(_key(seed) for seed in range(2, 2 + MAX_RETIRED_ENCRYPTION_KEYS + 1))
+
+    with pytest.raises(ValidationError, match="at most"):
+        Settings(
+            app_env="development",
+            encryption_key=_key(1),
+            encryption_key_previous=too_many,
+        )
+
+
+def test_exactly_the_cap_of_retired_keys_is_allowed() -> None:
+    allowed = ",".join(_key(seed) for seed in range(2, 2 + MAX_RETIRED_ENCRYPTION_KEYS))
+
+    settings = Settings(
+        app_env="development",
+        encryption_key=_key(1),
+        encryption_key_previous=allowed,
+    )
+
+    assert len(settings.retired_encryption_keys) == MAX_RETIRED_ENCRYPTION_KEYS
 
 
 def test_a_zero_dispatch_budget_is_refused_at_startup() -> None:

@@ -40,6 +40,11 @@ NotificationTransport = Literal["none", "smtp"]
 DEV_SECRET_PLACEHOLDER = "dev-only-insecure-secret-key-change-me"  # noqa: S105  # nosec B105
 
 MIN_PRODUCTION_SECRET_LENGTH = 32
+#: How many retired encryption keys may be carried at once. A rotation that is
+#: finished carries none, so this only bounds the window between "new key in
+#: place" and "`reseal-fields` has rewritten every row" — and every decrypt walks
+#: the list, so an unbounded one would be an unbounded cost on the send path.
+MAX_RETIRED_ENCRYPTION_KEYS = 4
 _VALID_LOG_LEVELS = frozenset({"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"})
 #: Hosts considered non-public. Used to *detect* a development origin, never to bind.
 _LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "0.0.0.0", "::1")  # nosec B104
@@ -69,6 +74,11 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = Field(default=15, gt=0, le=120)
     refresh_token_expire_days: int = Field(default=7, gt=0, le=30)
     encryption_key: str = ""
+    #: Keys this installation used *before* the current one, comma-separated, in
+    #: the order they were retired. They are decrypt-only: nothing is ever sealed
+    #: with one, so rotation is "add the old key here, reseal, then clear this".
+    #: Empty is the steady state, not a degraded one.
+    encryption_key_previous: str = ""
 
     # --- password hashing (Argon2id) -------------------------------------
     #: The defaults are argon2-cffi's recommendations and comfortably exceed the
@@ -343,6 +353,46 @@ class Settings(BaseSettings):
                 'print(Fernet.generate_key().decode())"'
             )
 
+        # Retired keys are decrypt-only, so a bad one does not corrupt a write --
+        # it turns a *readable* row into a 503 or a suppressed notification, which
+        # is the failure this whole setting exists to prevent. Validated at boot
+        # for that reason, and every complaint names the offending position rather
+        # than the value: a key is a secret even when it is the old one.
+        retired = self.retired_encryption_keys
+        if len(retired) > MAX_RETIRED_ENCRYPTION_KEYS:
+            raise ValueError(
+                "ENCRYPTION_KEY_PREVIOUS lists "
+                f"{len(retired)} keys; at most {MAX_RETIRED_ENCRYPTION_KEYS} may be "
+                "carried at once. A finished rotation carries none -- run "
+                "'python -m app.cli reseal-fields' and then clear it."
+            )
+        for position, retired_key in enumerate(retired, start=1):
+            if not _is_fernet_key(retired_key):
+                raise ValueError(
+                    "every ENCRYPTION_KEY_PREVIOUS entry must be a 32-byte URL-safe "
+                    f"base64 value; entry {position} is not. A malformed entry "
+                    "cannot decrypt anything, so the rows it was meant to unseal "
+                    "would stay unreadable while the setting looked configured."
+                )
+        if len(set(retired)) != len(retired):
+            raise ValueError(
+                "ENCRYPTION_KEY_PREVIOUS lists the same key twice; each retired key may appear once"
+            )
+        if self.encryption_key and self.encryption_key in retired:
+            # A rotation to the key you already have is not a rotation, and carrying
+            # it twice hides that the new key was never actually put in place.
+            raise ValueError(
+                "ENCRYPTION_KEY also appears in ENCRYPTION_KEY_PREVIOUS; if the "
+                "values are equal there has been no rotation, and if they are "
+                "meant to differ one of the two variables holds the wrong key"
+            )
+        if retired and not self.encryption_key:
+            raise ValueError(
+                "ENCRYPTION_KEY_PREVIOUS is set but ENCRYPTION_KEY is empty. "
+                "Retired keys only decrypt; something has to be able to seal the "
+                "resealed rows, so the current key is still required."
+            )
+
         # Argon2 requires ``memory_cost >= 8 * parallelism``. The Field bounds
         # already make a violation unrepresentable -- memory is at least 8192 KiB
         # and parallelism at most 16, so even the strictest permitted shape gives
@@ -420,13 +470,35 @@ class Settings(BaseSettings):
         shape is validated here without pulling ``cryptography`` into every
         process that merely loads settings.
         """
-        if not self.encryption_key:
-            return False
-        try:
-            decoded = base64.urlsafe_b64decode(self.encryption_key.encode("ascii"))
-        except (ValueError, UnicodeEncodeError):
-            return False
-        return len(decoded) == 32
+        return _is_fernet_key(self.encryption_key)
+
+    @property
+    def retired_encryption_keys(self) -> list[str]:
+        """``ENCRYPTION_KEY_PREVIOUS`` as a list, oldest entry first.
+
+        Comma-separated rather than repeated, matching ``CORS_ORIGINS`` and
+        ``KAFKA_BOOTSTRAP_SERVERS``: one variable, one line in ``.env``, and no
+        ordering convention an operator has to guess at. Order does not change
+        the result (every entry is tried until one works), but keeping the
+        retirement order makes "which key is this?" answerable by eye.
+        """
+        return [key.strip() for key in self.encryption_key_previous.split(",") if key.strip()]
+
+
+def _is_fernet_key(value: str) -> bool:
+    """Whether ``value`` has the shape of a Fernet key (32 bytes, URL-safe base64).
+
+    A shape check, not an import of ``cryptography``: settings are loaded by
+    processes that never touch a PII column, and the point here is only to catch
+    a typo at boot instead of at the first encrypt or decrypt.
+    """
+    if not value:
+        return False
+    try:
+        decoded = base64.urlsafe_b64decode(value.encode("ascii"))
+    except (ValueError, UnicodeEncodeError):
+        return False
+    return len(decoded) == 32
 
 
 def _is_plausible_address(value: str) -> bool:

@@ -367,3 +367,158 @@ def test_explicit_ids_ignore_the_limit_argument(
     assert code == EXIT_OK
     assert is_sealed(str(load(session_factory, first).normalized_value))
     assert is_sealed(str(load(session_factory, second).normalized_value))
+
+
+# --- finishing a key rotation --------------------------------------------
+# Rotating ``ENCRYPTION_KEY`` is two steps, and this command is both of them
+# landing on the same rows. Step one: list the old key in
+# ``ENCRYPTION_KEY_PREVIOUS`` so stored values stay *readable*. Step two: run
+# this, so they stop *needing* the old key. Until step two finishes, the old key
+# is load-bearing — drop it early and every row written before the rotation
+# becomes an unreadable token, which is the outage the ring exists to prevent.
+
+
+def rotated_settings(settings: Settings, *, current: str, previous: str) -> Settings:
+    """Settings whose ring carries ``previous`` as the retired key."""
+    return settings.model_copy(
+        update={"encryption_key": current, "encryption_key_previous": previous}
+    )
+
+
+def test_a_row_sealed_under_a_retired_key_is_rewrapped_under_the_current_key(
+    session_factory: sessionmaker[Session], settings: Settings, contract: Contract
+) -> None:
+    old_key = Fernet.generate_key().decode("ascii")
+    new_key = Fernet.generate_key().decode("ascii")
+    token = FieldCipher(old_key).encrypt(PLAINTEXT_EMAIL)
+    field_id = add_field(session_factory, contract, raw=token, normalized=token)
+
+    code = run(session_factory, rotated_settings(settings, current=new_key, previous=old_key))
+
+    row = load(session_factory, field_id)
+    assert code == EXIT_OK
+    assert row.normalized_value is not None
+    assert row.normalized_value != token
+    # The point of the run: the current key alone now reads the row.
+    assert FieldCipher(new_key).decrypt(row.normalized_value) == PLAINTEXT_EMAIL
+
+
+def test_after_the_rewrap_the_old_key_is_no_longer_needed(
+    session_factory: sessionmaker[Session], settings: Settings, contract: Contract
+) -> None:
+    """A second run with ``ENCRYPTION_KEY_PREVIOUS`` cleared must be a clean no-op.
+
+    This is the operator's proof that the variable can be removed: the run after
+    the rotation reports nothing unreadable, so nothing still depends on the key.
+    """
+    old_key = Fernet.generate_key().decode("ascii")
+    new_key = Fernet.generate_key().decode("ascii")
+    token = FieldCipher(old_key).encrypt(PLAINTEXT_EMAIL)
+    field_id = add_field(session_factory, contract, raw=token, normalized=token)
+
+    assert (
+        run(session_factory, rotated_settings(settings, current=new_key, previous=old_key))
+        == EXIT_OK
+    )
+    rewrapped = load(session_factory, field_id).normalized_value
+
+    # Now the cutover: the retired key is gone, exactly as an operator would leave it.
+    code = run(session_factory, sealed_settings(settings, key=new_key))
+
+    assert code == EXIT_OK
+    assert load(session_factory, field_id).normalized_value == rewrapped
+
+
+def test_a_row_already_under_the_current_key_is_left_byte_identical(
+    session_factory: sessionmaker[Session], settings: Settings, contract: Contract
+) -> None:
+    """A half-rotated database: some rows carry the ring, some do not. Neither is rewritten."""
+    old_key = Fernet.generate_key().decode("ascii")
+    new_key = Fernet.generate_key().decode("ascii")
+    token = FieldCipher(new_key).encrypt(PLAINTEXT_EMAIL)
+    field_id = add_field(session_factory, contract, raw=token, normalized=token)
+
+    code = run(session_factory, rotated_settings(settings, current=new_key, previous=old_key))
+
+    row = load(session_factory, field_id)
+    assert code == EXIT_OK
+    assert row.raw_value == token
+    assert row.normalized_value == token
+
+
+def test_a_dry_run_reports_a_rotation_without_performing_it(
+    session_factory: sessionmaker[Session], settings: Settings, contract: Contract
+) -> None:
+    """The dry run is how an operator sizes the job before committing to it."""
+    old_key = Fernet.generate_key().decode("ascii")
+    new_key = Fernet.generate_key().decode("ascii")
+    token = FieldCipher(old_key).encrypt(PLAINTEXT_EMAIL)
+    field_id = add_field(session_factory, contract, raw=token, normalized=token)
+
+    code = run(
+        session_factory,
+        rotated_settings(settings, current=new_key, previous=old_key),
+        "--dry-run",
+    )
+
+    row = load(session_factory, field_id)
+    assert code == EXIT_OK
+    # Untouched: still wrapped in the old key, so the old key is still required.
+    assert row.raw_value == token
+    assert row.normalized_value == token
+    assert FieldCipher(old_key).decrypt(str(row.normalized_value)) == PLAINTEXT_EMAIL
+
+
+def test_a_row_whose_key_was_dropped_before_the_rewrap_is_reported_unreadable(
+    session_factory: sessionmaker[Session], settings: Settings, contract: Contract
+) -> None:
+    """The mistake this section warns about: clearing the old key one step too early.
+
+    It has to be *loud*. A silent success here would tell the operator the
+    rotation was finished while the rows it was meant to rescue are lost.
+    """
+    old_key = Fernet.generate_key().decode("ascii")
+    new_key = Fernet.generate_key().decode("ascii")
+    token = FieldCipher(old_key).encrypt(PLAINTEXT_EMAIL)
+    field_id = add_field(session_factory, contract, raw=token, normalized=token)
+
+    code = run(session_factory, sealed_settings(settings, key=new_key))
+
+    row = load(session_factory, field_id)
+    assert code == EXIT_UNREADABLE
+    # Left exactly as found. Re-sealing an unreadable token would wrap ciphertext
+    # in ciphertext and destroy the only copy of the value.
+    assert row.raw_value == token
+    assert row.normalized_value == token
+
+
+def test_one_run_seals_plaintext_and_rewraps_a_retired_token(
+    session_factory: sessionmaker[Session], settings: Settings, contract: Contract
+) -> None:
+    """Real databases are mixed: legacy plaintext rows and rotating rows together."""
+    old_key = Fernet.generate_key().decode("ascii")
+    new_key = Fernet.generate_key().decode("ascii")
+    token = FieldCipher(old_key).encrypt(PLAINTEXT_EMAIL)
+    rotating = add_field(
+        session_factory, contract, field_name=FieldName.EMAIL, raw=token, normalized=token
+    )
+    plaintext = add_field(
+        session_factory,
+        contract,
+        field_name=FieldName.PHONE,
+        raw=PLAINTEXT_PHONE,
+        normalized=PLAINTEXT_PHONE,
+    )
+
+    code = run(session_factory, rotated_settings(settings, current=new_key, previous=old_key))
+
+    current_only = FieldCipher(new_key)
+    assert code == EXIT_OK
+    assert (
+        current_only.decrypt(str(load(session_factory, rotating).normalized_value))
+        == PLAINTEXT_EMAIL
+    )
+    assert (
+        current_only.decrypt(str(load(session_factory, plaintext).normalized_value))
+        == PLAINTEXT_PHONE
+    )

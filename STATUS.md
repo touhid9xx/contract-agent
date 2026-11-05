@@ -48,7 +48,7 @@ creates permission. **GATE 2 was signed on 2026-11-04 at `5c3e077`** — see *GA
 — signed* below. That sign-off is unchanged by the later slice; what moved is the
 migration head, from `0003` to `0004`.
 
-Four slices have landed on top of the sign-off, none of which moves the schema.
+Six slices have landed on top of the sign-off, none of which moves the schema.
 `ddd4db9` (`fix(demo)`) repairs Phase-0 fixture drift against the real
 `AgentDecisionView` wire contract, and `a29f925` (`chore(gate)`) closes the last
 untypechecked project in the tree by running the demo frontend's `tsc` in
@@ -77,6 +77,15 @@ interpreter" and failed *open*, the same failure class as gap 13. Measured befor
 and after (14 CR → 0), with `git add --renormalize .` staging nothing, so the rule
 pins the checkout without rewriting a byte of content (D1-10). The migration head is
 unchanged at `0004`, and no test count moved.
+**The sixth slice is the residue gap 20 explicitly deferred** (`feat(crypto)`):
+`ENCRYPTION_KEY` can now be rotated. `FieldCipher` holds a key *ring* — one current key
+that seals, plus `ENCRYPTION_KEY_PREVIOUS` keys that can only unseal — and
+`reseal-fields` gains a `rewrapped` count, so the old key can be retired once the log
+says zero. A rotated key no longer makes stored recipients unreadable, which was the
+trade-off D10-11 recorded and this supersedes (D10-13). It is still a manual two-step
+procedure with no audit trail and no KMS, and that limit is written with the slice
+rather than left to be discovered. The suite went **529 → 553**, all 24 in
+`test_reseal.py`, `test_crypto.py` and `test_config.py`.
 
 ## Phase history
 
@@ -1125,8 +1134,11 @@ What lands:
 5. **The repair path is a CLI, not a data migration.** `python -m app.cli
    reseal-fields` (with `--ids`, `--limit`, `--dry-run`) seals unsealed rows, skips
    ones already sealed, counts `DecryptionError` separately and exits `4`
-   (`EXIT_UNREADABLE`) rather than re-sealing a token it cannot read. This is the
-   command `dispatch.py` already promised; it now exists.
+   (`EXIT_UNREADABLE`) rather than re-sealing a token it cannot read. **Extended after
+   this slice:** it also re-wraps a token sealed under a retired key
+   (`ENCRYPTION_KEY_PREVIOUS`), which is the half of a rotation this section records as
+   missing — see `D10-13` below. This is the command `dispatch.py` already promised; it
+   now exists.
 6. **Fail-closed everywhere it matters.** No key: the scheduler claims nothing
    (`notification_scheduler.py` returns before claiming), routes answer `503`, and the
    CLI exits `3`. A value sealed under a *different* key decrypts to
@@ -1167,9 +1179,14 @@ plaintext until an operator runs `reseal-fields`, and ~~**nothing schedules or a
 that** — there is no probe that counts unsealed rows~~. **Narrowed after this slice, not
 erased:** `python -m app.cli doctor` now counts unsealed rows and exits non-zero (next
 section, `D10-12`) — but **nothing schedules it**, so the number is available and nobody
-acts on it yet. And `ENCRYPTION_KEY` rotation is
-unsupported: a rotated key makes every stored recipient unreadable until the old one
-is restored, which is the fail-closed behaviour above, not a bug, but it is unhandled.
+acts on it yet. And ~~`ENCRYPTION_KEY` rotation is unsupported: a rotated key makes
+every stored recipient unreadable until the old one is restored~~ — **closed on top of
+this slice, not erased:** `D10-13` adds `ENCRYPTION_KEY_PREVIOUS`, a ring of
+decrypt-only keys and a `rewrapped` outcome in `reseal-fields`, so a rotation is now a
+two-step procedure instead of an outage. The fail-closed behaviour above was never the
+bug; the bug was that the only recovery was a database restore. What replaces it is
+narrower and is stated with it: the procedure is manual, nobody records who rotated or
+when, and `rewrapped=0` off an *untruncated* run is the only proof of completion.
 
 ## Two silent states now have a check ✅ (gap 22 + gap 20 residue, `D10-12`, `028b8b3`)
 
@@ -1194,7 +1211,11 @@ What lands:
 3. **No `ENCRYPTION_KEY` required.** `is_sealed` is shape-based (D10-11), so a keyless
    run still reports plaintext as plaintext. The mirror case is pinned too: a token
    sealed under a *rotated* key is **not** reported, because flagging it would send the
-   operator to `reseal-fields`, which would refuse with `EXIT_UNREADABLE`.
+   operator to `reseal-fields`, which would refuse with `EXIT_UNREADABLE`. That still
+   holds after `D10-13`: rotation is supported, but only for keys the process actually
+   carries, and `doctor` cannot tell a rotated token from a lost key — so reporting one
+   would be telling the operator to fix something that may already be a completed
+   rotation with the old key retired on purpose.
 4. **Read-only.** It seals nothing, retries nothing, resolves nothing;
    `test_running_it_changes_nothing` asserts the plaintext row is still plaintext after
    a run. Sealing stays `reseal-fields`' job, where it needs a key and a `--dry-run`.
@@ -1267,6 +1288,73 @@ that already holds CRLF files, which stay CRLF until the `mixed-line-ending` hoo
 rewrites them on its next run. Nor can it constrain an editor configured to emit
 CRLF — the hook remains the second line of defence, which is why the hook was kept
 rather than replaced by the attribute file.
+
+## `ENCRYPTION_KEY` rotates without stranding a row ✅ (`D10-13`)
+
+This closes the residue gap 20 left behind. The trade-off recorded at `99b5c4b` was
+that rotation was **unsupported**: a changed key made every stored recipient
+unreadable, `reseal-fields` refused rather than repaired it, and the only recovery was
+a database restore. That note called the missing piece "a two-key read window, which is
+a slice of its own". This is that slice.
+
+What lands:
+
+1. **A ring, not a second key.** `FieldCipher` takes one current key plus zero or more
+   retired ones. The current key seals everything; retired keys can only unseal. That
+   asymmetry is the design, not an implementation detail — if a retired key could
+   encrypt, "which key sealed this row?" would stop having one answer, and clearing
+   `ENCRYPTION_KEY_PREVIOUS` at the end of a rotation would be unsafe while a stale
+   process could still mint tokens with it.
+2. **`reseal-fields` gains a fourth outcome.** Beside seal / leave-alone / unreadable,
+   a token sealed under a retired key is re-wrapped under the current one and counted
+   as `rewrapped`. No second command: it already owns the question "do the stored
+   tokens conform to the current key?", already has `--ids`, `--limit`, `--dry-run` and
+   an exit code per outcome, and a `rotate-key` twin would be a third place to disagree
+   about what an unreadable token is.
+3. **`ENCRYPTION_KEY_PREVIOUS` is validated at boot.** Comma-separated, oldest first,
+   at most `MAX_RETIRED_ENCRYPTION_KEYS` (4). A malformed entry, a duplicate, the
+   current key listed as retired, retired keys with no current key — all start-up
+   failures, and every message names the *position*, never the value.
+4. **A dropped key stays an error.** A row sealed under a key no longer on the ring is
+   counted `unreadable` and the run exits `EXIT_UNREADABLE` (4). Re-wrapping a token
+   nobody can read would wrap ciphertext in ciphertext and destroy the value — the same
+   reasoning that made `is_sealed` shape-based.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Full suite, SQLite | `pytest` in `backend/`, `MYSQL_TEST_URL` **unset** | **553 collected — 0 failures, 0 errors, 7 skipped** (JUnit: `tests=553 failures=0 errors=0 skipped=7`) |
+| Full suite, **real MySQL 8.4** | `pytest` with `MYSQL_TEST_URL` on `:3307` | **NOT RUN** — the Docker daemon still did not answer on this host |
+| Lint | `ruff check .` (repo root) | All checks passed |
+| Format | `ruff format --check .` (repo root) | **85 files** already formatted |
+| Types | `mypy` (strict, config `files = backend/app`) | clean, **49 source files** |
+| Security lint | `bandit -q -c pyproject.toml -r backend/app` | **0 issues** (exit 0; 3 expected `nosec B104`) |
+
+The collected total grew by **24** over the `doctor` slice's 529, and the split was
+measured rather than estimated: `tests/test_reseal.py` 15 → **21** (+6, the rotation
+end-to-end cases), `tests/test_crypto.py` 20 → **30** (+10, the ring),
+`tests/test_config.py` 19 → **27** (+8, the validation refusals). The MySQL row is unrun
+for the third slice running and is left as `NOT RUN` rather than filled in with the
+expected 552/1 — nothing here touches the `FOR UPDATE SKIP LOCKED` path, the ENUMs or
+`NUMERIC(4,3)`, but "not touched" is not "verified".
+
+**Rotation is two steps, deliberately.** Set the new `ENCRYPTION_KEY` *and* the old one
+in `ENCRYPTION_KEY_PREVIOUS`, restart, run `reseal-fields` until the log says
+`rewrapped=0`, then clear `ENCRYPTION_KEY_PREVIOUS` and restart again. A single-step
+rotation is not offered because it would need every process to switch keys at the same
+instant; the failing state — a process holding only the new key while rows are still
+under the old one — is exactly the outage this slice exists to prevent. `.env.example`
+documents the same three lines an operator will actually run.
+
+**What it does not do.** It is a manual, operator-driven procedure: nothing records who
+rotated or when, there is no hosted-KMS integration (keys are environment variables in
+process memory), and `rewrapped=0` is conclusive only from an *untruncated* run — a
+`--limit` smaller than the row count reports zero for the rows it examined. A
+misconfigured rotation also widens the blast radius rather than shrinking it: a wrong
+key pasted into `ENCRYPTION_KEY_PREVIOUS` does not break reads of current rows, so it
+sits there looking correct until the day someone clears the variable and the rows it
+was carrying become unreadable. And rotation under concurrent writers is untested — the
+suite proves a rotation on a quiet database, not two processes rotating while one is
+sending.
 
 ## Known gaps / issues
 
@@ -1804,6 +1892,13 @@ sign-off, not footnotes:**
    key, since `is_sealed` is shape-based) and exits non-zero, so the state is now
    machine-checkable. Nothing schedules the command, so an operator still has to look —
    which is why the residue is narrowed here rather than struck out.
+   ~~**And `ENCRYPTION_KEY` rotation is unsupported, so a rotated key makes every stored
+   recipient unreadable until the old key is restored**~~ — **that clause is closed, not
+   deleted, by `D10-13`:** a retired-key ring (`ENCRYPTION_KEY_PREVIOUS`, decrypt-only,
+   at most 4) keeps rows written under the previous key readable, and
+   `reseal-fields --dry-run` re-wraps them under the current one, counted as `rewrapped`.
+   It is a manual two-step procedure with no audit trail of who ran it and no KMS
+   integration, and it is recorded that way rather than as full closure.
 7. ~~**Every contract predating `0002` is un-contactable** until consent is set row
    by row (gap 18), and an `AgentDecision` still cannot be overridden or flagged
    (gap 19) even though the `version` column those routes need now exists.~~

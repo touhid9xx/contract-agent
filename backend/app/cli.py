@@ -175,13 +175,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     reseal = commands.add_parser(
         "reseal-fields",
-        help="encrypt field values that were stored as plaintext",
+        help="seal plaintext field values, and finish a key rotation",
         description=(
-            "Seal extracted-field values written before gap 20 closed: "
-            "'raw_value' was always encrypted, 'normalized_value' was not. "
-            "Values that are already sealed are left alone, and a value that "
-            "cannot be read with the configured ENCRYPTION_KEY is reported "
-            "rather than re-encrypted."
+            "Two jobs on the same rows. Seals extracted-field values written "
+            "before gap 20 closed: 'raw_value' was always encrypted, "
+            "'normalized_value' was not. And re-seals values still wrapped in a "
+            "key listed in ENCRYPTION_KEY_PREVIOUS, which is the second half of "
+            "rotating ENCRYPTION_KEY. Values sealed with the current key are left "
+            "alone, and a value no configured key can read is reported rather "
+            "than re-encrypted."
         ),
     )
     reseal.add_argument(
@@ -405,10 +407,14 @@ def _reseal_fields(
     the clear, while the decision and dispatch policies read it. The write paths
     now seal it; this is the repair path for rows written before they did.
 
-    Three outcomes per value, and the distinction matters:
+    Four outcomes per value, and the distinction matters:
 
-    - **already sealed and readable** — left alone. Re-sealing would wrap a token
-      in a second token and lose the value for good.
+    - **already sealed with the current key** — left alone. Re-sealing would wrap a
+      token in a second token and lose the value for good.
+    - **sealed with a retired key** — re-sealed under the current one. This is the
+      second half of a rotation: ``ENCRYPTION_KEY_PREVIOUS`` keeps those rows
+      *readable*, and this makes them stop needing it, which is what lets the
+      operator clear the variable afterwards.
     - **already sealed but unreadable** — reported, never touched, and the run
       exits :data:`EXIT_UNREADABLE`. This is what a wrong ``ENCRYPTION_KEY`` looks
       like, and continuing past it would rewrite a correct database with garbage.
@@ -434,6 +440,7 @@ def _reseal_fields(
         return EXIT_FAILED
 
     sealed = 0
+    rewrapped = 0
     already_sealed = 0
     unreadable = 0
     changed: list[int] = []
@@ -448,7 +455,7 @@ def _reseal_fields(
                     continue
                 if is_sealed(str(value)):
                     try:
-                        cipher.decrypt(str(value))
+                        replacement = cipher.rewrap(str(value))
                     except DecryptionError:
                         unreadable += 1
                         log.warning(
@@ -457,7 +464,13 @@ def _reseal_fields(
                             column=column,
                         )
                         continue
-                    already_sealed += 1
+                    if replacement is None:
+                        already_sealed += 1
+                        continue
+                    if not dry_run:
+                        setattr(field, column, replacement)
+                    rewrapped += 1
+                    sealed_here += 1
                     continue
                 if not dry_run:
                     setattr(field, column, cipher.encrypt(str(value)))
@@ -471,6 +484,9 @@ def _reseal_fields(
         dry_run=dry_run,
         examined=len(rows),
         sealed=sealed,
+        # Rotation progress: this reaching 0 is the signal that
+        # ENCRYPTION_KEY_PREVIOUS can be cleared.
+        rewrapped=rewrapped,
         already_sealed=already_sealed,
         unreadable=unreadable,
         field_ids=changed,
@@ -488,7 +504,10 @@ def _reseal_fields(
         log.error(
             "reseal_left_values_unreadable",
             unreadable=unreadable,
-            hint="check that ENCRYPTION_KEY is the key these rows were sealed with",
+            hint=(
+                "check that ENCRYPTION_KEY is the key these rows were sealed with, "
+                "and that ENCRYPTION_KEY_PREVIOUS still carries any older one"
+            ),
         )
         return EXIT_UNREADABLE
 
