@@ -66,8 +66,17 @@ counts the two states in this system that fail *silently*: notifications parked
 `ENCRYPTION_KEY` (sealing is judged by envelope shape, so a rotated key still reads
 as sealed rather than as plaintext), it writes nothing, and it exits
 `EXIT_ATTENTION` (5) when either count is non-zero, so a cron entry or a CI step can
-watch it (D10-12). **Nothing schedules it yet** — it is a check, not an alarm. The
-migration head is unchanged at `0004`.
+watch it (D10-12). **Nothing schedules it yet** — it is a check, not an alarm.
+**The fifth slice is tooling, not product code.** A new `.gitattributes` pins
+`* text=auto eol=lf`, because `core.autocrlf` (a *checkout* setting, `true` on this
+host both locally and globally) and `mixed-line-ending --fix=lf` (a *post-checkout*
+hook) had been disagreeing: the tree only looked LF because the hook had already
+rewritten it. A fresh checkout carried **14 CR bytes** in `.husky/pre-commit` — a
+shebang `sh` cannot resolve, so the commit gate would have died with "bad
+interpreter" and failed *open*, the same failure class as gap 13. Measured before
+and after (14 CR → 0), with `git add --renormalize .` staging nothing, so the rule
+pins the checkout without rewriting a byte of content (D1-10). The migration head is
+unchanged at `0004`, and no test count moved.
 
 ## Phase history
 
@@ -1214,6 +1223,50 @@ machine-checkable instead of requiring a hand-written query — the two GATE 2 c
 answers are narrowed, not closed. **Nothing schedules it**: no cron entry, no alert
 route, no pager is added, and a command nobody runs is worth little more than the log
 line it replaces. That limit is stated in `D10-12` rather than left to be discovered.
+
+## Checkout line endings pinned to LF ✅ (`D1-10`)
+
+This closes the item carried as "`core.autocrlf=true` vs `mixed-line-ending
+--fix=lf`". It was not a style disagreement — the two settings operate at different
+times, so only one of them can win and it is not the one in this repo:
+
+- `core.autocrlf` decides what a **checkout writes**. It is `true` on this host,
+  both in the repo and in the global config, which is the stock Windows default.
+- `mixed-line-ending --fix=lf` decides what the **hook** writes, *after* the
+  checkout has already happened.
+
+The consequence is that the worktree was LF while the checkout contract still said
+CRLF. The tree looked correct only because the hook had run at least once, so any
+fresh clone, or any `git checkout -- <file>`, silently restored the CRLF.
+
+**Why this is a gate defect rather than a cosmetic one.** `.husky/pre-commit` and
+`.husky/commit-msg` are shell scripts, invoked through `sh`. Checked out as CRLF,
+the first line reads `#!/bin/sh\r`, which is not a path that exists, so the hook
+dies with "bad interpreter" instead of running. That fails **open**: the commit goes
+through and the gate reports nothing. This repo has already shipped one gate that
+was silently not running (gap 13), which is the reason this one is pinned rather
+than left to a hook that may or may not have run.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Checkout EOL — **before** | `git checkout-index -a --prefix=<scratch>`, byte-scan `.husky/pre-commit` | **360 bytes, 14 CR** (CRLF) |
+| Checkout EOL — **after** | same, with `.gitattributes` in place | **346 bytes, 0 CR** (LF) |
+| Source file, after | same, `backend/app/cli.py` / `STATUS.md` | **0 CR** each |
+| Index churn | `git add --renormalize .` | **staged nothing** — index was already LF, so no content is rewritten |
+| Commit gate | `pre-commit run --all-files` | **17 hooks Passed**, exit 0 (gitleaks is manual-stage, D1-03) |
+| Lint / format / types / security — all via the gate | `ruff check`, `ruff format --check`, `mypy` strict, `bandit` | Passed |
+| Full suite, SQLite | `pytest`, `MYSQL_TEST_URL` **unset** | **522 passed, 7 skipped, 0 failed** (exit 0) — **unchanged**, which is the expected evidence for a config-only change |
+| Full suite, **real MySQL 8.4** | `pytest` with `MYSQL_TEST_URL` on `:3307` | **NOT RUN** — the Docker daemon did not answer on this host; recorded as unrun rather than filled in |
+
+The change is 22 lines in one new file and touches no Python, TypeScript or SQL. The
+suite count being *identical* to the previous slice (522/7) is the point: nothing
+should move, and nothing did.
+
+**What it does not do.** `eol=lf` governs checkouts; it cannot retro-fit a clone
+that already holds CRLF files, which stay CRLF until the `mixed-line-ending` hook
+rewrites them on its next run. Nor can it constrain an editor configured to emit
+CRLF — the hook remains the second line of defence, which is why the hook was kept
+rather than replaced by the attribute file.
 
 ## Known gaps / issues
 

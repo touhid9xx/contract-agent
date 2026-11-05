@@ -190,6 +190,31 @@ including the Phase 0 demo files. D0-08 is closed.
 - **Why:** `make` is not installed on the primary Windows machine. The
   documented one-command path (`npm run bootstrap`) must not depend on it.
 
+## D1-10 — Line endings are pinned in `.gitattributes`, because `core.autocrlf` outranks the hook
+
+- **Decision:** the repo carries a `.gitattributes` whose whole content is
+  `* text=auto eol=lf`. One rule; git's own binary detection is left on.
+- **Why:** `mixed-line-ending --fix=lf` normalizes the worktree *after* checkout,
+  but `core.autocrlf` decides what the checkout writes in the first place, and it
+  is `true` on a default Windows install. The hook therefore rewrites files git
+  has just written, and the two settings only agree once the hook has run at
+  least once. The tree looked LF while the checkout contract said CRLF.
+- **Why that is a gate failure and not cosmetics:** `.husky/pre-commit` and
+  `.husky/commit-msg` are shell scripts. A fresh Windows checkout hands `sh` a
+  shebang reading `#!/bin/sh\r`, which it cannot resolve, so the hook dies with
+  "bad interpreter" and the commit gate fails *open* and reports nothing. This
+  project has already shipped one gate that was silently not running (Gap 13),
+  so the checkout is pinned rather than left to chance.
+- **Verified, not assumed:** `git checkout-index -a` into a scratch prefix gave
+  `.husky/pre-commit` 14 CR bytes without the file and 0 with it, while
+  `git add --renormalize .` staged nothing — the index was already LF, so this
+  adds a rule without rewriting a single byte of content.
+- **Limit:** `eol=lf` governs checkouts. It does not retro-fit a clone that
+  already holds CRLF files; those stay CRLF until the `mixed-line-ending` hook
+  rewrites them on its next run. And the rule can only constrain what git
+  writes — an editor configured for CRLF can still reintroduce them, which is
+  why the hook stays as the second line of defence.
+
 ---
 
 ## Phase 1 — F2 (persistence, outbox, relay)

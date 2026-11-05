@@ -1,0 +1,21 @@
+# Line endings, pinned so the checkout and the hook agree.
+#
+# `.pre-commit-config.yaml` runs `mixed-line-ending --fix=lf`, which forces LF
+# into the worktree. That is not enough on its own: `core.autocrlf` is a
+# *checkout* setting, and this project's primary host is Windows, where it is
+# commonly `true`. With it enabled every `git checkout` writes CRLF and the hook
+# then rewrites the same bytes back to LF, so the two settings never converge -
+# the tree only looks LF because the hook has already run at least once.
+#
+# That is not cosmetic. `.husky/pre-commit` and `.husky/commit-msg` are shell
+# scripts, and husky invokes them through sh. Checked out as CRLF, the kernel
+# hands sh a shebang of `#!/bin/sh\r`, which it cannot find: the hook dies with
+# "bad interpreter" instead of running, so the commit gate fails *open*. This
+# repo has already been bitten once by a gate that was silently not running
+# (Gap 13), so the checkout is pinned rather than left to luck.
+#
+# `eol=lf` overrides `core.autocrlf` per path, so a fresh clone gets LF before
+# any hook has run and the two settings agree from the first checkout.
+# `text=auto` keeps git's own binary detection, so nothing here needs a
+# per-extension opt-out.
+* text=auto eol=lf
