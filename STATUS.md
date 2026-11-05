@@ -1414,6 +1414,63 @@ missing migration set and is not one.
 history up to this commit. That hook is bound to a Docker image and had never been able to
 run before, which is why it is recorded here rather than assumed green from a manual stage.
 
+## A consent sheet imports in bulk ✅ (gap 18's buildable half, `D10-14`)
+
+Gap 18 has always been two pieces of work wearing one heading: a screen where an operator
+ticks four boxes for **one** contract, and a way to record consent for the contracts that
+already exist. The first is not built and this slice does not claim it. The second is, as
+`python -m app.cli consent-import` — which replaces the hand-written `UPDATE` against the
+contracts table that a consent sheet produces today, and which leaves no audit row and
+cannot tell a revocation from a re-grant.
+
+| Area | Detail |
+| --- | --- |
+| Command | `python -m app.cli consent-import --file <sheet.csv> [--dry-run]`. Header `contract_id,consent_email,consent_sms,consent_voice,do_not_contact`, built from `CONSENT_FLAG_COLUMNS` so a fifth channel cannot reach the writer without reaching the reader. |
+| Sheet cells | A closed vocabulary — `true/yes/1` and `false/no/0`, compared after stripping and lower-casing. Not `bool(cell)`, which reads `"false"` as consent granted. A **blank cell is an error**, not `false`: consent is stated, so blank is an unanswered question and defaulting it would revoke a channel the sheet never mentioned. |
+| Validate-then-write | `_read_consent_sheet` returns the rows **and every problem it found**, and a non-empty problem list writes nothing. Ragged row, non-numeric id, duplicate id, missing column, unreadable file and a header-only sheet are all refused with the line number. |
+| The sheet is the state | Full-state replacement, mirroring `PUT /contracts/{id}/consent` (D9-01), because a partial sheet cannot express a withdrawal. An all-false line revokes. |
+| No-op rows | `consent_flags(contract) == row.flags()` → counted `unchanged`, nothing written: no version bump, no audit row, no `consent_updated_at` move. Re-running an export is not an incident. |
+| Unknown ids | Reported and exit `EXIT_NO_MATCH`, while the rest of the sheet still applies — the rows are independent, but "40 of 41" must not look like success. |
+| Audit | One row per changed contract: `action=contract.consent_updated`, `actor_type=system`, `actor_id=None` (an operator with DB access is not a principal, and borrowing an identity would fabricate the fact the log exists to carry), `reason` naming the sheet's **file name** and line. One correlation id per run, so the import is one query rather than a guessed time range. |
+| Concurrency | `session.flush()` per row, so a concurrent writer surfaces as `StaleDataError` at the row that hit it, and the whole run rolls back rather than reporting a partly-applied sheet. |
+| No key needed | Consent is four booleans and a primary key. The contact values they permit live in the sealed fields, which this command neither reads nor writes — so it cannot be blocked by a missing or rotated `ENCRYPTION_KEY`. |
+| Tests | `test_consent_import.py` (15): apply, audit shape, revocation, multi-row, idempotent re-run, `--dry-run`, malformed cell, blank cell, missing column, duplicate id, header-only sheet, unreadable file, unknown id alongside applied rows, spreadsheet BOM, `yes/no/1/0`. |
+
+The refactor that came with it is the part that reduces risk rather than adding a feature:
+`consent_state()`, `consent_flags()` and `apply_consent()` now live in
+`app/db/repositories/contracts.py`, and `PUT /contracts/{id}/consent` was moved onto them.
+Before this there were two definitions of what "consent state" means; now there is one, so
+an import and a route cannot drift about which four columns they write. `ACTOR_SYSTEM` and
+`ACTION_CONSENT_UPDATED` were added to `app/db/repositories/audit.py` for the same reason —
+the action string was a module-local constant in the router, and two write paths naming the
+same action differently would have split the audit trail.
+
+### Verification actually run (consent import)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Tests | `pytest`, from `backend/` | **568 collected — 567 passed, 1 skipped, 0 failed** (JUnit: `tests=568 failures=0 errors=0 skipped=1`), exit 0. Was 553 at `9b6cf0f`; the 15 consent-import tests are the difference. |
+| Lint | `ruff check .`, root | All checks passed, exit 0 |
+| Format | `ruff format --check .`, root | **86 files already formatted**, exit 0 (85 at `9b6cf0f`; the new test file is the difference) |
+| Types | `mypy`, root | Success, **no issues in 49 source files**, exit 0 |
+| Security | `bandit -q -c pyproject.toml -r backend/app` | **0 issues**, exit 0 (two `nosec` advisories on `config.py:50`, unchanged) |
+
+The single skip is `KAFKA_LIVE` and it is unchanged, so GATE 2's clause 1 stands exactly as
+signed. The MySQL-dependent tests execute here because the container is up; no new MySQL
+test was written for this slice, and nothing in it is MySQL-specific.
+
+### What this does not do — state it, do not bury it
+
+- **The consent screen is still unbuilt**, so gap 18 is **narrowed, not closed**. Consent
+  still cannot be granted from the UI, and somebody still has to produce and own the sheet.
+- **No import-provenance record.** The audit rows are per-contract, so "which sheet
+  authorised this change" is answered only by the shared correlation id — there is no
+  first-class `import` row.
+- **The conflict path is handled but not tested.** `StaleDataError` rolls the run back;
+  no test forces that race.
+- **No test runs the command against a live API process**, the same limit `reseal-fields`
+  carries.
+
 ## Known gaps / issues
 
 1. **`gitleaks` needs Docker** and is manual-stage only (D1-03). Run
@@ -1545,14 +1602,22 @@ run before, which is why it is recorded here rather than assumed green from a ma
     path — the one the verification above actually exercises — cannot produce a
     reviewable address, and a contract whose only contact detail is a postal
     address yields nothing usable (D7-03).
-18. **Consent has no UI and no import path.** F9's flags default to `false`, so
+18. **Consent has no UI. ~~and no import path~~** F9's flags default to `false`, so
     **every contract that existed before `0002` became un-contactable** —
     fail-closed and correct, but resolvable only through
     `PUT /contracts/{id}/consent`, one contract at a time. There is no consent
-    screen and no bulk import, so this is a standing data-entry task somebody has
+    screen ~~and no bulk import~~, so this is a standing data-entry task somebody has
     to own; it is also the honest answer to "why does the decision route refuse
-    everything on a fresh database". Consent and opt-out are enforced in code at
-    both plan time and send time. ~~Quiet hours are enforced nowhere~~ — **retired
+    everything on a fresh database".
+    **Amended, not deleted:** the *import* half is built — `python -m app.cli
+    consent-import --file <sheet.csv> [--dry-run]` applies a whole consent sheet across
+    contracts, validates it entirely before writing, no-ops on rows that already agree,
+    and audits each change as a `system` actor (`D10-14`, section above). What stands
+    exactly as written is the part that matters for the product: **there is still no
+    consent screen**, so consent cannot be granted from the UI, and somebody still has to
+    produce and own the sheet. The gap is narrowed, not closed. Consent and opt-out
+    are enforced in code at both plan time and send time.
+    ~~Quiet hours are enforced nowhere~~ — **retired
     by F10.** `Contract.timezone` is read at last, `zoneinfo` + `tzdata` resolve it,
     and the window (`[20:00, 08:00)` by default) is checked immediately before the
     transport is reached, on the customer's wall clock and DST-safely (D10-01,
@@ -1798,8 +1863,11 @@ transport still refuses, and the SMTP path has only ever spoken to a loopback re
 this suite started and certified itself — so `sent: true` over HTTP is proven against
 a relay of our own making, never against a provider, and never through a handshake
 chaining to a public CA over a real network (D10-10). From F9: **every contract that
-predates `0002` is un-contactable** until someone sets consent one row at a time
-(gap 18), and ~~an `AgentDecision` still **cannot be overridden or flagged** — the
+predates `0002` is un-contactable** until someone sets consent ~~one row at a time
+(gap 18)~~ — **amended by `D10-14`, not deleted:** a consent sheet can now be imported
+across contracts in one audited run (`python -m app.cli consent-import`), so the
+one-row-at-a-time limit is gone. What still stands is that **no consent screen exists**,
+so consent cannot be granted from the UI at all. And ~~an `AgentDecision` still **cannot be overridden or flagged** — the
 `version` column that blocked those routes now exists (`0f5da36`), but the routes
 themselves still do not (gap 19)~~. **The struck clause is amended, not deleted:**
 the `feat(g19)` slice added both routes on top of migration `0004`, so an
@@ -1963,8 +2031,8 @@ sign-off, not footnotes:**
 7. ~~**Every contract predating `0002` is un-contactable** until consent is set row
    by row (gap 18), and an `AgentDecision` still cannot be overridden or flagged
    (gap 19) even though the `version` column those routes need now exists.~~
-   **Amended after the sign-off, not deleted from it:** the gap 18 half stands
-   exactly as signed. The gap 19 half is superseded by the `feat(g19)` slice, which
+   **Amended after the sign-off, not deleted from it:** ~~the gap 18 half stands
+   exactly as signed.~~ The gap 19 half is superseded by the `feat(g19)` slice, which
    added override and flag-review on top of migration `0004`. The two residues that
    replace it are narrower and are carried here rather than buried — a re-run
    appends a new decision instead of updating this one, so `rerun_count` is a
@@ -1973,6 +2041,11 @@ sign-off, not footnotes:**
    fixture, its `AgentDecision` type, its mutation helpers and
    `demo/backend/main.py` all follow the real wire contract. One residue remains,
    the `rerun_count` snapshot named first, and it is deliberate.
+   **And the gap 18 half is now narrowed, not closed, by `D10-14`:** bulk consent import
+   exists (`python -m app.cli consent-import`), so contracts predating `0002` no longer
+   have to be consented one `PUT` at a time — but **no consent screen exists**, so the
+   clause as signed still holds in the part it was written about. Nothing here was a
+   defect; it was missing work, and half of it has now been done.
 8. **`FOR UPDATE` is a no-op on SQLite.** The concurrency guarantees are
    MySQL-only evidence by construction; the offline suite can never be the proof.
 9. **Missing pieces by design, not by defect:** `CustomerResponse` and `Escalation`

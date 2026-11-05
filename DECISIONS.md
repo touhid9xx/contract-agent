@@ -1568,3 +1568,72 @@ committed together. That pairing is the milestone; extraction and review follow.
   key service. And as with `doctor`'s field scan, `rewrapped=0` is a statement about
   the rows one run saw — under `--limit` it is a floor, so the command to clear
   `ENCRYPTION_KEY_PREVIOUS` is only earned by a run that was not truncated.
+
+### D10-14 — A consent sheet is validated whole, then written per row
+
+- **Decision:** `python -m app.cli consent-import --file <sheet.csv> [--dry-run]` applies
+  the four consent booleans (`consent_email`, `consent_sms`, `consent_voice`,
+  `do_not_contact`) to many contracts in one run. The header is
+  `contract_id,consent_email,consent_sms,consent_voice,do_not_contact` and is derived
+  from `CONSENT_FLAG_COLUMNS` rather than retyped. Outcomes are counted as `updated`,
+  `unchanged` and `missing`; `--dry-run` reports the first two and writes nothing. This
+  is the buildable half of gap 18 — the consent *screen* is still unbuilt.
+- **Why a CLI command and not a bulk HTTP route:** `contract_id` is the table's primary
+  key, so a sheet can name any tenant's contract, and an HTTP route would therefore need
+  a cross-tenant collection endpoint — precisely what the tenant predicate exists to
+  prevent. The two operator commands that already reach across tenants (`extract`,
+  `reseal-fields`) are CLI commands for the same reason. The tenant each *write* lands
+  in is taken from the contract row, never from the sheet, so a hand-edited id cannot
+  move a write into another organisation.
+- **Why the sheet is the complete state and not a patch:** it mirrors
+  `PUT /contracts/{id}/consent`, which is a full-state replacement because a partial
+  `PATCH` cannot express a withdrawal (D9-01). An all-false line therefore revokes, and
+  that has to be a normal line rather than an omission — an import that treated a missing
+  column as "leave alone" would make revocation the one edit the sheet could not express.
+- **Why the whole file is parsed before anything is written:** an importer that stopped at
+  the first bad cell would already have applied the good lines above it, leaving the
+  database holding half a sheet with nothing recording which half. So the reader returns
+  the rows *and* every problem it found, and a non-empty problem list writes nothing and
+  names the line. A ragged row, a non-numeric id, a duplicate id and a missing column are
+  all reported this way.
+- **Why the boolean vocabulary is closed:** `bool("false")` is `True`, so a naive cell
+  parser reads a revocation as a grant, and a typo like `ture` would import as consent
+  given. Only `true/yes/1` and `false/no/0` are accepted, compared after stripping and
+  lower-casing. A blank cell is an **error**, not `false`: consent is stated, so an empty
+  cell is an unanswered question, and defaulting it to `false` would silently revoke a
+  channel the sheet never mentioned.
+- **Why a row that already agrees writes nothing:** no version bump, no audit row, no
+  `consent_updated_at` move — the same no-op rule the route uses. That is what makes
+  re-running an export from a spreadsheet harmless, and what makes the command safe to
+  re-run after it refused a sheet.
+- **Why an unknown contract id is reported but the rest still apply:** the rows are
+  independent, so failing the whole sheet over one stale id punishes 40 correct lines. But
+  the run exits `EXIT_NO_MATCH`, not `EXIT_OK`, because "consent recorded for 40 of 41
+  customers" must not look like success to a scheduler or a `&&`.
+- **Why the audit row says `system` with no `actor_id`:** an operator with database access
+  is not a principal, so there is no `actor_id` to record and borrowing one would fabricate
+  the fact the audit log exists to carry. One correlation id is minted for the run, so
+  "what did this import change?" is a single query rather than a guessed time range, and
+  the row's `reason` names the sheet's **file name** and line — enough to identify the
+  import, without recording an operator's directory layout.
+- **Why no contact value column, and why no `ENCRYPTION_KEY`:** the address and phone live
+  in the sealed `ExtractedField` columns, and a sheet carrying them would be a new copy of
+  exactly the PII F7 and gap 20 sealed. The command reads and writes four booleans and an
+  id, so it needs no key and cannot be blocked by a missing one.
+- **Trade-off, stated rather than buried:** this is not the consent UI, and gap 18 stays
+  open because of it. Somebody still has to produce and own the sheet, and consent still
+  cannot be granted from a screen — the command replaces a hand-written `UPDATE`, which
+  was what a consent sheet produced before this existed and which left no audit row and
+  could not distinguish a revocation from a re-grant. There is also no import-provenance
+  table: the audit rows are per-contract, so "which sheet authorised this change" is
+  answered only by the shared correlation id, not by a first-class record. And a
+  `StaleDataError` rolls the whole run back rather than reporting a partly-applied sheet;
+  the retry is the operator's, because only they can see what changed underneath.
+- **What this proves and what it does not.** Fifteen tests in
+  `backend/tests/test_consent_import.py` cover the apply path, the audit shape, a
+  revocation, a multi-row sheet, an idempotent re-run, `--dry-run`, a malformed cell, a
+  blank cell, a missing column, a duplicate id, a header-only sheet, an unreadable file, an
+  unknown id alongside applied rows, a spreadsheet BOM, and the `yes/no/1/0` spellings.
+  Not proven: nothing tests the concurrency path (`StaleDataError` is handled but no test
+  forces it), and no test runs the command against a live API process — the same gap
+  `reseal-fields` carries.

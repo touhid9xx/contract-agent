@@ -21,14 +21,31 @@ Two model fields are deliberately **not** settable from this path:
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from collections.abc import Mapping
+from datetime import date, datetime
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.db.base import utc_now
 from app.db.enums import ContractSource
 from app.db.models import Contract
 from app.db.repositories.base import TenantScopedRepository
+
+#: The four consent columns, named once.
+#:
+#: Every path that reads or writes consent iterates this tuple: the update route,
+#: the CLI import, and the audit snapshot that records what either of them did.
+#: Adding a fourth channel flag then reaches all three at once, instead of
+#: silently applying to two of them and leaving the audit trail describing an
+#: older shape of the row.
+CONSENT_FLAG_COLUMNS = (
+    "consent_email",
+    "consent_sms",
+    "consent_voice",
+    "do_not_contact",
+)
 
 
 class ContractRepository(TenantScopedRepository[Contract]):
@@ -79,13 +96,72 @@ def contract_for_operator(session: Session, contract_id: int) -> Contract | None
 
     This is the second audited exception to tenant scoping, and it exists for the
     same reason ``dead_lettered`` does: an operator running
-    ``python -m app.cli extract`` has a database connection, not a principal, so
-    there is no tenant for them to be scoped to. Keeping the bypass in one named
-    function — rather than an unscoped ``select`` at the call site — is what makes
-    it reviewable.
+    ``python -m app.cli extract`` or ``python -m app.cli consent-import`` has a
+    database connection, not a principal, so there is no tenant for them to be
+    scoped to. Keeping the bypass in one named function — rather than an unscoped
+    ``select`` at the call site — is what makes it reviewable, and one function
+    means the exceptions are countable.
 
     The contract's own ``tenant_id`` is then what scopes the *write*: extraction
-    builds its repository from ``contract.tenant_id``, so this lookup can widen
-    which contract an operator can see, but never which tenant a row lands in.
+    builds its repository from ``contract.tenant_id``, and the consent import
+    writes its audit row through one, so this lookup can widen which contract an
+    operator can see, but never which tenant a row lands in.
     """
     return session.execute(select(Contract).where(Contract.id == contract_id)).scalar_one_or_none()
+
+
+def consent_state(contract: Contract) -> Mapping[str, Any]:
+    """The consent picture of one contract, as a plain mapping.
+
+    Used as the *before* and *after* image written to ``AuditLog`` and as the
+    "did anything actually change?" comparison. Deliberately free of stored
+    contact values: consent is a set of booleans and a version, so this mapping
+    is safe to log and to persist verbatim.
+
+    ``version`` rides along because the interesting question an auditor asks is
+    not only what the flags were but which revision of the row said so.
+    """
+    state: dict[str, Any] = {column: getattr(contract, column) for column in CONSENT_FLAG_COLUMNS}
+    state["version"] = contract.version
+    return state
+
+
+def consent_flags(contract: Contract) -> Mapping[str, bool]:
+    """Only the four booleans, without ``version``.
+
+    Separate from ``consent_state`` because the two answer different questions:
+    ``consent_state`` records a revision, while equality here is what makes a
+    re-submitted consent sheet a no-op rather than a write. Comparing the
+    version too would turn every re-run into a "change".
+    """
+    return {column: bool(getattr(contract, column)) for column in CONSENT_FLAG_COLUMNS}
+
+
+def apply_consent(
+    contract: Contract,
+    *,
+    consent_email: bool,
+    consent_sms: bool,
+    consent_voice: bool,
+    do_not_contact: bool,
+    now: datetime | None = None,
+) -> bool:
+    """Set all four consent flags; report whether that changed anything.
+
+    All four are required, for the same reason ``ConsentUpdateRequest`` requires
+    them: a partial application would silently default the flags the caller did
+    not mention, and for consent a silent default is a decision nobody made.
+
+    Returns ``False`` when the flags already held these values, in which case
+    ``consent_updated_at`` is left alone — the row's stated consent date stays
+    the date consent last actually changed, not the date somebody re-sent it.
+    """
+    before = consent_flags(contract)
+    contract.consent_email = consent_email
+    contract.consent_sms = consent_sms
+    contract.consent_voice = consent_voice
+    contract.do_not_contact = do_not_contact
+    if consent_flags(contract) == before:
+        return False
+    contract.consent_updated_at = now or utc_now()
+    return True

@@ -30,6 +30,8 @@ from app.db.models import AuditLog
 from app.db.repositories.base import TenantScopedRepository
 
 __all__ = [
+    "ACTION_CONSENT_UPDATED",
+    "ACTOR_SYSTEM",
     "ACTOR_USER",
     "AUDIT_ENTITY_CONTRACT",
     "AUDIT_ENTITY_DECISION",
@@ -55,6 +57,22 @@ AUDIT_ENTITY_DECISION = "agent_decisions"
 #: ``AuditLog.actor_type`` value for a person acting through the API. The model
 #: also allows ``worker``/``system`` for actions that have no human actor.
 ACTOR_USER = "user"
+
+#: ``AuditLog.actor_type`` value for an action taken by a process with no human
+#: behind it. ``consent-import`` uses this and leaves ``actor_id`` empty rather
+#: than borrowing a user id: the row has to say "a command did this", and
+#: naming an operator who did not run it would fabricate exactly the fact the
+#: audit log exists to carry.
+ACTOR_SYSTEM = "system"
+
+#: ``AuditLog.action`` for any change to a contract's consent flags.
+#:
+#: Named here rather than in the route that first wrote it, because two paths now
+#: record it — ``PUT /contracts/{id}/consent`` and ``python -m app.cli
+#: consent-import``. One action string is what makes "everything that ever
+#: changed this customer's consent" a single query; a per-path action name would
+#: answer it in two, and the second one would be the one nobody remembered.
+ACTION_CONSENT_UPDATED = "contract.consent_updated"
 
 
 def _snapshot(state: Mapping[str, Any] | None) -> str | None:

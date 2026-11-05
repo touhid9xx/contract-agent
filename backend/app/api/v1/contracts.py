@@ -45,7 +45,6 @@ from sqlalchemy.orm.exc import StaleDataError
 from app.api.deps import get_request_session, require_roles
 from app.core.middleware import correlation_id_or_new
 from app.core.principal import Principal
-from app.db.base import utc_now
 from app.db.enums import (
     Channel,
     ContractSource,
@@ -56,8 +55,13 @@ from app.db.enums import (
     UserRole,
 )
 from app.db.models import Contract, ExtractedField
-from app.db.repositories.audit import ACTOR_USER, AUDIT_ENTITY_CONTRACT, AuditLogRepository
-from app.db.repositories.contracts import ContractRepository
+from app.db.repositories.audit import (
+    ACTION_CONSENT_UPDATED,
+    ACTOR_USER,
+    AUDIT_ENTITY_CONTRACT,
+    AuditLogRepository,
+)
+from app.db.repositories.contracts import ContractRepository, apply_consent, consent_state
 from app.db.repositories.fields import ExtractedFieldRepository
 from app.db.repositories.outbox import enqueue_event
 
@@ -401,24 +405,6 @@ class ConsentView(BaseModel):
     version: int
 
 
-CONSENT_UPDATED_ACTION = "contract.consent_updated"
-
-
-def _consent_state(contract: Contract) -> dict[str, object]:
-    """The audit snapshot for consent — four booleans and a version, no PII.
-
-    Nothing here identifies the customer; the row this describes already does, and
-    ``AuditLog`` is plain text that any operator can read.
-    """
-    return {
-        "consent_email": contract.consent_email,
-        "consent_sms": contract.consent_sms,
-        "consent_voice": contract.consent_voice,
-        "do_not_contact": contract.do_not_contact,
-        "version": contract.version,
-    }
-
-
 def _consent_view(contract: Contract) -> ConsentView:
     return ConsentView(
         contract_id=contract.id,
@@ -475,26 +461,30 @@ def update_consent(
             },
         )
 
-    before = _consent_state(contract)
-    contract.consent_email = payload.consent_email
-    contract.consent_sms = payload.consent_sms
-    contract.consent_voice = payload.consent_voice
-    contract.do_not_contact = payload.do_not_contact
-    unchanged = all(before[key] == value for key, value in _consent_state(contract).items())
-    if unchanged:
+    # The snapshot and the write itself come from the repository module, shared with
+    # ``python -m app.cli consent-import``: two copies of "what consent looks like"
+    # would drift the first time a channel was added.
+    before = consent_state(contract)
+    changed = apply_consent(
+        contract,
+        consent_email=payload.consent_email,
+        consent_sms=payload.consent_sms,
+        consent_voice=payload.consent_voice,
+        do_not_contact=payload.do_not_contact,
+    )
+    if not changed:
         return _consent_view(contract)
 
-    contract.consent_updated_at = utc_now()
     try:
         # Flush before the snapshot so ``after`` records the version the write
         # produced, not the one it replaced.
         session.flush()
-        after = _consent_state(contract)
+        after = consent_state(contract)
         AuditLogRepository(session, principal.tenant_id).record(
             correlation_id=correlation_id_or_new(),
             actor_type=ACTOR_USER,
             actor_id=principal.user_id,
-            action=CONSENT_UPDATED_ACTION,
+            action=ACTION_CONSENT_UPDATED,
             entity=AUDIT_ENTITY_CONTRACT,
             entity_id=str(contract.id),
             before=before,

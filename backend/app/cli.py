@@ -8,6 +8,8 @@ Run from ``backend/``::
     python -m app.cli extract --contract-id 12 --text-file contract.txt
     python -m app.cli reseal-fields --dry-run
     python -m app.cli reseal-fields
+    python -m app.cli consent-import --file consent.csv --dry-run
+    python -m app.cli consent-import --file consent.csv
     python -m app.cli doctor
 
 Why a command rather than an HTTP endpoint: republishing parked events is a
@@ -29,13 +31,17 @@ error string can echo a destination address, and these rows carry them.
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import structlog
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.core.config import Settings, get_settings
 from app.core.crypto import (
@@ -45,8 +51,21 @@ from app.core.crypto import (
     is_sealed,
 )
 from app.core.logging import configure_logging
+from app.core.middleware import correlation_id_or_new
 from app.db.enums import NotificationStatus
-from app.db.repositories.contracts import contract_for_operator
+from app.db.repositories.audit import (
+    ACTION_CONSENT_UPDATED,
+    ACTOR_SYSTEM,
+    AUDIT_ENTITY_CONTRACT,
+    AuditLogRepository,
+)
+from app.db.repositories.contracts import (
+    CONSENT_FLAG_COLUMNS,
+    apply_consent,
+    consent_flags,
+    consent_state,
+    contract_for_operator,
+)
 from app.db.repositories.fields import DEFAULT_RESEAL_LIMIT, fields_for_reseal
 from app.db.repositories.notifications import undelivered_counts
 from app.db.repositories.outbox import (
@@ -90,6 +109,153 @@ EXIT_ATTENTION = 5
 #: ``reseal-fields`` seals this set and ``doctor`` checks it, and a column added to
 #: one without the other is the failure this constant exists to prevent.
 _PII_COLUMNS = ("raw_value", "normalized_value")
+
+#: The header a consent sheet must carry, in the order :data:`ConsentSheetRow`
+#: documents it.
+#:
+#: Built from :data:`~app.db.repositories.contracts.CONSENT_FLAG_COLUMNS` rather
+#: than retyped, so a fifth channel flag cannot be added to the sheet's writer
+#: without appearing in its reader. Note there is no contact *value* column: the
+#: address and phone number live in the encrypted fields, and a sheet that carried
+#: them would be a new copy of the PII that F7 and gap 20 sealed.
+_CONSENT_SHEET_COLUMNS = ("contract_id", *CONSENT_FLAG_COLUMNS)
+
+#: Accepted spellings for a consent cell, compared after stripping and lowering.
+#:
+#: Deliberately a closed set rather than ``bool(cell)``: ``bool("false")`` is
+#: ``True``, and a typo like ``ture`` would import as consent granted. Getting this
+#: wrong is not a formatting nit — it is a customer being contacted who said no.
+_TRUE_WORDS = frozenset({"true", "yes", "1"})
+_FALSE_WORDS = frozenset({"false", "no", "0"})
+
+
+@dataclass(frozen=True)
+class ConsentSheetRow:
+    """One validated line of a consent sheet.
+
+    The field names are the CSV column names, so the parser, the reader and the
+    writer all describe the same shape. ``line`` is kept because the only useful
+    thing to tell an operator about a bad sheet is where in the file it went
+    wrong, and the row itself has no idea it came from a file at all.
+    """
+
+    line: int
+    contract_id: int
+    consent_email: bool
+    consent_sms: bool
+    consent_voice: bool
+    do_not_contact: bool
+
+    def flags(self) -> dict[str, bool]:
+        """The four consent booleans, keyed by column name.
+
+        Used for the "does the sheet disagree with the row?" comparison, which
+        has to be the *same* four columns
+        :func:`~app.db.repositories.contracts.apply_consent` writes — hence the
+        iteration over ``CONSENT_FLAG_COLUMNS`` rather than a literal list.
+        """
+        return {column: bool(getattr(self, column)) for column in CONSENT_FLAG_COLUMNS}
+
+
+def _consent_bool(cell: str) -> bool | None:
+    """Parse one consent cell, or ``None`` when it is not a recognisable boolean."""
+    word = cell.strip().lower()
+    if word in _TRUE_WORDS:
+        return True
+    if word in _FALSE_WORDS:
+        return False
+    return None
+
+
+def _read_consent_sheet(path: Path) -> tuple[list[ConsentSheetRow], list[str]]:
+    """Parse a whole consent sheet, collecting every problem it has.
+
+    Returns the usable rows *and* the problems, and the caller writes nothing at
+    all while the problem list is non-empty. Validating the file before touching
+    the database is the point: an import that stops at the first bad line has
+    already applied the good ones, leaving the database holding half a sheet with
+    nothing recording which half.
+
+    ``utf-8-sig`` because these sheets come out of spreadsheet software, which
+    writes a byte-order mark. Without it the first column arrives spelled
+    ``\\ufeffcontract_id`` and the sheet is rejected for a header the operator can
+    plainly see.
+    """
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except OSError as exc:
+        return [], [f"could not read {path}: {exc}"]
+    except UnicodeDecodeError as exc:
+        return [], [f"{path} is not UTF-8 text: {exc}"]
+
+    reader = csv.DictReader(io.StringIO(text))
+    header = list(reader.fieldnames or [])
+    missing_columns = [column for column in _CONSENT_SHEET_COLUMNS if column not in header]
+    if missing_columns:
+        return [], [
+            f"missing column(s) {', '.join(missing_columns)}; "
+            f"expected the header {','.join(_CONSENT_SHEET_COLUMNS)}"
+        ]
+
+    rows: list[ConsentSheetRow] = []
+    problems: list[str] = []
+    seen: dict[int, int] = {}
+
+    for record in reader:
+        where = f"line {reader.line_num}"
+        if None in record or any(value is None for value in record.values()):
+            # ``DictReader`` files extra cells under a ``None`` key and pads a
+            # short row with ``None`` values; either means the sheet is ragged.
+            problems.append(f"{where}: cell count does not match the header")
+            continue
+
+        raw_id = str(record["contract_id"] or "").strip()
+        try:
+            contract_id = int(raw_id)
+        except ValueError:
+            problems.append(f"{where}: contract_id {raw_id!r} is not a whole number")
+            continue
+
+        wanted: dict[str, bool] = {}
+        for column in CONSENT_FLAG_COLUMNS:
+            parsed = _consent_bool(str(record[column] or ""))
+            if parsed is None:
+                # A blank cell lands here too, deliberately: consent is stated, so
+                # an empty cell is an unanswered question, not a "no". Treating it
+                # as false would silently revoke a channel the sheet never
+                # mentioned.
+                problems.append(
+                    f"{where}: {column} {record[column]!r} is not a boolean "
+                    f"(expected {'/'.join(sorted(_TRUE_WORDS))} or "
+                    f"{'/'.join(sorted(_FALSE_WORDS))})"
+                )
+            else:
+                wanted[column] = parsed
+        if len(wanted) != len(CONSENT_FLAG_COLUMNS):
+            continue
+
+        if contract_id in seen:
+            # Two lines disagreeing about one contract has no defensible
+            # resolution order, and picking the last one would make the import's
+            # effect depend on row order.
+            problems.append(
+                f"{where}: contract_id {contract_id} already appears on line {seen[contract_id]}"
+            )
+            continue
+
+        seen[contract_id] = reader.line_num
+        rows.append(
+            ConsentSheetRow(
+                line=reader.line_num,
+                contract_id=contract_id,
+                consent_email=wanted["consent_email"],
+                consent_sms=wanted["consent_sms"],
+                consent_voice=wanted["consent_voice"],
+                do_not_contact=wanted["do_not_contact"],
+            )
+        )
+
+    return rows, problems
 
 
 def _ids_arg(value: str) -> list[int]:
@@ -229,6 +395,34 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     doctor.set_defaults(handler=_doctor)
+
+    consent = commands.add_parser(
+        "consent-import",
+        help="apply a consent sheet (CSV) to many contracts in one run",
+        description=(
+            "Record channel consent and opt-out state for many contracts from a "
+            "CSV sheet. The header must be "
+            f"{','.join(_CONSENT_SHEET_COLUMNS)}; each cell is true/false, "
+            "yes/no or 1/0. The sheet is the complete state for every contract it "
+            "names, so an all-false line revokes consent. Nothing is written "
+            "unless every line parses."
+        ),
+    )
+    consent.add_argument(
+        "--file",
+        required=True,
+        metavar="PATH",
+        help=(
+            "consent sheet to read (UTF-8; a spreadsheet BOM is tolerated). A "
+            "byte-order mark, CRLF endings and quoted cells are all handled"
+        ),
+    )
+    consent.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report which contracts would change without writing anything",
+    )
+    consent.set_defaults(handler=_consent_import)
     return parser
 
 
@@ -607,6 +801,160 @@ def _doctor(
         return EXIT_ATTENTION
 
     log.info("doctor_clean", **report)
+    return EXIT_OK
+
+
+def _consent_import(
+    args: argparse.Namespace,
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+) -> int:
+    """``consent-import``: apply a consent sheet to many contracts in one run.
+
+    The bulk half of gap 18. The other half — a screen where an operator ticks the
+    same four boxes for one contract — is still unbuilt, and this command is not a
+    substitute for it: what it replaces is a hand-written ``UPDATE`` against the
+    contracts table, which is what a consent sheet produces today. That UPDATE
+    leaves no audit row and cannot tell a revocation from a re-grant.
+
+    Four rules, each of which is a way the naive version goes wrong:
+
+    - **The whole sheet is validated before anything is written.** A half-applied
+      import leaves some customers consented and some not, with nothing pointing
+      at the boundary. A sheet with one bad cell writes nothing and says which
+      line.
+    - **A row that already agrees writes nothing.** No version bump, no audit
+      row, no ``consent_updated_at`` move — the same no-op rule as
+      ``PUT /contracts/{id}/consent``, so re-running an export is not an incident.
+      This is also what makes the command safe to re-run after a partial failure.
+    - **A contract id that does not exist is reported, not skipped.** The rest of
+      the sheet still applies — those rows are independent — but the run exits
+      :data:`EXIT_NO_MATCH`, because "we recorded consent for 40 of 41 customers"
+      must not look like success.
+    - **The audit row says ``system``, not a person.** An operator with database
+      access is not a principal, so there is no ``actor_id`` to record, and
+      borrowing one would fabricate the fact the audit log exists to carry.
+
+    Needs no ``ENCRYPTION_KEY``: consent is four booleans, and the contact values
+    they permit live in the sealed fields, which this command neither reads nor
+    writes.
+
+    The ``contract_id`` is the table's primary key, so the sheet can name any
+    tenant's contract — the same reach :func:`_extract` has, and the reason both
+    are CLI commands rather than HTTP routes. The tenant each *write* lands in is
+    taken from the contract row, never from the sheet.
+    """
+    sheet = Path(str(args.file))
+    rows, problems = _read_consent_sheet(sheet)
+
+    if problems:
+        log.error(
+            "consent_import_sheet_invalid",
+            path=str(sheet),
+            problems=problems,
+            hint="nothing was written; fix the sheet and run it again",
+        )
+        return EXIT_FAILED
+
+    if not rows:
+        # A header with no data rows is not an import of zero consent updates: it
+        # is almost always an export that produced nothing. Exiting 0 would let a
+        # scheduled import report success every night for a year while no consent
+        # was ever recorded.
+        log.error(
+            "consent_import_sheet_empty",
+            path=str(sheet),
+            hint=f"the sheet needs the header {','.join(_CONSENT_SHEET_COLUMNS)} and at least one row",
+        )
+        return EXIT_FAILED
+
+    dry_run = bool(args.dry_run)
+    # One correlation id for the whole run, so "what did this import change?" is a
+    # single query over audit_log rather than a time range to guess at.
+    correlation_id = correlation_id_or_new()
+    updated: list[int] = []
+    unchanged: list[int] = []
+    missing: list[int] = []
+
+    with session_scope(session_factory) as session:
+        try:
+            for row in rows:
+                contract = contract_for_operator(session, row.contract_id)
+                if contract is None:
+                    missing.append(row.contract_id)
+                    continue
+
+                wanted = row.flags()
+                if consent_flags(contract) == wanted:
+                    unchanged.append(contract.id)
+                    continue
+
+                # Counted before the dry-run exit as well: a dry run answers "what
+                # would change", and a sheet that would change nothing has to look
+                # different from one that would.
+                updated.append(contract.id)
+                before = consent_state(contract)
+                if dry_run:
+                    continue
+
+                apply_consent(
+                    contract,
+                    consent_email=row.consent_email,
+                    consent_sms=row.consent_sms,
+                    consent_voice=row.consent_voice,
+                    do_not_contact=row.do_not_contact,
+                )
+                # Flush per row so a concurrent writer's committed change surfaces
+                # here as a version conflict with the row that hit it, rather than
+                # as an opaque failure at the end of the run.
+                session.flush()
+                AuditLogRepository(session, contract.tenant_id).record(
+                    correlation_id=correlation_id,
+                    actor_type=ACTOR_SYSTEM,
+                    actor_id=None,
+                    action=ACTION_CONSENT_UPDATED,
+                    entity=AUDIT_ENTITY_CONTRACT,
+                    entity_id=str(contract.id),
+                    before=before,
+                    after=consent_state(contract),
+                    # The sheet's *name*, not its full path: enough to identify the
+                    # import, without recording an operator's directory layout.
+                    reason=f"consent imported from {sheet.name} line {row.line}",
+                )
+        except StaleDataError:
+            # Another writer committed between the read and the flush. Undo the
+            # whole run rather than reporting a partly-applied sheet, and leave the
+            # retry to the operator, who can see what changed.
+            session.rollback()
+            log.error(
+                "consent_import_conflict",
+                path=str(sheet),
+                hint="consent changed while the import ran; nothing was written, run it again",
+            )
+            return EXIT_FAILED
+
+    log.info(
+        "consent_import",
+        path=str(sheet),
+        dry_run=dry_run,
+        rows=len(rows),
+        updated=len(updated),
+        unchanged=len(unchanged),
+        missing=missing,
+        contract_ids=updated,
+    )
+
+    if missing:
+        log.error(
+            "consent_import_contracts_not_found",
+            contract_ids=missing,
+            hint=(
+                "no row was written for these ids; check the sheet came from this "
+                "database and not from another environment's export"
+            ),
+        )
+        return EXIT_NO_MATCH
+
     return EXIT_OK
 
 
