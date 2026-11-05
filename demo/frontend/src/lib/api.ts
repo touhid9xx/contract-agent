@@ -89,13 +89,16 @@ export const api = {
     ),
   rerunAgent: (contractId: number) =>
     request<{ decision: import("./types").AgentDecision }>(`/agent/decisions/${contractId}/rerun`, { method: "POST" }),
-  overrideChannel: (contractId: number, channel: import("./types").Channel) =>
+  overrideChannel: (contractId: number, channel: import("./types").Channel, version: number) =>
     request<{ decision: import("./types").AgentDecision }>(`/agent/decisions/${contractId}/override`, {
       method: "POST",
-      body: JSON.stringify({ channel }),
+      body: JSON.stringify({ channel, version }),
     }),
-  flagDecision: (contractId: number) =>
-    request<{ decision: import("./types").AgentDecision }>(`/agent/decisions/${contractId}/flag-review`, { method: "POST" }),
+  flagDecision: (contractId: number, version: number) =>
+    request<{ decision: import("./types").AgentDecision }>(`/agent/decisions/${contractId}/flag-review`, {
+      method: "POST",
+      body: JSON.stringify({ version }),
+    }),
   notifications: (params: Record<string, string | undefined> = {}) => {
     const search = new URLSearchParams();
     Object.entries(params).forEach(([key, value]) => {

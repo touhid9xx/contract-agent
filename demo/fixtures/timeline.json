@@ -87,9 +87,7 @@
           "confidence": 0.92,
           "prompt_version": "v3",
           "llm_model": "qwen2:7b",
-          "needs_review": false,
-          "input_signals": { "age_bucket": "40-50", "has_email": true, "has_phone": false, "contract_value_bucket": "low", "days_to_expiry": 24 },
-          "mlflow_run_id": "7f3a9c2e"
+          "needs_review": false
         }
       },
       {
@@ -154,8 +152,8 @@
         "at": "2025-05-29T09:38:40Z",
         "type": "agent_decisions",
         "title": "agent_decisions",
-        "summary": "channel=sms conf=0.88 (1 schema repair)",
-        "payload": { "channel": "sms", "confidence": 0.88, "prompt_version": "v3", "llm_model": "qwen2:7b", "schema_repairs": 1, "needs_review": false, "mlflow_run_id": "2b81e4d0" }
+        "summary": "channel=sms conf=0.88",
+        "payload": { "channel": "sms", "confidence": 0.88, "prompt_version": "v3", "llm_model": "qwen2:7b", "needs_review": false }
       },
       {
         "id": "ev-1041-3",
@@ -193,7 +191,7 @@
         "type": "agent_decisions",
         "title": "agent_decisions",
         "summary": "channel=voice conf=0.95",
-        "payload": { "channel": "voice", "confidence": 0.95, "prompt_version": "v3", "llm_model": "qwen2:7b", "needs_review": false, "mlflow_run_id": "9c40a17b" }
+        "payload": { "channel": "voice", "confidence": 0.95, "prompt_version": "v3", "llm_model": "qwen2:7b", "needs_review": false }
       },
       {
         "id": "ev-1040-2",
@@ -240,7 +238,7 @@
         "type": "agent_decisions",
         "title": "agent_decisions",
         "summary": "channel=email conf=0.91",
-        "payload": { "channel": "email", "confidence": 0.91, "prompt_version": "v2", "llm_model": "qwen2:7b", "needs_review": false, "mlflow_run_id": "6a02ff19" }
+        "payload": { "channel": "email", "confidence": 0.91, "prompt_version": "v2", "llm_model": "qwen2:7b", "needs_review": false }
       },
       {
         "id": "ev-1038-2",
@@ -259,8 +257,8 @@
         "at": "2025-06-13T16:40:22Z",
         "type": "agent_decisions",
         "title": "agent_decisions",
-        "summary": "channel=voice conf=0.79 (2 schema repairs)",
-        "payload": { "channel": "voice", "confidence": 0.79, "prompt_version": "v3", "llm_model": "qwen2:7b", "schema_repairs": 2, "needs_review": false, "mlflow_run_id": "4d19bb83" }
+        "summary": "channel=voice conf=0.79",
+        "payload": { "channel": "voice", "confidence": 0.79, "prompt_version": "v3", "llm_model": "qwen2:7b", "needs_review": false }
       },
       {
         "id": "ev-1037-2",

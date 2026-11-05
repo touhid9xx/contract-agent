@@ -1,6 +1,7 @@
 {
   "mocked": true,
   "current_user": {
+    "id": "0b6f1c2d-3a4e-4f58-9b7c-1d2e3f4a5b6c",
     "name": "admin@acme.test",
     "display_name": "Demo Admin",
     "role": "admin",

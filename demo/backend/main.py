@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-import random
 import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -178,7 +177,23 @@ class NoteIn(BaseModel):
 
 
 class ChannelIn(BaseModel):
+    """Body of an operator override, matching ``DecisionOverrideRequest``.
+
+    ``version`` is required rather than optional so the demo client has to send the
+    generation it rendered, exactly as the real route demands. Without it the demo
+    could never show the 409 the real API returns.
+    """
+
     channel: Literal["email", "sms", "voice"]
+    version: int = Field(gt=0)
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class FlagReviewIn(BaseModel):
+    """Body of a flag-review, matching ``FlagReviewRequest`` (no channel: unrepresentable)."""
+
+    version: int = Field(gt=0)
+    reason: str | None = Field(default=None, max_length=500)
 
 
 class AssignIn(BaseModel):
@@ -395,7 +410,9 @@ async def review_field(field_id: str, body: ReviewUpdate) -> dict[str, Any]:
         field["status"] = "unreadable"
 
     field["version"] += 1
-    field["reviewed_by"] = STATE["users"]["current_user"]["name"]
+    # The real column is a GUID (`ExtractedField.reviewed_by`), not an email: identity
+    # is resolved through the user table, and the demo stores the same shape.
+    field["reviewed_by"] = STATE["users"]["current_user"]["id"]
     field["reviewed_at"] = datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
     contract = _find_contract(field["contract_id"])
     _refresh_pipeline_block(contract)
@@ -403,7 +420,7 @@ async def review_field(field_id: str, body: ReviewUpdate) -> dict[str, Any]:
         contract["id"],
         "review.resolved",
         "review.resolved",
-        f"{field['field']} {body.action} by {field['reviewed_by']}",
+        f"{field['field']} {body.action} by {STATE['users']['current_user']['display_name']}",
         {
             "field": field["field"],
             "action": body.action,
@@ -431,19 +448,27 @@ async def get_decision(contract_id: int = Query(...)) -> dict[str, Any]:
 async def rerun_agent(contract_id: int) -> dict[str, Any]:
     await asyncio.sleep(1.6)  # simulated Ollama latency
     contract = _find_contract(contract_id)
-    decision = _decision_for(contract_id)
-    if decision is None:
+    current = _decision_for(contract_id)
+    if current is None:
         raise HTTPException(status_code=409, detail={"code": "PIPELINE_BLOCKED", "message": "No decision exists; the contract is still awaiting review."})
+    # A re-run **appends**, it never edits, which is what the real route does: the
+    # previous recommendation stays readable as history instead of being overwritten.
+    decision = copy.deepcopy(current)
+    decision["id"] = max((row["id"] for row in STATE["decisions"]), default=0) + 1
+    decision["correlation_id"] = str(uuid.uuid4())
     decision["created_at"] = datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
-    decision["latency_ms"] = random.randint(1500, 2500)
-    decision["mlflow_run_id"] = uuid.uuid4().hex[:8]
-    decision["rerun_count"] = decision.get("rerun_count", 0) + 1
+    decision["version"] = 1
+    decision["original_channel"] = None
+    decision["overridden_by"] = None
+    decision["needs_review"] = False
+    decision["rerun_count"] = current.get("rerun_count", 0) + 1
+    STATE["decisions"].insert(0, decision)
     _append_event(
         contract_id,
         "agent_decisions",
         "agent_decisions",
         f"channel={decision['channel']} conf={decision['confidence']:.2f} (re-run)",
-        {"channel": decision["channel"], "confidence": decision["confidence"], "prompt_version": decision["prompt_version"], "llm_model": decision["llm_model"], "mlflow_run_id": decision["mlflow_run_id"], "rerun": True},
+        {"channel": decision["channel"], "confidence": decision["confidence"], "prompt_version": decision["prompt_version"], "llm_model": decision["llm_model"], "rerun_count": decision["rerun_count"], "rerun": True},
     )
     return {"decision": decision, "contract": contract, "mocked": True}
 
@@ -454,27 +479,42 @@ async def override_channel(contract_id: int, body: ChannelIn) -> dict[str, Any]:
     decision = _decision_for(contract_id)
     if decision is None:
         raise HTTPException(status_code=409, detail={"code": "NO_DECISION", "message": "There is no agent decision to override."})
+    if body.version != decision["version"]:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "CONCURRENT_UPDATE", "message": "This decision changed since you loaded it.", "decision": decision},
+        )
     previous = decision["channel"]
     decision["channel"] = body.channel
-    decision["overridden_by"] = STATE["users"]["current_user"]["name"]
-    decision["original_channel"] = previous
+    decision["version"] += 1
+    # Set once and never rewritten, so a second override still reports the channel the
+    # *policy* chose rather than the previous operator's choice.
+    if decision["original_channel"] is None:
+        decision["original_channel"] = previous
+    decision["overridden_by"] = STATE["users"]["current_user"]["id"]
     _append_event(
         contract_id,
         "audit_log",
         "agent_decision.overridden",
         f"channel {previous} → {body.channel} by operator",
-        {"previous_channel": previous, "new_channel": body.channel, "actor": decision["overridden_by"]},
+        {"previous_channel": previous, "new_channel": body.channel, "original_channel": decision["original_channel"], "actor": decision["overridden_by"]},
     )
     return {"decision": decision, "mocked": True}
 
 
 @app.post("/api/v1/agent/decisions/{contract_id}/flag-review")
-async def flag_for_review(contract_id: int) -> dict[str, Any]:
+async def flag_for_review(contract_id: int, body: FlagReviewIn) -> dict[str, Any]:
     await asyncio.sleep(0.3)
     decision = _decision_for(contract_id)
     if decision is None:
         raise HTTPException(status_code=409, detail={"code": "NO_DECISION", "message": "There is no agent decision to flag."})
+    if body.version != decision["version"]:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "CONCURRENT_UPDATE", "message": "This decision changed since you loaded it.", "decision": decision},
+        )
     decision["needs_review"] = True
+    decision["version"] += 1
     _append_event(contract_id, "audit_log", "agent_decision.flagged", "decision flagged for human review", {"needs_review": True})
     return {"decision": decision, "mocked": True}
 

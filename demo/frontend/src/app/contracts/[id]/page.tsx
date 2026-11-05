@@ -282,8 +282,15 @@ function AgentDecisionCard({
   const pushToast = useToast((state) => state.push);
   const [channel, setChannel] = useState<"email" | "sms" | "voice">("email");
 
+  // Both corrections send the `version` they were rendered from, exactly as the real
+  // routes require: a stale version is a 409, not a silent overwrite of another
+  // operator's change. Hooks have to sit above the early returns below, so the null
+  // check lives inside the mutation instead of relying on the render guard.
   const overrideMutation = useMutation({
-    mutationFn: () => api.overrideChannel(contractId, channel),
+    mutationFn: () => {
+      if (!decision) throw new Error("There is no agent decision to override.");
+      return api.overrideChannel(contractId, channel, decision.version);
+    },
     onSuccess: () => {
       pushToast("Channel overridden by operator (mocked).", "success");
       void queryClient.invalidateQueries({ queryKey: ["contract", contractId] });
@@ -292,7 +299,10 @@ function AgentDecisionCard({
   });
 
   const flagMutation = useMutation({
-    mutationFn: () => api.flagDecision(contractId),
+    mutationFn: () => {
+      if (!decision) throw new Error("There is no agent decision to flag.");
+      return api.flagDecision(contractId, decision.version);
+    },
     onSuccess: () => {
       pushToast("Decision flagged for human review.", "success");
       void queryClient.invalidateQueries({ queryKey: ["contract", contractId] });
@@ -348,6 +358,9 @@ function AgentDecisionCard({
             {decision.original_channel ? (
               <span className="text-[11px] text-muted-foreground">(was {decision.original_channel})</span>
             ) : null}
+            {decision.rerun_count > 0 ? (
+              <span className="text-[11px] text-muted-foreground">· re-run {decision.rerun_count}</span>
+            ) : null}
           </div>
         </div>
 
@@ -361,31 +374,25 @@ function AgentDecisionCard({
           <dl className="mt-1 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
             <div>prompt <span className="text-foreground">{decision.prompt_version}</span></div>
             <div>model <span className="text-foreground">{decision.llm_model}</span></div>
-            <div>temperature <span className="text-foreground">{decision.temperature}</span></div>
-            <div>tokens <span className="text-foreground">{decision.tokens_in}/{decision.tokens_out}</span></div>
-            <div>latency <span className="text-foreground">{decision.latency_ms} ms</span></div>
-            <div>repairs <span className="text-foreground">{decision.schema_repairs}</span></div>
+            <div>decision <span className="text-foreground">#{decision.id}</span></div>
+            <div>version <span className="text-foreground">{decision.version}</span></div>
+            <div>re-runs <span className="text-foreground">{decision.rerun_count}</span></div>
+            <div>corr <span className="text-foreground">{shortId(decision.correlation_id)}</span></div>
           </dl>
-          <p className="mt-1 text-[11px] text-muted-foreground">
-            mlflow run <span className="text-foreground">{decision.mlflow_run_id}</span>
-          </p>
         </div>
 
         <div>
-          <p className="text-xs uppercase tracking-wide text-muted-foreground">Input signals (PII-free)</p>
-          <pre className="mt-1 overflow-x-auto rounded-md bg-muted p-2 text-[11px] leading-relaxed">
-{JSON.stringify(decision.input_signals, null, 2)}
-          </pre>
-        </div>
-
-        <div>
-          <p className="text-xs uppercase tracking-wide text-muted-foreground">Safety</p>
+          <p className="text-xs uppercase tracking-wide text-muted-foreground">Review state</p>
           <p className="mt-1 text-[11px] text-muted-foreground">
-            needs_review <span className={cn("font-medium", decision.needs_review ? "text-warning" : "text-success")}>{String(decision.needs_review)}</span>
-            {" · "}injection tags present{" "}
-            <span className={cn("font-medium", decision.injection_tags_present ? "text-danger" : "text-success")}>
-              {decision.injection_tags_present ? "yes" : "no"}
+            needs_review{" "}
+            <span className={cn("font-medium", decision.needs_review ? "text-warning" : "text-success")}>
+              {String(decision.needs_review)}
             </span>
+            {decision.overridden_by ? (
+              <>
+                {" · "}overridden by <span className="text-foreground">{shortId(decision.overridden_by)}</span>
+              </>
+            ) : null}
           </p>
         </div>
 

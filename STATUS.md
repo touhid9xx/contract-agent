@@ -1059,9 +1059,15 @@ reformatted the new test module.
 
 Two residues are carried rather than hidden: a re-run is still a `POST` that
 **appends**, so `rerun_count` is a snapshot at append time and not a live
-aggregate; and `demo/fixtures/agent_decisions.json` still carries field names
-(`tokens_in`, `input_signals`, …) the real model does not have — a fixture-fidelity
-gap, not an unimplemented route.
+aggregate; and ~~`demo/fixtures/agent_decisions.json` still carries field names
+(`tokens_in`, `input_signals`, …) the real model does not have~~ — **closed
+since.** The fixture was rewritten to the `AgentDecisionView` wire shape, and the
+drift was wider than first recorded: five invented fields, four missing ones, and
+the same drift in `users.json`, `extracted_fields.json` and `timeline.json`, plus
+the demo backend accepting an override without a `version` and mutating a decision
+in place where the real route appends. Still open: `llm_model` legitimately reads
+`qwen2:7b` in the fixture against `deterministic` in a real row — demo narrative,
+not drift.
 
 ## Known gaps / issues
 
@@ -1220,12 +1226,18 @@ gap, not an unimplemented route.
     what the policy chose, and never rewritten; `overridden_by` records the actor;
     each correction writes an `AuditLog` row (`agent_decision.overridden` /
     `agent_decision.flagged`) carrying the before/after state, so the edit is
-    reconstructable even though the row is mutated in place. Two things remain
-    open and are named rather than hidden: a re-run is still a new `POST` that
+    reconstructable even though the row is mutated in place. One thing remains
+    open and is named rather than hidden: a re-run is still a new `POST` that
     **appends** — `rerun_count` is stamped at append time and is a snapshot, not a
-    live aggregate — and `demo/fixtures/agent_decisions.json` still carries field
+    live aggregate. ~~And `demo/fixtures/agent_decisions.json` still carries field
     names (`tokens_in`, `input_signals`, …) the real model does not have, which is
-    a fixture-fidelity gap rather than an unimplemented route.
+    a fixture-fidelity gap rather than an unimplemented route.~~ — **closed
+    since.** The fixture is now the `AgentDecisionView` shape field for field, and
+    the demo backend, its `AgentDecision` type and both mutation helpers follow the
+    real wire contract: `version` is sent and compared (409 `CONCURRENT_UPDATE`), a
+    flag-review body cannot carry a channel, `original_channel` is written once,
+    and a re-run appends instead of overwriting. The frontend now calls the routes
+    that exist instead of narrating fields no route returns.
 20. **`normalized_value` is plaintext PII, and it is the column the policy reads.**
     F7 encrypts `raw_value`, and the fields API never carries either column — but
     `ExtractedField.normalized_value` is a plain `Text` column holding the
@@ -1557,8 +1569,11 @@ sign-off, not footnotes:**
    added override and flag-review on top of migration `0004`. The two residues that
    replace it are narrower and are carried here rather than buried — a re-run
    appends a new decision instead of updating this one, so `rerun_count` is a
-   snapshot at append time, and the demo fixture still names fields the real model
-   does not have.
+   snapshot at append time, and ~~the demo fixture still names fields the real
+   model does not have~~ — **that second residue is now closed too**: the demo
+   fixture, its `AgentDecision` type, its mutation helpers and
+   `demo/backend/main.py` all follow the real wire contract. One residue remains,
+   the `rerun_count` snapshot named first, and it is deliberate.
 8. **`FOR UPDATE` is a no-op on SQLite.** The concurrency guarantees are
    MySQL-only evidence by construction; the offline suite can never be the proof.
 9. **Missing pieces by design, not by defect:** `CustomerResponse` and `Escalation`

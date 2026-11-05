@@ -66,26 +66,33 @@ export interface ReviewQueueResponse {
   mocked: boolean;
 }
 
+/**
+ * Mirrors `AgentDecisionView` in `backend/app/api/v1/agent.py` field for field.
+ *
+ * That list is deliberately narrower than the `agent_decisions` table: the table
+ * also carries model-provenance columns (temperature, token counts, latency,
+ * schema repairs, mlflow run id), and the API does not expose them. Keeping this
+ * type on the wire shape rather than the row shape is what lets this screen
+ * survive the Phase-1 swap to the real backend.
+ */
 export interface AgentDecision {
+  id: number;
   contract_id: number;
+  correlation_id: string;
   channel: Channel;
   confidence: number;
   reasoning: string;
   needs_review: boolean;
   prompt_version: string;
   llm_model: string;
-  temperature: number;
-  tokens_in: number;
-  tokens_out: number;
-  latency_ms: number;
-  schema_repairs: number;
-  mlflow_run_id: string;
-  injection_tags_present: boolean;
   created_at: string;
-  input_signals: Record<string, string | number | boolean>;
-  original_channel?: Channel;
-  overridden_by?: string;
-  rerun_count?: number;
+  /** Send back on override / flag-review; a stale value is a 409. */
+  version: number;
+  /** The channel the *policy* chose, once a person overrode it. Set once, never rewritten. */
+  original_channel: Channel | null;
+  overridden_by: string | null;
+  /** How many recommendations already existed for this contract when this row was appended. */
+  rerun_count: number;
 }
 
 export interface TimelineEvent {
