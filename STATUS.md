@@ -46,7 +46,12 @@ override re-runs the consent and opt-out gates against the contract's state *now
 and chooses only *among* permitted channels, so it redirects a channel and never
 creates permission. **GATE 2 was signed on 2026-11-04 at `5c3e077`** — see *GATE 2
 — signed* below. That sign-off is unchanged by the later slice; what moved is the
-migration head, from `0003` to `0004`.
+migration head, from `0003` to `0004`. After that came gap-20 sealing (`D10-11`), the
+read-only `doctor` command (`D10-12`) and key rotation through a ring of decrypt-only
+keys (`D10-13`) — and at `9b6cf0f` the **MySQL half was run again** after three slices
+of recording it as `NOT RUN`: 553 collected, 1 skipped (`KAFKA_LIVE` only), `0004` at
+head on a fresh database, `gitleaks` clean over 46 commits. See *The MySQL half, run at
+the rotation head* below.
 
 Six slices have landed on top of the sign-off, none of which moves the schema.
 `ddd4db9` (`fix(demo)`) repairs Phase-0 fixture drift against the real
@@ -1152,7 +1157,7 @@ What lands:
 | Check | Command | Result |
 | --- | --- | --- |
 | Full suite, SQLite | `pytest` in `backend/`, `MYSQL_TEST_URL` **unset** | **510 collected — 503 passed, 7 skipped, 0 failed** (JUnit: `tests=510 failures=0 errors=0 skipped=7`) |
-| Full suite, **real MySQL 8.4** | `pytest` with `MYSQL_TEST_URL` on `:3307` | **NOT RUN — see below** |
+| Full suite, **real MySQL 8.4** | `pytest` with `MYSQL_TEST_URL` on `:3307` | **NOT RUN at this commit — see below.** **Superseded: since run at `9b6cf0f`, which contains this slice, see *The MySQL half, run at the rotation head* below** (553 collected, 1 skipped) |
 | Lint | `ruff check .` (repo root) | All checks passed |
 | Format | `ruff format --check .` (repo root) | **84 files** already formatted |
 | Types | `mypy app` (strict) | clean, **49 source files** |
@@ -1169,6 +1174,11 @@ migration here to apply, but the topology claim is still unverified on this tree
 The SQLite column above is a real run; the MySQL column is the gap the earlier F9
 report made the mistake of filling in by expectation. Reproduce with the block under
 *GATE 2 — signed*; the expectation is **509 passed, 1 skipped** (only `KAFKA_LIVE`).
+
+**Amended after the fact, not deleted:** the row was executed at `9b6cf0f` — see *The
+MySQL half, run at the rotation head* below. The 509/1 expectation above belongs to
+*this* slice's tree (510 collected); the later head is 553 collected with the same single
+`KAFKA_LIVE` skip — the same shape, deliberately not the same number.
 
 The collected total grew by **28** over GATE 2's 482: `tests/test_reseal.py` is a new
 module of **15**, and `tests/test_crypto.py` (**20** now) and
@@ -1226,7 +1236,7 @@ What lands:
 | Check | Command | Result |
 | --- | --- | --- |
 | Full suite, SQLite | `pytest` in `backend/`, `MYSQL_TEST_URL` **unset** | **529 collected — 522 passed, 7 skipped, 0 failed** (JUnit: `tests=529 failures=0 errors=0 skipped=7`) |
-| Full suite, **real MySQL 8.4** | `pytest` with `MYSQL_TEST_URL` on `:3307` | **NOT RUN — Docker daemon down again, see above** |
+| Full suite, **real MySQL 8.4** | `pytest` with `MYSQL_TEST_URL` on `:3307` | **NOT RUN at this commit — Docker daemon down again, see above.** **Superseded: since run at `9b6cf0f`, which contains this slice, see *The MySQL half, run at the rotation head* below** |
 | Lint | `ruff check .` (repo root) | All checks passed (2 findings fixed: `RUF022`, `C420`) |
 | Format | `ruff format --check .` (repo root) | **85 files** already formatted |
 | Types | `mypy` (strict, config `files = backend/app`) | clean, **49 source files** |
@@ -1238,6 +1248,10 @@ unrun for the same reason as the slice above it (the daemon did not answer on th
 and it is left as `NOT RUN` rather than filled in with the expected number: those six
 tests exercise `FOR UPDATE SKIP LOCKED` and the ENUM/NUMERIC columns, none of which this
 slice touches, but "not touched" is not "verified".
+
+**Amended:** it has since been verified at `9b6cf0f` (see *The MySQL half, run at the
+rotation head* below). That does not retrofit a green onto the row above — this table's
+row stays as measured at its own commit, and the pointer is the only change made to it.
 
 **What this narrows and what it does not.** The state is now observable and
 machine-checkable instead of requiring a hand-written query — the two GATE 2 clauses it
@@ -1277,7 +1291,7 @@ than left to a hook that may or may not have run.
 | Commit gate | `pre-commit run --all-files` | **17 hooks Passed**, exit 0 (gitleaks is manual-stage, D1-03) |
 | Lint / format / types / security — all via the gate | `ruff check`, `ruff format --check`, `mypy` strict, `bandit` | Passed |
 | Full suite, SQLite | `pytest`, `MYSQL_TEST_URL` **unset** | **522 passed, 7 skipped, 0 failed** (exit 0) — **unchanged**, which is the expected evidence for a config-only change |
-| Full suite, **real MySQL 8.4** | `pytest` with `MYSQL_TEST_URL` on `:3307` | **NOT RUN** — the Docker daemon did not answer on this host; recorded as unrun rather than filled in |
+| Full suite, **real MySQL 8.4** | `pytest` with `MYSQL_TEST_URL` on `:3307` | **NOT RUN at this commit** — the Docker daemon did not answer on this host; recorded as unrun rather than filled in. **Superseded: since run at `9b6cf0f`, which contains this config-only change; the suite count is unchanged there too** |
 
 The change is 21 lines in one new file and touches no Python, TypeScript or SQL. The
 suite count being *identical* to the previous slice (522/7) is the point: nothing
@@ -1323,7 +1337,7 @@ What lands:
 | Check | Command | Result |
 | --- | --- | --- |
 | Full suite, SQLite | `pytest` in `backend/`, `MYSQL_TEST_URL` **unset** | **553 collected — 0 failures, 0 errors, 7 skipped** (JUnit: `tests=553 failures=0 errors=0 skipped=7`) |
-| Full suite, **real MySQL 8.4** | `pytest` with `MYSQL_TEST_URL` on `:3307` | **NOT RUN** — the Docker daemon still did not answer on this host |
+| Full suite, **real MySQL 8.4** | `pytest` with `MYSQL_TEST_URL` on `:3307` | **NOT RUN at this commit** — the Docker daemon still did not answer on this host. **Superseded: since run at `9b6cf0f`, the next commit, see *The MySQL half, run at the rotation head* below** — the expected 552/1 was confirmed |
 | Lint | `ruff check .` (repo root) | All checks passed |
 | Format | `ruff format --check .` (repo root) | **85 files** already formatted |
 | Types | `mypy` (strict, config `files = backend/app`) | clean, **49 source files** |
@@ -1336,6 +1350,10 @@ end-to-end cases), `tests/test_crypto.py` 20 → **30** (+10, the ring),
 for the third slice running and is left as `NOT RUN` rather than filled in with the
 expected 552/1 — nothing here touches the `FOR UPDATE SKIP LOCKED` path, the ENUMs or
 `NUMERIC(4,3)`, but "not touched" is not "verified".
+
+**Amended:** the expectation was then confirmed rather than assumed. Run at `9b6cf0f`,
+the next commit: **553 collected, 552 passed, 1 skipped** (`KAFKA_LIVE` only) — see *The
+MySQL half, run at the rotation head* below.
 
 **Rotation is two steps, deliberately.** Set the new `ENCRYPTION_KEY` *and* the old one
 in `ENCRYPTION_KEY_PREVIOUS`, restart, run `reseal-fields` until the log says
@@ -1356,10 +1374,53 @@ was carrying become unreadable. And rotation under concurrent writers is unteste
 suite proves a rotation on a quiet database, not two processes rotating while one is
 sending.
 
+## The MySQL half, run at the rotation head ✅ (`9b6cf0f`)
+
+Three slices in a row recorded `NOT RUN` against a real MySQL server because the Docker
+daemon did not answer on this host. It answers now (`29.8.1`), and the compose MySQL 8.4
+container was already up and healthy on `127.0.0.1:3307`, so the row was executed for
+real at the tree this file currently ends on. **This verifies `9b6cf0f`, not the trees the
+earlier tables were written against** — those rows are left as measured and amended only
+with a pointer here, because a number belongs to the commit it was produced on.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Full suite, **real MySQL 8.4** | `pytest backend/tests`, `MYSQL_TEST_URL` on `:3307` | **553 collected — 552 passed, 1 skipped, 0 failed** (JUnit: `tests=553 failures=0 errors=0 skipped=1`), exit 0 |
+| Integration only | `pytest -m integration backend/tests` | **12 passed, 0 skipped** |
+| Migrations, **fresh scratch DB** | `alembic upgrade head` / `current` / `check` | `0001 → 0002 → 0003 → 0004`, **`0004 (head)`**, "No new upgrade operations detected.", exit 0 |
+| Secrets | `gitleaks detect` (Docker image `v8.18.4`, D1-03) | **46 commits scanned, no leaks found**, exit 0 |
+| Lint / format / types / security | `ruff check .`, `ruff format --check .`, `mypy app`, `bandit -q -c pyproject.toml -r backend/app` | All checks passed; **85 files** formatted; clean, **49 source files**; **0 issues** |
+
+The two counts reconcile with the offline row rather than contradicting it: the suite is
+**553 collected either way**, and the skip count moves 7 → 1 because the 6 MySQL-dependent
+tests execute. The one remaining skip is `KAFKA_LIVE`
+(`test_publishers::test_a_real_kafka_broker_acknowledges_the_event`), which states its own
+reason in the report. GATE 2's clause 1 — no broker, no consumer — stands exactly as
+signed; this run does not narrow it.
+
+`-m integration` selects **12** while only **6** of those need a server: the rest are the
+URL-resolution and driver-error-formatting tests, which run offline too. That is why the
+offline suite skips six and not twelve.
+
+Two things had to be right to run it, both already recorded above and both still true. The
+app user cannot `CREATE DATABASE` (`ERROR 1044`), so the scratch database
+`ca_alembic_check` was created as root and dropped afterwards. And `script_location =
+migrations` resolves relative to the **working directory**, not the ini file, so alembic
+must be invoked from `backend/`: `-c backend\alembic.ini` from the root fails with *Path
+doesn't exist: migrations* even though the ini was found — a failure that reads like a
+missing migration set and is not one.
+
+`gitleaks` scans **git history**, not the working tree, so "46 commits scanned" means the
+history up to this commit. That hook is bound to a Docker image and had never been able to
+run before, which is why it is recorded here rather than assumed green from a manual stage.
+
 ## Known gaps / issues
 
 1. **`gitleaks` needs Docker** and is manual-stage only (D1-03). Run
    `pre-commit run gitleaks --all-files` before pushing, or rely on CI.
+   **Run once for real at `9b6cf0f`:** 46 commits scanned, no leaks, exit 0 — the daemon
+   answered that time. It remains manual, so it still gates nothing; one green run is
+   evidence about the history, not a new automatic check.
 2. **`make` is optional** — not installed on the primary Windows host; `npm`
    scripts are the contract (D1-09).
 3. **Bandit's gate scope is `backend/app`.** A repo-wide `bandit -r backend`
