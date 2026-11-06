@@ -8,7 +8,7 @@ from app.db.models.contract import Contract, ExtractedField
 from app.db.models.delivery import AgentDecision, CustomerResponse, Notification
 from app.db.models.escalation import AuditLog, Escalation
 from app.db.models.outbox import OutboxEvent
-from app.db.models.security import LoginAttempt
+from app.db.models.security import LoginAttempt, RefreshToken
 from app.db.models.tenant import Tenant, User
 
 __all__ = [
@@ -21,6 +21,7 @@ __all__ = [
     "LoginAttempt",
     "Notification",
     "OutboxEvent",
+    "RefreshToken",
     "Tenant",
     "User",
 ]

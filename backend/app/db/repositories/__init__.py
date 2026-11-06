@@ -34,7 +34,7 @@ from app.db.repositories.outbox import (
     enqueue_event,
     replay_dead_lettered,
 )
-from app.db.repositories.security import LoginAttemptRepository
+from app.db.repositories.security import LoginAttemptRepository, RefreshTokenRepository
 from app.db.repositories.users import IdentityDirectory, UserRepository, normalize_email
 
 __all__ = [
@@ -51,6 +51,7 @@ __all__ = [
     "MissingTenantContextError",
     "NotificationRepository",
     "OutboxRepository",
+    "RefreshTokenRepository",
     "ReviewCursor",
     "TenantScopedRepository",
     "UserRepository",

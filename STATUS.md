@@ -103,6 +103,15 @@ digest, and `POST /auth/login` now refuses with `429` + `Retry-After` once the w
 count rather than a password verification (D10-16). The migration head moves
 `0004 → 0005` for the first time since the `feat(g19)` slice, and the suite went
 **603 → 646** plus two new MySQL integration tests.
+**The slice on top of that is session renewal** (`feat(auth)`): `POST /auth/login` returns
+a single-use refresh token beside the access token, and `POST /auth/refresh` spends it and
+returns a successor in the same family, so a 15-minute access token no longer means
+re-entering credentials. The tokens are opaque rather than JWTs, stored only as a SHA-256
+digest, and presenting a spent one is read as theft and revokes every member of its family
+— including the successor the thief would have held (D10-17). `POST /auth/logout` ends the
+family without needing a live access token. Migration `0006` adds `refresh_tokens`, so the
+head moves `0005 → 0006`, and the suite went **646 → 695** plus five new MySQL integration
+tests.
 
 ## Phase history
 
@@ -1624,6 +1633,77 @@ The single skip remains `KAFKA_LIVE`, so GATE 2's clause 1 stands exactly as sig
   `SQLAlchemyError` on the count would 500 rather than fail open; the write paths swallow
   errors, the read path does not.
 
+## A session can now outlive its access token ✅ (gap 6, `D10-17`)
+
+Gap 6 said "no refresh token": access tokens last 15 minutes and cannot be renewed without
+re-entering credentials, recorded as a usability limit rather than a security one because
+`token_epoch` already revokes immediately. The reason it stayed open this long is that
+closing it *creates* a long-lived credential where none existed — a value that a database
+dump could replay and that a user cannot take back. This slice adds the renewal and the
+controls that make it no worse than the 15-minute token it replaces.
+
+| Area | Detail |
+| --- | --- |
+| Policy | `app/core/refresh.py` — pure functions, the same split `login_throttle.py`, `workers/decision.py` and `workers/dispatch.py` take: `mint_refresh_token` (32 bytes from `secrets`), `refresh_token_hash`, `refresh_expiry`. The parts that can be wrong are testable without a DB or a clock. |
+| Opaque, not a JWT | A signed JWT would look self-validating until the question "has this been revoked?" arrives — it cannot answer that without the same server-side table an opaque token needs, and it would add a second algorithm-and-claims surface beside the access token. A random string plus a row can be revoked at any instant. |
+| Digest, not encryption | `refresh_token_hash` is a plain SHA-256 with no salt and no keyed function, deliberately: the input is 256 bits of `secrets`, so there is no dictionary to attack, and a salt would defeat the single query this table exists to answer ("which row is this token?") because it cannot be recovered from the request. |
+| Namespace | `refresh-token.v1` is hashed into the material, so a digest lifted from this table maps to nothing anywhere else and a future scheme cannot alias onto an old row. The constant is named `REFRESH_DIGEST_NAMESPACE`, not `…_TOKEN_…`: both secret scanners this repo runs (`ruff` S105, `bandit` B105) match on the variable **name**. Renaming is the honest fix — a `nosec` would have suppressed the check for the whole file. |
+| Storage | `refresh_tokens.token_hash` is `String(64)` with a unique constraint. The raw value exists once, in the login/refresh response, and is never logged or echoed. |
+| Single use | `claim_for_rotation` is one conditional `UPDATE … WHERE used_at IS NULL AND revoked_at IS NULL`, and `rowcount == 1` decides who won. A read-then-write check would let two racers both pass and both mint a successor — two live sessions from one token, the exact outcome rotation exists to prevent. |
+| Reuse is theft | Presenting a spent token revokes the **whole family**, then commits, then refuses. Killing only the replayed token would leave the attacker holding whichever copy they had already rotated in. A client that raced itself across two tabs is caught by the same net and must log in again — the deliberate price of not being able to tell the two cases apart. |
+| Family | `family_id` is shared by a login and every successor it mints, `None` at login and inherited on rotation. Logout and reuse detection both revoke by it. |
+| Ceiling | A successor **inherits** `expires_at` from the token it replaced, so a fresh window per rotation cannot make a session immortal. `refresh_token_expire_days` (7, `gt=0, le=30`) bounds the session from login instead of sliding. |
+| Entitlement re-read | Every redemption re-reads the user, the tenant, `is_active` on both, and `token_epoch` from the database — the same five-check posture `get_current_principal` takes, minus the bearer token, because here the refresh token *is* the credential. A refresh token that outlived a deactivated account would make deactivation meaningless. |
+| Refusal | One 401 with one fixed message: forged, expired, spent and revoked are indistinguishable, and it is 401 rather than 403 because the caller presented a credential that bought nothing. |
+| Logout | Takes the **refresh** token, not an access token: the moment a caller most needs to log out is the moment their access token has expired. Always `204`, even for a token that never existed — a caller who could tell "revoked something" from "revoked nothing" would have a probe for which values were ever issued. |
+| Check order | `revoked_at` is tested before `used_at`, so a family already killed is logged as revoked rather than falsely reported as a replay. |
+| One transaction | The claim and the successor insert commit together; a crash between them would otherwise leave the presented token spent with no successor, ending the session. |
+| `autoflush=False` defect | The claim and the family revoke are bulk `UPDATE`s, but the request session never autoflushes, so a row added earlier in the same transaction was invisible to them. A revoked-token test caught `claim_for_rotation` answering `True` for it. Fixed with an explicit `flush()` at both sites rather than by turning autoflush on globally. |
+| Time normalisation | `refresh_expires_at` is normalised through the existing `as_utc` helper (`db/base.py:55`) — the JWT's `expires_at` is offset-aware while the stored value is naive, and a client comparing the two got a `TypeError`. Reused, not reinvented. |
+| Cascade | Both FKs cascade from `users` and `tenants`, so deleting either leaves no live session behind. `tenant_id` is redundant with the user's own and kept on purpose (D2-02): it makes "revoke every session in this tenant" one indexed query instead of a join. |
+| Prune | `create` deletes **that user's expired** rows before inserting. A used-but-unexpired row is kept on purpose — it is the evidence that makes replay detectable, so deleting it would turn a detected reuse into an unexplained 401. Bounded without a sweeper, the same trade `LoginAttemptRepository.record` makes. |
+| Config | No new setting. `refresh_token_expire_days` has existed in `config.py` since F1 and `.env.example` already documented it, which is why this slice touched neither. |
+| Migration | `0006_refresh_tokens.py`, hand-written like `0001`–`0005`, with the unique `token_hash` constraint and the `family_id` index the family revoke filters on. Its `downgrade` is a single `drop_table`: MySQL refuses to drop `ix_refresh_tokens_tenant_id` while the FK still needs it (errno 1553), and it drops indexes before the table. Found by the migration gate, not in review. |
+| Tests | `test_refresh.py` (44): policy shape, digest properties, expiry flooring, rotation, reuse→family kill, epoch bump, expiry boundary, per-user prune, logout, and the route-level login/refresh/logout contract. |
+
+### Verification actually run (refresh tokens)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Tests | `pytest backend/tests`, root, `MYSQL_TEST_URL` unset | **695 collected — 694 passed, 1 skipped, 0 failed** (JUnit: `tests=695 failures=0 errors=0 skipped=1`), exit 0. Was 646 at `7ffcc03`; the 44 refresh tests plus 5 new MySQL integration tests are the difference. |
+| Tests (MySQL) | `pytest backend/tests/test_mysql_integration.py`, from root | **19 passed**, exit 0 — a real MySQL 8 server was reachable, so `0006` is proven rather than inferred. |
+| Migration | `alembic upgrade head` / `alembic current`, from `backend/` | Exit 0, `current` reports **`0006 (head)`**; the module fixture downgrades to `base` and re-applies on every run, which is what caught the `downgrade` defect above. |
+| Lint | `ruff check .`, root | All checks passed |
+| Format | `ruff format --check .`, root | **95 files already formatted** (92 at `7ffcc03`) |
+| Types | `mypy`, root | Success, **no issues in 53 source files** (52 at `7ffcc03`) |
+| Security | `bandit -q -c pyproject.toml -r backend/app` | **0 issues**, exit 0 (the two `nosec` advisories on `config.py:50` are unchanged) |
+
+Five of the nineteen MySQL tests are new here and exist because SQLite cannot answer them:
+the unique `token_hash` index and the exact column types read back from
+`information_schema` rather than inferred from the model; a duplicate digest rejected with
+errno 1062; `ON DELETE CASCADE` really deleting one user's sessions while leaving another
+user's alone; `claim_for_rotation` really taking an exclusive row lock (errno 1205 on a
+second worker) and returning `False` for the spent token — the `rowcount` contract SQLite
+cannot prove; and `revoke_family` reporting 3 then 0 while leaving a sibling family alive.
+
+### What this does not do — state it, do not bury it
+
+- **It does not shorten the access token's life.** A stolen bearer token is still usable for
+  its remaining minutes. Renewal adds a long-lived credential; it does not remove the short
+  one's exposure.
+- **There is no "sign out everywhere".** Revoking *every* session is still an operator
+  `token_epoch` bump (gap 8), and no route exposes it. Logout closes one family.
+- **`/auth/refresh` is not rate-limited.** The login throttle is keyed on a submitted
+  `(tenant, email)` pair, which a refresh request does not carry. Single use is the only
+  limit: a stolen token is worth one redemption, and the second attempt kills the family.
+- **No global sweeper.** Pruning happens only when that user next logs in, so an account
+  that never returns leaves its expired rows until it does.
+- **The storage decision is still open.** The token is returned in the response body, so
+  the client must hold it; whether that is an httpOnly cookie or in memory is a frontend
+  question, and nothing consumes it yet (gap 7). The API shape does not force either.
+- **No live-server test.** The proof goes through the ASGI app, not a served port — the same
+  limit `create-admin`, `consent-import` and `reseal-fields` carry.
+
 ## Known gaps / issues
 
 1. **`gitleaks` needs Docker** and is manual-stage only (D1-03). Run
@@ -1651,9 +1731,14 @@ The single skip remains `KAFKA_LIVE`, so GATE 2's clause 1 stands exactly as sig
    **no alert fires when rows park and nothing requeues them automatically**
    (D5-03). The default `EVENT_TRANSPORT=none` keeps the refusing stand-in, so a
    fresh deployment retries and parks events rather than losing them (D4-03).
-6. **No refresh token.** Access tokens last 15 minutes and cannot be renewed
-   without re-entering credentials (D3-05). Revocation works immediately via
-   `token_epoch`, so this is a usability limit, not a security one.
+6. ~~**No refresh token.**~~ — **closed by `D10-17`.** `POST /auth/login` now also
+   returns a single-use refresh token, and `POST /auth/refresh` spends it for a
+   successor in the same family, so a 15-minute access token no longer means
+   re-entering credentials (D3-05). Redemption re-reads the user, the tenant and
+   `token_epoch` from the database, so revocation is still immediate. What it does
+   **not** do is shorten the access token's own life: a stolen bearer token is
+   usable for its remaining minutes, and there is no "sign out everywhere" route —
+   that remains an operator `token_epoch` bump (gap 8).
 7. **The frontend does not use the auth API yet.** F3 is backend-only: there is
    no login screen, no token storage and no `Authorization` header in
    `frontend/src/`. The `frontend/src/lib/api.ts` module and the `demo/` fixtures

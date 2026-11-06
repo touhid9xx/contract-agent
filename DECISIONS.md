@@ -1794,3 +1794,99 @@ committed together. That pairing is the milestone; extraction and review follow.
   design is what makes it safe, but the race is argued, not demonstrated), no test covers
   spraying, and the read path is not best-effort — if the count query fails the login 500s
   rather than failing open.
+
+### D10-17 — Refresh tokens are opaque, single-use, and grouped into a revocable family
+
+- **Decision:** `POST /auth/login` returns a refresh token beside the access token and
+  `POST /auth/refresh` spends it for a successor; `POST /auth/logout` revokes the session.
+  Tokens are random strings stored only as a SHA-256 digest in a new `refresh_tokens` table
+  (migration `0006`), grouped by `family_id`, with a `token_epoch` snapshot and a fixed
+  `expires_at`. The policy lives in `app/core/refresh.py` as pure functions
+  (`mint_refresh_token`, `refresh_token_hash`, `refresh_expiry`) and the routes keep the
+  wiring. This closes gap 6.
+- **Why an opaque token and not a JWT:** a signed JWT is self-validating, which sounds like
+  the whole advantage until the question "has this been revoked?" arrives — and it cannot
+  answer that without exactly the server-side lookup table an opaque token needs anyway. It
+  would additionally introduce a second algorithm-and-claims surface next to the access
+  token. A random value plus a row can be revoked at any instant, which is the property
+  that actually matters for a credential with a week-long life. Gap 6 was recorded as a
+  usability limit rather than a security one, and this keeps it that way.
+- **Why a plain SHA-256 with no salt and no keyed function:** the input is 256 bits from
+  `secrets`, so there is no dictionary to attack and no work factor to add — that is what
+  Argon2 buys a human-chosen password, not a random token. A salt would actively defeat the
+  one query the table exists to answer, "which row is this token?", because the salt cannot
+  be recovered from the request. The digest is namespaced (`refresh-token.v1`) so a value
+  lifted from this table means nothing anywhere else and a future scheme cannot alias onto
+  an old row. The constant is named `REFRESH_DIGEST_NAMESPACE` rather than
+  `REFRESH_TOKEN_NAMESPACE` because both secret scanners this repo runs (`ruff` S105,
+  `bandit` B105) match on the *variable name*; renaming is the honest fix where a `nosec`
+  would have blinded the check for the file.
+- **Why rotation rather than reuse:** a stolen long-lived token that stays valid until
+  expiry gives the server nothing to notice. With rotation, every redemption spends the
+  presented token and mints a successor in the same family, so any individual token the
+  client holds is worthless after one use — and a *second* presentation of a spent token is
+  positive evidence that someone else has a copy. A plain JWT could not express this
+  either: it has no "already used" state.
+- **Why reuse revokes the whole family rather than the replayed token:** refusing only the
+  replayed value would leave the attacker holding whichever successor they had already
+  rotated in, so the victim's session would end while the thief's continued. Killing the
+  family logs out both. The cost is stated rather than glossed: a client that races itself
+  across two tabs is indistinguishable from a thief and has to log in again, because the
+  server genuinely cannot tell the two apart.
+- **Why the authoritative check is a conditional `UPDATE` and not a Python `if`:** reading
+  the row and then writing it lets two concurrent redemptions of the same token both see
+  `used_at is None` and both mint a successor — two live sessions from one token, the exact
+  outcome rotation exists to prevent. `claim_for_rotation` issues one
+  `UPDATE … WHERE used_at IS NULL AND revoked_at IS NULL` and trusts `rowcount`: the
+  database decides, and the loser is treated exactly like a replay. `revoked_at` is part of
+  the predicate rather than a courtesy, so a token whose family was already killed cannot be
+  spent by a caller still holding a stale copy.
+- **Why the repository flushes before those bulk updates:** the request session is built with
+  `autoflush=False`, so a row added earlier in the same transaction is still pending and a
+  bulk `UPDATE` cannot see it. A revoked-token test caught `claim_for_rotation` answering
+  `True` for a row that had already been revoked in that transaction. Fixed with an explicit
+  `flush()` at both bulk-update sites; turning autoflush on globally would have changed
+  behaviour for every other repository to fix one method.
+- **Why a successor inherits `expires_at` instead of getting a fresh window:** a new window
+  per rotation makes the session immortal as long as the client keeps refreshing, and
+  `refresh_token_expire_days` would then bound nothing. Inheriting the deadline means the
+  configured lifetime bounds the whole session from login, with no "how long can this
+  actually last" arithmetic to get wrong.
+- **Why entitlement is re-read from the database on every redemption:** a refresh token that
+  outlived a deactivated account or a deactivated tenant would make both meaningless. The
+  route therefore re-resolves the user by id, checks the row's `tenant_id` against the
+  user's, checks `is_active` on both, and compares `token_epoch` — the same posture
+  `get_current_principal` takes, minus the bearer token, because here the refresh token *is*
+  the credential. The token's own claims are never a fallback.
+- **Why one 401 with one message for every failure:** forged, expired, spent and revoked must
+  be indistinguishable to the caller, or the refusal becomes a probe for which values were
+  ever issued. It is `401` and not `403` because the caller presented a credential and it
+  bought nothing. Logout follows the same rule from the other side: it takes the *refresh*
+  token (the moment a caller most needs to log out is when their access token has expired)
+  and returns `204` even for a value that never existed.
+- **Why the claim and the successor insert commit together:** a crash between them would
+  leave the presented token spent with no successor, ending the session for a caller who did
+  nothing wrong. The routes commit once, after the refresh row exists, so a failed commit can
+  never return tokens the database cannot later honour.
+- **Why the model keeps a redundant `tenant_id`:** the user already has one. Keeping it
+  follows D2-02 and makes a future "revoke every session in this organisation" one indexed
+  query instead of a join, and it lets `ON DELETE CASCADE` from either parent remove a live
+  session. The prune in `create` is scoped to `user_id` for the same reason — housekeeping
+  for one account must not touch another's session.
+- **What this proves and what it does not.** Forty-four tests in
+  `backend/tests/test_refresh.py` cover the policy shape, digest properties (not a bare
+  hash, contains neither the token nor the namespace, a bumped namespace cannot alias),
+  expiry flooring, rotation returning a new pair, a spent token revoking its successor,
+  `token_epoch` bumps and deactivated users refused, the expiry boundary, per-user pruning,
+  and the login/refresh/logout route contract including the non-oracle `204`. Five new MySQL
+  integration tests cover what SQLite cannot: the unique `token_hash` index and exact column
+  types read back from `information_schema`, a duplicate digest rejected with errno 1062,
+  cascading delete, `claim_for_rotation` really taking an exclusive lock (errno 1205 on a
+  second worker) and returning `False` for the spent token, and `revoke_family` reporting
+  3 then 0 while a sibling family survives. Not proven: `/auth/refresh` is not rate-limited
+  (single use is the only limit, and the login throttle's key does not apply), there is no
+  "sign out everywhere" route — that remains an operator `token_epoch` bump — no global
+  sweeper prunes expired rows for an account that never logs in again, and a stolen *access*
+  token is still usable for its remaining minutes. The storage decision on the client side
+  (httpOnly cookie versus memory) is left open, deliberately: nothing consumes the token yet
+  (gap 7), and the response shape does not force either.

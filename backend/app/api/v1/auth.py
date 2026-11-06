@@ -1,14 +1,23 @@
 """Authentication routes.
 
-Four endpoints, and the shape of each is a decision:
+Six endpoints, and the shape of each is a decision:
 
 ``POST /auth/login``
-    Takes a tenant slug plus credentials and returns a short-lived access token.
-    The tenant is part of the request because login happens *before* a principal
-    exists — nothing else in the system is allowed to take a tenant from the
-    client. The token that comes back carries the id of the tenant that owned
-    the matched user row, so a mis-targeted slug cannot mint a token for the
-    wrong organisation.
+    Takes a tenant slug plus credentials and returns a short-lived access token
+    plus a long-lived refresh token. The tenant is part of the request because
+    login happens *before* a principal exists — nothing else in the system is
+    allowed to take a tenant from the client. The token that comes back carries
+    the id of the tenant that owned the matched user row, so a mis-targeted slug
+    cannot mint a token for the wrong organisation.
+
+``POST /auth/refresh``
+    Trades a refresh token for a *new* access token and a *new* refresh token.
+    Rotation, not reuse: the presented token is spent, and presenting it again is
+    treated as theft. See :func:`refresh_session`.
+
+``POST /auth/logout``
+    Revokes the session a refresh token belongs to. Takes no access token, so a
+    caller whose access token has already expired can still end their session.
 
 ``GET /auth/me``
     Echoes the resolved principal. Useful to a UI, and the smallest possible
@@ -45,6 +54,7 @@ from app.api.deps import (
 from app.core.config import Settings
 from app.core.login_throttle import decide, login_key_hash, window_start
 from app.core.principal import Principal
+from app.core.refresh import mint_refresh_token, refresh_expiry, refresh_token_hash
 from app.core.security import (
     MAX_PASSWORD_LENGTH,
     MIN_PASSWORD_LENGTH,
@@ -54,10 +64,10 @@ from app.core.security import (
     spend_password_hash_time,
     verify_password,
 )
-from app.db.base import utc_now
+from app.db.base import as_utc, truncate_to_second, utc_now
 from app.db.enums import UserRole
 from app.db.models import User
-from app.db.repositories.security import LoginAttemptRepository
+from app.db.repositories.security import LoginAttemptRepository, RefreshTokenRepository
 from app.db.repositories.users import (
     IdentityDirectory,
     UserRepository,
@@ -81,6 +91,12 @@ _INVALID_CREDENTIALS = "Invalid tenant, email or password"
 #: the account exists, because the counter is keyed on the submitted pair alone
 #: and an unknown address crosses the threshold identically.
 _TOO_MANY_ATTEMPTS = "Too many failed login attempts; try again later"
+
+#: One refusal for every cause a refresh can fail: unknown token, expired, already
+#: spent, revoked, or an account that is no longer entitled to a session. A caller
+#: holding a forged token and a caller holding a stolen-but-revoked one learn the
+#: same thing, which is the only thing either should learn.
+_REFRESH_REFUSED = "Invalid or expired refresh token"
 
 
 class LoginRequest(BaseModel):
@@ -117,12 +133,35 @@ class UserSummary(BaseModel):
     tenant_slug: str
 
 
-class LoginResponse(BaseModel):
+class SessionResponse(BaseModel):
+    """A freshly minted session: one access token and one refresh token.
+
+    Returned by both ``/login`` and ``/refresh`` because the shape is genuinely
+    the same — rotation hands back exactly what admission handed out the first
+    time, which is what lets a client treat them with one code path.
+
+    Both tokens sit in the body rather than the refresh token in an httpOnly
+    cookie. That is a browser-safety compromise this milestone had to accept, and
+    it is recorded as such in STATUS.md: the cookie is the right home for a token
+    that must not be readable by script, but the SPA that would receive it does
+    not exist yet (gap 7), and a cookie set here would be a CSRF surface with no
+    client to opt into it.
+    """
+
     access_token: str
     token_type: Literal["bearer"] = "bearer"  # noqa: S105  # a scheme name, not a secret
     expires_in: int
     expires_at: datetime
+    #: The raw value exists only in this response. Only its SHA-256 is stored.
+    refresh_token: str
+    refresh_expires_at: datetime
     user: UserSummary
+
+
+class RefreshRequest(BaseModel):
+    """The token to redeem or revoke. Never logged, never echoed."""
+
+    refresh_token: str = Field(min_length=1, max_length=512)
 
 
 def _user_summary(user: User, *, tenant_slug: str) -> UserSummary:
@@ -176,6 +215,80 @@ def _record_failed_attempt(
         log.warning("login_attempt_not_recorded")
 
 
+def _refuse_refresh() -> HTTPException:
+    """The single refusal every failed redemption returns.
+
+    A 401 rather than a 403: the caller presented a credential and it bought
+    nothing, which is what 401 means. The message is fixed, so a forged token, an
+    expired one, a spent one and a revoked one are indistinguishable.
+    """
+    return HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=_REFRESH_REFUSED)
+
+
+def _issue_session(
+    session: Session,
+    *,
+    settings: Settings,
+    user: User,
+    tenant_slug: str,
+    now: datetime,
+    family_id: uuid.UUID | None = None,
+    refresh_expires_at: datetime | None = None,
+) -> SessionResponse:
+    """Mint an access token and a stored refresh token for a verified user.
+
+    Used by both ``/login`` and ``/refresh``, because a rotation hands back
+    exactly what admission handed out the first time. The two callers differ in
+    only two arguments, and both differences are the point:
+
+    ``family_id``
+        ``None`` at login — a new login is a new session family. On rotation it
+        is the *existing* family, so a replay of any member can revoke every
+        member, including the successor.
+
+    ``refresh_expires_at``
+        ``None`` at login, where the ceiling is
+        ``REFRESH_TOKEN_EXPIRE_DAYS`` from now. On rotation it is the expiry of
+        the token being replaced, so rotating never pushes the deadline out. The
+        alternative — a fresh window per rotation — would make a session
+        immortal for as long as the client keeps refreshing, and the configured
+        lifetime would then bound nothing.
+
+    The caller commits. Both routes do it at the same place, after the refresh
+    row exists, so a commit failure can never return tokens the database cannot
+    later honour.
+    """
+    access = issue_access_token(
+        user_id=user.id,
+        tenant_id=user.tenant_id,
+        role=user.role,
+        token_epoch=user.token_epoch,
+        settings=settings,
+    )
+    raw_refresh = mint_refresh_token()
+    expires_at = refresh_expires_at or refresh_expiry(now, settings.refresh_token_expire_days)
+    RefreshTokenRepository(session).create(
+        user_id=user.id,
+        tenant_id=user.tenant_id,
+        family_id=family_id or uuid.uuid4(),
+        token_hash=refresh_token_hash(raw_refresh),
+        token_epoch=user.token_epoch,
+        issued_at=now,
+        expires_at=expires_at,
+    )
+    return SessionResponse(
+        access_token=access.token,
+        expires_in=access.expires_in,
+        expires_at=access.expires_at,
+        refresh_token=raw_refresh,
+        # Stored timestamps are naive UTC by convention (D2-01) while the JWT
+        # expiry is already offset-aware. One response must not mix the two, so
+        # the stored deadline is labelled on the way out.
+        refresh_expires_at=as_utc(expires_at) or expires_at,
+        user=_user_summary(user, tenant_slug=tenant_slug),
+    )
+
+
 def _clear_failed_attempts(session_factory: sessionmaker[Session], *, key: str) -> None:
     """Wipe the counter after a successful login, in its own transaction.
 
@@ -193,16 +306,16 @@ def _clear_failed_attempts(session_factory: sessionmaker[Session], *, key: str) 
 
 @router.post(
     "/login",
-    response_model=LoginResponse,
-    summary="Exchange credentials for an access token",
+    response_model=SessionResponse,
+    summary="Exchange credentials for an access token and a refresh token",
 )
 def login(
     payload: LoginRequest,
     request: Request,
     session: Session = Depends(get_request_session),
     session_factory: sessionmaker[Session] = Depends(app_session_factory),
-) -> LoginResponse:
-    """Authenticate a user of one tenant and mint an access token.
+) -> SessionResponse:
+    """Authenticate a user of one tenant and mint a session.
 
     Every rejection below returns the same 401 with the same message, after
     spending the same Argon2id work, so neither the body nor the response time
@@ -279,20 +392,152 @@ def login(
             session.rollback()
             log.warning("password_rehash_skipped", user_id=str(user.id))
 
-    access = issue_access_token(
-        user_id=user.id,
-        tenant_id=user.tenant_id,
-        role=user.role,
-        token_epoch=user.token_epoch,
+    response = _issue_session(
+        session,
         settings=settings,
+        user=user,
+        tenant_slug=tenant.slug,
+        now=now,
     )
+    # The refresh row is written by ``_issue_session`` and must be durable before
+    # the tokens reach the client: a 200 carrying a refresh token that no row
+    # backs would authenticate the caller for the access token's lifetime and
+    # then fail every redemption. Committed once, here.
+    session.commit()
+
     log.info("login_succeeded", user_id=str(user.id), tenant=tenant.slug)
-    return LoginResponse(
-        access_token=access.token,
-        expires_in=access.expires_in,
-        expires_at=access.expires_at,
-        user=_user_summary(user, tenant_slug=tenant.slug),
+    return response
+
+
+@router.post(
+    "/refresh",
+    response_model=SessionResponse,
+    summary="Rotate a refresh token for a new session",
+)
+def refresh_session(
+    payload: RefreshRequest,
+    request: Request,
+    session: Session = Depends(get_request_session),
+) -> SessionResponse:
+    """Redeem a refresh token, spending it and returning a successor.
+
+    The token is single-use. Redemption marks it spent and mints a replacement in
+    the same family, so a client can keep a session alive indefinitely while any
+    individual token it holds is worthless after one use.
+
+    Presenting a spent token is treated as theft, not as a mistake: the whole
+    family is revoked, which logs out the attacker *and* the legitimate client
+    rather than leaving the attacker with the copy they rotated in. A client that
+    raced itself across two tabs is caught by the same net and has to log in
+    again — the deliberate cost of not being able to tell the two cases apart.
+    That includes the race inside this function: the read below can see
+    ``used_at`` as null a microsecond before another request spends the same
+    token, which is why the authoritative gate is the conditional ``UPDATE`` in
+    :meth:`RefreshTokenRepository.claim_for_rotation` and not the Python check.
+
+    Entitlement is re-read from the database on every redemption — the row, its
+    tenant, ``is_active`` on both, and ``token_epoch`` — because a refresh token
+    that outlives a deactivated account would make deactivation meaningless. It
+    is the same five-check posture ``get_current_principal`` takes, minus the
+    bearer token: the refresh token *is* the credential here.
+    """
+    settings = app_settings(request)
+    now = utc_now()
+    digest = refresh_token_hash(payload.refresh_token)
+    repository = RefreshTokenRepository(session)
+
+    token = repository.by_hash(digest)
+    if token is None:
+        # No row means "never issued here" — a forged or already-pruned value.
+        log.info("refresh_failed", reason="unknown_token")
+        raise _refuse_refresh()
+
+    if token.revoked_at is not None:
+        # The family is already dead. Nothing left to detect, so nothing is
+        # revoked here: the honest answer is that this token never had a chance.
+        log.info("refresh_failed", reason="revoked")
+        raise _refuse_refresh()
+
+    if token.used_at is not None:
+        repository.revoke_family(token.family_id, now=now)
+        session.commit()
+        log.warning("refresh_reuse_detected", family_id=str(token.family_id))
+        raise _refuse_refresh()
+
+    if token.expires_at <= truncate_to_second(now):
+        log.info("refresh_failed", reason="expired")
+        raise _refuse_refresh()
+
+    user = IdentityDirectory(session).user_by_id(token.user_id)
+    if user is None or user.tenant_id != token.tenant_id:
+        # The row and the token disagree about who this is, or the account is
+        # gone. Both are refusals, and neither may fall back to the token's claim.
+        log.info("refresh_failed", reason="account_missing")
+        raise _refuse_refresh()
+
+    if not user.is_active or not user.tenant.is_active or user.token_epoch != token.token_epoch:
+        # Deactivated user, deactivated organisation, or a bumped epoch: the
+        # session was revoked by an act that happened after it was minted.
+        log.info("refresh_failed", reason="not_entitled")
+        raise _refuse_refresh()
+
+    if not repository.claim_for_rotation(digest, now=now):
+        # Lost the race to another request holding the same token. Indistinguish-
+        # able from a replay, and answered the same way.
+        repository.revoke_family(token.family_id, now=now)
+        session.commit()
+        log.warning("refresh_reuse_detected", family_id=str(token.family_id))
+        raise _refuse_refresh()
+
+    # ``token.expires_at`` is inherited rather than recomputed: rotation must not
+    # extend the session past the ceiling the login set.
+    response = _issue_session(
+        session,
+        settings=settings,
+        user=user,
+        tenant_slug=user.tenant.slug,
+        now=now,
+        family_id=token.family_id,
+        refresh_expires_at=token.expires_at,
     )
+    # One transaction: the claim above and the successor insert land together, so
+    # there is no instant where the presented token is spent and no successor
+    # exists — a crash between the two would otherwise end the session.
+    session.commit()
+
+    log.info("refresh_succeeded", user_id=str(user.id), family_id=str(token.family_id))
+    return response
+
+
+@router.post(
+    "/logout",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_model=None,
+    summary="Revoke the session a refresh token belongs to",
+)
+def logout(
+    payload: RefreshRequest,
+    request: Request,
+    session: Session = Depends(get_request_session),
+) -> None:
+    """End the session, so its refresh token can never be redeemed again.
+
+    Takes the refresh token rather than an access token, because the moment a
+    caller most needs to log out is the moment their access token has expired.
+    Requiring a valid one would leave a client holding a live refresh token and
+    unable to use it or destroy it.
+
+    Always 204, whether or not the token exists. A caller who could tell "revoked
+    something" from "revoked nothing" would have a probe for which values were
+    ever issued — and the holder of a token is already entitled to destroy it, so
+    there is nothing to protect by being specific.
+    """
+    now = utc_now()
+    token = RefreshTokenRepository(session).by_hash(refresh_token_hash(payload.refresh_token))
+    if token is not None and token.revoked_at is None:
+        RefreshTokenRepository(session).revoke_family(token.family_id, now=now)
+        session.commit()
+        log.info("logout", user_id=str(token.user_id), family_id=str(token.family_id))
 
 
 @router.get("/me", response_model=UserSummary, summary="The authenticated principal")

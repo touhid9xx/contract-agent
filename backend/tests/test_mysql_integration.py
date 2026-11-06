@@ -16,6 +16,15 @@ four things below that this project depends on:
 4. ``confidence``'s declared scale. ``NUMERIC(4, 3)`` is enforced by MySQL and
    only *declared* by SQLite, so the quantiser from ``c90423b`` must be a no-op
    here — this file is where that can be shown rather than argued.
+5. Refresh-token rotation — gap 6. ``claim_for_rotation`` is a conditional
+   ``UPDATE`` whose *affected-row count* is the answer to "did I win the race",
+   and whose row must be locked while it runs. SQLite has no row locks (writers
+   queue globally) and no ``AUTO_INCREMENT``-style ``rowcount`` subtleties, so
+   neither half of that guarantee is observable on it.
+6. Foreign keys that actually cascade. SQLite only enforces them when
+   ``PRAGMA foreign_keys`` is on; InnoDB enforces them always. Deleting a user
+   must take that user's live sessions with it, which is a claim about the
+   server, not about our model declarations.
 
 These are skipped, not failed, when no MySQL is reachable, so the default
 ``pytest`` run stays offline. To run them against the compose stack::
@@ -42,15 +51,16 @@ from alembic import command
 from alembic.config import Config as AlembicConfig
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine, make_url
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.core.refresh import mint_refresh_token, refresh_token_hash
 from app.db.base import Base, utc_now
-from app.db.enums import Channel, FieldName, FieldStatus, NotificationStatus
-from app.db.models import Contract, Notification, Tenant
+from app.db.enums import Channel, FieldName, FieldStatus, NotificationStatus, UserRole
+from app.db.models import Contract, Notification, Tenant, User
 from app.db.repositories.notifications import NotificationRepository, claim_next_due
 from app.db.repositories.outbox import OutboxRepository, enqueue_event
-from app.db.repositories.security import LoginAttemptRepository
+from app.db.repositories.security import LoginAttemptRepository, RefreshTokenRepository
 
 pytestmark = pytest.mark.integration
 
@@ -614,3 +624,235 @@ def test_confidence_enforces_its_declared_scale_without_the_quantiser(migrated: 
     assert stored == Decimal("0.300"), (
         f"MySQL should round to the declared scale on write, got {stored!r}"
     )
+
+
+def _seed_user(engine: Engine) -> tuple[uuid.UUID, uuid.UUID]:
+    """A committed tenant and one admin user: ``(tenant_id, user_id)``.
+
+    Committed rather than flushed because the refresh tests open *separate*
+    sessions on purpose — an uncommitted parent row would be invisible to them,
+    and a cascade test that cannot see the child proves nothing.
+    """
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory() as session:
+        tenant = Tenant(name="Refresh Tenant", slug=f"rt-{uuid.uuid4().hex[:8]}")
+        session.add(tenant)
+        session.flush()
+        user = User(
+            tenant_id=tenant.id,
+            email=f"rt-{uuid.uuid4().hex[:8]}@example.test",
+            password_hash="integration-test-not-a-real-argon2-hash",
+            role=UserRole.ADMIN,
+            token_epoch=0,
+        )
+        session.add(user)
+        session.commit()
+        return tenant.id, user.id
+
+
+def _issue_token(
+    engine: Engine,
+    *,
+    user_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    family_id: uuid.UUID | None = None,
+) -> tuple[str, str]:
+    """Mint and persist one refresh token. Returns ``(raw, digest)``.
+
+    Goes through the real repository rather than raw SQL so these tests exercise
+    the same write path the route uses, including its timestamp flooring.
+    """
+    raw = mint_refresh_token()
+    digest = refresh_token_hash(raw)
+    issued_at = utc_now()
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory() as session:
+        RefreshTokenRepository(session).create(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            family_id=family_id or uuid.uuid4(),
+            token_hash=digest,
+            token_epoch=0,
+            issued_at=issued_at,
+            expires_at=issued_at + timedelta(days=7),
+        )
+        session.commit()
+    return raw, digest
+
+
+def test_the_refresh_token_table_stores_digests_under_a_unique_index(migrated: Engine) -> None:
+    """Migration ``0006``: three schema facts the redemption path depends on.
+
+    **The digest is unique.** The lookup is ``WHERE token_hash = ?`` and treats
+    the single row it finds as authority over which user and tenant the session
+    belongs to. Without the constraint, a duplicate digest would make
+    ``scalar_one_or_none`` raise rather than refuse — a 500 instead of a 401 —
+    and, worse, two logins could resolve to whichever row the planner returned
+    first.
+
+    **It is exactly 64 characters.** A hex SHA-256 and nothing wider, so a
+    truncated or over-long digest is a bug the column rejects instead of data.
+
+    **The timestamps carry no fractional seconds.** ``expires_at`` is the
+    deadline; a value rounded *forward* on write would let a token outlive it.
+    The same trap ``LoginAttemptRepository.record`` floors against, and only the
+    server's own ``COLUMN_TYPE`` shows whether the column can even hold a
+    fraction.
+    """
+    with migrated.connect() as connection:
+        uniques = connection.execute(
+            text(
+                "SELECT INDEX_NAME, NON_UNIQUE, COLUMN_NAME "
+                "FROM information_schema.STATISTICS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'refresh_tokens' "
+                "AND COLUMN_NAME = 'token_hash' "
+                "ORDER BY INDEX_NAME"
+            )
+        ).all()
+
+    assert [(name, int(non_unique), column) for name, non_unique, column in uniques] == [
+        ("uq_refresh_tokens_token_hash", 0, "token_hash")
+    ], f"token_hash must carry exactly one single-column UNIQUE index, MySQL built {uniques!r}"
+
+    assert _column_type(migrated, "refresh_tokens", "token_hash") == "varchar(64)"
+    assert _column_type(migrated, "refresh_tokens", "issued_at") == "datetime"
+    assert _column_type(migrated, "refresh_tokens", "expires_at") == "datetime"
+
+
+def test_the_same_digest_cannot_be_stored_twice(migrated: Engine) -> None:
+    """The constraint above, exercised rather than merely inspected."""
+    tenant_id, user_id = _seed_user(migrated)
+    _, digest = _issue_token(migrated, user_id=user_id, tenant_id=tenant_id)
+
+    occurred_at = utc_now()
+    factory = sessionmaker(bind=migrated, expire_on_commit=False)
+    with factory() as session:
+        RefreshTokenRepository(session).create(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            family_id=uuid.uuid4(),
+            token_hash=digest,
+            token_epoch=0,
+            issued_at=occurred_at,
+            expires_at=occurred_at + timedelta(days=7),
+        )
+        with pytest.raises(IntegrityError) as duplicate:
+            session.commit()
+
+    assert _driver_error(duplicate.value).startswith("MySQL error 1062"), (
+        "a second row for one digest must be refused by the server, not silently "
+        f"accepted ({_driver_error(duplicate.value)})"
+    )
+
+
+def test_deleting_the_user_takes_its_live_sessions_with_it(migrated: Engine) -> None:
+    """The ``ON DELETE CASCADE`` on ``user_id``, proven by InnoDB.
+
+    A refresh token outlives the access token it was issued beside, so a deleted
+    user whose session survived would be an identity that can still mint access
+    tokens. SQLite only enforces this because the test harness turns
+    ``PRAGMA foreign_keys`` on; MySQL enforces it unconditionally, which is the
+    configuration production actually runs.
+    """
+    tenant_id, user_id = _seed_user(migrated)
+    survivor_tenant_id, survivor_user_id = _seed_user(migrated)
+    _issue_token(migrated, user_id=user_id, tenant_id=tenant_id)
+    _issue_token(migrated, user_id=user_id, tenant_id=tenant_id)
+    _issue_token(migrated, user_id=survivor_user_id, tenant_id=survivor_tenant_id)
+
+    with migrated.begin() as connection:
+        connection.execute(text("DELETE FROM users WHERE id = :id"), {"id": str(user_id)})
+        gone = connection.execute(
+            text("SELECT COUNT(*) FROM refresh_tokens WHERE user_id = :id"),
+            {"id": str(user_id)},
+        ).scalar_one()
+        kept = connection.execute(
+            text("SELECT COUNT(*) FROM refresh_tokens WHERE user_id = :id"),
+            {"id": str(survivor_user_id)},
+        ).scalar_one()
+
+    assert gone == 0, "deleting a user must not leave a redeemable session behind"
+    assert kept == 1, "the cascade must be scoped to the deleted user, not the whole table"
+
+
+def test_claim_for_rotation_is_decided_by_the_database(migrated: Engine) -> None:
+    """The rotation race, on a server that really has row locks.
+
+    ``claim_for_rotation`` is a conditional ``UPDATE`` whose affected-row count is
+    the answer to "did *I* spend this token", because a Python-side
+    ``if token.used_at is None`` would let two racing requests both rotate one
+    token into two live sessions. Two halves, and neither is observable on
+    SQLite:
+
+    * Worker B must **wait** on worker A's in-flight ``UPDATE`` and give up after
+      ``innodb_lock_wait_timeout``. A read-no-lock implementation would return
+      immediately instead.
+    * Once A commits, B's identical statement must report ``rowcount == 0``. That
+      is the value the route turns into "replay detected, revoke the family", so
+      it has to come from the server rather than from a driver heuristic.
+    """
+    tenant_id, user_id = _seed_user(migrated)
+    _, digest = _issue_token(migrated, user_id=user_id, tenant_id=tenant_id)
+
+    factory = sessionmaker(bind=migrated, expire_on_commit=False)
+    worker_a = factory()
+    worker_b = factory()
+    try:
+        assert RefreshTokenRepository(worker_a).claim_for_rotation(digest, now=utc_now()) is True
+
+        worker_b.execute(text(f"SET SESSION innodb_lock_wait_timeout = {LOCK_WAIT_SECONDS}"))
+        with pytest.raises(OperationalError) as blocked:
+            RefreshTokenRepository(worker_b).claim_for_rotation(digest, now=utc_now())
+        assert _driver_error(blocked.value).startswith(f"MySQL error {LOCK_WAIT_TIMEOUT}"), (
+            "the claim must take an exclusive lock on the row, so a concurrent claimer "
+            f"waits instead of spending the same token twice ({_driver_error(blocked.value)})"
+        )
+        worker_b.rollback()
+
+        worker_a.commit()
+
+        assert (
+            RefreshTokenRepository(worker_b).claim_for_rotation(digest, now=utc_now()) is False
+        ), (
+            "a token already spent must report zero affected rows; that count is how the "
+            "route detects a replay and revokes the family"
+        )
+        worker_b.rollback()
+    finally:
+        worker_a.rollback()
+        worker_b.rollback()
+        worker_a.close()
+        worker_b.close()
+
+
+def test_revoke_family_reports_the_rows_it_killed(migrated: Engine) -> None:
+    """``revoke_family`` returns MySQL's affected count, so the number matters.
+
+    Three tokens in one family and one in another: a count of "everything the
+    user owns" would log the victim out of a second browser, and a count of "the
+    row I found" would leave the successor alive — which is precisely the copy an
+    attacker who already rotated holds.
+
+    The second revoke must report 0. MySQL reports *changed* rows rather than
+    matched ones, and the ``revoked_at IS NULL`` predicate is what keeps that
+    honest: re-revoking cannot reset the original revocation time, so the
+    evidence of when a session was killed is not overwritten by a later logout.
+    """
+    tenant_id, user_id = _seed_user(migrated)
+    family_id = uuid.uuid4()
+    for _ in range(3):
+        _issue_token(migrated, user_id=user_id, tenant_id=tenant_id, family_id=family_id)
+    _, other_digest = _issue_token(migrated, user_id=user_id, tenant_id=tenant_id)
+
+    factory = sessionmaker(bind=migrated, expire_on_commit=False)
+    with factory() as session:
+        assert RefreshTokenRepository(session).revoke_family(family_id, now=utc_now()) == 3
+        session.commit()
+
+    with factory() as session:
+        assert RefreshTokenRepository(session).revoke_family(family_id, now=utc_now()) == 0
+
+        survivor = RefreshTokenRepository(session).by_hash(other_digest)
+        assert survivor is not None, "the other family's token must still exist"
+        assert survivor.revoked_at is None, "revoking one session must not end the other"
+        session.rollback()
