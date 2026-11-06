@@ -103,7 +103,7 @@ digest, and `POST /auth/login` now refuses with `429` + `Retry-After` once the w
 count rather than a password verification (D10-16). The migration head moves
 `0004 → 0005` for the first time since the `feat(g19)` slice, and the suite went
 **603 → 646** plus two new MySQL integration tests.
-**The slice on top of that is session renewal** (`feat(auth)`): `POST /auth/login` returns
+**The slice on top of that is session renewal** (`0f0ada4`, `feat(auth)`): `POST /auth/login` returns
 a single-use refresh token beside the access token, and `POST /auth/refresh` spends it and
 returns a successor in the same family, so a 15-minute access token no longer means
 re-entering credentials. The tokens are opaque rather than JWTs, stored only as a SHA-256
