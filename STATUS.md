@@ -91,6 +91,18 @@ trade-off D10-11 recorded and this supersedes (D10-13). It is still a manual two
 procedure with no audit trail and no KMS, and that limit is written with the slice
 rather than left to be discovered. The suite went **529 → 553**, all 24 in
 `test_reseal.py`, `test_crypto.py` and `test_config.py`.
+**Then the chicken-and-egg gap** (`5af7795`, `feat(cli)`): gap 10 was the one gap that
+made every other feature unreachable on a clean install, because `POST /auth/users` is
+admin-only and an admin needs a user. `python -m app.cli create-admin` creates the tenant
+(when the slug is new) and its first admin in one transaction, with the password read from
+stdin or a twice-typed prompt and never from argv (D10-15). The suite went **568 → 603**.
+**The slice on top of that is admission control on login** (gap 9, `feat(auth)`): a new
+`login_attempts` table with migration `0005` counts failures per `(tenant slug, email)`
+digest, and `POST /auth/login` now refuses with `429` + `Retry-After` once the window holds
+`login_max_attempts` failures — *before* any Argon2id work, so a flood costs a digest and a
+count rather than a password verification (D10-16). The migration head moves
+`0004 → 0005` for the first time since the `feat(g19)` slice, and the suite went
+**603 → 646** plus two new MySQL integration tests.
 
 ## Phase history
 
@@ -1549,6 +1561,69 @@ got misread.
 - **No test runs it against a live API process** — the login proof goes through the ASGI
   app, not a served port. Same limit `reseal-fields` and `consent-import` carry.
 
+## `POST /auth/login` can now refuse ✅ (gap 9, `D10-16`)
+
+Gap 9 said "no rate limiting on `/auth/login`", and the F3 section was explicit about
+why that mattered: Argon2id makes each attempt *expensive server-side*, which protects a
+stolen hash and does nothing about an attacker who may attempt forever. The route had
+been hardened against every oracle it could be — uniform 401s, constant-time-ish password
+work for unknown accounts, no hash leakage — and still handed out unlimited guesses and a
+cheap way to burn the server's CPU. This slice adds admission control in front of the
+password work.
+
+| Area | Detail |
+| --- | --- |
+| Policy | `app/core/login_throttle.py` — pure functions, the same shape as `workers/decision.py` and `workers/dispatch.py`: `login_key_hash`, `window_start`, `decide` returning a frozen `ThrottleDecision(is_blocked, retry_after_seconds, failures)`. The threshold boundaries and the window arithmetic are testable without a DB, a clock or an HTTP client. |
+| Key | SHA-256 over `("login-throttle.v1", slug.strip().lower(), normalize_email(email))`, joined with `\x00`. Both parts are folded **exactly as the login lookup folds them**, so `Ops@Acme.test` and `ops@acme.test ` cannot occupy two counters and double an attacker's attempts. A namespace prefix means a future scheme change cannot alias onto an old counter. |
+| No PII in the table | The digest is all the throttle needs; storing the address would have made `login_attempts` the app's first unencrypted store of one (the same argument that sealed `normalized_value`, gap 20). It also cannot be used to enumerate which addresses exist. |
+| No `tenant_id` | Deliberate, and the second such exception after `IdentityDirectory`: an attempt is counted *before* a tenant is resolved, and a wrong slug has no tenant row to point at. No tenant-scoped query may be built over this table. |
+| Rows, not a counter | One append-only row per failure, self-pruning the key's aged-out rows at the next write. No lock, no lost update (two racing inserts both land), and no lockout flag a crash can leave stuck on. |
+| Refusal | `429` with `Retry-After`, raised **before** any password work, so a flood costs a digest and a count instead of an Argon2id verification. `401` remains the unchanged wrong-password answer; `429` is a distinct state, not a friendlier 401. |
+| `Retry-After` | Seconds until the oldest counted failure ages out, `max(1, ceil(...))` so it is never `0` (which invites an immediate retry loop). Derived from the oldest row, so it is advisory by construction — spelled out in `decide`'s docstring rather than promised precisely. |
+| No `X-Forwarded-For` | Rejected on purpose: the header is caller-controlled unless a trusted proxy strips it, so keying on it would let an attacker mint a fresh empty counter per request and switch the control off. Keying on the submitted pair makes the control per-account; password spraying across accounts stays the edge's job (proxy/WAF). |
+| The write | `_record_failed_attempt` / `_clear_failed_attempts` open **their own** `session_scope`. The request session is never committed, so a counter written on it would be rolled back by the very `HTTPException` that ends the request — the throttle would read as protection and enforce nothing. Both are best-effort: a lost row costs one uncounted attempt, never a false 500 or a denied valid login. |
+| Success clears | Only when the window actually had failures, so an ordinary login costs no extra transaction. Without it a user who mistyped four times and then succeeded would sit one slip from a lockout. |
+| Config | `login_max_attempts` (default 5, ge=1) and `login_window_seconds` (default 900), each with its rationale in `app/core/config.py`. Five tolerated failures = the sixth attempt is refused. |
+| Migration | `0005_login_attempts.py`, hand-written like `0001`–`0004`, with the composite `(key_hash, attempted_at)` index the count and the prune both need. |
+| Flooring | `record` floors its own `now` to the second. The model default does too, but the route passes an explicit `utc_now()`; MySQL rounds a microseconds-bearing `DATETIME` **forward**, which would date a just-written failure in the future and start `Retry-After` from an instant that has not happened. Fixed at the single enforcement point rather than at each call site. |
+| Tests | `test_login_throttle.py` (41): digest shape and no readable email, case/whitespace folding, tenant separation, `window_start`/`decide` boundaries, 6th attempt → `429` + `Retry-After`, the counter **surviving the 401**, success clearing it, an unknown account throttled identically, and other accounts unaffected. |
+
+### Verification actually run (login throttle)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Tests | `pytest backend/tests`, root, `MYSQL_TEST_URL` unset | **646 collected — 645 passed, 1 skipped, 0 failed** (JUnit: `tests=646 failures=0 errors=0 skipped=1`), exit 0. Was 603 at `5af7795`; the 41 throttle tests plus 2 new MySQL integration tests are the difference. |
+| Tests (MySQL) | `pytest -m integration tests/test_mysql_integration.py`, from `backend/` | **14 passed**, exit 0 — a real MySQL 8 server was reachable, so `0005` is proven rather than inferred. |
+| Migration | `alembic upgrade head` / `alembic current` | Exit 0, `current` reports **`0005 (head)`**; the module fixture downgrades to `base` and re-applies on every run. |
+| Lint | `ruff check .`, root | All checks passed |
+| Format | `ruff format --check .`, root | **92 files already formatted** (87 at `5af7795`) |
+| Types | `mypy`, root | Success, **no issues in 52 source files** |
+| Security | `bandit -q -c pyproject.toml -r backend/app` | **0 issues**, exit 0 (the two `nosec` advisories on `config.py:50` are unchanged) |
+
+Two of the fourteen MySQL tests are new here and exist because SQLite cannot answer them:
+that `0005` really built `(key_hash, attempted_at)` **in that order** (read back from
+`information_schema.STATISTICS`, not inferred from the model), and that MySQL really does
+round a `.7s` fraction forward while `record` floors it — asserting both halves so the fix
+is not protecting against an imaginary hazard.
+
+The single skip remains `KAFKA_LIVE`, so GATE 2's clause 1 stands exactly as signed.
+
+### What this does not do — state it, do not bury it
+
+- **No `Retry-After` on a per-IP basis, and no spraying defence.** One password tried
+  against many accounts is untouched; that belongs at the edge, and saying so is the
+  honest half of this entry.
+- **The counters live in MySQL, not Redis.** `.env.example` has named Redis for this since
+  F1 and it stays unwired (gap list, below): every login now costs one extra query, and a
+  database outage takes the throttle with it. That is the right trade at this size — the
+  alternative is a second dependency the operator must run for a control that only has to
+  be roughly right.
+- **No test forces a concurrent `record` race.** The append-only design is what makes it
+  safe (no read-modify-write to lose), but the race itself is argued, not demonstrated.
+- **An unreadable `login_attempts` degrades to "not throttled", not to "refuse".** A
+  `SQLAlchemyError` on the count would 500 rather than fail open; the write paths swallow
+  errors, the read path does not.
+
 ## Known gaps / issues
 
 1. **`gitleaks` needs Docker** and is manual-stage only (D1-03). Run
@@ -1587,9 +1662,16 @@ got misread.
 8. **Only `POST /auth/users` exists for account lifecycle.** There is no
    password reset, no self-service change, no deactivate/delete endpoint. A
    forgotten password is an operator task (bump `token_epoch`, set a new hash).
-9. **No rate limiting on `/auth/login`.** Argon2id makes each attempt expensive
-   server-side, which is not the same as throttling an attacker. Admission
-   control belongs at the edge (proxy/WAF) or with a later Redis-backed limiter.
+9. ~~**No rate limiting on `/auth/login`.**~~ — **closed for the per-account case by
+   `D10-16`.** Every failure is now a row in `login_attempts` keyed by a SHA-256
+   of `(tenant slug, email)`, and the route refuses with `429` + `Retry-After`
+   once the window holds `login_max_attempts` (default 5) failures — before any
+   Argon2id work. What it deliberately does **not** cover is password *spraying*
+   (one password, many accounts) and any per-client-address limit: the key is
+   derived from the submitted values only, because `X-Forwarded-For` is
+   caller-controlled and keying on it would let an attacker mint a fresh counter
+   per request. That half still belongs at the edge (proxy/WAF), and still with
+   the Redis-backed limiter named here since F1 — the counters are in MySQL.
 10. ~~**No bootstrap path for the first user.**~~ — **closed by `create-admin`**
     (`D10-15`). `python -m app.cli create-admin` creates the tenant (when its slug
     is new) and its first admin in one transaction, so a fresh database can be
@@ -1848,9 +1930,13 @@ and 20), none of which changes whether the flow runs.
   the notification path it is ahead of it. No screen talks to the real API yet:
   `frontend/src/app/*` still calls the mocked demo backend, so the F8, F9 and F10
   routes have only ever been called by `TestClient`.
-- Redis (rate limiting, gap 9) and Ollama are still unwired: the `ollama` backend
-  is written but has no compose service, so `EXTRACTION_BACKEND=pattern` is what
-  runs (gap 17). Each belongs to the slice that first needs it.
+- Redis and Ollama are still unwired: the `ollama` backend is written but has no
+  compose service, so `EXTRACTION_BACKEND=pattern` is what runs (gap 17). Each
+  belongs to the slice that first needs it. Redis was named for login rate
+  limiting since F1 and **was not needed** — the throttle's counters live in
+  `login_attempts` (gap 9, D10-16), which costs one extra query per login and
+  needs no second dependency; what Redis would still buy is a per-address limit,
+  which is the edge's job.
 
 **The pipeline slice, in the order the dependencies demanded:**
 

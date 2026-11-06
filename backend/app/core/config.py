@@ -89,6 +89,27 @@ class Settings(BaseSettings):
     argon2_memory_cost: int = Field(default=65536, ge=8192, le=4_194_304)
     argon2_parallelism: int = Field(default=4, ge=1, le=16)
 
+    # --- login throttle (gap 9) ------------------------------------------
+    #: Failed ``POST /auth/login`` attempts allowed against one
+    #: ``(tenant slug, email)`` pair inside ``login_window_seconds`` before the
+    #: next attempt is refused with ``429`` and a ``Retry-After``.
+    #:
+    #: This is *admission control*, not password policy: Argon2id makes each
+    #: attempt expensive for the server, which is exactly why an unbounded number
+    #: of them is a denial-of-service lever as much as a guessing lever.
+    #:
+    #: Five is the OWASP-style starting point for a lockout counter. The floor is
+    #: 1, not 0, for the same reason ``notification_retry_max`` has a floor of 1:
+    #: 0 would refuse the *first* attempt and make login impossible, a setting
+    #: that reads as "strictest" and behaves as "broken".
+    login_max_attempts: int = Field(default=5, ge=1, le=100)
+    #: The window failures are counted over, and therefore also how long a
+    #: throttled caller waits: the block lifts by itself once the oldest counted
+    #: failure ages out, so there is no separate lockout timer to get stuck.
+    #: 15 minutes is long enough to make guessing pointless and short enough that
+    #: a user who fat-fingered their password is not locked out for the afternoon.
+    login_window_seconds: int = Field(default=900, ge=1, le=86_400)
+
     # --- infrastructure --------------------------------------------------
     database_url: str = "mysql+pymysql://app:app@localhost:3306/contracts"
     db_pool_size: int = Field(default=20, gt=0, le=200)

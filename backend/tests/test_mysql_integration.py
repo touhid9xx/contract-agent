@@ -33,7 +33,7 @@ import os
 import re
 import uuid
 from collections.abc import Iterator
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -50,6 +50,7 @@ from app.db.enums import Channel, FieldName, FieldStatus, NotificationStatus
 from app.db.models import Contract, Notification, Tenant
 from app.db.repositories.notifications import NotificationRepository, claim_next_due
 from app.db.repositories.outbox import OutboxRepository, enqueue_event
+from app.db.repositories.security import LoginAttemptRepository
 
 pytestmark = pytest.mark.integration
 
@@ -462,6 +463,114 @@ def test_the_scheduler_claim_skips_a_row_another_worker_holds(migrated: Engine) 
         worker_b.rollback()
         worker_a.close()
         worker_b.close()
+
+
+def test_the_login_attempt_index_serves_the_window_query(migrated: Engine) -> None:
+    """Migration ``0005`` must ship the exact index the throttle's query needs.
+
+    ``LoginAttemptRepository.window`` filters on ``key_hash`` (equality) and then
+    ranges over ``attempted_at``, so the index has to lead with the first and
+    carry the second. Getting that wrong would still return *correct* rows, only
+    slowly, and nothing else in the suite would notice — which is why the column
+    order is read back from ``information_schema`` rather than inferred from the
+    model, whose ``Index`` declaration is not what MySQL actually built.
+    """
+    assert "login_attempts" in set(inspect(migrated).get_table_names())
+
+    with migrated.connect() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT COLUMN_NAME FROM information_schema.STATISTICS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'login_attempts' "
+                "AND INDEX_NAME = 'ix_login_attempts_key_hash_attempted_at' "
+                "ORDER BY SEQ_IN_INDEX"
+            )
+        ).all()
+
+    assert [row[0] for row in rows] == ["key_hash", "attempted_at"], (
+        "the composite index must lead with the equality column and then the range "
+        f"column; MySQL built {[row[0] for row in rows]!r}"
+    )
+
+    # Exact-width digest and second precision, both load-bearing: a wider column
+    # would accept a malformed key, and a fractional-second column would store
+    # the value ``record`` floors and undo the fix asserted below.
+    assert _column_type(migrated, "login_attempts", "key_hash") == "varchar(64)"
+    assert _column_type(migrated, "login_attempts", "attempted_at") == "datetime"
+
+
+def _throttle_key() -> str:
+    """A 64-character hex digest, unique per call, so tests cannot collide."""
+    return uuid.uuid4().hex + uuid.uuid4().hex
+
+
+def _with_microseconds(microsecond: int) -> datetime:
+    """A "now" carrying a fraction MySQL would round — never the real clock."""
+    return utc_now().replace(microsecond=microsecond)
+
+
+def test_a_recorded_attempt_is_floored_rather_than_rounded_forward(migrated: Engine) -> None:
+    """Why ``LoginAttemptRepository.record`` floors its own timestamp.
+
+    MySQL stores ``DATETIME`` with no fractional seconds and *rounds* on write,
+    so a failure entered with 0.7s is stored a moment in the future. The window
+    then measures "how long until the oldest failure ages out" from an instant
+    that has not happened yet, and ``Retry-After`` outlives the configured
+    window. The model's default already floors, but the login route passes an
+    explicit ``utc_now()``, so the repository is the only enforcement point that
+    covers every caller.
+
+    Both halves are asserted, because either alone proves nothing: that raw
+    insertion really does round *forward* on this server (so the floor is not
+    guarding against an imaginary hazard), and that ``record`` does not.
+    """
+    fractional = _with_microseconds(700_000)
+    floored = fractional.replace(microsecond=0)
+
+    raw_key = _throttle_key()
+    with migrated.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO login_attempts (id, key_hash, attempted_at) "
+                "VALUES (:id, :key_hash, :attempted_at)"
+            ),
+            {"id": str(uuid.uuid4()), "key_hash": raw_key, "attempted_at": fractional},
+        )
+        raw_stored = connection.execute(
+            text("SELECT attempted_at FROM login_attempts WHERE key_hash = :key_hash"),
+            {"key_hash": raw_key},
+        ).scalar_one()
+
+    assert raw_stored == floored + timedelta(seconds=1), (
+        "this test is only meaningful if MySQL rounds a .7s fraction up; it stored "
+        f"{raw_stored!r} for {fractional!r}"
+    )
+
+    recorded_key = _throttle_key()
+    factory = sessionmaker(bind=migrated, expire_on_commit=False)
+    with factory() as session:
+        LoginAttemptRepository(session).record(
+            recorded_key, now=fractional, prune_before=fractional - timedelta(seconds=900)
+        )
+        session.commit()
+
+    with factory() as session:
+        stored = session.execute(
+            text("SELECT attempted_at FROM login_attempts WHERE key_hash = :key_hash"),
+            {"key_hash": recorded_key},
+        ).scalar_one()
+        assert stored == floored, (
+            f"record() must floor {fractional!r} to {floored!r}, stored {stored!r}"
+        )
+
+        # The stored value has to be usable by the query that consumes it: a
+        # failure rounded into the future would fall outside a window that starts
+        # at "now", so it would never be counted and never block anything.
+        count, earliest = LoginAttemptRepository(session).window(
+            recorded_key, since=floored - timedelta(seconds=1)
+        )
+    assert count == 1
+    assert earliest == floored
 
 
 def test_confidence_enforces_its_declared_scale_without_the_quantiser(migrated: Engine) -> None:

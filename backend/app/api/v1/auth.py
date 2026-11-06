@@ -33,9 +33,17 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
-from app.api.deps import app_settings, get_current_principal, get_request_session, require_roles
+from app.api.deps import (
+    app_session_factory,
+    app_settings,
+    get_current_principal,
+    get_request_session,
+    require_roles,
+)
+from app.core.config import Settings
+from app.core.login_throttle import decide, login_key_hash, window_start
 from app.core.principal import Principal
 from app.core.security import (
     MAX_PASSWORD_LENGTH,
@@ -46,14 +54,17 @@ from app.core.security import (
     spend_password_hash_time,
     verify_password,
 )
+from app.db.base import utc_now
 from app.db.enums import UserRole
 from app.db.models import User
+from app.db.repositories.security import LoginAttemptRepository
 from app.db.repositories.users import (
     IdentityDirectory,
     UserRepository,
     is_plausible_email,
     normalize_email,
 )
+from app.db.session import session_scope
 
 log = structlog.get_logger(__name__)
 
@@ -63,6 +74,13 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 #: user, wrong password, deactivated account. Anything more specific turns the
 #: endpoint into an oracle for which addresses and organisations exist.
 _INVALID_CREDENTIALS = "Invalid tenant, email or password"
+
+#: Refusal for a login that has spent its attempt budget. A different status code
+#: from the 401 above on purpose: a client cannot back off from a refusal it
+#: cannot tell apart from "wrong password". It still says nothing about whether
+#: the account exists, because the counter is keyed on the submitted pair alone
+#: and an unknown address crosses the threshold identically.
+_TOO_MANY_ATTEMPTS = "Too many failed login attempts; try again later"
 
 
 class LoginRequest(BaseModel):
@@ -127,6 +145,52 @@ def _principal_summary(principal: Principal) -> UserSummary:
     )
 
 
+def _record_failed_attempt(
+    session_factory: sessionmaker[Session],
+    *,
+    key: str,
+    settings: Settings,
+    now: datetime,
+) -> None:
+    """Count one failed login, in a transaction of its own.
+
+    It must not use the request session: that session is never committed (see
+    ``get_request_session``), and the very ``HTTPException`` this is called
+    before would roll an insert on it back. The counter would then never move and
+    the throttle would be decorative — the one bug this whole slice exists to
+    avoid, so the write is deliberately detached from the failed request.
+
+    Best effort. If counting fails the caller still gets the correct 401: a wrong
+    password must not be reported as a server error, and the honest cost of a
+    lost row is that one attempt goes uncounted, not that a valid user is locked
+    out or told something untrue.
+    """
+    try:
+        with session_scope(session_factory) as scratch:
+            LoginAttemptRepository(scratch).record(
+                key,
+                now=now,
+                prune_before=window_start(now, settings.login_window_seconds),
+            )
+    except SQLAlchemyError:
+        log.warning("login_attempt_not_recorded")
+
+
+def _clear_failed_attempts(session_factory: sessionmaker[Session], *, key: str) -> None:
+    """Wipe the counter after a successful login, in its own transaction.
+
+    Without this, a user who mistyped four times and then got in would start
+    their next session one attempt away from a lockout. Detached from the request
+    session for the same reason as ``_record_failed_attempt``, but best effort:
+    failing to clear must never cost the caller a session they have earned.
+    """
+    try:
+        with session_scope(session_factory) as scratch:
+            LoginAttemptRepository(scratch).clear(key)
+    except SQLAlchemyError:
+        log.warning("login_attempts_not_cleared")
+
+
 @router.post(
     "/login",
     response_model=LoginResponse,
@@ -136,15 +200,48 @@ def login(
     payload: LoginRequest,
     request: Request,
     session: Session = Depends(get_request_session),
+    session_factory: sessionmaker[Session] = Depends(app_session_factory),
 ) -> LoginResponse:
     """Authenticate a user of one tenant and mint an access token.
 
     Every rejection below returns the same 401 with the same message, after
     spending the same Argon2id work, so neither the body nor the response time
     reveals whether the tenant or the address exists.
+
+    Admission control runs first (`app.core.login_throttle`), before any password
+    work, so a flood costs a digest and a count instead of an Argon2id
+    verification. It is keyed on the submitted values alone and therefore adds no
+    new oracle: a real account and a fictional one are refused at the same point,
+    for the same reason, at the same speed.
     """
     settings = app_settings(request)
     directory = IdentityDirectory(session)
+
+    now = utc_now()
+    throttle_key = login_key_hash(payload.tenant, payload.email)
+    window_seconds = settings.login_window_seconds
+    failures, earliest = LoginAttemptRepository(session).window(
+        throttle_key, since=window_start(now, window_seconds)
+    )
+    throttle = decide(
+        failures=failures,
+        earliest=earliest,
+        now=now,
+        max_attempts=settings.login_max_attempts,
+        window_seconds=window_seconds,
+    )
+    if throttle.is_blocked:
+        log.warning(
+            "login_throttled",
+            tenant=payload.tenant,
+            failures=throttle.failures,
+            retry_after_seconds=throttle.retry_after_seconds,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=_TOO_MANY_ATTEMPTS,
+            headers={"Retry-After": str(throttle.retry_after_seconds)},
+        )
 
     tenant = directory.tenant_by_slug(payload.tenant)
     user = None
@@ -153,6 +250,7 @@ def login(
 
     if user is None or tenant is None:
         spend_password_hash_time(settings)
+        _record_failed_attempt(session_factory, key=throttle_key, settings=settings, now=now)
         log.info("login_failed", reason="no_matching_account", tenant=payload.tenant)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=_INVALID_CREDENTIALS)
 
@@ -160,8 +258,14 @@ def login(
     # make "deactivated" measurably faster than "wrong password".
     password_ok = verify_password(payload.password, user.password_hash, settings)
     if not (password_ok and user.is_active):
+        _record_failed_attempt(session_factory, key=throttle_key, settings=settings, now=now)
         log.info("login_failed", reason="bad_password_or_inactive_account")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=_INVALID_CREDENTIALS)
+
+    # Only when there is something to wipe, so the ordinary login — no failures in
+    # the window — costs no extra transaction.
+    if failures:
+        _clear_failed_attempts(session_factory, key=throttle_key)
 
     # A successful login is the only moment the plaintext exists, so it is the
     # only place an old hash can be upgraded to the current cost. Best-effort: a

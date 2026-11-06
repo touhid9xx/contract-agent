@@ -1717,3 +1717,80 @@ committed together. That pairing is the milestone; extraction and review follow.
   the prompt path, and the audit row's shape and non-disclosure. Not proven: nothing tests
   a concurrent second invocation creating the same address, and nothing tests behaviour
   when the database is unreachable mid-run.
+
+### D10-16 — Login admission control is per-account, hashed, and written in its own transaction
+
+- **Decision:** `POST /auth/login` counts failures in a new `login_attempts` table (migration
+  `0005`), keyed by a SHA-256 digest of `(tenant slug, email)`, and refuses with `429` +
+  `Retry-After` once the window holds `login_max_attempts` (default 5) failures. The policy
+  lives in `app/core/login_throttle.py` as pure functions, the route keeps only the wiring.
+  This closes gap 9 for the per-account case.
+- **Why per-account and not per-address:** the key is derived from the values the caller
+  submitted, and nothing else. `X-Forwarded-For` was rejected on purpose: it is
+  caller-controlled unless a trusted proxy strips it, so an attacker could mint a fresh
+  empty counter with every request and switch the control off — a limiter the attacker can
+  disable is worse than none, because it reads as protection. The consequence is stated
+  rather than hidden: password *spraying* (one password, many accounts) is untouched by
+  this and still belongs at the edge, proxy or WAF, where a client address can be judged
+  honestly.
+- **Why the key is a digest and the table has no `tenant_id`:** the throttle only needs
+  equality, so storing `(slug, email)` would buy nothing and turn a security control into a
+  second unencrypted copy of a customer address — the same argument that sealed
+  `normalized_value` (D10-11). A side effect worth having: the table cannot be used to
+  enumerate which addresses exist. The missing tenant column is the second deliberate
+  exception after `IdentityDirectory` (the first is read-only for exactly this reason): an
+  attempt is counted *before* a tenant is resolved, and the common case of a wrong slug has
+  no tenant row to point at. The exception is safe because no statement in
+  `LoginAttemptRepository` can read or write a tenant-owned row.
+- **Why rows and not a counter:** a counter needs a lock and a separate "when did the window
+  start" column that is easy to reset wrongly, and a lost update silently loses an
+  increment. Rows append, so two racing failures both land and the count sees both; the
+  window is a `WHERE attempted_at >= ?`, and the block lifts by itself when the oldest row
+  ages out — there is no lockout flag a bug or a crash can leave stuck on. Growth is bounded
+  by pruning that key's aged-out rows at the next write, so the table tracks *distinct
+  recently-failing keys*, not total attempts.
+- **Why the failure row is committed on a transaction of its own:** this is the defect the
+  slice exists around. `get_request_session` never commits, and the `HTTPException` that
+  ends a failed login rolls its session back — so a counter written there would be undone by
+  the very refusal it was meant to record, leaving a throttle that reads as protection and
+  enforces nothing. `_record_failed_attempt` and `_clear_failed_attempts` therefore open
+  their own `session_scope` and are best-effort: a lost row costs one uncounted attempt,
+  never a 500 in place of a correct 401 and never a denied valid session.
+- **Why `429` and not a friendlier `401`:** a caller has to be able to tell "wrong password,
+  try the right one" from "stop trying for a while", or the limiter just makes the app look
+  broken. The refusal is raised **before** any password work, so a flood costs a digest and
+  a count instead of an Argon2id verification. That makes a throttled request measurably
+  faster, which is not an oracle: the answer depends only on the caller's own input, so a
+  real account and a fictional one reach it at the same speed.
+- **Why `Retry-After` is derived from the oldest failure and floored at 1:** the honest
+  answer is "until the oldest counted failure ages out", so that is what is returned;
+  `max(1, ...)` keeps it from ever being `0`, which invites an immediate retry loop. It is
+  advisory by construction — under concurrent overruns the caller may be refused once more
+  with a smaller value — and inventing a precise figure would cost a second query. `decide`
+  says so in its docstring rather than in a comment the caller never reads.
+- **Why the store is MySQL and not Redis:** `.env.example` has named Redis for this since
+  F1, and it stays unwired. The trade is stated plainly: every login now costs one extra
+  query, and a database outage takes the throttle with it — but the alternative is a second
+  dependency the operator must run for a control that only has to be roughly right, and a
+  limiter whose state vanishes on restart is not obviously better than one that is slightly
+  slow.
+- **Why `record` floors its own timestamp:** MySQL's `DATETIME` has second precision and
+  *rounds* on write, so a value carrying 0.7s is stored a moment in the future. Window
+  arithmetic would then measure "how long until the oldest failure ages out" from an instant
+  that has not happened, and `Retry-After` would outlive the configured window. The model
+  default already floors, but the route passes an explicit `utc_now()`, so the repository is
+  the single point that covers every caller. The same trap `truncate_to_second` documents
+  for outbox eligibility, arrived at independently.
+- **What this proves and what it does not.** Forty-one tests in
+  `backend/tests/test_login_throttle.py` cover the digest's shape and the absence of a
+  readable email, case/whitespace folding and tenant separation, the `decide` boundaries, the
+  sixth attempt returning `429` with `Retry-After`, the counter **surviving the 401**, success
+  clearing it, an unknown account throttled identically, and other accounts unaffected. Two
+  new MySQL integration tests cover what SQLite cannot: that `0005` really built
+  `(key_hash, attempted_at)` in that order (read back from `information_schema.STATISTICS`,
+  not inferred from the model), and that this server really does round a `.7s` fraction
+  forward while `record` floors it — both halves asserted, so the fix is not guarding an
+  imaginary hazard. Not proven: no test forces a concurrent `record` race (the append-only
+  design is what makes it safe, but the race is argued, not demonstrated), no test covers
+  spraying, and the read path is not best-effort — if the count query fails the login 500s
+  rather than failing open.
