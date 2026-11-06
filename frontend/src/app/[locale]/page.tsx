@@ -4,7 +4,10 @@ import { useTheme } from "next-themes";
 import { useLocale, useTranslations } from "next-intl";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useState } from "react";
 
+import { useAuth } from "@/components/auth-provider";
+import { HealthStatus } from "@/components/health-status";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { localeLabels, locales } from "@/i18n/config";
@@ -16,12 +19,30 @@ export default function HomePage() {
   const locale = useLocale();
   const pathname = usePathname();
   const { theme, setTheme } = useTheme();
+  const { user, signOut, signOutEverywhere } = useAuth();
+
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   /** Swap the leading locale segment while keeping the rest of the path. */
   function pathForLocale(target: string): string {
     const segments = pathname.split("/").filter(Boolean);
     segments[0] = target;
     return `/${segments.join("/")}`;
+  }
+
+  async function run(action: () => Promise<void>) {
+    setBusy(true);
+    setActionError(null);
+    try {
+      await action();
+    } catch {
+      // The one thing worth saying is that the button did not do what it said.
+      // Why is a server detail the user cannot act on.
+      setActionError(t("home.actionFailed"));
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -32,7 +53,66 @@ export default function HomePage() {
         </p>
         <h1 className="text-2xl font-semibold">{t("app.name")}</h1>
         <p className="text-sm text-muted-foreground">{t("app.tagline")}</p>
+        <HealthStatus />
       </header>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>{t("home.accountHeading")}</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {user === null ? (
+            <>
+              <p className="text-sm text-muted-foreground">{t("home.signedOut")}</p>
+              <Link href={`/${locale}/login`}>
+                <Button size="sm">{t("home.signIn")}</Button>
+              </Link>
+            </>
+          ) : (
+            <>
+              <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+                <dt className="text-muted-foreground">{t("common.email")}</dt>
+                <dd className="break-all">{user.email}</dd>
+                <dt className="text-muted-foreground">{t("common.role")}</dt>
+                <dd>{user.role}</dd>
+                <dt className="text-muted-foreground">{t("common.organisation")}</dt>
+                <dd>{user.tenant_slug}</dd>
+              </dl>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => {
+                    void run(signOut);
+                  }}
+                >
+                  {t("home.signOut")}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="danger"
+                  disabled={busy}
+                  onClick={() => {
+                    void run(signOutEverywhere);
+                  }}
+                >
+                  {t("home.signOutEverywhere")}
+                </Button>
+              </div>
+
+              <p className="text-xs text-muted-foreground">{t("home.signOutEverywhereHint")}</p>
+            </>
+          )}
+
+          {actionError !== null && (
+            <p className="rounded-lg bg-danger-muted px-3 py-2 text-xs text-danger" role="alert">
+              {actionError}
+            </p>
+          )}
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>
@@ -78,12 +158,6 @@ export default function HomePage() {
           </div>
         </CardContent>
       </Card>
-
-      <nav className="text-sm">
-        <Link className="text-primary underline-offset-4 hover:underline" href="/dashboard">
-          {t("nav.dashboard")}
-        </Link>
-      </nav>
     </main>
   );
 }

@@ -13,17 +13,42 @@
   "home": {
     "phaseLabel": "Phase 1 foundation",
     "heading": "Foundation is being built",
-    "body": "The real authentication, data and messaging layers land in F2 to F7. Product features follow after GATE 2.",
+    "body": "Ingestion, extraction, human review, channel selection and reminders are live in the API. The screens for them arrive after GATE 2.",
     "healthHeading": "Backend connectivity",
     "healthOk": "API reachable",
     "healthFail": "API unreachable",
-    "healthChecking": "Checking…"
+    "healthChecking": "Checking…",
+    "accountHeading": "Your session",
+    "signedOut": "You are not signed in.",
+    "signIn": "Sign in",
+    "signOut": "Sign out",
+    "signOutEverywhere": "Sign out everywhere",
+    "signOutEverywhereHint": "Ends every session of your account, including the ones you cannot see.",
+    "actionFailed": "That did not work. Try again."
+  },
+  "auth": {
+    "title": "Sign in",
+    "subtitle": "Use the account an administrator created for you.",
+    "tenant": "Organisation",
+    "tenantHint": "The tenant slug, not the display name.",
+    "email": "Email",
+    "password": "Password",
+    "submit": "Sign in",
+    "submitting": "Signing in…",
+    "invalidCredentials": "Those details were not accepted.",
+    "rateLimited": "Too many attempts. Wait a few minutes and try again.",
+    "offline": "The API is not reachable. Is the backend running?",
+    "failed": "Sign-in failed. Try again.",
+    "backToHome": "Back"
   },
   "common": {
     "language": "Language",
     "theme": "Theme",
     "light": "Light",
     "dark": "Dark",
-    "system": "System"
+    "system": "System",
+    "email": "Email",
+    "role": "Role",
+    "organisation": "Organisation"
   }
 }

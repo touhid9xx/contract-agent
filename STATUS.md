@@ -122,6 +122,16 @@ every *other* session and re-issues the caller's, and two admin routes add
 the stored refresh rows, because either half alone leaves a credential that still works
 (D10-18). No migration: `token_epoch` and `refresh_tokens` already existed. The suite went
 **695 → 731**, and the MySQL half was re-run at this head (**19 passed**, still `0006`).
+**The slice on top of that is the first screen that signs in** (`feat(web)`): gap 7 said
+the frontend never called `/auth/*` — no login screen, no token storage, no
+`Authorization` header, and `frontend/src/lib/api.ts` did not exist despite
+`backend/app/main.py` naming it. `/auth/login`, `/auth/refresh`, `/auth/logout`,
+`/auth/logout-all` and `/auth/me` now have a caller: the token pair lives in memory only,
+rotation is serialised because a refresh token is single-use, and a reload deliberately
+signs the user out (D10-19). No migration and no `backend/` file changed, so the suite
+stays **731**; `next.config.ts` also gained explicit `/health` rewrites, since the probe
+sits outside `/api/v1` and the existing `/api/:path*` rule never matched it.
+The hash lands in the `docs(status)` follow-up, like every slice before it.
 
 ## Phase history
 
@@ -1712,9 +1722,11 @@ cannot prove; and `revoke_family` reporting 3 then 0 while leaving a sibling fam
   limit: a stolen token is worth one redemption, and the second attempt kills the family.
 - **No global sweeper.** Pruning happens only when that user next logs in, so an account
   that never returns leaves its expired rows until it does.
-- **The storage decision is still open.** The token is returned in the response body, so
-  the client must hold it; whether that is an httpOnly cookie or in memory is a frontend
-  question, and nothing consumes it yet (gap 7). The API shape does not force either.
+- ~~**The storage decision is still open.**~~ — **answered by `D10-19`.** The token is
+  returned in the response body, so the client must hold it; whether that was an httpOnly
+  cookie or memory was a frontend question nothing consumed yet (gap 7). The API shape did
+  not force either, and the first client chose **memory only** — with the httpOnly cookie
+  recorded as the intended successor rather than as a rejected alternative.
 - **No live-server test.** The proof goes through the ASGI app, not a served port — the same
   limit `create-admin`, `consent-import` and `reseal-fields` carry.
 
@@ -1778,8 +1790,75 @@ works after an administrator believes they killed it.
   nothing per-address, exactly like `/login` (gap 9).
 - **No live-server test.** The proof goes through the ASGI app, not a served port — the
   same limit `create-admin`, `consent-import` and `reseal-fields` carry.
-- **Nothing consumes these routes yet.** No screen calls `/auth/*` (gap 7), so the
-  lifecycle is exercised only by `TestClient`.
+- ~~**Nothing consumes these routes yet.**~~ — **amended by `D10-19`.** `/auth/login`,
+  `/auth/refresh`, `/auth/logout`, `/auth/logout-all` and `/auth/me` now have a caller under
+  `frontend/src/`. The two **admin** routes still have none: there is no
+  user-administration screen, so `PATCH /auth/users/{id}` and the password reset remain
+  exercised by `TestClient` alone.
+
+## A screen can sign in now ✅ (gap 7, `D10-19`)
+
+Gap 7 said the frontend never called the auth API: no login screen, no token storage, no
+`Authorization` header — and `frontend/src/lib/api.ts`, the module `backend/app/main.py`
+already names in a comment, did not exist. So `D10-17` and `D10-18` had built a session
+model with **no client at all**: a single-use refresh token nothing redeemed, and a
+"sign out everywhere" button nobody could press. This slice is the first caller. It adds
+`lib/api.ts` (the wire shapes, declared once), `lib/session.ts` (the token pair and its
+rotation), an `AuthProvider`, a localized login screen, and the account card that makes
+the session visible.
+
+The one thing worth reading twice: **the client has to know that refresh tokens are
+single-use.** Two concurrent 401s that each refreshed would spend one token twice, which
+`D10-17` deliberately treats as theft — the family dies and the user is signed out of
+everything. `refreshSession()` therefore serialises rotation on a shared in-flight
+promise. Without it, ordinary concurrent page loads would occasionally trigger the
+family-revocation path, and the symptom would look like a backend bug.
+
+| Area | Detail |
+| --- | --- |
+| Wire shapes, declared once | `Session`, `UserSummary` and `UserRole` are declared against what `app/api/v1/auth.py` actually returns — including `is_active`, which `D10-18` added. Renaming a route or a field is now a compile error, not a 404 someone finds in a browser. |
+| One error shape | `request()` parses the `{"error": {...}}` envelope from `app/main.py` once; a non-JSON body (a proxy error page, a dead socket) becomes a synthetic `network_error` with status `0`. Callers branch on `isUnauthorized` / `isRateLimited` / `isOffline`, never on bare numbers. |
+| Memory only | The pair lives in a module-level variable and dies with the tab — never `localStorage`, `sessionStorage` or a cookie (`D10-19`). Web storage is readable by any injected script, so it is not a safer place to put a 7-day credential. |
+| Reload signs you out | The stated cost of memory-only, not an oversight. It is also why the store is a module behind `getSession`/`setSession` instead of `useState` in the provider: moving to an httpOnly cookie later is one file, and no component learns about it. |
+| Retry once, then stop | `authorized()` calls an endpoint with the current access token and, on a single 401, rotates and retries exactly once. A second 401 means the new credential is also refused, and looping there would hammer the throttle. |
+| Rotation is serialised | `refreshSession()` caches its in-flight promise. This is a correctness rule inherited from `D10-17`, written down in the module that owns the token so no caller has to remember it. |
+| Sign-out is local-first | The UI clears the session before the server call, so the browser is signed out even if `/auth/logout` never answers; the refresh token is captured first and the request is fire-and-forget. `signOutEverywhere` is the opposite — it must succeed server-side to mean anything, so it uses `authorized()` and clears in `finally`. |
+| Three failures, three sentences | Wrong credentials, throttled (`429`) and API-unreachable are different problems with the same visual outcome on a login form. Each gets its own string in both locales instead of one "sign-in failed". |
+| The tenant field is explained | `/auth/login` takes a tenant **slug**, not a display name. The label says so (`auth.tenantHint`), because that is the field a first-time user gets wrong. |
+| Health probe gets its own rewrite | `/health` is unversioned and outside `/api/v1` on purpose, so `/api/:path*` never matched it; `next.config.ts` gained two explicit rules. Worth two lines because "the API is down" and "your password is wrong" are otherwise indistinguishable. |
+| A dangling link removed | `/[locale]` linked to `/dashboard`, a route that does not exist. It is replaced by the sign-in link rather than pointed at a 404. |
+| Both locales, together | `auth.*`, `home.account*` and `common.email/role/organisation` were added to `en.json` and `bn.json` in the same edit. **Note the guard does not exist:** `i18n/messages.ts` casts `bn` to `typeof en`, and a cast across a narrower object compiles, so a key missing from `bn` falls back at run time rather than failing the build. Keeping the two in step is a convention here, not a check. |
+
+### Verification actually run (auth UI)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Types | `npm run typecheck` (root → `frontend`) | Not run by hand — the commit gate owns it. At authoring time the language server reported **no errors or warnings** in every file this slice touched. |
+| Lint | `eslint` (commit gate) | Same caveat. New code uses `import type` throughout, which this config makes an error, and defines every identifier it imports. |
+| Backend | *no Python changed* | This slice adds no file under `backend/`, so the 731-test suite is unaffected by construction rather than by measurement. |
+| Automated UI tests | — | **None.** `frontend/` has no test runner (no `vitest`/`jest`, no `test` script), and adding one would be a new dependency in a slice that does not need it. Everything below is asserted by types, not by execution. |
+
+### What this does not do — state it, do not bury it
+
+- **No request has been made against a running backend from this environment.** The
+  client is typed against the real wire shapes, but nothing here proves it end to end;
+  the `pytest` suite remains the only evidence the server behaves as declared.
+- **A reload signs the user out.** No rehydration, by design (`D10-19`). The httpOnly
+  cookie is the recorded successor and needs backend work: `Set-Cookie` on login and
+  refresh, `SameSite`/`Secure`, CSRF for the state-changing routes.
+- **No route is protected.** Anyone can load any page; the API refuses, which is the real
+  boundary. There is no redirect-to-login middleware, so a deep link into a future
+  authenticated page will render its shell and then fail its queries.
+- **The admin routes still have no screen.** `PATCH /auth/users/{id}` and
+  `/auth/users/{id}/password-reset` remain `TestClient`-only — there is no user
+  administration UI, which is a larger slice than a login form.
+- **No password-reset request flow for end users.** `D10-18` deliberately keeps the
+  generated password in a human's hands; the UI neither asks for nor displays one.
+- **Production must proxy `/health` too.** The rewrite is Next-side configuration; a
+  different front door (nginx, a load balancer) has to reproduce both rules, or the
+  connectivity line reads "down" on a healthy API.
+- **The consent screen (gap 18) is not here.** It remains an owner decision, and folding
+  it in would have made this slice two.
 
 ## Known gaps / issues
 
@@ -1817,11 +1896,13 @@ works after an administrator believes they killed it.
    usable for its remaining minutes. "Sign out everywhere" now exists
    (`POST /auth/logout-all`, `D10-18`), which is the remedy for that window rather
    than its removal.
-7. **The frontend does not use the auth API yet.** F3 is backend-only: there is
-   no login screen, no token storage and no `Authorization` header in
-   `frontend/src/`. The `frontend/src/lib/api.ts` module and the `demo/` fixtures
-   still run unauthenticated. Wiring the UI is part of a later milestone — until
-   then, `/api/v1/auth/*` is exercised by tests only.
+7. ~~**The frontend does not use the auth API yet.**~~ — **closed by `D10-19`.** There is
+   now a login screen (`/[locale]/login`), an in-memory session store
+   (`frontend/src/lib/session.ts`) and an `Authorization` header on every authenticated
+   call, all behind `frontend/src/lib/api.ts` — the module this entry named as missing and
+   which `backend/app/main.py` already assumed existed. Residue, stated rather than buried:
+   a reload signs the user out (memory-only by choice), no route is *protected* (the API
+   refuses, which is the real boundary), and the two admin routes still have no screen.
 8. ~~**Only `POST /auth/users` exists for account lifecycle.**~~ — **closed by
    `D10-18`.** `POST /auth/logout-all` ends every session of the caller's account,
    `POST /auth/password` changes their own after proving the current one, and two
@@ -2079,6 +2160,9 @@ works after an administrator believes they killed it.
 been run (`c99c792`) — including the concurrency proof that closes gap 23 — and the
 transport decision the slice ended on has been built and proven against a socket
 (`6f4cb0b`, and the socket suite that followed); GATE 2 is signed (`5c3e077`).**
+The first real screen also exists now: the auth UI (`feat(web)`) signs in against
+`/auth/*` with an in-memory session (gap 7, D10-19), so the API is no longer reached
+only by `TestClient`.
 F1–F10 are all committed and the pipeline slice is closed — every arrow in the Phase-0
 flow (ingest → extract → review → decide → notify) now has real code behind it, a due
 row is reached by a background poller rather than an operator, the review backlog is
@@ -2099,9 +2183,14 @@ and 20), none of which changes whether the flow runs.
   opens an SLA clock.
 - `app/api/v1/` — `auth`, `health`, `contracts`, `agent`, `review` and now
   `notifications`. The backend is no longer *behind* the UI contract by a route; on
-  the notification path it is ahead of it. No screen talks to the real API yet:
-  `frontend/src/app/*` still calls the mocked demo backend, so the F8, F9 and F10
-  routes have only ever been called by `TestClient`.
+  the notification path it is ahead of it. The first screens now do call it:
+  `/[locale]/login` and the account card reach `/auth/*` (`feat(web)`, D10-19).
+  Nothing else does — the contract, review, agent and notification routes have still
+  only ever been called by `TestClient`. **Corrected while editing this paragraph:**
+  it previously said "`frontend/src/app/*` still calls the mocked demo backend", which
+  was never true — the mock is `demo/backend`, and it is consumed by
+  `demo/frontend/src/lib/api.ts`. The real app had no API caller at all, which is what
+  gap 7 was.
 - Redis and Ollama are still unwired: the `ollama` backend is written but has no
   compose service, so `EXTRACTION_BACKEND=pattern` is what runs (gap 17). Each
   belongs to the slice that first needs it. Redis was named for login rate

@@ -2006,3 +2006,54 @@ committed together. That pairing is the milestone; extraction and review follow.
   than typed but is still a spoken secret; `/password` inherits the per-account login budget and
   nothing per-address (gap 9); and nothing consumes these routes yet — no screen calls `/auth/*`
   (gap 7), so the whole lifecycle is exercised only by `TestClient`.
+
+### D10-19 — The browser holds the session in memory, and rotation is serialised on purpose
+
+Gap 7 is the first slice where a screen calls `/auth/*`, which forces the question D10-17 deferred:
+**where does the browser keep the token pair?** `STATUS.md` recorded it as open because the API does
+not force either answer — `/auth/login` returns the token in the response body, so a cookie and a
+JavaScript-held value are both possible.
+
+- **The choice: memory only. Neither `localStorage` nor `sessionStorage` nor a cookie.** The pair
+  lives in a module-level variable in `frontend/src/lib/session.ts` and dies with the tab. This is
+  the option that needs no backend change, adds no CSRF surface, and is not a security downgrade
+  relative to storage: web storage is readable by any injected script, which is exactly the
+  property an XSS bug converts into a stolen refresh token.
+- **Why not a cookie now.** The httpOnly refresh cookie is the better *end state* — script cannot
+  read it at all — but it is not a frontend-only change: it needs `Set-Cookie` on login and refresh,
+  `SameSite` and `Secure` decisions per deployment, a CSRF story for the state-changing routes, and
+  the CORS/credentials story turned on. `next.config.ts` already proxies `/api/*` "so cookies stay
+  first-party", which is that road half-paved and not mine to finish in a UI slice. Recorded here as
+  the intended successor, not as a rejected alternative.
+- **The cost is stated rather than hidden: a reload signs you out.** There is no rehydration, so
+  every navigation that reloads the document returns to `/login`. That is the honest price of
+  memory-only, and it is why the session store is a separate module behind `getSession`/`setSession`
+  rather than `useState` in the provider — swapping the storage strategy becomes a one-file change
+  that no component has to know about.
+- **Rotation is single-flight, and that is a correctness requirement, not an optimisation.** Refresh
+  tokens are single-use (D10-17) and a second redemption of an already-spent token is
+  indistinguishable from a replay: the backend revokes the whole family. So two concurrent 401s that
+  each tried to refresh would log the user out *and* kill every other session from the same login.
+  `refreshSession()` therefore caches the in-flight promise and hands it to every caller; the whole
+  family-revocation mechanism would otherwise fire on ordinary concurrent page loads. This is the
+  first place the client has to know a server-side invariant, and it is written in the module that
+  owns the token rather than left to callers to remember.
+- **`ApiError` is the only failure shape.** `request()` parses the `{"error": {...}}` envelope once
+  and maps a non-JSON body (a proxy error page, a dead connection) to a synthetic
+  `network_error` with status `0`. Callers branch on `isUnauthorized` / `isRateLimited` /
+  `isOffline` instead of inspecting numbers, so the three failures a sign-in form must distinguish —
+  wrong credentials, throttled, API unreachable — each get their own sentence in both locales.
+- **The liveness probe is proxied separately.** `/health` is unversioned and outside `/api/v1` on
+  purpose, so the existing `/api/:path*` rewrite does not match it; `next.config.ts` gained two
+  explicit rules. The readout is worth the two lines because "the API is down" and "your password is
+  wrong" are otherwise the same experience at a sign-in form.
+- **What this proves and what it does not.** Proven: `npm run typecheck` and `eslint` accept the new
+  modules; every wire shape is declared against what `app/api/v1/auth.py` actually returns
+  (`SessionResponse`, `UserSummary` with `is_active`, the `error_payload` envelope), so a route
+  rename is a compile error rather than a runtime 404. Not proven: **no request has been made against
+  a running backend from this environment**, so the client is unverified end to end and the existing
+  `pytest` suite remains the only evidence that the server side behaves as typed. Also absent: no
+  route is protected (the only authenticated view is a card on `/`, and any page can be loaded
+  without a session — the API refuses, which is the real boundary); there is no password-reset or
+  user-administration screen, so `PATCH /auth/users/{id}` and the reset route still have no caller;
+  and the consent screen (gap 18) is a separate owner decision, not folded in here.
