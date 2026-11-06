@@ -122,8 +122,8 @@ every *other* session and re-issues the caller's, and two admin routes add
 the stored refresh rows, because either half alone leaves a credential that still works
 (D10-18). No migration: `token_epoch` and `refresh_tokens` already existed. The suite went
 **695 → 731**, and the MySQL half was re-run at this head (**19 passed**, still `0006`).
-**The slice on top of that is the first screen that signs in** (`feat(web)`): gap 7 said
-the frontend never called `/auth/*` — no login screen, no token storage, no
+**The slice on top of that is the first screen that signs in** (`f8d341e`, `feat(web)`):
+gap 7 said the frontend never called `/auth/*` — no login screen, no token storage, no
 `Authorization` header, and `frontend/src/lib/api.ts` did not exist despite
 `backend/app/main.py` naming it. `/auth/login`, `/auth/refresh`, `/auth/logout`,
 `/auth/logout-all` and `/auth/me` now have a caller: the token pair lives in memory only,
@@ -131,7 +131,6 @@ rotation is serialised because a refresh token is single-use, and a reload delib
 signs the user out (D10-19). No migration and no `backend/` file changed, so the suite
 stays **731**; `next.config.ts` also gained explicit `/health` rewrites, since the probe
 sits outside `/api/v1` and the existing `/api/:path*` rule never matched it.
-The hash lands in the `docs(status)` follow-up, like every slice before it.
 
 ## Phase history
 
