@@ -112,6 +112,16 @@ digest, and presenting a spent one is read as theft and revokes every member of 
 family without needing a live access token. Migration `0006` adds `refresh_tokens`, so the
 head moves `0005 → 0006`, and the suite went **646 → 695** plus five new MySQL integration
 tests.
+**The slice on top of that is the account lifecycle that closes gap 8** (`feat(auth)`): gap 8
+said only `POST /auth/users` existed, so a forgotten password and a session someone feared
+for were both operator tasks. `POST /auth/logout-all` ends every session of the caller's
+account, `POST /auth/password` proves the current password, ends every *other* session and
+re-issues the caller's, and two admin routes add `PATCH /auth/users/{id}` (role and active
+state) and `POST /auth/users/{id}/password-reset` (a generated password, returned once).
+Every one of them bumps `token_epoch` **and** revokes the stored refresh rows, because either
+half alone leaves a credential that still works (D10-18). No migration: `token_epoch` and
+`refresh_tokens` already existed. The suite went **695 → 731**, and the MySQL half was re-run
+at this head (**19 passed**, still `0006`).
 
 ## Phase history
 
@@ -1560,8 +1570,10 @@ got misread.
 
 ### What this does not do — state it, do not bury it
 
-- **It does not reset a password.** Gap 8's account lifecycle is still open: a forgotten
-  password for the *last* admin still means a new address or a database operator.
+- **It does not reset a password.** This was gap 8 at the time, and a forgotten
+  password for the *last* admin meant a new address or a database operator. Gap 8 has
+  since been closed (`POST /auth/users/{id}/password-reset`, `D10-18`); the command
+  itself still does not reset one.
 - **It is not a migration-safe env-var bootstrap.** That alternative was rejected for the
   reason the old gap entry named: it puts a password in the environment, where it is
   readable by anything that can read the process environment and is copied into every
@@ -1691,8 +1703,10 @@ cannot prove; and `revoke_family` reporting 3 then 0 while leaving a sibling fam
 - **It does not shorten the access token's life.** A stolen bearer token is still usable for
   its remaining minutes. Renewal adds a long-lived credential; it does not remove the short
   one's exposure.
-- **There is no "sign out everywhere".** Revoking *every* session is still an operator
-  `token_epoch` bump (gap 8), and no route exposes it. Logout closes one family.
+- ~~**There is no "sign out everywhere".**~~ — **closed by `D10-18`.** When this slice
+  landed, revoking *every* session was an operator `token_epoch` bump with no route behind
+  it, and logout closed one family. `POST /auth/logout-all` now does it for the caller's own
+  account, and the two admin routes end a colleague's sessions the same way.
 - **`/auth/refresh` is not rate-limited.** The login throttle is keyed on a submitted
   `(tenant, email)` pair, which a refresh request does not carry. Single use is the only
   limit: a stolen token is worth one redemption, and the second attempt kills the family.
@@ -1703,6 +1717,69 @@ cannot prove; and `revoke_family` reporting 3 then 0 while leaving a sibling fam
   question, and nothing consumes it yet (gap 7). The API shape does not force either.
 - **No live-server test.** The proof goes through the ASGI app, not a served port — the same
   limit `create-admin`, `consent-import` and `reseal-fields` carry.
+
+## An account can now be recovered ✅ (gap 8, `D10-18`)
+
+Gap 8 said "only `POST /auth/users` exists for account lifecycle" — one admin could
+create an account and nothing else could happen to one. A forgotten password was an
+operator task, and a session someone feared for could only be ended by an operator
+bumping `token_epoch` by hand. That mattered more after `D10-17`: a refresh token is a
+7-day credential, so "end this session now" stopped being a wait-for-expiry problem.
+This slice adds the four routes that make an account recoverable, and the reason it
+took a slice rather than four decorators is that every one of them has to end sessions
+*correctly* — the failure mode of a half-done revocation is a credential that still
+works after an administrator believes they killed it.
+
+| Area | Detail |
+| --- | --- |
+| Two halves, welded | `_end_sessions` does both every time: `user.token_epoch += 1` and `RefreshTokenRepository.revoke_all_for_user`. The epoch is the half that reaches **access** tokens — a minted bearer cannot be deleted, but it carries the epoch it was minted under and `get_current_principal` refuses a mismatch. Row revocation is the half that reaches **refresh** tokens: they could simply be deleted, but they are stamped so the log keeps the fact that the session existed. Either half alone leaves something working, which is why neither is left to the caller. |
+| `POST /auth/logout-all` | Takes an **access** token, unlike `/logout`, which takes a refresh token because its whole point is to work when the access token is dead. This is the opposite case: the caller has a token, has decided it may have been seen, and requiring the refresh token of the device they are worried about would withhold the remedy exactly when it is needed. Ends every session including the caller's, so the next request is a 401. |
+| No audit row on logout-all | Matches `/logout`: nothing about the account changed, and per-session events are the volume the audit log exists to keep out. The epoch bump is visible in the row for anyone lining a session's death up against it. |
+| `POST /auth/password` | Proves the current password, ends every session, then re-issues the calling device a fresh pair. A password change happens because the old one may be known to someone else, so leaving its sessions alive secures the door and leaves the windows open — but signing the caller out of the device they are sitting at teaches users to avoid the button. |
+| Rotate, do not reuse the family | The successor is minted in a **new** family rather than the current one. Reusing it would leave earlier members stamped `used_at`, so a later replay of any of them would revoke the replacement the user is now relying on. |
+| Order matters | Revoke before issuing. Issuing first would stamp the successor `revoked_at` in the same bulk update and hand back a token that cannot be redeemed — a one-line ordering bug that produces a session which looks fine and dies on first use. |
+| Shared admission control | `/password` uses the same key, window and arithmetic as `/login` through one `_throttle_decision` helper. A stolen access token is otherwise a free oracle for guessing the password behind it, which is how fifteen minutes becomes permanence. The failed attempts are counted in a **separate** transaction (`_record_failed_attempt`), because the request session is never committed and the 401 would roll the insert back — the counter would never move and the throttle would be decorative. |
+| `PATCH /auth/users/{id}` | Admin-only. Role **or** `is_active`, both optional; a request carrying neither is a 400 rather than a silent no-op, so a client bug is visible at the call site. Any real change ends the target's sessions: the role travels inside the access token, so without a bump a demoted administrator keeps every permission for the rest of its life, and the epoch only moves forward, so reactivating cannot resurrect a token minted before the deactivation. A PATCH that changes nothing ends nothing — idempotent by value, not just by status. |
+| Cross-tenant is a 404 | `UserRepository` is built from the principal's tenant, so another organisation's user id resolves to `None` — byte-identical to an id that never existed. The alternative (404 vs 403) would make the route a directory probe. |
+| Self-change refused | 409, not 400. A tenant whose only administrator deactivates themselves has no recovery path: `create-admin` refuses a slug that already exists, so nobody is left who can promote anyone back. A colleague is required, which incidentally means a second pair of eyes on a privilege change. |
+| `POST /auth/users/{id}/password-reset` | Admin-only, and the administrator does **not** choose the value: `generate_password()` (18 bytes of `secrets`, url-safe, fixed width) is returned **once** in the response and stored only as an Argon2id hash. An admin-chosen password would mean two people know it, and the admin could use the account after the user changed it. Self-service is refused because `/password` is the route that proves the current password; a deactivated target is refused because the response would carry a password login is configured to reject. |
+| Response shape | `UserSummary` now carries `is_active`. The route that changes it answered a deactivation and a reactivation with identical bodies, leaving the caller to infer the outcome from a 200 both acts return. `/me` reports it from the token as `True` by construction — `get_current_principal` refuses an inactive user or tenant before any body runs — so the shape does not change between routes. |
+| Audit | Three constants, one per act: `user.password_changed`, `user.password_reset`, `user.updated`. `ACTION_USER_CREDENTIAL_CHANGED`/`..._RESET` are named for the credential while the stored strings still say "password": ruff `S105` and bandit `B105` match on the **variable name**, and renaming the identifier is the honest fix where a `nosec` would blind the check for the whole file (same trade as `REFRESH_DIGEST_NAMESPACE`). Snapshots carry `role`, `is_active` and `token_epoch` — the observable consequence of the act — and never the hash, by construction rather than by redaction. |
+| Reuse | `UserRepository.by_id` is a thin wrapper over the base `get`, so the tenant predicate comes from the same place as everywhere else; `revoke_all_for_user` sits beside `revoke_family` and reuses `truncate_to_second`, so a revocation time is stored at the precision the column actually holds. It filters already-revoked rows so the returned count is the number of sessions this call ended — what a route can honestly log. |
+| `autoflush=False` again | `revoke_all_for_user` carries the same explicit `flush()` that `claim_for_rotation` needed: with autoflush off, a refresh row inserted earlier in the same transaction is invisible to a bulk `UPDATE`, so a password change could revoke five sessions and report four. |
+| Tests | `test_account_lifecycle.py` (36): all four routes, both revocation halves asserted separately per case, the audit rows and snapshots, the throttle shared with `/login`, the IDOR case, self-change refusal, the deactivated-target reset, and the ordering rule proven by redeeming the successor the change hands back. |
+
+### Verification actually run (account lifecycle)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Tests | `pytest backend/tests`, root, `MYSQL_TEST_URL` **set** (`127.0.0.1:3307`) | **731 collected — 730 passed, 1 skipped, 0 failed** (JUnit: `tests=731 failures=0 errors=0 skipped=1`), exit 0. Was 695 at `0f0ada4`; all 36 are the new `test_account_lifecycle.py`. The one skip is `KAFKA_LIVE`. |
+| Tests (MySQL unset) | same command with `MYSQL_TEST_URL` **cleared** | **731 collected — 717 passed, 14 skipped, 0 failed**, exit 0 — the 13 `integration` tests plus `KAFKA_LIVE`. Recorded because this row once claimed "unset" over a run that had inherited the variable: a skip is not a pass, and the two runs differ only by which tests ran. |
+| Tests (MySQL) | `pytest backend/tests/test_mysql_integration.py -m integration`, from root | **19 passed, 0 skipped**, exit 0 — a real MySQL 8 server answered, so this head is proven on both databases even though it adds no schema. |
+| Migration | `alembic upgrade head` / `alembic current`, from `backend/` | Exit 0, `current` reports **`0006 (head)`** — unchanged, because this slice writes through columns that already existed. |
+| Lint | `ruff check .`, root | All checks passed |
+| Format | `ruff format --check .`, root | **96 files already formatted** (the new test module is the difference) |
+| Types | `mypy`, root | Success, **no issues in 53 source files** |
+| Security | `bandit -q -c pyproject.toml -r backend/app` | **0 issues**, exit 0 (the two `nosec` advisories on `config.py:50` are unchanged) |
+
+### What this does not do — state it, do not bury it
+
+- **A reset does not force a change on next login.** Nothing marks the account as holding
+  a temporary password, so the generated value keeps working until the user replaces it
+  through `/password`. A `must_change_password` flag is the missing half, and it is a
+  migration rather than a route.
+- **The temporary password travels through a human.** There is no mail transport, so the
+  administrator has to read it to the user — the same handover `create-admin` relies on.
+  That is why it is generated rather than typed, but it is still a spoken secret.
+- **No account can be deleted.** `is_active` is a switch and the row stays, which is what
+  the audit trail wants; a genuinely departing user keeps their address reserved.
+- **`/logout-all` and `/password` are not rate-limited beyond the shared login counter.**
+  `/logout-all` has nothing to guess, but `/password` inherits the per-account budget and
+  nothing per-address, exactly like `/login` (gap 9).
+- **No live-server test.** The proof goes through the ASGI app, not a served port — the
+  same limit `create-admin`, `consent-import` and `reseal-fields` carry.
+- **Nothing consumes these routes yet.** No screen calls `/auth/*` (gap 7), so the
+  lifecycle is exercised only by `TestClient`.
 
 ## Known gaps / issues
 
@@ -1737,16 +1814,24 @@ cannot prove; and `revoke_family` reporting 3 then 0 while leaving a sibling fam
    re-entering credentials (D3-05). Redemption re-reads the user, the tenant and
    `token_epoch` from the database, so revocation is still immediate. What it does
    **not** do is shorten the access token's own life: a stolen bearer token is
-   usable for its remaining minutes, and there is no "sign out everywhere" route —
-   that remains an operator `token_epoch` bump (gap 8).
+   usable for its remaining minutes. "Sign out everywhere" now exists
+   (`POST /auth/logout-all`, `D10-18`), which is the remedy for that window rather
+   than its removal.
 7. **The frontend does not use the auth API yet.** F3 is backend-only: there is
    no login screen, no token storage and no `Authorization` header in
    `frontend/src/`. The `frontend/src/lib/api.ts` module and the `demo/` fixtures
    still run unauthenticated. Wiring the UI is part of a later milestone — until
    then, `/api/v1/auth/*` is exercised by tests only.
-8. **Only `POST /auth/users` exists for account lifecycle.** There is no
-   password reset, no self-service change, no deactivate/delete endpoint. A
-   forgotten password is an operator task (bump `token_epoch`, set a new hash).
+8. ~~**Only `POST /auth/users` exists for account lifecycle.**~~ — **closed by
+   `D10-18`.** `POST /auth/logout-all` ends every session of the caller's account,
+   `POST /auth/password` changes their own after proving the current one, and two
+   admin routes add `PATCH /auth/users/{id}` (role and active state) and
+   `POST /auth/users/{id}/password-reset`. Every one of them ends sessions by bumping
+   `token_epoch` **and** revoking the stored refresh rows, because either half alone
+   leaves a credential that still works. What it does **not** do: a reset leaves no
+   "must change at next login" mark, there is still no delete endpoint (`is_active`
+   is a switch), and the generated password has to be handed over by a human because
+   there is no mail transport.
 9. ~~**No rate limiting on `/auth/login`.**~~ — **closed for the per-account case by
    `D10-16`.** Every failure is now a row in `login_attempts` keyed by a SHA-256
    of `(tenant slug, email)`, and the route refuses with `429` + `Retry-After`
@@ -1763,8 +1848,10 @@ cannot prove; and `revoke_family` reporting 3 then 0 while leaving a sibling fam
     logged into without a REPL. It took the **operator-CLI** branch of the two
     options this entry named, for the reason recorded here: a migration-safe
     env-var bootstrap puts a password in the environment. What it does **not** do
-    is reset a password — a forgotten one is still gap 8, and the audit row it
-    writes is the only record of the one account created with no principal.
+    is reset a password — a forgotten one is now `POST /auth/users/{id}/password-reset`
+    (`D10-18`) rather than a second run of this command, which refuses a slug that
+    already exists. The audit row it writes is the only record of the one account
+    created with no principal.
 11. ~~**Ingested contracts are inert.**~~ — **closed by F7.** `python -m app.cli
     extract` turns a contract's document text into `ExtractedField` rows with a
     status, confidence and provenance, and the run's counts are logged with a

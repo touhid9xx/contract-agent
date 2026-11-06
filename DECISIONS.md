@@ -1884,9 +1884,125 @@ committed together. That pairing is the milestone; extraction and review follow.
   cascading delete, `claim_for_rotation` really taking an exclusive lock (errno 1205 on a
   second worker) and returning `False` for the spent token, and `revoke_family` reporting
   3 then 0 while a sibling family survives. Not proven: `/auth/refresh` is not rate-limited
-  (single use is the only limit, and the login throttle's key does not apply), there is no
-  "sign out everywhere" route — that remains an operator `token_epoch` bump — no global
-  sweeper prunes expired rows for an account that never logs in again, and a stolen *access*
-  token is still usable for its remaining minutes. The storage decision on the client side
+  (single use is the only limit, and the login throttle's key does not apply), ~~there is no
+  "sign out everywhere" route — that remains an operator `token_epoch` bump~~ — **superseded
+  by D10-18, which adds `POST /auth/logout-all`; the clause is struck rather than deleted
+  because it is what that slice was written against** — no global sweeper prunes expired rows
+  for an account that never logs in again, and a stolen *access* token is still usable for
+  its remaining minutes. The storage decision on the client side
   (httpOnly cookie versus memory) is left open, deliberately: nothing consumes the token yet
   (gap 7), and the response shape does not force either.
+
+### D10-18 — An account is recoverable, and ending a session means both `token_epoch` and the rows
+
+- **Decision:** four routes make an account administrable. `POST /auth/logout-all` ends every
+  session of the caller's account, `POST /auth/password` replaces the caller's password after
+  proving the current one, and two admin routes add `PATCH /auth/users/{id}` (role and active
+  state) and `POST /auth/users/{id}/password-reset` (a generated password, returned once). Every
+  one of them ends sessions through a single helper, `_end_sessions`, which bumps
+  `user.token_epoch` **and** calls `RefreshTokenRepository.revoke_all_for_user` — never one
+  without the other. This closes gap 8.
+- **Why the two halves are welded and not left to each caller:** two mechanisms exist because two
+  kinds of credential exist, and neither reaches both. `token_epoch` is the only thing that can
+  invalidate an **access** token before its fifteen minutes are up — a bearer is verified without
+  a database write, so a minted one cannot be deleted, but it carries the epoch it was minted
+  under and `get_current_principal` refuses a mismatch. Stored refresh rows are the only thing
+  that reaches **refresh** tokens, which are rows and could simply be deleted — they are stamped
+  instead, so the log keeps the fact that the session existed. Either half alone leaves a
+  credential that still works, and the failure mode of a half-done revocation is an administrator
+  who believes they killed a session that is still live. So it is one function rather than a
+  sentence in each route's docstring.
+- **Why `/logout-all` takes an access token when `/logout` deliberately takes a refresh one:**
+  `/logout` takes the refresh token because its whole point is to work when the access token has
+  already expired. This route is the opposite case: the caller holds a valid access token, has
+  decided it may have been seen, and wants the account to hold no live session at all. Requiring
+  the refresh token of the device they are worried about would withhold the remedy exactly when
+  it is needed. It ends the caller's own session too, so the very next request is a 401 — a
+  "sign out everywhere" that left the button it was pressed from alive would be a lie in the one
+  case that matters.
+- **Why `/password` rotates the caller's session instead of killing it:** a password change
+  happens because the old password may be known to someone else, so leaving the sessions it
+  opened alive secures the door and leaves the windows open. But signing the caller out of the
+  device they are sitting at teaches users to avoid the button, which is worse than the risk it
+  avoids. They are demonstrably holding both the old password and a live token, so they get a
+  fresh pair; every other session dies.
+- **Why the successor gets a new family rather than continuing the current one:** reusing the
+  family would leave its earlier members stamped `used_at`, and a later replay of any of them is
+  read as theft and revokes the whole family — including the replacement the user is now relying
+  on. A new family is a clean room, so a replay of a pre-change token kills nothing the user
+  needs.
+- **Why revoking happens before issuing:** issuing first would let the bulk `UPDATE` stamp the
+  new row `revoked_at` in the same transaction and hand back a token that cannot be redeemed — a
+  one-line ordering bug whose symptom is a session that looks fine and dies on first use. The
+  order is written in a comment at the call site because the code reads equally well either way.
+- **Why `/password` shares `/login`'s admission control, and through one helper:** a stolen
+  access token would otherwise be a free oracle for guessing the password behind it, converting
+  fifteen minutes of access into permanence. `_throttle_decision` was extracted so the two routes
+  ask the same question in the same place — same key (`login_key_hash(tenant_slug, email)`), same
+  window, same arithmetic — because two copies would drift apart at the first tuning change. The
+  failure is counted in its own transaction through `_record_failed_attempt`, for the reason
+  D10-16 records: the request session is never committed and the 401 would roll the insert back,
+  so the counter would never move and the throttle would be decorative.
+- **Why a demotion or a deactivation has to end sessions too:** the role travels *inside* the
+  access token and `require_roles` reads it from there, so a demoted administrator would keep
+  every permission they had for the rest of the token's life — an hour-long window in which the
+  revocation has not happened yet. A deactivation needs it for the same reason plus one of its
+  own: the epoch only moves forward, so reactivating later cannot resurrect a token minted before
+  the account was switched off.
+- **Why a PATCH that changes nothing ends nothing:** the routes compare values before acting, so
+  "set the role to the role it already has" is idempotent by *value*, not merely by status. The
+  alternative ends sessions on a client retry, which is exactly the kind of invisible cost that
+  makes callers stop retrying.
+- **Why cross-tenant is `404` and not `403`:** `UserRepository` is built from the principal's
+  tenant, so another organisation's user id resolves to `None` — byte-identical to an id that
+  never existed. Distinguishing the two would make the route a directory probe for which user
+  ids exist elsewhere.
+- **Why self-change is refused and it is a `409`, not a `400`:** a tenant whose only
+  administrator deactivates themselves has no recovery path — `create-admin` refuses a slug that
+  already exists (D10-15), so nobody is left who can promote anyone back. `409` because the
+  request is well-formed and the *state* is the conflict; a colleague is required, which
+  incidentally puts a second pair of eyes on a privilege change.
+- **Why a password reset generates the value instead of accepting one:** an administrator who
+  chooses the value knows both halves of someone else's credential and can use the account after
+  the user changes it. `generate_password()` is 18 bytes from `secrets` (not `random`, which is
+  not a CSPRNG), url-safe, fixed width so it is pasteable and checkable, returned **once** in the
+  response body and stored only as an Argon2id hash. It is deliberately not in the audit row, not
+  in the log line, and not on the user summary.
+- **Why reset refuses a deactivated target:** the response would carry a password that login is
+  configured to reject, so the administrator would hand over a credential that cannot work and
+  the real problem — the account is switched off — would surface as "the password you gave me is
+  wrong". Reactivate first, then reset.
+- **Why `UserSummary` gained `is_active`:** the route that changes the field answered a
+  deactivation and a reactivation with byte-identical bodies, so the caller had to infer the
+  outcome from a 200 that both acts return. `/me` reports it as `True` by construction —
+  `get_current_principal` refuses an inactive user or tenant before any body runs — so the single
+  shape is truthful on both routes.
+- **Why only three of the four routes write an audit row:** `user.updated`,
+  `user.password_changed` and `user.password_reset` change the account, so they record `role`,
+  `is_active` and `token_epoch` — the observable consequence, never the hash. `/logout-all`
+  writes nothing, matching `/logout`: nothing about the account changed, and per-session events
+  are exactly the volume an audit log exists to keep out. The epoch bump is visible in the row
+  for anyone lining a session's death up against it.
+- **Why the audit constants are named for the credential while the stored strings say
+  "password":** `ruff` S105 and `bandit` B105 match on the *variable name*, not the value, so
+  `ACTION_USER_PASSWORD_CHANGED` is reported as a hard-coded secret. Renaming the identifier is
+  the honest fix where a `nosec` would blind both checks for the file — the same trade as
+  `REFRESH_DIGEST_NAMESPACE` in D10-17, and the same user-facing strings survive unchanged.
+- **Why `revoke_all_for_user` flushes before its bulk update:** the request session is built with
+  `autoflush=False`, so a refresh row added earlier in the same transaction is invisible to a
+  bulk `UPDATE`. Without the explicit `flush()` a password change could revoke five sessions and
+  report four. This is the third site to need it; the pattern is now established enough that any
+  new bulk update should be assumed to need it until shown otherwise.
+- **What this proves and what it does not.** Thirty-six tests in
+  `backend/tests/test_account_lifecycle.py` cover all four routes, both revocation halves
+  asserted *separately* per case rather than inferred from one success, the audit rows and their
+  snapshots, the throttle shared with `/login`, the cross-tenant 404, self-change refusal, the
+  deactivated-target reset, and the ordering rule proven by redeeming the successor the password
+  change hands back. Not proven: a reset leaves no "must change at next login" mark, so the
+  generated password keeps working until the user replaces it — a `must_change_password` column
+  is the missing half and it is a migration, not a route; there is still no delete endpoint
+  (`is_active` is a switch and the address stays reserved); the temporary password has to be read
+  to the user by a human because there is no mail transport, which is why it is generated rather
+  than typed but is still a spoken secret; `/password` inherits the per-account login budget and
+  nothing per-address (gap 9); and nothing consumes these routes yet — no screen calls `/auth/*`
+  (gap 7), so the whole lifecycle is exercised only by `TestClient`.

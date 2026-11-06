@@ -150,6 +150,7 @@ def test_login_returns_a_bearer_token_and_the_users_details(
         "role": "admin",
         "tenant_id": str(acme.id),
         "tenant_slug": "acme",
+        "is_active": True,
     }
 
 
@@ -315,6 +316,7 @@ def test_me_returns_the_resolved_principal(
         "role": "operator",
         "tenant_id": str(acme.id),
         "tenant_slug": "acme",
+        "is_active": True,
     }
 
 

@@ -1,6 +1,6 @@
 """Authentication routes.
 
-Six endpoints, and the shape of each is a decision:
+Ten endpoints, and the shape of each is a decision:
 
 ``POST /auth/login``
     Takes a tenant slug plus credentials and returns a short-lived access token
@@ -23,10 +23,20 @@ Six endpoints, and the shape of each is a decision:
     Echoes the resolved principal. Useful to a UI, and the smallest possible
     demonstration that the dependency chain works end to end.
 
-``POST /auth/users`` and ``GET /auth/users``
+``POST /auth/logout-all`` and ``POST /auth/password``
+    The two self-service routes that end sessions the caller cannot name (gap 8).
+    Both bump ``token_epoch`` *and* revoke the stored refresh rows, because either
+    half alone leaves a working credential behind. ``/logout-all`` ends every
+    session including this one; ``/password`` ends every *other* one and hands
+    back a fresh pair so the caller stays signed in where they are.
+
+``POST /auth/users``, ``GET /auth/users``, ``PATCH /auth/users/{id}`` and
+``POST /auth/users/{id}/password-reset``
     Admin-only, and tenant-scoped by construction: the repository is built from
     ``principal.tenant_id``, so there is no request field that could aim the
-    write at another organisation.
+    write at another organisation. The last two are the account-lifecycle half of
+    gap 8 — a colleague moves, forgets their password, or leaves, and that must
+    not require a database shell.
 
 Every failure path is written to fail closed. There is no "if we cannot tell,
 allow" branch anywhere in this module.
@@ -52,12 +62,19 @@ from app.api.deps import (
     require_roles,
 )
 from app.core.config import Settings
-from app.core.login_throttle import decide, login_key_hash, window_start
+from app.core.login_throttle import (
+    ThrottleDecision,
+    decide,
+    login_key_hash,
+    window_start,
+)
+from app.core.middleware import correlation_id_or_new
 from app.core.principal import Principal
 from app.core.refresh import mint_refresh_token, refresh_expiry, refresh_token_hash
 from app.core.security import (
     MAX_PASSWORD_LENGTH,
     MIN_PASSWORD_LENGTH,
+    generate_password,
     hash_password,
     issue_access_token,
     password_needs_rehash,
@@ -67,6 +84,14 @@ from app.core.security import (
 from app.db.base import as_utc, truncate_to_second, utc_now
 from app.db.enums import UserRole
 from app.db.models import User
+from app.db.repositories.audit import (
+    ACTION_USER_CREDENTIAL_CHANGED,
+    ACTION_USER_CREDENTIAL_RESET,
+    ACTION_USER_UPDATED,
+    ACTOR_USER,
+    AUDIT_ENTITY_USER,
+    AuditLogRepository,
+)
 from app.db.repositories.security import LoginAttemptRepository, RefreshTokenRepository
 from app.db.repositories.users import (
     IdentityDirectory,
@@ -98,6 +123,63 @@ _TOO_MANY_ATTEMPTS = "Too many failed login attempts; try again later"
 #: same thing, which is the only thing either should learn.
 _REFRESH_REFUSED = "Invalid or expired refresh token"
 
+#: Refusal for any authenticated route whose principal no longer resolves to a
+#: row. It cannot normally happen — ``get_current_principal`` read that row a
+#: moment earlier — so a hit means the account was deleted mid-request. Fail
+#: closed, and never report success for a write that touched nothing.
+_ACCOUNT_GONE = "Account is no longer available"
+
+#: Refusal for an admin route aimed at an id that is not a colleague. Same answer
+#: for "never existed" and "belongs to another organisation", so the route cannot
+#: be used to probe which ids exist.
+_NO_SUCH_USER = "No such user in this tenant"
+
+#: Refusal for an administrator editing their own account through the admin
+#: routes. Not tidiness: self-deactivation (or self-demotion from the last admin
+#: seat) is exactly how a tenant loses its only administrator, and there is no
+#: recovery path — nobody is left who can promote anyone back, and ``create-admin``
+#: refuses a slug that already exists. A colleague is required, which incidentally
+#: also means a second pair of eyes.
+_SELF_CHANGE_REFUSED = (
+    "An administrator cannot change their own role or active state; ask a colleague"
+)
+
+#: These three are named for the *credential* rather than the password they
+#: mention, and the distinction is not cosmetic: ruff's ``S105`` and bandit's
+#: ``B105`` match on the *variable name*, so a ``*_PASSWORD_*`` spelling is
+#: reported as a hardcoded password in the source of a file whose whole job is to
+#: talk about passwords. Renaming the identifier is the honest fix — a ``nosec``
+#: would suppress the check for the file, including on a real secret. The values
+#: users see still say "password", because that is the word the user typed.
+#:
+#: Refusal for ``POST /auth/password`` when the supplied current password is
+#: wrong. Specific, unlike ``_INVALID_CREDENTIALS``: the caller is authenticated
+#: and already knows their own account exists, so there is no account to hide and
+#: a vague answer would only make a legitimate user retype a correct password.
+_CURRENT_CREDENTIAL_WRONG = "Current password is incorrect"
+
+#: Refusal for a password change that would set the password it is replacing.
+#: Worth its own answer rather than a silent success: the change ends every other
+#: session of the account, so "nothing changed" and "you are signed out
+#: everywhere" must not be the same response.
+_CREDENTIAL_REUSED = "New password must differ from the current one"
+
+#: Separate from ``_TOO_MANY_ATTEMPTS`` because the abuse here is different: a
+#: *stolen access token* being used to guess the password behind it, not a
+#: credential stuffing attempt against ``/login``.
+_TOO_MANY_CREDENTIAL_ATTEMPTS = "Too many incorrect password attempts; try again later"
+
+#: Refusal for an admin ``PATCH`` carrying neither field. A no-op is refused
+#: rather than answered with 200 so a client bug is visible at the call site
+#: instead of looking like a write that landed.
+_NOTHING_TO_CHANGE = "Provide at least one of role or is_active"
+
+#: Refusal for a password reset aimed at a deactivated account. The reset would
+#: store a hash nobody can use — login refuses an inactive user — so returning a
+#: fresh temporary password would be a convincing lie. Reactivate first, then
+#: reset; the two acts stay separately auditable.
+_ACCOUNT_INACTIVE = "Account is deactivated; reactivate it before resetting the password"
+
 
 class LoginRequest(BaseModel):
     """Credentials plus the tenant the caller intends to log in to."""
@@ -124,13 +206,20 @@ class CreateUserRequest(BaseModel):
 
 
 class UserSummary(BaseModel):
-    """The user fields that are safe to return. Never the password hash."""
+    """The user fields that are safe to return. Never the password hash.
+
+    ``is_active`` is here because ``PATCH /auth/users/{id}`` is the one route that
+    changes it: a response that omitted it would answer a deactivation and a
+    reactivation with byte-identical bodies, leaving the caller to infer the
+    outcome from a 200 it would have received either way.
+    """
 
     id: uuid.UUID
     email: str
     role: UserRole
     tenant_id: uuid.UUID
     tenant_slug: str
+    is_active: bool
 
 
 class SessionResponse(BaseModel):
@@ -164,6 +253,45 @@ class RefreshRequest(BaseModel):
     refresh_token: str = Field(min_length=1, max_length=512)
 
 
+class ChangePasswordRequest(BaseModel):
+    """A self-service password change: prove the old one, supply the new one.
+
+    ``current_password`` is bounded like any other submitted password so the KDF
+    cannot be handed a megabyte. ``new_password`` carries the same bounds the
+    account was created under — a change must not be able to set a password that
+    creation would have refused.
+    """
+
+    current_password: str = Field(min_length=1, max_length=MAX_PASSWORD_LENGTH)
+    new_password: str = Field(min_length=MIN_PASSWORD_LENGTH, max_length=MAX_PASSWORD_LENGTH)
+
+
+class UpdateUserRequest(BaseModel):
+    """A change to a colleague's role or active state. Both fields optional.
+
+    Two nullable fields rather than separate routes: "deactivate" and "promote"
+    are the same act on the same row and want the same guards, audit row and
+    response. A request with neither set is refused rather than treated as a
+    no-op, so a client bug is visible instead of silently succeeding.
+    """
+
+    role: UserRole | None = None
+    is_active: bool | None = None
+
+
+class PasswordResetResponse(BaseModel):
+    """A reset password, visible exactly once.
+
+    The field is in the response because there is nowhere else it can go: this
+    milestone has no mail transport, so an administrator has to read the value to
+    the user. It is returned once, never logged, never written to the audit log,
+    and stored only as an Argon2id hash.
+    """
+
+    user: UserSummary
+    temporary_password: str
+
+
 def _user_summary(user: User, *, tenant_slug: str) -> UserSummary:
     return UserSummary(
         id=user.id,
@@ -171,17 +299,99 @@ def _user_summary(user: User, *, tenant_slug: str) -> UserSummary:
         role=user.role,
         tenant_id=user.tenant_id,
         tenant_slug=tenant_slug,
+        is_active=user.is_active,
     )
 
 
 def _principal_summary(principal: Principal) -> UserSummary:
+    """``/me``, from a token rather than a row.
+
+    ``is_active`` is ``True`` by construction rather than by assumption:
+    ``get_current_principal`` refuses an inactive user or tenant before any route
+    body runs, so an authenticated caller is an active one. Reported anyway so the
+    response shape does not change between ``/me`` and ``PATCH /auth/users/{id}``.
+    """
     return UserSummary(
         id=principal.user_id,
         email=principal.email,
         role=principal.role,
         tenant_id=principal.tenant_id,
         tenant_slug=principal.tenant_slug,
+        is_active=True,
     )
+
+
+def _account_snapshot(user: User) -> dict[str, object]:
+    """The account fields the audit log may hold. Never the password hash.
+
+    ``token_epoch`` is in here on purpose: it is the observable consequence of a
+    password change, a reset or a deactivation, so it is the value an operator
+    lines a session's death up against. ``role`` and ``is_active`` say what
+    entitlement changed. The hash says nothing an auditor may see and everything
+    an attacker would want, so it is absent by construction rather than by
+    redaction.
+    """
+    return {
+        "role": user.role.value,
+        "is_active": user.is_active,
+        "token_epoch": user.token_epoch,
+    }
+
+
+def _audit_account_change(
+    session: Session,
+    *,
+    principal: Principal,
+    action: str,
+    target: User,
+    before: dict[str, object],
+    after: dict[str, object] | None = None,
+) -> None:
+    """Append one audit row for a change to an account (gap 8).
+
+    The tenant comes from the repository, never from the target row, so a row
+    cannot be written onto another organisation's log. ``actor_id`` is always the
+    principal — including on ``/password``, where actor and subject are the same
+    person, because "this account's sessions were ended at this instant" is the
+    fact worth keeping.
+    """
+    AuditLogRepository(session, principal.tenant_id).record(
+        correlation_id=correlation_id_or_new(),
+        actor_type=ACTOR_USER,
+        actor_id=principal.user_id,
+        action=action,
+        entity=AUDIT_ENTITY_USER,
+        entity_id=str(target.id),
+        before=before,
+        after=after,
+    )
+
+
+def _end_sessions(session: Session, *, user: User, now: datetime) -> int:
+    """End every session of one account, both halves at once (gap 8).
+
+    Two mechanisms exist and neither is sufficient alone, which is why they are
+    welded together here rather than left to each caller:
+
+    ``token_epoch`` is the half that reaches *access* tokens. A bearer token is
+    verified without a database write, so a token already minted cannot be
+    deleted — but it carries the epoch it was minted under, and
+    ``get_current_principal`` refuses a mismatch. Bumping the column is therefore
+    the only way to invalidate an access token before its fifteen minutes are up.
+    It is also what makes a deactivation stick: reactivating the account does not
+    restore an epoch it has moved past.
+
+    Revoking the stored refresh rows is the half that reaches *refresh* tokens.
+    Those are rows, so they could simply be deleted; they are stamped instead, so
+    the log keeps the fact that the session existed. A stale-epoch row would be
+    refused on redemption anyway, but leaving live rows behind means leaving a
+    credential whose only guard is a check in another table.
+
+    Returns how many live sessions the revocation ended, so a caller can report
+    something true. The caller commits.
+    """
+    user.token_epoch += 1
+    return RefreshTokenRepository(session).revoke_all_for_user(user.id, now=now)
 
 
 def _record_failed_attempt(
@@ -213,6 +423,29 @@ def _record_failed_attempt(
             )
     except SQLAlchemyError:
         log.warning("login_attempt_not_recorded")
+
+
+def _throttle_decision(
+    session: Session, *, key: str, settings: Settings, now: datetime
+) -> ThrottleDecision:
+    """The admission decision for one throttle key (gap 9).
+
+    Extracted so ``/login`` and ``/password`` ask *the same question in the same
+    place*. An attacker holding a stolen access token must get exactly as many
+    guesses at the password behind it as an anonymous caller gets at ``/login``,
+    and two copies of this arithmetic would drift apart at the first tuning
+    change.
+    """
+    failures, earliest = LoginAttemptRepository(session).window(
+        key, since=window_start(now, settings.login_window_seconds)
+    )
+    return decide(
+        failures=failures,
+        earliest=earliest,
+        now=now,
+        max_attempts=settings.login_max_attempts,
+        window_seconds=settings.login_window_seconds,
+    )
 
 
 def _refuse_refresh() -> HTTPException:
@@ -332,17 +565,7 @@ def login(
 
     now = utc_now()
     throttle_key = login_key_hash(payload.tenant, payload.email)
-    window_seconds = settings.login_window_seconds
-    failures, earliest = LoginAttemptRepository(session).window(
-        throttle_key, since=window_start(now, window_seconds)
-    )
-    throttle = decide(
-        failures=failures,
-        earliest=earliest,
-        now=now,
-        max_attempts=settings.login_max_attempts,
-        window_seconds=window_seconds,
-    )
+    throttle = _throttle_decision(session, key=throttle_key, settings=settings, now=now)
     if throttle.is_blocked:
         log.warning(
             "login_throttled",
@@ -377,7 +600,7 @@ def login(
 
     # Only when there is something to wipe, so the ordinary login — no failures in
     # the window — costs no extra transaction.
-    if failures:
+    if throttle.failures:
         _clear_failed_attempts(session_factory, key=throttle_key)
 
     # A successful login is the only moment the plaintext exists, so it is the
@@ -603,3 +826,253 @@ def create_user(
 
     log.info("user_created", user_id=str(user.id), role=user.role.value)
     return _user_summary(user, tenant_slug=principal.tenant_slug)
+
+
+@router.post(
+    "/logout-all",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_model=None,
+    summary="End every session of the caller's account",
+)
+def logout_all(
+    principal: Principal = Depends(get_current_principal),
+    session: Session = Depends(get_request_session),
+) -> None:
+    """Sign out everywhere, including here.
+
+    ``/logout`` needs a refresh token because its whole point is to work when the
+    access token is dead. This route is the other case: the caller has an access
+    token, has decided it may have been seen, and wants the account to hold no
+    live session at all. Requiring them to also produce the refresh token of the
+    device they are worried about would make the remedy unavailable exactly when
+    it is needed.
+
+    No audit row, deliberately, matching ``/logout``: nothing about the account
+    changed, and per-login events are the volume the audit log is meant to keep
+    out. The epoch bump is still visible in the row itself for anyone lining a
+    session's death up against it.
+    """
+    now = utc_now()
+    user = UserRepository(session, principal.tenant_id).by_id(principal.user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=_ACCOUNT_GONE)
+
+    ended = _end_sessions(session, user=user, now=now)
+    session.commit()
+    log.info("sessions_revoked", user_id=str(user.id), sessions=ended, cause="logout_all")
+
+
+@router.post(
+    "/password",
+    response_model=SessionResponse,
+    summary="Change the caller's password and end their other sessions",
+)
+def change_password(
+    payload: ChangePasswordRequest,
+    request: Request,
+    principal: Principal = Depends(get_current_principal),
+    session: Session = Depends(get_request_session),
+    session_factory: sessionmaker[Session] = Depends(app_session_factory),
+) -> SessionResponse:
+    """Replace the caller's password after proving the current one.
+
+    Every other session dies. A password change happens because the old one may
+    be known to someone else, so leaving the sessions it opened alive would
+    secure the door and leave the windows open. The caller's own session is
+    *rotated* rather than killed — they are demonstrably holding both the old
+    password and a live token, and signing them out of the device they are
+    sitting at would teach users to avoid the button.
+
+    Rotation happens by ending everything and minting a fresh family, not by
+    keeping the current one: reusing the family would mean the new refresh token
+    answered to a family whose earlier members are still stamped ``used_at``, and
+    a replay of any of them would then revoke the replacement too.
+
+    Admission control is shared with ``/login`` — same key, same arithmetic, same
+    window (``_throttle_decision``). A stolen access token is otherwise a free
+    oracle for guessing the password behind it, which is how an attacker turns
+    fifteen minutes into permanence.
+    """
+    settings = app_settings(request)
+    now = utc_now()
+
+    user = UserRepository(session, principal.tenant_id).by_id(principal.user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=_ACCOUNT_GONE)
+
+    throttle_key = login_key_hash(principal.tenant_slug, principal.email)
+    throttle = _throttle_decision(session, key=throttle_key, settings=settings, now=now)
+    if throttle.is_blocked:
+        log.warning(
+            "password_change_throttled",
+            user_id=str(user.id),
+            failures=throttle.failures,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=_TOO_MANY_CREDENTIAL_ATTEMPTS,
+            headers={"Retry-After": str(throttle.retry_after_seconds)},
+        )
+
+    if not verify_password(payload.current_password, user.password_hash, settings):
+        # Counted in its own transaction, like a failed login: this session is
+        # never committed and the exception below would roll an insert back.
+        _record_failed_attempt(session_factory, key=throttle_key, settings=settings, now=now)
+        log.info("password_change_failed", user_id=str(user.id), reason="wrong_current_password")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=_CURRENT_CREDENTIAL_WRONG
+        )
+
+    if payload.new_password == payload.current_password:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_CREDENTIAL_REUSED)
+
+    if throttle.failures:
+        _clear_failed_attempts(session_factory, key=throttle_key)
+
+    before = _account_snapshot(user)
+    user.password_hash = hash_password(payload.new_password, settings)
+    # Ends every session including the caller's, then the successor below is the
+    # only live one. Order matters: revoking after issuing would stamp the new
+    # row ``revoked_at`` and hand back a token that cannot be redeemed.
+    ended = _end_sessions(session, user=user, now=now)
+    _audit_account_change(
+        session,
+        principal=principal,
+        action=ACTION_USER_CREDENTIAL_CHANGED,
+        target=user,
+        before=before,
+        after=_account_snapshot(user),
+    )
+    response = _issue_session(
+        session,
+        settings=settings,
+        user=user,
+        tenant_slug=principal.tenant_slug,
+        now=now,
+    )
+    session.commit()
+
+    log.info("password_changed", user_id=str(user.id), sessions_ended=ended)
+    return response
+
+
+@router.patch(
+    "/users/{user_id}",
+    response_model=UserSummary,
+    summary="Change a colleague's role or active state",
+)
+def update_user(
+    user_id: uuid.UUID,
+    payload: UpdateUserRequest,
+    principal: Principal = Depends(require_roles(UserRole.ADMIN)),
+    session: Session = Depends(get_request_session),
+) -> UserSummary:
+    """Admin-only account lifecycle: promote, demote, deactivate, reactivate.
+
+    ``UserRepository`` is built from the principal's tenant, so ``user_id`` that
+    belongs to another organisation resolves to ``None`` and answers 404 — the
+    same answer as an id that never existed, which is what stops this route from
+    being a directory probe.
+
+    Any real change ends the target's sessions. A demotion has to, because the
+    role travels *inside* the access token and ``require_roles`` reads it from
+    there: without a bump, a demoted administrator keeps every permission they
+    had for the rest of the token's life. A deactivation has to for the same
+    reason plus one of its own — reactivating later must not resurrect a token
+    minted before the account was switched off, and the epoch only moves forward.
+    """
+    if payload.role is None and payload.is_active is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_NOTHING_TO_CHANGE)
+
+    target = UserRepository(session, principal.tenant_id).by_id(user_id)
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NO_SUCH_USER)
+    if target.id == principal.user_id:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_SELF_CHANGE_REFUSED)
+
+    before = _account_snapshot(target)
+
+    changed = False
+    if payload.role is not None and target.role != payload.role:
+        target.role = payload.role
+        changed = True
+    if payload.is_active is not None and target.is_active != payload.is_active:
+        target.is_active = payload.is_active
+        changed = True
+
+    if changed:
+        _end_sessions(session, user=target, now=utc_now())
+        _audit_account_change(
+            session,
+            principal=principal,
+            action=ACTION_USER_UPDATED,
+            target=target,
+            before=before,
+            after=_account_snapshot(target),
+        )
+        session.commit()
+        log.info(
+            "user_updated",
+            user_id=str(target.id),
+            role=target.role.value,
+            is_active=target.is_active,
+        )
+    return _user_summary(target, tenant_slug=principal.tenant_slug)
+
+
+@router.post(
+    "/users/{user_id}/password-reset",
+    response_model=PasswordResetResponse,
+    summary="Reset a colleague's password and end their sessions",
+)
+def reset_user_password(
+    user_id: uuid.UUID,
+    request: Request,
+    principal: Principal = Depends(require_roles(UserRole.ADMIN)),
+    session: Session = Depends(get_request_session),
+) -> PasswordResetResponse:
+    """Admin-only. Generated password, returned once, never logged.
+
+    The administrator does not choose the value: they would then know both halves
+    of someone else's credential, and could use the account once the user had
+    changed it. A generated password means the reset can only ever be a handover.
+
+    Self-service is refused and so is a deactivated target. The first because
+    ``/password`` is the path that proves the current password, and an admin
+    resetting their own would skip that proof; the second because the response
+    would carry a password that login is configured to refuse.
+
+    The temporary password is not a field on the audit row, not in ``after``, and
+    not in the log line below — the hash is all that is stored, and this response
+    is the only copy that ever exists.
+    """
+    settings = app_settings(request)
+    now = utc_now()
+
+    target = UserRepository(session, principal.tenant_id).by_id(user_id)
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NO_SUCH_USER)
+    if target.id == principal.user_id:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_SELF_CHANGE_REFUSED)
+    if not target.is_active:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_ACCOUNT_INACTIVE)
+
+    before = _account_snapshot(target)
+    temporary_password = generate_password()
+    target.password_hash = hash_password(temporary_password, settings)
+    ended = _end_sessions(session, user=target, now=now)
+    _audit_account_change(
+        session,
+        principal=principal,
+        action=ACTION_USER_CREDENTIAL_RESET,
+        target=target,
+        before=before,
+        after=_account_snapshot(target),
+    )
+    session.commit()
+
+    log.info("password_reset", user_id=str(target.id), sessions_ended=ended)
+    return PasswordResetResponse(
+        user=_user_summary(target, tenant_slug=principal.tenant_slug),
+        temporary_password=temporary_password,
+    )

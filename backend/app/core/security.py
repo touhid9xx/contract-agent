@@ -23,6 +23,7 @@ that need to record a failure log the *reason*, never the credential.
 
 from __future__ import annotations
 
+import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -144,6 +145,30 @@ def password_needs_rehash(encoded: str, settings: Settings) -> bool:
         # An unparseable hash cannot be upgraded; it can only be replaced, which
         # requires the user to log in successfully first.
         return False
+
+
+#: Bytes of entropy behind a generated temporary password. 18 bytes encode to
+#: exactly 24 url-safe characters — comfortably past ``MIN_PASSWORD_LENGTH``,
+#: and fixed-width, so the value never depends on how the encoding rounds.
+_TEMPORARY_PASSWORD_BYTES = 18
+
+
+def generate_password() -> str:
+    """Return a random password for an administrator-initiated reset (gap 8).
+
+    A reset has to hand *some* password back, and letting the administrator type
+    one would mean two people know it before the user ever signs in. So the value
+    is generated here instead, returned once, and stored only as its Argon2id
+    hash — the same posture as any other password.
+
+    ``secrets`` rather than ``random``: this output *is* a credential for as long
+    as it stands, and ``random`` is a predictable Mersenne Twister.
+
+    Nothing marks the account as holding a temporary password, so the response
+    that carries this is the only copy: the caller is expected to show it once
+    and the user to replace it through ``POST /auth/password``.
+    """
+    return secrets.token_urlsafe(_TEMPORARY_PASSWORD_BYTES)
 
 
 def dummy_password_hash(settings: Settings) -> str:

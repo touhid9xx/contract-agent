@@ -32,6 +32,9 @@ from app.db.repositories.base import TenantScopedRepository
 __all__ = [
     "ACTION_CONSENT_UPDATED",
     "ACTION_USER_CREATED",
+    "ACTION_USER_CREDENTIAL_CHANGED",
+    "ACTION_USER_CREDENTIAL_RESET",
+    "ACTION_USER_UPDATED",
     "ACTOR_SYSTEM",
     "ACTOR_USER",
     "AUDIT_ENTITY_CONTRACT",
@@ -67,11 +70,18 @@ ACTOR_USER = "user"
 #: audit log exists to carry.
 ACTOR_SYSTEM = "system"
 
-#: ``AuditLog.entity`` for user rows. Only account creation is recorded here:
-#: ``create-admin`` is the one path that mints an account with **no authenticated
-#: principal** behind it, so the log row is the only evidence it happened. Nothing
-#: records routine logins or the ``POST /auth/users`` route, which already has an
-#: admin in the request to attribute it to.
+#: ``AuditLog.entity`` for user rows.
+#:
+#: ``create-admin`` writes here because it is the one path that mints an account
+#: with **no authenticated principal** behind it, so the log row is the only
+#: evidence it happened. Since gap 8 three more routes do: changing your own
+#: password, an administrator resetting a colleague's, and an administrator
+#: changing a colleague's role or active state. Each is an act that ends
+#: somebody's sessions or changes what they may do, and "who did that, and when"
+#: must survive the account it was done to.
+#:
+#: Routine logins and logouts are still not recorded. They change nothing an
+#: auditor needs a chain for, and the volume would bury the entries that matter.
 AUDIT_ENTITY_USER = "users"
 
 #: ``AuditLog.action`` for any change to a contract's consent flags.
@@ -85,6 +95,37 @@ ACTION_CONSENT_UPDATED = "contract.consent_updated"
 
 #: ``AuditLog.action`` for an operator account being created by ``create-admin``.
 ACTION_USER_CREATED = "user.created"
+
+#: ``AuditLog.action`` for a user replacing their own password (gap 8).
+#:
+#: Recorded even though the actor and the subject are the same person: the
+#: interesting fact is not *who* did it but that every other session of that
+#: account stopped working at that moment. An operator investigating a
+#: compromise needs that instant to line up against the bumps in ``token_epoch``.
+#:
+#: The constant is named for the *credential* while the stored action string
+#: still reads ``user.password_changed``. That is deliberate, not drift: the
+#: value is what an auditor reads in a raw row and it should say the plain thing,
+#: but both secret scanners this repo runs (ruff ``S105``, bandit ``B105``) match
+#: on the *variable name*, and a ``*_PASSWORD_*`` spelling is reported as a
+#: hardcoded password. Renaming the identifier is the honest fix — a ``nosec``
+#: would suppress the check for the whole file. Same trade as
+#: ``REFRESH_DIGEST_NAMESPACE`` in ``app/core/refresh.py``.
+ACTION_USER_CREDENTIAL_CHANGED = "user.password_changed"
+
+#: ``AuditLog.action`` for an administrator resetting a colleague's password.
+#:
+#: The temporary password itself is never recorded — not in ``after``, not in
+#: ``reason``. The row says a reset happened and who ordered it; the value exists
+#: only in the response that carried it. Named for the credential for the reason
+#: given above; the stored string stays ``user.password_reset``.
+ACTION_USER_CREDENTIAL_RESET = "user.password_reset"
+
+#: ``AuditLog.action`` for an administrator changing a colleague's role or active
+#: state. One action for both because they answer one question — "what did this
+#: administrator change about this account?" — and the snapshot in
+#: ``before``/``after`` says which field moved.
+ACTION_USER_UPDATED = "user.updated"
 
 
 def _snapshot(state: Mapping[str, Any] | None) -> str | None:

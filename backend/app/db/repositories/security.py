@@ -220,3 +220,32 @@ class RefreshTokenRepository:
         )
         result = cast("CursorResult[Any]", self._session.execute(stmt))
         return result.rowcount
+
+    def revoke_all_for_user(self, user_id: uuid.UUID, *, now: datetime) -> int:
+        """Revoke every live session of one account. Returns rows affected.
+
+        This is the repository half of "sign out everywhere" (gap 8) and of every
+        act that must invalidate a session immediately: a password change, a
+        password reset, a deactivation, and the caller's own ``/auth/logout-all``.
+
+        Keyed on ``user_id`` alone, with no tenant predicate, because
+        ``RefreshTokenRepository`` is not tenant-scoped (see the class docstring)
+        and does not need to be: a user id identifies exactly one row in exactly
+        one tenant, so there is no second tenant's session this could reach.
+        ``tenant_id`` is repeated on the table for the *other* query the model
+        anticipates — revoking a whole organisation — not for this one.
+
+        Already-revoked rows are filtered out rather than re-stamped, so the
+        return value counts the sessions this call actually ended. That is what a
+        route can honestly report, and re-stamping would overwrite the original
+        revocation time that reuse detection may need to reason about.
+        """
+        # See claim_for_rotation: a pending insert is invisible to a bulk UPDATE.
+        self._session.flush()
+        stmt = (
+            update(RefreshToken)
+            .where(RefreshToken.user_id == user_id, RefreshToken.revoked_at.is_(None))
+            .values(revoked_at=truncate_to_second(now))
+        )
+        result = cast("CursorResult[Any]", self._session.execute(stmt))
+        return result.rowcount

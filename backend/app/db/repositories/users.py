@@ -62,6 +62,17 @@ class UserRepository(TenantScopedRepository[User]):
         stmt = self.scoped(User).where(User.email == normalize_email(email))
         return self.session.execute(stmt).scalar_one_or_none()
 
+    def by_id(self, user_id: uuid.UUID) -> User | None:
+        """One colleague by primary key, or ``None`` if the id is someone else's.
+
+        Thin wrapper over the base ``get`` so the routes never have to name the
+        model to look up a user. Returning ``None`` for another tenant's id is
+        what makes ``PATCH /auth/users/{id}`` answer 404 instead of editing
+        across the isolation boundary — the IDOR/BOLA case the specification
+        calls out.
+        """
+        return self.get(User, user_id)
+
     def list_all(self) -> list[User]:
         """Every user of this tenant, ordered so the output is stable."""
         stmt = self.scoped(User).order_by(User.email)
