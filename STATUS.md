@@ -131,6 +131,21 @@ rotation is serialised because a refresh token is single-use, and a reload delib
 signs the user out (D10-19). No migration and no `backend/` file changed, so the suite
 stays **731**; `next.config.ts` also gained explicit `/health` rewrites, since the probe
 sits outside `/api/v1` and the existing `/api/:path*` rule never matched it.
+**The slice on top of that is the two tables that had no writer** (`1f88ea2`,
+`feat(escalations)`): gap 15 said nothing recorded a customer reply or opened an SLA
+clock, so `ContractStatus.RESPONDED` and `ContractStatus.ESCALATED` were enum members no
+route could produce, and `customer_responses` and `escalations` had sat in `0001`
+untouched ever since. Five routes now fill them. A reply
+(`POST /contracts/{id}/response`) closes the open escalation **and** moves the contract to
+`responded` in one transaction — the two are one event — while a human raising, claiming,
+assigning or resolving one (`POST /contracts/{id}/escalation`, `PATCH /escalations/{id}`)
+closes only the queue item and leaves the contract `escalated`, because "someone worked
+this" and "the customer answered" are different facts. The queue (`GET /escalations`)
+sorts by a 48-hour deadline derived on the server from `escalation_sla_hours`, and
+`sla_breached` is compared at read time rather than stored, since no poller exists to flip
+it (D10-20). The reply body is deliberately not stored: the row records that contact
+happened, not what was said. No migration — every column it writes already existed. The
+suite went **731 → 780**.
 
 ## Phase history
 
@@ -1859,6 +1874,59 @@ family-revocation path, and the symptom would look like a backend bug.
 - **The consent screen (gap 18) is not here.** It remains an owner decision, and folding
   it in would have made this slice two.
 
+## A reply and an SLA clock exist now ✅ (gap 15, `D10-20`)
+
+Two tables created by `0001` had never been written to, and two `ContractStatus` members
+had no producer: `RESPONDED` and `ESCALATED` were reachable only by editing the database
+by hand, which is why "nothing records a reply or opens an SLA clock" has sat in the gap
+list since GATE 2. This slice adds the writers. It adds **no schema** — every column it
+fills already existed and was unused by any other path, so the migration head stays
+`0006`.
+
+| Area | Detail |
+| --- | --- |
+| Policy in the worker, transport in the route | `app/workers/escalation.py` holds `refusal_to_raise` / `_assign` / `_resolve` / `_transition`, `sla_deadline`, `is_overdue` and `status_after_response`, each taking its `now` and its rows as arguments — the same split as `dispatch.py` and `decision.py`, so the state machine is testable with no session and no HTTP client. |
+| One refusal vocabulary | `EscalationRefusedError` **subclasses** `DecisionRefusedError`, so `app/api/v1/agent.refusal` maps it to the envelope every other 409 in this API already uses. A third error vocabulary would have made "a rule said no" look different to clients per route, for no gain. |
+| A reply and a resolve are two facts | Recording a reply closes the open escalation **and** moves the contract to `responded` in one transaction. Resolving by hand closes the queue item and leaves the contract `escalated`: collapsing them would let an operator mark a contract responded on the customer's behalf. `test_resolving_by_hand_closes_the_queue_item_and_leaves_the_contract_escalated` pins it, because it is the kind of separation a later refactor tidies away. |
+| The SLA is derived, not stored | 48 hours from the moment the escalation is raised (Q2), configurable through `escalation_sla_hours` (default `48`, bounded `1..720`, documented as a business clock rather than a security parameter). `sla_deadline` is persisted so the queue can sort by it; `is_overdue` compares against a caller-supplied `now`, and **`sla_breached` is never written** — a stored flag would need a poller to flip it and would be wrong for every row the poller had not reached. The window is half-open (`<`, never `<=`), the same reading `quiet_hours_until` uses. |
+| The reply body is never stored | `POST /contracts/{id}/response` takes `channel` and `received_at`; a `message` in the body is ignored and appears in neither the row nor the audit snapshot. A reply is a *fact of contact* — what the clock needed — and free text would land in the one table with no review gate, no encryption and no redaction path. The test asserts the absence, so adding a body later is a decision someone makes on purpose. |
+| A late reply is still recorded | Arriving after the deadline is not grounds for refusal: it closes the escalation and moves the contract, and the previous row's `is_overdue` still shows the breach. Refusing it would punish the customer for the operator's lateness. A reply to a `renewed` or `expired` contract is recorded without rewriting the status (`status_after_response` returns `None`) — "they answered after the term ended" must not erase the fact that the term ended. |
+| Closed means closed; a no-op writes nothing | A resolved escalation cannot be reopened (that would leave `resolved_at` and `resolution_note` on a row that is open again); the action an operator wants is a *new* escalation, which the route allows and which gets its own deadline. Re-PATCHing the status a row already holds is a silent no-op with **no** audit row, so the audit log records changes rather than requests. |
+| Cross-tenant is a 404 | On the contract id, the escalation id and an `assigned_to` naming another tenant's user. A 403 confirms the row exists, which is what tenant isolation is supposed to hide. Matches every existing router. |
+| Reuse | `EscalationRepository` / `CustomerResponseRepository` extend `TenantScopedRepository`, so the tenant predicate is inherited rather than re-implemented; `create` flushes to get an id for the audit row; reads take `VIEWER`, writes `ADMIN`/`OPERATOR`, like every other router. Four audit actions and two entities were added beside the existing constants, with the rationale comment that file's constants carry. |
+| Tests | `test_escalations.py` (49): **21 cases** call the policy module alone — the half-open deadline, double-open, resolve-twice, reopen-after-resolve, a reply after the deadline, the two `OPEN_ESCALATION_STATUSES` tuples asserted **equal** so the deliberate duplication cannot drift — and **28** drive the same rules through the real ASGI app: tenancy, roles, the 409 envelope, the three audit rows a reply writes, the reply body's absence, and the no-op PATCH. |
+
+### Verification actually run (escalation queue)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Tests | `pytest backend/tests`, root, `MYSQL_TEST_URL` **set** (`127.0.0.1:3307`) | **780 collected — 779 passed, 1 skipped, 0 failed** (JUnit: `tests=780 failures=0 errors=0 skipped=1`), exit 0. Was 731 at `85a1752`; all 49 are the new `test_escalations.py`. The one skip is `KAFKA_LIVE`. |
+| Tests (MySQL unset) | same command with `MYSQL_TEST_URL` **cleared** | **780 collected — 766 passed, 14 skipped, 0 failed**, exit 0 — the 13 `integration` tests plus `KAFKA_LIVE`. |
+| Tests (MySQL) | `pytest backend/tests/test_mysql_integration.py -m integration` | **19 passed, 0 skipped**, exit 0. Recorded even though this slice adds no schema: it is the leg that runs real `ENUM` and `NUMERIC` behaviour, which SQLite cannot. |
+| Migration | `alembic current` / `alembic check`, from `backend/`, `DATABASE_URL` on `:3307` | `current` → **`0006 (head)`**; `check` → "No new upgrade operations detected." No migration was added, and the head is unchanged. |
+| Lint | `ruff check .`, root | All checks passed |
+| Format | `ruff format --check .`, root | **100 files already formatted** (four new modules is the difference) |
+| Types | `mypy app`, strict, from `backend/` | Success, **no issues in 56 source files** |
+| Security | `bandit -q -c pyproject.toml -r backend/app` | **0 issues**, exit 0 (the `nosec` advisory on `config.py:50` is unchanged) |
+
+### What this does not do — state it, do not bury it
+
+- **Nothing flips an overdue row.** `sla_breached` remains unreachable as a *stored*
+  status; the queue reports an `overdue` count computed at read time, so the SLA only
+  means something when somebody looks. Making it move needs a poller — gap 5/17
+  territory, not this slice — and no alert is attached to the count.
+- **Escalation is a human decision.** The "two weeks of no response" trigger the Phase-0
+  demo shows is still an operator pressing a button; nothing scans for silence.
+- **No screen calls any of these five routes.** They are exercised by `TestClient` only,
+  the same limit the review, agent and notification routes carry.
+- **A response has no deduplication.** Two identical replies are two rows. That is
+  correct for an audit trail, but a caller retrying on a timeout will double-record.
+- **No outbox event is emitted.** A reply arriving is invisible to anything downstream —
+  the same deferral the send path already carries, recorded rather than papered over.
+- **The MySQL leg proves repository behaviour, not concurrency.** These paths take no
+  row lock, so there is no `FOR UPDATE` guarantee here to prove or to rely on: two
+  operators resolving the same escalation race on the `version` check and one gets a 409.
+
 ## Known gaps / issues
 
 1. **`gitleaks` needs Docker** and is manual-stage only (D1-03). Run
@@ -1991,10 +2059,13 @@ family-revocation path, and the symptom would look like a backend bug.
     cannot chain to the configured bundle or the system store is refused — proven by
     the socket suite, which fails when the bundle is withheld and passes when it is
     supplied (gap 24, closed by D10-10). Separately,
-    `CustomerResponse` and `Escalation` still have **no writer**, so nothing records
-    a reply or opens an SLA clock; and no *screen* talks to the real API:
-    `frontend/src/app/*` still calls the mocked demo backend, so the F8, F9 and F10
-    routes have only ever been called by `TestClient`.
+    ~~`CustomerResponse` and `Escalation` still have **no writer**, so nothing records
+    a reply or opens an SLA clock~~ — **closed by the escalation slice**
+    (`feat(escalations)`, D10-20): five routes now write both tables, and recording a
+    reply is what moves a contract to `responded`. What is left of this entry is the
+    second half: no *screen* talks to the real API — sign-in is the only one —
+    `frontend/src/app/*` still calls the mocked demo backend everywhere else, so the F8,
+    F9 and F10 routes have only ever been called by `TestClient`.
 16. ~~**The review queue paginates by `limit` only.**~~ — **closed by `c90423b`.**
     `awaiting_review()` takes an `after=ReviewCursor` keyset and the route accepts
     `?cursor=` / returns `next_cursor`, so a backlog longer than the 500-row cap is
@@ -2169,17 +2240,23 @@ walkable end to end rather than truncated at the cap, and with
 `NOTIFICATION_TRANSPORT=smtp` plus a relay configured the last arrow leaves the
 process. The pipeline now **does** send, and the relay it talks to is now
 *authenticated* as well as encrypted (gap 24, D10-10) — so what is left is not a
-missing feature and not a hardening pass either, but three decisions (gaps 18, 19
-and 20), none of which changes whether the flow runs.
+missing feature and not a hardening pass either, but the consent screen's owner
+decision (gap 18), which does not change whether the flow runs. The other half of
+gap 15 is closed too: a reply is now recorded and an SLA clock is now opened
+(`feat(escalations)`, D10-20).
 
 - `app/db/models/` — every table in the flow now has a writer: `Contract`
   (`POST /contracts`), `ExtractedField` (`python -m app.cli extract`,
   `PATCH /review/{id}`), `AuditLog` (review, reveal, consent), `AgentDecision`
   (`POST /agent/decisions`) and `Notification` (`POST /notifications`,
   `POST /{id}/dispatch`, `POST /{id}/retry`, and now the scheduler itself, which
-  dispatches without a request at all — `4e7dd5c`). `CustomerResponse` and
+  dispatches without a request at all — `4e7dd5c`). ~~`CustomerResponse` and
   `Escalation` remain writer-less (gap 15), which is why nothing records a reply or
-  opens an SLA clock.
+  opens an SLA clock.~~ **That clause is closed, not deleted, by `feat(escalations)` /
+  `D10-20`:** five routes write both tables, so the two `ContractStatus` members that
+  had no producer — `responded` and `escalated` — are now reachable over HTTP. What is
+  still missing is a *trigger*, not a writer: nothing scans for silence and raises an
+  escalation by itself, so "two weeks with no reply" remains an operator's judgement.
 - `app/api/v1/` — `auth`, `health`, `contracts`, `agent`, `review` and now
   `notifications`. The backend is no longer *behind* the UI contract by a route; on
   the notification path it is ahead of it. The first screens now do call it:
@@ -2429,9 +2506,14 @@ sign-off, not footnotes:**
    (D10-10). `sent: true` over HTTP is proven against a relay of our own making.
 4. **No live Ollama has answered anything** (gap 17); `EXTRACTION_BACKEND=pattern`
    is what runs.
-5. **No screen talks to the real API.** `frontend/` still calls the mocked demo
-   backend, so the `review`, `agent` and `notification` routes have only ever been
-   called by `TestClient`.
+5. **Almost no screen talks to the real API.** ~~`frontend/` still calls the mocked
+   demo backend, so the `review`, `agent` and `notification` routes have only ever been
+   called by `TestClient`.~~ **Corrected after the sign-off:** the first clause was
+   never true — the mock is `demo/backend` and it is consumed by `demo/frontend`; the
+   real app had no API caller at all, which is what gap 7 was. The auth UI (`feat(web)`,
+   `D10-19`) now calls `/auth/*`, so *a* screen does. The rest stands: the `review`,
+   `agent`, `notification` and now `escalation` routes have still only ever been
+   reached by `TestClient`.
 6. ~~**`normalized_value` is still plaintext** (gap 20) — the one place a shipped
    column contradicts "no raw PII at rest", and it needs a decision (encrypt +
    compare on a blind index, or keep it and record the exception), not a patch.~~
@@ -2473,8 +2555,13 @@ sign-off, not footnotes:**
    defect; it was missing work, and half of it has now been done.
 8. **`FOR UPDATE` is a no-op on SQLite.** The concurrency guarantees are
    MySQL-only evidence by construction; the offline suite can never be the proof.
-9. **Missing pieces by design, not by defect:** `CustomerResponse` and `Escalation`
-   remain writer-less (gap 15) — nothing records a reply or opens an SLA clock.
+9. ~~**Missing pieces by design, not by defect:** `CustomerResponse` and `Escalation`
+   remain writer-less (gap 15) — nothing records a reply or opens an SLA clock.~~
+   **Closed after the sign-off, not deleted from it, by `D10-20`:** five routes write
+   both tables, so a reply is recorded and an SLA clock is opened. Two residues are
+   carried here instead of a green tick — the clock is *read* when the queue is
+   requested and nothing flips an overdue row into `sla_breached`, and no trigger scans
+   for silence, so raising an escalation is still a person pressing a button.
 
 None of 1–9 is a green check described as complete. Each is visible in the code and
 in this file, which is the standard this project has held gates to: a caveat stated
