@@ -96,7 +96,7 @@ made every other feature unreachable on a clean install, because `POST /auth/use
 admin-only and an admin needs a user. `python -m app.cli create-admin` creates the tenant
 (when the slug is new) and its first admin in one transaction, with the password read from
 stdin or a twice-typed prompt and never from argv (D10-15). The suite went **568 → 603**.
-**The slice on top of that is admission control on login** (gap 9, `feat(auth)`): a new
+**The slice on top of that is admission control on login** (`7ffcc03`, `feat(auth)`): a new
 `login_attempts` table with migration `0005` counts failures per `(tenant slug, email)`
 digest, and `POST /auth/login` now refuses with `429` + `Retry-After` once the window holds
 `login_max_attempts` failures — *before* any Argon2id work, so a flood costs a digest and a
