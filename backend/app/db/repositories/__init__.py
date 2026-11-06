@@ -11,6 +11,14 @@ from app.db.repositories.agent import AgentDecisionRepository
 from app.db.repositories.audit import AuditLogRepository
 from app.db.repositories.base import MissingTenantContextError, TenantScopedRepository
 from app.db.repositories.contracts import ContractRepository, contract_for_operator
+from app.db.repositories.escalations import (
+    DEFAULT_ESCALATION_QUEUE_LIMIT,
+    DEFAULT_RESPONSE_HISTORY_LIMIT,
+    MAX_ESCALATION_QUEUE_LIMIT,
+    MAX_RESPONSE_HISTORY_LIMIT,
+    CustomerResponseRepository,
+    EscalationRepository,
+)
 from app.db.repositories.fields import (
     ExtractedFieldRepository,
     ReviewCursor,
@@ -38,13 +46,19 @@ from app.db.repositories.security import LoginAttemptRepository, RefreshTokenRep
 from app.db.repositories.users import IdentityDirectory, UserRepository, normalize_email
 
 __all__ = [
+    "DEFAULT_ESCALATION_QUEUE_LIMIT",
     "DEFAULT_NOTIFICATION_LIMIT",
+    "DEFAULT_RESPONSE_HISTORY_LIMIT",
+    "MAX_ESCALATION_QUEUE_LIMIT",
     "MAX_NOTIFICATION_LIMIT",
+    "MAX_RESPONSE_HISTORY_LIMIT",
     "UNDELIVERED_STATUSES",
     "AgentDecisionRepository",
     "AuditLogRepository",
     "ContractRepository",
+    "CustomerResponseRepository",
     "DeadLetterReplay",
+    "EscalationRepository",
     "ExtractedFieldRepository",
     "IdentityDirectory",
     "LoginAttemptRepository",

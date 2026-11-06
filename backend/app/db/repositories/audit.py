@@ -31,6 +31,11 @@ from app.db.repositories.base import TenantScopedRepository
 
 __all__ = [
     "ACTION_CONSENT_UPDATED",
+    "ACTION_ESCALATION_ASSIGNED",
+    "ACTION_ESCALATION_CLAIMED",
+    "ACTION_ESCALATION_OPENED",
+    "ACTION_ESCALATION_RESOLVED",
+    "ACTION_RESPONSE_RECORDED",
     "ACTION_USER_CREATED",
     "ACTION_USER_CREDENTIAL_CHANGED",
     "ACTION_USER_CREDENTIAL_RESET",
@@ -39,7 +44,9 @@ __all__ = [
     "ACTOR_USER",
     "AUDIT_ENTITY_CONTRACT",
     "AUDIT_ENTITY_DECISION",
+    "AUDIT_ENTITY_ESCALATION",
     "AUDIT_ENTITY_FIELD",
+    "AUDIT_ENTITY_RESPONSE",
     "AUDIT_ENTITY_USER",
     "AuditLogRepository",
 ]
@@ -126,6 +133,51 @@ ACTION_USER_CREDENTIAL_RESET = "user.password_reset"
 #: administrator change about this account?" — and the snapshot in
 #: ``before``/``after`` says which field moved.
 ACTION_USER_UPDATED = "user.updated"
+
+#: ``AuditLog.entity`` for escalation rows (gap 15). An escalation is a promise
+#: that a human will act by a deadline, so every transition on it is audited:
+#: opened, assigned, resolved. Nothing else in the app watches a clock on someone's
+#: behalf, and a queue nobody can reconstruct afterwards is not accountability.
+AUDIT_ENTITY_ESCALATION = "escalations"
+
+#: ``AuditLog.entity`` for customer-response rows. Recording a reply is the one
+#: write that can end an escalation and take a contract out of the reminder
+#: pipeline, so it needs an author even though nothing about it is destructive.
+AUDIT_ENTITY_RESPONSE = "customer_responses"
+
+#: ``AuditLog.action`` for an escalation being raised against a contract.
+#:
+#: The contract's own status change (``escalated``) rides in this row's ``after``
+#: snapshot rather than getting a second row on ``AUDIT_ENTITY_CONTRACT``. One
+#: event, one row: a paired row would double the size of every escalation trail
+#: without recording a fact the first row does not already carry.
+ACTION_ESCALATION_OPENED = "escalation.opened"
+
+#: ``AuditLog.action`` for an operator taking ownership of an escalation. The
+#: interesting fact is *who* took it, which is why ``assigned_to`` is in the
+#: snapshot and the actor is the operator; the two are the same uuid here, and
+#: keeping both is what makes a reassignment readable.
+ACTION_ESCALATION_ASSIGNED = "escalation.assigned"
+
+#: ``AuditLog.action`` for an operator moving an escalation to ``in_progress``
+#: without assigning it to anyone.
+#:
+#: Distinct from :data:`ACTION_ESCALATION_ASSIGNED` on purpose: "I am working
+#: this" and "this is now Priya's" are different claims, and an audit trail that
+#: recorded both as ``assigned`` could not answer "who picked this up" for the row
+#: nobody was ever named on. Assigning to a colleague records ``assigned`` instead,
+#: because the name in the snapshot is the fact worth keeping there.
+ACTION_ESCALATION_CLAIMED = "escalation.claimed"
+
+#: ``AuditLog.action`` for an escalation being closed, whether by an operator or
+#: by a recorded customer reply. ``reason`` separates the two, so "everything this
+#: customer ever answered" and "everything we closed by hand" stay one query each.
+ACTION_ESCALATION_RESOLVED = "escalation.resolved"
+
+#: ``AuditLog.action`` for a customer reply being recorded. No value from the
+#: reply is stored — no message text, no contact detail — because this table is
+#: readable by any operator and the response itself lives in its own row.
+ACTION_RESPONSE_RECORDED = "response.recorded"
 
 
 def _snapshot(state: Mapping[str, Any] | None) -> str | None:

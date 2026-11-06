@@ -194,6 +194,19 @@ class Settings(BaseSettings):
     #: sweep interval to be noticed.
     notification_poll_interval_seconds: float = Field(default=5.0, gt=0, le=300)
 
+    # --- escalation (gap 15) ---------------------------------------------
+    #: Hours between an escalation being raised and its deadline. ``Q2`` in
+    #: ``DECISIONS.md`` fixes the default at 48 h, counted from the moment the
+    #: escalation is raised — **not** from the reminder that preceded it. The two
+    #: clocks are different, and the Phase-0 demo splits them the same way (a
+    #: two-week no-response window raises the escalation, then ``sla_hours: 48``).
+    #:
+    #: The floor is 1 because 0 would mark every escalation late the instant it
+    #: opened, which looks like "no grace period" and behaves like "already
+    #: failed". The ceiling is deliberately loose: this is a business clock an
+    #: operator may legitimately stretch, not a security parameter.
+    escalation_sla_hours: int = Field(default=48, ge=1, le=720)
+
     # --- smtp transport --------------------------------------------------
     # Read only when ``notification_transport == "smtp"``. ``smtp_host`` is the
     # one field with no usable default: every other setting below has a sane

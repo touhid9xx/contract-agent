@@ -2057,3 +2057,81 @@ JavaScript-held value are both possible.
   without a session — the API refuses, which is the real boundary); there is no password-reset or
   user-administration screen, so `PATCH /auth/users/{id}` and the reset route still have no caller;
   and the consent screen (gap 18) is a separate owner decision, not folded in here.
+
+### D10-20 — A reply and an escalation are two separate facts, and the SLA is a server-derived clock
+
+Gap 15 is the slice that makes `ContractStatus.RESPONDED` and `ContractStatus.ESCALATED`
+reachable. Both columns and both tables (`customer_responses`, `escalations`) have existed since
+migration `0001` and had **no writer** — the enum members were dead ends, `STATUS.md` listed
+"nothing records a reply or opens an SLA clock" as an open gap, and the two statuses could only be
+produced by editing the database by hand. This slice adds the writers. It needs **no migration**:
+every column it fills already existed and is unused by any other code path.
+
+- **Policy lives in `app/workers/escalation.py`, the route is transport.** The same split as
+  `dispatch.py` and `decision.py`: `refusal_to_raise`, `refusal_to_assign`, `refusal_to_resolve`,
+  `refusal_to_transition`, `sla_deadline`, `is_overdue` and `status_after_response` take their
+  `now` and their rows as arguments, so the state machine is testable with no session and no HTTP
+  client. Seventeen test functions in `backend/tests/test_escalations.py` — twenty-one cases, since
+  three of them are parametrised — call this module alone, and that is where the real edge cases
+  live: double-open, resolve-twice, reopen-after-resolve, a reply arriving after the deadline. The
+  remaining twenty-eight cases drive the same rules through the ASGI app.
+- **`EscalationRefusedError` subclasses `DecisionRefusedError`.** A refusal already has exactly one
+  shape in this API — a stable `code`, a prose message, and `details` that never carry a field
+  value — and `app/api/v1/agent.refusal` already maps it to the 409 envelope. Subclassing rather
+  than copying means a new policy surface cannot drift into a third error vocabulary, which is the
+  same trade `DispatchRefusedError` made. The alternative — a fresh `EscalationRefusedError(Exception)`
+  with its own handler — would have produced a 409 that looks different to every client for the
+  same class of "a rule said no".
+- **Recording a reply and resolving an escalation are deliberately *not* the same act.** A customer
+  reply (`POST /contracts/{id}/response`) closes the open escalation **and** moves the contract to
+  `responded`, in one transaction: the two are one event. A human resolving an escalation
+  (`PATCH /escalations/{id}` with `status: resolved`) closes the queue item and leaves the contract
+  `escalated`. "Someone on the team worked this" and "the customer answered" are different facts,
+  and collapsing them would let an operator silently mark a contract as responded on a customer's
+  behalf. `test_resolving_by_hand_closes_the_queue_item_and_leaves_the_contract_escalated` pins
+  that separation, because it is the kind of thing a later refactor would tidy away.
+- **The SLA is 48 hours from the moment the escalation is raised**, per Q2, and it is derived on
+  the server: `sla_deadline` is stored on the row so the queue can sort by it, but `is_overdue` is
+  a comparison against a caller-supplied `now` and **`sla_breached` is never stored by this slice**.
+  There is no background job here and the endpoint does not write on read. The queue reports an
+  `overdue` count instead. That is the honest trade: a stored `sla_breached` would need a poller to
+  flip it and would immediately be wrong for any row the poller had not reached yet; a derived flag
+  is always right and simply needs someone to look. The window is half-open (`<`, never `<=`), the
+  same reading `quiet_hours_until` uses, so an instant belongs to one side of the boundary.
+- **`escalation_sla_hours` is configuration, not a constant.** Default `48`, bounded `1..720`. It is
+  documented in `config.py` as a business clock rather than a security parameter — the bounds exist
+  to reject a typo (`0` would make every row instantly late, `100000` would make the queue useless),
+  not to enforce a policy.
+- **The reply body is never stored.** `POST /contracts/{id}/response` takes `channel` and
+  `received_at`; a `message` field in the body is ignored and appears in neither the row nor the
+  audit snapshot. The reply is a *fact of contact* — the thing the escalation clock needed — and
+  storing free text would put customer prose into the one table with no review gate, no encryption
+  and no redaction path. The test asserts the absence, so "we could add a body later" is a decision
+  someone has to make on purpose rather than a field that quietly appears.
+- **A late reply is still recorded.** A response arriving after the deadline is not refused: it
+  closes the escalation and moves the contract, and `is_overdue` on the *previous* row still shows
+  the breach. Refusing it would punish the customer for the operator's lateness. Likewise a reply
+  against a `renewed` or `expired` contract is recorded but does **not** rewrite the contract's
+  status: `status_after_response` returns `None` there, because "they answered after the term
+  ended" must not erase the fact that the term ended.
+- **A resolved escalation cannot be reopened, and a no-op PATCH writes nothing.** Reopening would
+  leave `resolved_at` and `resolution_note` populated on a row that is open again — a queue item
+  whose own columns disagree about whether it is closed. The action an operator actually wants is
+  a *new* escalation on the same contract, which the route already allows and which gets its own
+  deadline. Re-PATCHing the status a row already holds is a silent no-op with no audit row, so the
+  audit log records changes rather than requests.
+- **Cross-tenant access is a 404, not a 403**, on both the contract and the escalation id, and an
+  `assigned_to` naming another tenant's user is a 404 too. A 403 confirms the row exists, which is
+  the thing tenant isolation is supposed to hide. This matches every existing router.
+- **What this proves and what it does not.** Proven: 49 new tests, `pytest backend/tests` at
+  **780 collected — 779 passed, 1 skipped, 0 failed** against real MySQL 8.4 (`KAFKA_LIVE` is the
+  only skip) and **780 — 766 passed, 14 skipped, 0 failed** with `MYSQL_TEST_URL` cleared; the
+  19-test `-m integration` leg passes. The queue and both mutation routes go through the real ASGI
+  app, so tenancy, roles, the 409 envelope and the audit rows are exercised end to end. Not proven:
+  **nothing flips an overdue row**, so an operator has to look at the queue for the SLA to mean
+  anything — `sla_breached` stays unreachable as a *stored* status until a poller exists (gap 5/17
+  territory, not this slice); there is no UI — no screen calls any of these five routes, so the
+  whole surface is exercised only by `TestClient`; escalation is manual, so the "two weeks of no
+  response" trigger that the Phase-0 demo shows is still a human decision rather than a rule; and
+  the response record has no deduplication, so two identical replies are two rows (correct for an
+  audit trail, but a caller retrying on a timeout will double-record).
