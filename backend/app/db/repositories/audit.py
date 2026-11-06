@@ -31,11 +31,13 @@ from app.db.repositories.base import TenantScopedRepository
 
 __all__ = [
     "ACTION_CONSENT_UPDATED",
+    "ACTION_USER_CREATED",
     "ACTOR_SYSTEM",
     "ACTOR_USER",
     "AUDIT_ENTITY_CONTRACT",
     "AUDIT_ENTITY_DECISION",
     "AUDIT_ENTITY_FIELD",
+    "AUDIT_ENTITY_USER",
     "AuditLogRepository",
 ]
 
@@ -65,6 +67,13 @@ ACTOR_USER = "user"
 #: audit log exists to carry.
 ACTOR_SYSTEM = "system"
 
+#: ``AuditLog.entity`` for user rows. Only account creation is recorded here:
+#: ``create-admin`` is the one path that mints an account with **no authenticated
+#: principal** behind it, so the log row is the only evidence it happened. Nothing
+#: records routine logins or the ``POST /auth/users`` route, which already has an
+#: admin in the request to attribute it to.
+AUDIT_ENTITY_USER = "users"
+
 #: ``AuditLog.action`` for any change to a contract's consent flags.
 #:
 #: Named here rather than in the route that first wrote it, because two paths now
@@ -73,6 +82,9 @@ ACTOR_SYSTEM = "system"
 #: changed this customer's consent" a single query; a per-path action name would
 #: answer it in two, and the second one would be the one nobody remembered.
 ACTION_CONSENT_UPDATED = "contract.consent_updated"
+
+#: ``AuditLog.action`` for an operator account being created by ``create-admin``.
+ACTION_USER_CREATED = "user.created"
 
 
 def _snapshot(state: Mapping[str, Any] | None) -> str | None:

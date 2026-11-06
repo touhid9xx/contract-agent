@@ -166,37 +166,51 @@ The one warning in the run is `starlette/testclient.py` deprecating an
    *permitted* shape satisfies the arithmetic — so a future bound widening fails
    in CI instead of silently.
 
-#### Creating the first account (manual testing)
+#### Creating the first account
 
-There is **no bootstrap endpoint or CLI yet** — see gap 10. `POST /auth/users`
-requires an admin token, which requires a user, so a fresh database cannot be
-logged into at all without one manual step. Until a seed command exists, create
-the first tenant and admin directly:
+`python -m app.cli create-admin` — **gap 10 is closed by this command.** It
+creates the tenant (when its slug does not exist yet) and that tenant's first
+admin in one transaction.
 
 ```powershell
-venv\Scripts\python.exe -c @"
-from app.core.config import get_settings
-from app.core.security import hash_password
-from app.db.enums import UserRole
-from app.db.models import Tenant, User
-from app.db.session import build_engine, build_session_factory
-
-settings = get_settings()
-session = build_session_factory(build_engine(settings))()
-tenant = Tenant(name='Acme', slug='acme')
-session.add(tenant)
-session.flush()
-session.add(User(tenant_id=tenant.id, email='admin@acme.test', role=UserRole.ADMIN,
-                 password_hash=hash_password('correct-horse-battery', settings)))
-session.commit()
-print('created tenant', tenant.slug)
-"@
+# From backend/, with DATABASE_URL set and after `alembic upgrade head`.
+"correct-horse-battery-staple" | venv\Scripts\python.exe -m app.cli create-admin `
+    --tenant-slug acme --tenant-name "Acme" --email admin@acme.test --password-stdin
 ```
 
-(Run from `backend/` with `DATABASE_URL` set, after `alembic upgrade head`. This
-exact snippet was executed against a real MySQL 8.4 schema before being written
-here, not transcribed from memory. `Tenant`/`User` take the keyword arguments
-shown — verified against `backend/app/db/models/tenant.py`.)
+The password arrives on stdin (`--password-stdin`) or from a twice-typed prompt,
+**never in argv** — a command line is visible in the process list and in CI logs.
+The bounds are imported from `app.core.security`, not retyped, so this path and
+`POST /auth/users` cannot disagree about what an acceptable password is. The
+slug is stored lower-cased because it is also half of a login credential and the
+login form lower-cases what it is given; one stored in another case would be a
+tenant nobody can log into.
+
+Every refusal is non-zero and happens **before the first write** (the session
+scope commits on a normal return, so a late return would persist a tenant with no
+admin in it):
+
+| Exit | Condition |
+| --- | --- |
+| `EXIT_FAILED (3)` | unusable slug/email/name, password outside bounds, no password on stdin, mismatched confirmation, unknown slug without `--tenant-name`, inactive tenant, `--tenant-name` disagreeing with the stored name |
+| `EXIT_EXISTS (6)` | that address already has an account in the tenant — **not** a reset |
+
+`EXIT_EXISTS` rather than a quiet success or a reset: success would leave the
+operator believing they had just set that password, and a reset would make this
+command a way to take over an admin account without knowing its password.
+Creating a *different* address in an existing tenant still works, because "we
+lost the only admin" is a real and recoverable state.
+
+The creation is audited as `actor_type=system` with a nil `actor_id`: it is the
+only account in the system created with no principal behind it, so the log row is
+the only evidence. It carries the role and nothing about the person — no address,
+no hash.
+
+This replaces the hand-written REPL snippet that stood here before. That snippet
+*was* executed against a real MySQL 8.4 schema rather than transcribed, but
+nothing stopped it drifting from the models, it bypassed every validation above,
+and it put a weak password in the page as an example to copy. It is superseded,
+not preserved: the command is the supported path.
 
 ## F4 — Event transport ✅
 
@@ -1471,6 +1485,70 @@ test was written for this slice, and nothing in it is MySQL-specific.
 - **No test runs the command against a live API process**, the same limit `reseal-fields`
   carries.
 
+## A fresh database can be logged into ✅ (gap 10, `D10-15`)
+
+Gap 10 was the one gap that made every other feature unreachable on a clean install.
+`POST /auth/users` is admin-only, an admin token needs a user, and a user needs an
+admin — so a new deployment could not be logged into at all. The documented workaround
+was the hand-written REPL snippet that used to sit under "Creating the first account" in
+the F3 section of this file. That snippet *was* executed against a real MySQL 8.4 schema
+rather than transcribed, but nothing stopped it drifting from the models, it bypassed
+every validation `POST /auth/users` enforces, and it printed a weak password in the page
+as an example to copy. It is now superseded by a command, and the snippet is gone rather
+than kept "for reference": **the command is the supported path.**
+
+```powershell
+# From backend/, with DATABASE_URL set and after `alembic upgrade head`.
+"correct-horse-battery-staple" | venv\Scripts\python.exe -m app.cli create-admin `
+    --tenant-slug acme --tenant-name "Acme" --email admin@acme.test --password-stdin
+```
+
+| Area | Detail |
+| --- | --- |
+| Command | `create-admin --tenant-slug SLUG --email ADDRESS [--tenant-name NAME] [--password-stdin]`. Creates the tenant when the slug does not exist yet, then adds one `ADMIN` user to it. The tenant is created **only** when `--tenant-name` is given, so "we lost the only admin" is a separate, working case. |
+| Password | stdin (first line, `rstrip("\r\n")` so a typed trailing space survives) or a twice-typed prompt. **Never argv** — a command line is in the process list and in CI logs. The bounds are **imported** from `app.core.security` (`MIN_PASSWORD_LENGTH`/`MAX_PASSWORD_LENGTH`), not retyped, so this path and `POST /auth/users` cannot disagree about what an acceptable password is. |
+| Slug | `strip().lower()`, `^[a-z0-9][a-z0-9-]*$`, ≤64 chars. Lower-cased because `POST /auth/login` resolves the tenant with `strip().lower()`: a tenant stored in a casing the login form cannot reproduce is a tenant nobody can log into. |
+| Refusals | `problems` are collected first and returned before the password is even read: blank/over-long/malformed slug, implausible email (the repository's `is_plausible_email`, not a second regex), blank or over-long `--tenant-name`. Then password bounds, then the database checks. |
+| Refusals, second half | `--tenant-name` disagreeing with the stored tenant name, an **inactive** tenant (a user there cannot log in, so creating one would be a success that does not work), and an unknown slug with no `--tenant-name` to create it. All `EXIT_FAILED`. |
+| Duplicates | An address that already has an account exits `EXIT_EXISTS` (6) and changes nothing. Not a quiet success — that would leave the operator believing the password had just been set — and **not a reset**, which would make this command a way to take over an admin account without knowing its password. |
+| Ordering | Every refusal precedes the first `flush()`. `session_scope` commits on a normal return, so a late `return` would persist a tenant with no admin in it — precisely the state this command exists to get out of. |
+| Audit | `action=user.created`, `entity=users`, `actor_type=system`, `actor_id=None`: this is the only account in the system created with **no principal behind it**, so the log row is the only evidence. `after` carries the role and `tenant_created`, and **nothing about the person** — no address, no hash. The `reason` names the command. |
+| Stored hash | `hash_password(password, settings)` — Argon2id, parameters from settings, the same helper login verifies against. The plaintext is never logged, never in `after`. |
+| Tests | `test_create_admin.py` (35): tenant+admin creation, a **real `POST /auth/login`** through the ASGI app, Argon2id-only storage, trailing-space fidelity, slug lower-casing, a second admin on an existing tenant, duplicate → `EXIT_EXISTS` with the original password still working, duplicate writes no audit row, mismatched name, unknown slug, inactive tenant, 8 bad slugs, 7 bad emails, 3 out-of-bounds passwords, empty stdin, mismatched confirmation, the prompt path, and the audit row's shape and non-disclosure. |
+
+### Verification actually run (create-admin)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Tests | `pytest` in `backend/`, `MYSQL_TEST_URL` **unset** | **603 collected — 602 passed, 1 skipped, 0 failed** (JUnit: `tests=603 failures=0 errors=0 skipped=1`), exit 0. Was 568 at `ff87079`; the 35 `create-admin` tests are the difference. |
+| Lint | `ruff check .`, root | All checks passed |
+| Format | `ruff format --check .`, root | **87 files already formatted** (86 at `ff87079`; the new test file is the difference) |
+| Types | `mypy`, root | Success, **no issues in 49 source files** |
+| Security | `bandit -q -c pyproject.toml -r backend/app` | **0 issues** |
+
+The single skip remains `KAFKA_LIVE`, so GATE 2's clause 1 stands exactly as signed. No
+migration was needed: `Tenant` and `User` already existed, and this slice only writes rows
+through the repositories that already own them.
+
+The figures above are the **SQLite** run. The MySQL half was not re-run at this head —
+honestly: this slice adds no schema change and no new query shape (two `SELECT`s and two
+`INSERT`s through repositories the MySQL baseline already exercises), so the SQLite pass is
+the evidence that exists, and the real-MySQL head remains `9b6cf0f`. Recorded rather than
+implied, because a green table that silently means "one database" is how the earlier slices
+got misread.
+
+### What this does not do — state it, do not bury it
+
+- **It does not reset a password.** Gap 8's account lifecycle is still open: a forgotten
+  password for the *last* admin still means a new address or a database operator.
+- **It is not a migration-safe env-var bootstrap.** That alternative was rejected for the
+  reason the old gap entry named: it puts a password in the environment, where it is
+  readable by anything that can read the process environment and is copied into every
+  container that shares the config. The CLI runs beside the database, with the same access
+  the snippet had.
+- **No test runs it against a live API process** — the login proof goes through the ASGI
+  app, not a served port. Same limit `reseal-fields` and `consent-import` carry.
+
 ## Known gaps / issues
 
 1. **`gitleaks` needs Docker** and is manual-stage only (D1-03). Run
@@ -1512,13 +1590,14 @@ test was written for this slice, and nothing in it is MySQL-specific.
 9. **No rate limiting on `/auth/login`.** Argon2id makes each attempt expensive
    server-side, which is not the same as throttling an attacker. Admission
    control belongs at the edge (proxy/WAF) or with a later Redis-backed limiter.
-10. **No bootstrap path for the first user.** `POST /auth/users` requires an
-    admin token, which requires an existing user, so a fresh database cannot be
-    logged into at all. The workaround is the manual snippet under "Creating the
-    first account" (executed and verified above). A seed command
-    (`python -m app.cli create-admin`) is the obvious fix and is **not built** —
-    it needs a decision on whether seeding is an operator CLI or a migration-safe
-    env-var bootstrap, since the latter puts a password in the environment.
+10. ~~**No bootstrap path for the first user.**~~ — **closed by `create-admin`**
+    (`D10-15`). `python -m app.cli create-admin` creates the tenant (when its slug
+    is new) and its first admin in one transaction, so a fresh database can be
+    logged into without a REPL. It took the **operator-CLI** branch of the two
+    options this entry named, for the reason recorded here: a migration-safe
+    env-var bootstrap puts a password in the environment. What it does **not** do
+    is reset a password — a forgotten one is still gap 8, and the audit row it
+    writes is the only record of the one account created with no principal.
 11. ~~**Ingested contracts are inert.**~~ — **closed by F7.** `python -m app.cli
     extract` turns a contract's document text into `ExtractedField` rows with a
     status, confidence and provenance, and the run's counts are logged with a

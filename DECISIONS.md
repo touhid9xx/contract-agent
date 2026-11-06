@@ -1637,3 +1637,83 @@ committed together. That pairing is the milestone; extraction and review follow.
   Not proven: nothing tests the concurrency path (`StaleDataError` is handled but no test
   forces it), and no test runs the command against a live API process — the same gap
   `reseal-fields` carries.
+
+### D10-15 — Bootstrap is an operator CLI, and the password never travels in argv
+
+- **Decision:** `python -m app.cli create-admin --tenant-slug SLUG --email ADDRESS
+  [--tenant-name NAME] [--password-stdin]` creates a tenant (only when the slug does not
+  exist yet) and one `ADMIN` user in it, in one transaction, audited as a system actor.
+  This closes gap 10: `POST /auth/users` is admin-only, an admin token needs a user, and a
+  user needs an admin, so before this a fresh database could not be logged into at all.
+- **Why the operator-CLI branch and not an env-var bootstrap:** gap 10 named the two
+  options. A migration-safe env-var bootstrap reads the first password from the
+  environment, where it is visible to anything that can read the process environment,
+  copied into every container sharing that config, and left behind in deployment
+  manifests after it has served its purpose. The CLI runs beside the relay with the same
+  database access the previous hand-written snippet had, and leaves nothing behind but an
+  Argon2id hash and one audit row. No migration was needed: `Tenant` and `User` already
+  existed.
+- **Why the password is stdin or a prompt, never an argument:** argv is in the process
+  list (`ps` shows it to every user on the box) and in shell history and CI logs, which is
+  exactly where a recycled bootstrap password ends up. `--password-stdin` reads the first
+  line of standard input — bracketed by a shell pipe, not by the argument vector — and the
+  default path asks twice through `getpass`. The twice-typed prompt exists because there
+  is no way to read an Argon2id hash back: a mistyped bootstrap password on a
+  one-account database is discoverable only by failing to log in, which reads as
+  "authentication is broken" rather than "the password was mangled".
+- **Why the stdin read is `rstrip("\r\n")` and not `strip()`:** the newline a shell adds
+  is not part of the password; a trailing space the operator typed is. Trimming the latter
+  would store a hash for a password the login form cannot reproduce, and the symptom would
+  be a wrong-password error for the credential that was just set.
+- **Why the bounds are imported, not restated:** `MIN_PASSWORD_LENGTH` and
+  `MAX_PASSWORD_LENGTH` come from `app.core.security`, the same constants
+  `POST /auth/users` validates against, so the CLI cannot drift from the API's policy and
+  there is one answer to "what is an acceptable password here". The check happens before
+  the database is touched, so an out-of-bounds password never costs a tenant row.
+- **Why the slug is lower-cased and shape-checked:** `POST /auth/login` resolves the
+  tenant with `strip().lower()`, so a tenant stored as `Acme` is a tenant nobody can log
+  into. The stored slug is therefore always what the login form will reproduce, and
+  `^[a-z0-9][a-z0-9-]*$` (≤64) rejects the shapes a later URL or log line would have to
+  escape.
+- **Why the tenant is created only when `--tenant-name` is given:** the two intents are
+  different operations — "bootstrap this deployment" and "we lost the only admin of an
+  existing tenant" — and inferring the first from a slug that merely looks new would let a
+  typo create a second organisation with a fresh admin. On an existing tenant,
+  `--tenant-name` must match the stored name or the run is refused, so a mistyped name is
+  reported rather than silently ignored.
+- **Why a duplicate address is `EXIT_EXISTS` (6) and not success or a reset:** a quiet
+  success would leave the operator believing the password had just been set, when nothing
+  was written. A reset would make this command a way to take over an admin account without
+  knowing its password — it is a bootstrap, not an account-recovery tool. The distinct
+  exit code exists so a provisioning script can tell "already done" (do not fail the
+  deployment) from "rejected" (fail it). Creating a *different* address in an existing
+  tenant still works, because "we lost the only admin" is a real and recoverable state.
+- **Why every refusal precedes the first write:** `session_scope` commits whatever it finds
+  on a normal return, so a `return` after a flush would persist a half-built bootstrap — a
+  tenant with no admin in it, which is the exact state this command exists to get out of.
+  An inactive tenant is refused for the same family of reasons: the row would be created
+  successfully and the account still could not log in.
+- **Why the audit row says `system` with a nil `actor_id`:** an operator with database
+  access is not a principal, so there is no id to record and borrowing one would fabricate
+  the fact the audit log exists to carry. This is also the only account in the system
+  created with no principal behind it at all, so the log row is the only evidence of the
+  creation. It carries the role and `tenant_created` and nothing about the person — no
+  address, no hash — so the audit trail cannot become a second copy of the PII the rest of
+  the system seals.
+- **Trade-off, stated rather than buried:** this is not account lifecycle. There is still
+  no password reset, no self-service change and no deactivate (gap 8), so a forgotten
+  password for the last admin still means a new address or a database operator. It is also
+  not a deployment hook: nothing runs it automatically, and an operator who forgets to run
+  it gets a blank login screen rather than a failure at boot. And no test runs the command
+  against a served port — the login proof goes through the ASGI app, the same limit
+  `reseal-fields` and `consent-import` carry.
+- **What this proves and what it does not.** Thirty-five tests in
+  `backend/tests/test_create_admin.py` cover tenant+admin creation, a real
+  `POST /auth/login` with the created credential, Argon2id-only storage, trailing-space
+  fidelity, slug lower-casing, a second admin on an existing tenant, the duplicate refusal
+  (with the original password still working and no audit row written), a mismatched
+  `--tenant-name`, an unknown slug without a name, an inactive tenant, eight bad slugs,
+  seven bad emails, three out-of-bounds passwords, empty stdin, a mismatched confirmation,
+  the prompt path, and the audit row's shape and non-disclosure. Not proven: nothing tests
+  a concurrent second invocation creating the same address, and nothing tests behaviour
+  when the database is unreachable mid-run.

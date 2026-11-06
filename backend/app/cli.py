@@ -11,6 +11,7 @@ Run from ``backend/``::
     python -m app.cli consent-import --file consent.csv --dry-run
     python -m app.cli consent-import --file consent.csv
     python -m app.cli doctor
+    python -m app.cli create-admin --tenant-slug acme --tenant-name Acme --email ops@acme.test
 
 Why a command rather than an HTTP endpoint: republishing parked events is a
 privileged, rare operation. Over HTTP it would become a "republish any tenant's
@@ -32,7 +33,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import getpass
 import io
+import re
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,11 +56,15 @@ from app.core.crypto import (
 )
 from app.core.logging import configure_logging
 from app.core.middleware import correlation_id_or_new
-from app.db.enums import NotificationStatus
+from app.core.security import MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH, hash_password
+from app.db.enums import NotificationStatus, UserRole
+from app.db.models import Tenant
 from app.db.repositories.audit import (
     ACTION_CONSENT_UPDATED,
+    ACTION_USER_CREATED,
     ACTOR_SYSTEM,
     AUDIT_ENTITY_CONTRACT,
+    AUDIT_ENTITY_USER,
     AuditLogRepository,
 )
 from app.db.repositories.contracts import (
@@ -74,6 +82,12 @@ from app.db.repositories.outbox import (
     dead_letter_count,
     dead_lettered,
     replay_dead_lettered,
+)
+from app.db.repositories.users import (
+    IdentityDirectory,
+    UserRepository,
+    is_plausible_email,
+    normalize_email,
 )
 from app.db.session import build_engine, build_session_factory, session_scope
 from app.workers.extraction import ExtractionUnavailableError, extract_contract
@@ -103,6 +117,13 @@ EXIT_UNREADABLE = 4
 #: a zero exit code would make the one state that needs attention the one state
 #: that looks exactly like a clean database.
 EXIT_ATTENTION = 5
+#: The account ``create-admin`` was asked for already exists, and nothing was
+#: changed. Distinct from ``EXIT_FAILED`` because a provisioning script has to be
+#: able to tell "this was already done" from "this was rejected" — only one of those
+#: is worth stopping a deployment for. It is a refusal rather than a quiet success
+#: on purpose: silently reusing the existing account would leave the caller believing
+#: it had just set that account's password, which it did not do and must not.
+EXIT_EXISTS = 6
 
 #: The two columns on :class:`~app.db.models.ExtractedField` that hold PII, and so
 #: must be sealed. Named once, here, so "did we miss a column?" has one answer —
@@ -127,6 +148,22 @@ _CONSENT_SHEET_COLUMNS = ("contract_id", *CONSENT_FLAG_COLUMNS)
 #: wrong is not a formatting nit — it is a customer being contacted who said no.
 _TRUE_WORDS = frozenset({"true", "yes", "1"})
 _FALSE_WORDS = frozenset({"false", "no", "0"})
+
+#: Longest slug and name the ``tenants`` columns accept, so an over-long argument
+#: is refused here rather than as a driver error after the tenant row is flushed.
+_MAX_SLUG_LENGTH = 64
+_MAX_TENANT_NAME_LENGTH = 200
+
+#: What a slug may contain, checked **after** the input is lower-cased.
+#:
+#: The slug is half of a login credential: ``POST /auth/login`` resolves it with
+#: ``strip().lower()``, so a tenant stored with characters an operator cannot
+#: reproduce at the login form is a tenant nobody can log into. Restricting the
+#: shape at the one place tenants get created is cheaper than discovering that in
+#: production. The first character is alphanumeric so a slug can never be read as a
+#: flag, and case is normalised rather than rejected: ``--tenant-slug Acme`` stores
+#: ``acme``, which is the value the login path will look up.
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
 @dataclass(frozen=True)
@@ -423,6 +460,54 @@ def build_parser() -> argparse.ArgumentParser:
         help="report which contracts would change without writing anything",
     )
     consent.set_defaults(handler=_consent_import)
+
+    create = commands.add_parser(
+        "create-admin",
+        help="create the first admin of a tenant, so a fresh database can be logged into",
+        description=(
+            "Bootstrap an operator account. Without it a fresh database cannot be "
+            "logged into at all: POST /auth/users needs an admin token, and an admin "
+            "token needs a user (STATUS.md gap 10). Creates the tenant when its slug "
+            "does not exist yet, then adds an ADMIN user to it. The password is read "
+            "from a prompt (or from the first line of standard input with "
+            "--password-stdin) and never from an argument, so it does not reach shell "
+            "history, the process list or CI logs."
+        ),
+    )
+    create.add_argument(
+        "--tenant-slug",
+        required=True,
+        metavar="SLUG",
+        help=(
+            "tenant the account belongs to, as typed at the login form. Case is "
+            "normalised to lower case; letters, digits and hyphens only"
+        ),
+    )
+    create.add_argument(
+        "--tenant-name",
+        default=None,
+        metavar="NAME",
+        help=(
+            "display name for the tenant. Required only when the slug does not exist "
+            "yet; on an existing tenant it must match the stored name or the run is "
+            "refused"
+        ),
+    )
+    create.add_argument(
+        "--email",
+        required=True,
+        metavar="ADDRESS",
+        help="login address for the new account",
+    )
+    create.add_argument(
+        "--password-stdin",
+        action="store_true",
+        help=(
+            "read the password from the first line of standard input instead of "
+            "prompting, for scripted provisioning and tests"
+        ),
+    )
+    create.set_defaults(handler=_create_admin)
     return parser
 
 
@@ -955,6 +1040,198 @@ def _consent_import(
         )
         return EXIT_NO_MATCH
 
+    return EXIT_OK
+
+
+def _password_from_stdin() -> tuple[str, str | None]:
+    """Read the password from the first line of standard input.
+
+    ``rstrip("\\r\\n")`` rather than ``strip()``: the newline a shell adds is not
+    part of the password, but a trailing space the operator typed is. Trimming that
+    would store a hash for a password the operator cannot reproduce at the login
+    form, and the failure would look like a wrong password rather than a mangled one.
+    """
+    line = sys.stdin.readline()
+    if not line:
+        return "", "no password arrived on standard input"
+    return line.rstrip("\r\n"), None
+
+
+def _password_from_prompt() -> tuple[str, str | None]:
+    """Ask for the password twice, so a typo cannot become the stored credential.
+
+    There is no way to read back an Argon2id hash, so a mistyped bootstrap password
+    is only discoverable by failing to log in afterwards — with a fresh database and
+    one account, that reads as "authentication is broken".
+    """
+    try:
+        first = getpass.getpass("Password: ")
+        second = getpass.getpass("Repeat password: ")
+    except (EOFError, KeyboardInterrupt):
+        return "", "no password was entered"
+    if first != second:
+        return "", "the two passwords did not match"
+    return first, None
+
+
+def _create_admin(
+    args: argparse.Namespace,
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+) -> int:
+    """``create-admin``: bootstrap the first account of a tenant.
+
+    Gap 10. Nothing else in the system can create a user without already having one:
+    ``POST /auth/users`` is admin-only, and login needs a user that does not exist
+    yet. The documented workaround was a hand-written snippet in STATUS.md that
+    built a ``Tenant`` and a ``User`` in a REPL — which means the first account of
+    every deployment was made by someone pasting Python, and the snippet could drift
+    from the models without anything noticing.
+
+    Four rules:
+
+    - **The password is never an argument.** It arrives on stdin or from a prompt,
+      so it stays out of shell history, out of the process list (``ps`` shows argv
+      to every user on the box) and out of CI logs, which is where a recycled
+      bootstrap password would end up otherwise. The same bounds as
+      ``POST /auth/users`` are imported rather than retyped, so the CLI cannot drift
+      from the API's policy.
+    - **The slug is stored the way login will look it up.** ``POST /auth/login``
+      resolves the tenant with ``strip().lower()``, so ``--tenant-slug Acme`` stores
+      ``acme``. A tenant stored with a casing the login form cannot reproduce is a
+      tenant nobody can log into, and that is not a state this command will create.
+    - **An existing account is a refusal, not a no-op.** Re-running with the same
+      address exits :data:`EXIT_EXISTS` and changes nothing. Reporting success would
+      leave the operator believing the password had just been set, and resetting it
+      would make this command a way to take over an admin account without knowing
+      its password. Creating a *different* address in an existing tenant still works,
+      because "we lost the only admin" is a real and recoverable state.
+    - **The creation is audited as ``system``.** This is the only account in the
+      system created with no principal behind it, so the audit row is the only
+      evidence of who did it. It carries the role and nothing about the person: no
+      address, no hash.
+
+    Every refusal happens before the first write. ``session_scope`` commits whatever
+    it finds on exit, so a ``return`` after a flush would persist a half-built
+    bootstrap — a tenant with no admin in it, which is exactly the state this command
+    exists to get out of.
+    """
+    slug = str(args.tenant_slug).strip().lower()
+    email = normalize_email(str(args.email))
+    tenant_name = None if args.tenant_name is None else str(args.tenant_name).strip()
+
+    problems: list[str] = []
+    if not slug:
+        problems.append("--tenant-slug cannot be blank")
+    elif len(slug) > _MAX_SLUG_LENGTH:
+        problems.append(f"--tenant-slug is longer than {_MAX_SLUG_LENGTH} characters")
+    elif not _SLUG_RE.match(slug):
+        problems.append(
+            "--tenant-slug must be letters, digits and hyphens, and start with a letter or digit"
+        )
+    if not is_plausible_email(email):
+        problems.append("--email is not a usable address")
+    if tenant_name is not None:
+        if not tenant_name:
+            problems.append("--tenant-name cannot be blank")
+        elif len(tenant_name) > _MAX_TENANT_NAME_LENGTH:
+            problems.append(f"--tenant-name is longer than {_MAX_TENANT_NAME_LENGTH} characters")
+    if problems:
+        log.error("create_admin_invalid_arguments", problems=problems)
+        return EXIT_FAILED
+
+    password, problem = (
+        _password_from_stdin() if bool(args.password_stdin) else _password_from_prompt()
+    )
+    if problem is not None:
+        log.error("create_admin_password_rejected", tenant_slug=slug, reason=problem)
+        return EXIT_FAILED
+    if not MIN_PASSWORD_LENGTH <= len(password) <= MAX_PASSWORD_LENGTH:
+        log.error(
+            "create_admin_password_rejected",
+            tenant_slug=slug,
+            reason="length",
+            min_length=MIN_PASSWORD_LENGTH,
+            max_length=MAX_PASSWORD_LENGTH,
+        )
+        return EXIT_FAILED
+
+    with session_scope(session_factory) as session:
+        existing = IdentityDirectory(session).tenant_by_slug(slug)
+
+        if existing is not None:
+            # Refusals first: still nothing written, so any return here leaves the
+            # database untouched.
+            if tenant_name is not None and tenant_name != existing.name:
+                log.error(
+                    "create_admin_tenant_exists",
+                    tenant_slug=slug,
+                    hint=(
+                        "--tenant-name is only used when the tenant is being created; "
+                        "drop it to add an admin to the existing tenant"
+                    ),
+                )
+                return EXIT_FAILED
+            if not existing.is_active:
+                log.error(
+                    "create_admin_tenant_inactive",
+                    tenant_slug=slug,
+                    hint="a user in a deactivated tenant cannot log in; reactivate it first",
+                )
+                return EXIT_FAILED
+            repository = UserRepository(session, existing.id)
+            if repository.by_email(email) is not None:
+                log.error(
+                    "create_admin_account_exists",
+                    tenant_slug=slug,
+                    hint=(
+                        "that address already has an account here and the run changed "
+                        "nothing; passwords are never reset by this command"
+                    ),
+                )
+                return EXIT_EXISTS
+            tenant = existing
+            tenant_created = False
+        else:
+            if tenant_name is None:
+                log.error(
+                    "create_admin_tenant_missing",
+                    tenant_slug=slug,
+                    hint="no tenant has that slug; pass --tenant-name to create it",
+                )
+                return EXIT_FAILED
+            tenant = Tenant(name=tenant_name, slug=slug)
+            session.add(tenant)
+            session.flush()
+            repository = UserRepository(session, tenant.id)
+            tenant_created = True
+
+        user = repository.create(
+            email=email,
+            password_hash=hash_password(password, settings),
+            role=UserRole.ADMIN,
+        )
+        session.flush()
+        AuditLogRepository(session, tenant.id).record(
+            correlation_id=correlation_id_or_new(),
+            actor_type=ACTOR_SYSTEM,
+            actor_id=None,
+            action=ACTION_USER_CREATED,
+            entity=AUDIT_ENTITY_USER,
+            entity_id=str(user.id),
+            after={"role": user.role.value, "tenant_created": tenant_created},
+            reason="bootstrap admin created by `python -m app.cli create-admin`",
+        )
+        user_id = user.id
+        tenant_slug = tenant.slug
+
+    log.info(
+        "admin_created",
+        user_id=str(user_id),
+        tenant_slug=tenant_slug,
+        role=UserRole.ADMIN.value,
+        tenant_created=tenant_created,
+    )
     return EXIT_OK
 
 
