@@ -112,16 +112,16 @@ digest, and presenting a spent one is read as theft and revokes every member of 
 family without needing a live access token. Migration `0006` adds `refresh_tokens`, so the
 head moves `0005 → 0006`, and the suite went **646 → 695** plus five new MySQL integration
 tests.
-**The slice on top of that is the account lifecycle that closes gap 8** (`feat(auth)`): gap 8
-said only `POST /auth/users` existed, so a forgotten password and a session someone feared
-for were both operator tasks. `POST /auth/logout-all` ends every session of the caller's
-account, `POST /auth/password` proves the current password, ends every *other* session and
-re-issues the caller's, and two admin routes add `PATCH /auth/users/{id}` (role and active
-state) and `POST /auth/users/{id}/password-reset` (a generated password, returned once).
-Every one of them bumps `token_epoch` **and** revokes the stored refresh rows, because either
-half alone leaves a credential that still works (D10-18). No migration: `token_epoch` and
-`refresh_tokens` already existed. The suite went **695 → 731**, and the MySQL half was re-run
-at this head (**19 passed**, still `0006`).
+**The slice on top of that is the account lifecycle that closes gap 8** (`c99f385`,
+`feat(auth)`): gap 8 said only `POST /auth/users` existed, so a forgotten password and a
+session someone feared for were both operator tasks. `POST /auth/logout-all` ends every
+session of the caller's account, `POST /auth/password` proves the current password, ends
+every *other* session and re-issues the caller's, and two admin routes add
+`PATCH /auth/users/{id}` (role and active state) and `POST /auth/users/{id}/password-reset`
+(a generated password, returned once). Every one of them bumps `token_epoch` **and** revokes
+the stored refresh rows, because either half alone leaves a credential that still works
+(D10-18). No migration: `token_epoch` and `refresh_tokens` already existed. The suite went
+**695 → 731**, and the MySQL half was re-run at this head (**19 passed**, still `0006`).
 
 ## Phase history
 
