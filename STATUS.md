@@ -241,6 +241,24 @@ so this closes the **input** half of gap 12 and nothing at all about gap 5. It w
 while the harness's shell could start no process at all, so it was recorded ungated and
 uncommitted; restarting the IDE cleared the fault, the suite was re-run green
 (**827 / 0 failed / 15 skipped**, exit 0), and the 17-hook gate ran green over the commit.
+**Then the contract aggregate gets the read side it never had** (`D10-27`,
+`feat(contracts)`): `GET /api/v1/contracts` lists the caller's contracts, newest
+first, one keyset page at a time. Until it existed the aggregate root was
+write-only — a contract could be ingested and its id echoed once, and every other
+per-contract route in v1 (consent, fields, decisions, notifications) took that id
+on faith, so the API was usable by whoever made the ingest call and by nobody
+else. The cursor is `Contract.id` rather than `created_at`, which is a correctness
+argument and not a shortcut: `created_at` is a `DATETIME` without fractional
+seconds, so two contracts ingested in the same second tie and "newest" stops being
+a total order — which is why `AgentDecisionRepository.recent` has to carry a
+second column and this does not. Two columns are deliberately withheld —
+`storage_path`, an absolute path inside the API container that maps the filesystem
+for any viewer, and `created_by`, which would let a viewer enumerate accounts by
+scrolling — so `has_document: bool` answers the only question a caller actually
+has. That is the sense in which `storage_path` now has a **reader**: something
+tests whether it is `None`, and nothing yet turns the bytes into text, so gap 12
+stays half-closed and gap 5 stays blocked. The suite moved from **827** to **840**
+(825 passed, the same 15 environmental skips). No migration: the head stays `0006`.
 
 ## Phase history
 
@@ -2325,6 +2343,15 @@ a hook finally ran and passed.
    **no alert fires when rows park and nothing requeues them automatically**
    (D5-03). The default `EVENT_TRANSPORT=none` keeps the refusing stand-in, so a
    fresh deployment retries and parks events rather than losing them (D4-03).
+   **Prerequisites now exist that did not when this was written, and the gap is
+   still open.** `D10-26` gave the contract a stored document, so the consumer
+   would have bytes to work on rather than only metadata, and `D10-27` gave the
+   aggregate a listing, so a contract id can be found without reading one out of an
+   ingest response. What has not changed is the decision: no handler is written,
+   and writing one is a choice about *what a consumer does* — extract text locally,
+   call out to a service, or acknowledge and do nothing — that a slice should not
+   make on its own. It is recorded as **blocked on an owner decision**, not as
+   unstarted work.
 6. ~~**No refresh token.**~~ — **closed by `D10-17`.** `POST /auth/login` now also
    returns a single-use refresh token, and `POST /auth/refresh` spends it for a
    successor in the same family, so a 15-minute access token no longer means
@@ -2392,7 +2419,12 @@ a hook finally ran and passed.
     narrower claim than the one it replaces: *the digest is the file hash wherever a
     file exists*. That is gap 12's **input** half. The other half is untouched — no
     code reads `storage_path` to turn a stored document into text, so gap 5 remains
-    exactly as blocked as it was, and nothing here has ever parsed a PDF.
+    exactly as blocked as it was, and nothing here has ever parsed a PDF. **`D10-27`
+    narrows that last clause rather than breaking it:** `GET /contracts` now reads the
+    column, but only to report whether it is `None` — `has_document: bool` — so the
+    column has an *existence* reader and still no *content* reader. It is also not sent
+    over the wire at all, which is deliberate: an absolute path inside the API container
+    has no use for a viewer and maps the deployment's filesystem for anyone who does.
 13. ~~**The husky commit gate has never actually run.**~~ — **closed by
     `chore(hooks)` (`4a9e8e9`).** The cause was upstream of `core.hooksPath`: root
     `node_modules` did not exist on this host at all (bootstrap had been run with
@@ -2750,9 +2782,11 @@ green.
 
 - **No real PDF has ever been stored.** The payloads are plausible-sized byte strings with
   the document content type; "PDF" here means bytes and nothing has parsed one.
-- **`storage_path` still has no reader.** This closes the **input** half of gap 12. Gap 5
-  stays blocked: there is still no document-to-text step, so the `contract.ingested`
-  consumer still has no work it could correctly do.
+- **`storage_path` has no *content* reader.** This closes the **input** half of gap 12.
+  Gap 5 stays blocked: there is still no document-to-text step, so the
+  `contract.ingested` consumer still has no work it could correctly do. (`D10-27` later
+  gave the column an *existence* reader in the contract listing — `has_document` — which
+  changes nothing about this: nothing turns the bytes into text.)
 - **`DOCUMENT_MAX_BYTES` bounds what is stored, not what is read.** FastAPI has buffered
   the body before the store sees it, and the store holds the plaintext and the sealed copy
   in memory at once. The real defence against a memory-exhausting upload is a request-size
@@ -2769,6 +2803,70 @@ green.
 - **No per-tenant quota or rate limit** on uploads, and no proxy body cap configured.
 - **A default stack parks every event this route produces** — see gap 25. That is F6's
   property, not this slice's, but this slice doubles the producers that hit it.
+
+## A contract can be found again ✅ (`D10-27` — the list the rest of the API needed)
+
+The aggregate root had a write path and no read path. `POST /contracts` and
+`POST /contracts/document` could create a row and echo its id once, and then every
+per-contract route in v1 — consent, fields, decisions, notifications — took that
+id on faith. There was no way to ask "what contracts does this tenant hold?",
+which meant the API was usable by whoever made the ingest call and by nobody else.
+`GET /api/v1/contracts` answers it.
+
+| Change | Detail |
+| --- | --- |
+| `ContractRepository.recent(limit, status, after)` | One keyset page, `ORDER BY id DESC`, tenant predicate from `scoped()`. `id` is the sort key **and** the cursor because it is autoincrement, so `id DESC` *is* insertion order — no tie to break, unlike `AgentDecisionRepository.recent`, which needs a second column because `created_at` is a `DATETIME` without fractional seconds. |
+| `DEFAULT_CONTRACT_PAGE_LIMIT` = 50, `MAX_CONTRACT_PAGE_LIMIT` = 200 | The bound lives at the query, same shape as `DEFAULT_DECISION_HISTORY_LIMIT`: no caller can ask for a tenant's whole contract table in one response. |
+| `ContractListItem` | Echoes `status`, `source` and `risk` as their **enums**, so an unknown value fails at the boundary. Withholds `storage_path` (an absolute path inside the API container — a viewer has no use for it, and it maps the filesystem for anyone who does) and `created_by` (an internal user id; exposing it would let a viewer enumerate accounts by scrolling). `has_document: bool` answers the only question a caller has about the document. |
+| `ContractListResponse` | `items`, `count`, the echoed `status`, and `next_cursor`. |
+| `GET /api/v1/contracts` | `?status=`, `?cursor=`, `?limit=`. Fetches `limit + 1` rows so `next_cursor` is **a fact about the database** rather than an inference from "the page looked full", and is `None` only when a row was actually seen beyond the page. |
+| Viewer is allowed | Nothing in the payload is a customer value. `customer_ref` is the pseudonymous label the model documents; identity stays in encrypted `ExtractedField` rows this route never touches. `may_contact` and `consent_channels` are derived from the model, so the listing cannot disagree with what the decision policy will refuse. |
+| No migration | Status, consent and `storage_path` columns are all in `0001`; `alembic` head stays `0006`. |
+
+### The parameter that would have shadowed `fastapi.status`
+
+The query parameter is named `contract_status` and aliased to `?status=`. The obvious
+name is the one that breaks: this module imports `fastapi.status` and uses
+`status.HTTP_201_CREATED` on its ingest routes, so a parameter called `status`
+would shadow the import inside the function and turn the next such reference into
+an `AttributeError` at runtime. Keeping the wire name obvious while the local name
+stays clear of a live import is what the alias is for — the same class of trap as
+`D10-26`'s `Depends()` finding, where a name meant one thing and the framework
+resolved it as another.
+
+### Verification actually run (`D10-27`)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Suite | `python -m pytest -q` (from `backend/`) | **840 collected — 825 passed, 15 skipped, 0 failed, exit 0**; baseline was 827 / 812 / 15 |
+| Contract tests alone | counted per case from `--junit-xml` | `tests/test_contracts.py` collects **33**, of which **13 are new** — ten new test functions, two parameterised (four `limit`/`cursor` bounds, one status filter) — against 20 before |
+| Types | `python -m mypy app/api/v1/contracts.py app/db/repositories/contracts.py` | **Success: no issues found in 2 source files** |
+| Lint | `ruff check` | all checks passed |
+
+The counts above were read per test case out of `--junit-xml`, not inferred from
+the totals, because the first pass got them wrong in a way that did not show:
+the new cases were counted as *ten* while the pre-existing ones were counted as
+*twenty-three*, and the two errors cancelled into the file's correct total of 33.
+The real split is 20 + 13. A wrong number that sums correctly is the kind that
+survives review, so the figure was re-derived rather than re-asserted.
+
+### What this does not do — stated, not buried
+
+- **No screen consumes it.** This slice is backend-only. `frontend/src/lib/api.ts`
+  has no client for the route, so nothing in the product renders this listing and
+  the contracts screen stays unbuilt.
+- **Newest-first is the only ordering.** There is no search, no sort parameter and
+  no `end_date` filter — so "which contracts expire soon", the question the
+  product exists to answer, is still not answerable from this route. The listing
+  finds a contract; it does not prioritise one.
+- **Gap 5 is unchanged.** The `contract.ingested` consumer is still unwritten and
+  still blocked on an owner decision. This listing is its prerequisite — an
+  operator can now find a contract id without reading one out of an ingest
+  response — but no work happens to an event that this route produces.
+- **`storage_path` gains an existence reader, not a content reader.**
+  `has_document` tests `storage_path is not None`. Nothing turns the stored bytes
+  into text, so the claim this slice can support is narrower than "the column is
+  read now": gap 12 stays half-closed and gap 5 stays blocked.
 
 ## Next permitted step
 
@@ -2815,8 +2913,11 @@ gap 15 is closed too: a reply is now recorded and an SLA clock is now opened
   What survives: no unit, cron entry or orchestrator definition exists outside the compose
   file, and a scanner that is up still raises nothing until a contract has actually been
   contacted (gap 5). One column joins the inventory in `D10-26`: `Contract.storage_path`
-  had no writer either, and `POST /contracts/document` is now one — but **nothing reads
-  it**, so gap 12 is half-closed and gap 5 is untouched.
+  had no writer either, and `POST /contracts/document` is now one. ~~**Nothing reads
+  it**, so gap 12 is half-closed and gap 5 is untouched.~~ **Narrowed by `D10-27`, not
+  closed:** `GET /contracts` reports `has_document` by testing the column for `None`, so
+  it has an *existence* reader now — but still no *content* reader, so gap 12 stays
+  half-closed and gap 5 stays blocked exactly where `D10-26` left it.
 - `app/api/v1/` — `auth`, `health`, `contracts`, `agent`, `review` and now
   `notifications`. The backend is no longer *behind* the UI contract by a route; on
   the notification path it is ahead of it. The first screens now do call it:

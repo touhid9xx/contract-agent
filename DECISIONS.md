@@ -2669,3 +2669,89 @@ thing to build was therefore not the consumer but the input it would consume.
   rerun. It is pre-existing, untouched by this slice, and recorded here rather
   than quietly re-run until green — a test that fails one time in five is a fact
   about the suite, not noise to be pressed out of the transcript.
+
+### D10-27 — The contract aggregate gets a read side, and the cursor is its id
+
+`GET /api/v1/contracts` now exists. Until this slice the aggregate root was
+write-only: a contract could be ingested and its id echoed back once, and every
+other per-contract route in v1 took that id on faith. The listing is what makes
+the rest of the API reachable — an operator can find a contract without reading
+its id out of an ingest response.
+
+- **The cursor is `id`, and that is a correctness argument rather than a
+  convenience.** `AgentDecisionRepository.recent` pages by `created_at` and needs
+  a second column to break ties, because `created_at` is a MySQL `DATETIME`
+  without fractional seconds: two rows written in the same second store the same
+  timestamp, so "newest" stops being a total order and a keyset walk can skip or
+  repeat a row. `Contract.id` is autoincrement, so `ORDER BY id DESC` *is*
+  insertion order — a single column that is both the sort key and the cursor, with
+  no tie to break. Paging is `WHERE id < after`, which touches each contract once
+  even while new ones are being ingested underneath the scroll. `OFFSET` cannot
+  give that, and it is the same reasoning the review queue uses (D8-06).
+- **The cursor is a position, not an authorisation.** It is only ever combined
+  with the tenant predicate from `scoped()`, so a guessed id from another
+  organisation narrows this tenant's own rows instead of disclosing someone
+  else's. Nothing in the route trusts the cursor to mean "this row is yours".
+- **`limit + 1` rows are fetched so `next_cursor` is a fact about the database.**
+  Asking for one row beyond the page is what distinguishes "there is more" from
+  "the page looked full". Filling a page exactly is the common case, and inferring
+  completeness from it would hand back a `next_cursor` that leads to an empty page
+  every time a tenant's count is a multiple of `limit`.
+- **The query parameter is `contract_status`, aliased to `status`.** The module
+  imports `fastapi.status` and uses `status.HTTP_201_CREATED` throughout; a
+  parameter named `status` would shadow it inside the function and turn the next
+  such reference into an `AttributeError`. The alias keeps the wire name the
+  obvious one without the local name being a trap.
+- **`storage_path` is withheld and `has_document` answers the real question.**
+  The path is an absolute path inside the API container: a viewer has no use for
+  it, and it maps the deployment's filesystem for anyone who does. The only thing
+  a caller needs from it is whether a document exists behind the row. The test
+  asserts the path is absent from the raw response text, not merely from the
+  model, so a field added by hand later cannot reintroduce it quietly.
+- **`created_by` is withheld too.** An internal user id that nothing renders, and
+  exposing it would let a viewer enumerate accounts by scrolling a contract list.
+- **Viewer may read the listing.** Nothing in the payload is a customer value:
+  `customer_ref` is the pseudonymous label the model already documents, and
+  identity lives in encrypted `ExtractedField` rows this route never touches. The
+  consent test proves `may_contact` and `consent_channels` track `PUT /consent`
+  without any identity ever appearing — and because both are derived from the
+  model rather than recomputed here, the flags a caller sees cannot disagree with
+  what the decision policy will refuse.
+- **`source`, `risk` and `status` are echoed as their enums, not strings.** The
+  response model reuses `ContractStatus`, `ContractSource` and `RiskLevel`, so an
+  unknown value fails validation at the boundary rather than reaching a client
+  that has no branch for it.
+- **`created_at` is re-attached to UTC in one place.** MySQL's `DATETIME` discards
+  the offset, so `as_utc` is where it is put back — the same single point the
+  decision view uses (D2-01).
+- **No migration.** The status and consent columns are in `0001`; the only new
+  code is a repository method, a page-limit pair and the route, so the head stays
+  `0006`.
+
+**What this proves and what it does not.** Proven by running:
+`tests/test_contracts.py` collects **33 cases, 13 of them new** — ten new test
+functions, two of which are parameterised (four `limit`/`cursor` bounds and one
+status filter) — against 20 before. The full suite is **840 collected / 825
+passed / 15 skipped / 0 failed, exit 0**, from a 827 / 812 / 15 baseline; the
+skips are the same environmental fifteen. `ruff check` reports all checks passed
+and `mypy` on both changed modules reports no issues.
+
+  One figure was wrong on the way into this entry and is corrected rather than
+  quietly overwritten: the new cases were first counted as *ten*, which happened
+  to agree with the file's total because the pre-existing count was
+  simultaneously taken as *twenty-three*. Two wrong numbers summing to the right
+  answer is the failure mode that survives review, so the counts above were read
+  out of `--junit-xml` per test case rather than inferred from the totals.
+
+  The new tests cover keyset paging across a page boundary, `next_cursor` being
+  `None` exactly at the end, a `limit` that exactly equals the remaining row
+  count, status filtering, tenant isolation of the cursor, the absence of
+  `storage_path` from the response text, viewer access, and the flags tracking a
+  consent write. Not proven, stated rather than buried: **the frontend
+`/contracts` screen has not been touched** — this slice is backend-only and
+`frontend/src/lib/api.ts` has no consumer for the route yet, so nothing in the
+product renders this listing; there is no search, no ordering other than
+newest-first, and no `end_date` filter, so "which contracts expire soon" — the
+question the product exists to answer — is still not answerable from this route.
+**Gap 5 remains open**: the `contract.ingested` consumer is unwritten and still
+blocked on an owner decision, and this listing is only its prerequisite.

@@ -347,3 +347,199 @@ def test_an_implausible_timezone_is_rejected(client: TestClient, token: str, tim
 def test_a_blank_customer_reference_is_rejected(client: TestClient, token: str) -> None:
     response = _ingest(client, token, customer_ref="   ")
     assert response.status_code == 422
+
+
+# --- the read side (GET /contracts) ---------------------------------------
+def _listing(client: TestClient, token: str, **params: Any) -> Response:
+    return client.get(CONTRACTS_PATH, params=params, headers=_auth(token))
+
+
+def _ids(response: Response) -> list[int]:
+    return [int(item["id"]) for item in response.json()["items"]]
+
+
+def test_an_empty_tenant_lists_no_contracts(client: TestClient, token: str) -> None:
+    response = _listing(client, token)
+    assert response.status_code == 200, response.text
+
+    body = response.json()
+    assert body["items"] == []
+    assert body["count"] == 0
+    assert body["status"] is None
+    # ``None`` is a completeness claim, not a default: there is nothing beyond.
+    assert body["next_cursor"] is None
+
+
+def test_contracts_are_listed_newest_first(client: TestClient, token: str) -> None:
+    stored = [_ingest(client, token, customer_ref=ref).json()["id"] for ref in ("A", "B", "C")]
+
+    response = _listing(client, token)
+    assert response.status_code == 200, response.text
+    assert _ids(response) == list(reversed(stored))
+    assert response.json()["count"] == 3
+
+
+def test_paging_walks_every_contract_exactly_once(client: TestClient, token: str) -> None:
+    """Keyset, not ``OFFSET``: a row ingested mid-scroll cannot shift the page.
+
+    Three contracts, two per page. The two pages must together contain each id
+    exactly once and the last page must say it is the last.
+    """
+    stored = [_ingest(client, token, customer_ref=ref).json()["id"] for ref in ("A", "B", "C")]
+
+    first = _listing(client, token, limit=2)
+    assert first.status_code == 200, first.text
+    assert len(first.json()["items"]) == 2
+    cursor = first.json()["next_cursor"]
+    assert cursor == _ids(first)[-1]
+
+    second = _listing(client, token, limit=2, cursor=cursor)
+    assert second.status_code == 200, second.text
+    assert second.json()["next_cursor"] is None
+
+    walked = _ids(first) + _ids(second)
+    assert sorted(walked) == sorted(stored)
+    assert len(walked) == len(set(walked)) == 3
+
+
+def test_the_status_filter_narrows_the_listing(
+    client: TestClient,
+    token: str,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """``status`` is set by the pipeline, never by the client, so the test sets it
+    in the database — which is also the only way to produce a filterable row."""
+    active = _ingest(client, token, customer_ref="Still active").json()["id"]
+    expired = _ingest(client, token, customer_ref="Ran out").json()["id"]
+
+    with session_scope(session_factory) as session:
+        row = session.get(Contract, expired)
+        assert row is not None
+        row.status = ContractStatus.EXPIRED
+
+    expired_page = _listing(client, token, status=ContractStatus.EXPIRED.value)
+    assert expired_page.status_code == 200, expired_page.text
+    assert _ids(expired_page) == [expired]
+    assert expired_page.json()["status"] == ContractStatus.EXPIRED.value
+
+    active_page = _listing(client, token, status=ContractStatus.ACTIVE.value)
+    assert _ids(active_page) == [active]
+
+
+def test_the_listing_reports_consent_without_repeating_contact_values(
+    client: TestClient, token: str
+) -> None:
+    """The read side reports what the *policy* will see, not who the customer is.
+
+    Before consent is recorded the row is listed and un-contactable, which is the
+    honest answer to "why does the decision route refuse everything on a fresh
+    database" (gap 18).
+    """
+    contract_id = _ingest(client, token).json()["id"]
+
+    before = _listing(client, token).json()["items"][0]
+    assert before["id"] == contract_id
+    assert before["may_contact"] is False
+    assert before["consent_channels"] == []
+    assert before["do_not_contact"] is False
+    # The identity lives in the encrypted fields, not on the contract.
+    assert "email" not in before
+    assert "phone" not in before
+
+    granted = client.put(
+        f"{CONTRACTS_PATH}/{contract_id}/consent",
+        json={
+            "consent_email": True,
+            "consent_sms": False,
+            "consent_voice": False,
+            "do_not_contact": False,
+            "version": before["version"],
+        },
+        headers=_auth(token),
+    )
+    assert granted.status_code == 200, granted.text
+
+    after = _listing(client, token).json()["items"][0]
+    assert after["may_contact"] is True
+    assert after["consent_channels"] == ["email"]
+    assert after["version"] == before["version"] + 1
+
+
+def test_the_listing_is_tenant_scoped(
+    client: TestClient,
+    token: str,
+    tenant: Tenant,
+    other_tenant: Tenant,
+    make_user: Callable[..., Any],
+) -> None:
+    other_user = make_user(other_tenant, email="ops@globex.test", role=UserRole.OPERATOR)
+    other_token = _token(client, other_tenant, other_user.email)
+
+    mine = _ingest(client, token).json()["id"]
+    theirs = _ingest(client, other_token, customer_ref="Another org").json()["id"]
+
+    assert _ids(_listing(client, token)) == [mine]
+    assert _ids(_listing(client, other_token)) == [theirs]
+
+    # A cursor naming the other tenant's row narrows this tenant's own rows rather
+    # than stepping into theirs: a position, not an authorisation.
+    crossed = _listing(client, token, cursor=theirs)
+    assert crossed.status_code == 200, crossed.text
+    assert theirs not in _ids(crossed)
+
+
+def test_the_listing_never_exposes_the_stored_document_path(
+    client: TestClient,
+    token: str,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """``has_document`` answers the only useful question; the path itself stays in.
+
+    Written straight to the row because the upload route needs an encryption key
+    and a store root, and what is under test here is the *listing's* decision to
+    withhold a column — not ``POST /contracts/document``, which
+    ``tests/test_documents.py`` already covers.
+    """
+    contract_id = _ingest(client, token).json()["id"]
+    path = "/var/lib/contract-agent/documents/ab/cd0123456789.enc"
+
+    with session_scope(session_factory) as session:
+        row = session.get(Contract, contract_id)
+        assert row is not None
+        row.storage_path = path
+
+    response = _listing(client, token)
+    assert response.status_code == 200, response.text
+    item = response.json()["items"][0]
+    assert item["has_document"] is True
+    assert "storage_path" not in item
+    # Not merely absent from the model: absent from the wire.
+    assert path not in response.text
+
+
+def test_a_viewer_may_read_the_listing(
+    client: TestClient,
+    tenant: Tenant,
+    make_user: Callable[..., Any],
+) -> None:
+    make_user(tenant, email="viewer@acme.test", role=UserRole.VIEWER)
+    viewer_token = _token(client, tenant, "viewer@acme.test")
+
+    response = _listing(client, viewer_token)
+    assert response.status_code == 200, response.text
+
+
+def test_listing_requires_a_token(client: TestClient) -> None:
+    assert client.get(CONTRACTS_PATH).status_code == 401
+
+
+@pytest.mark.parametrize(
+    "params",
+    [{"limit": 0}, {"limit": 10_000}, {"cursor": 0}, {"status": "not-a-status"}],
+)
+def test_the_page_parameters_are_bounded(
+    client: TestClient, token: str, params: dict[str, Any]
+) -> None:
+    """A negative or unbounded page size, an unusable cursor and an unknown status
+    are all 422 rather than a silently clamped or empty answer."""
+    assert _listing(client, token, **params).status_code == 422

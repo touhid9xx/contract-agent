@@ -25,6 +25,12 @@ The route deliberately answers 409 rather than silently returning the existing
 row. A retried POST is a *conflict*, not a success it never performed; the
 response names the id of the row that already holds that content so the caller
 can read it, and no second outbox event is created.
+
+``GET /contracts`` is the aggregate's **read** side, and it exists because
+without it every per-contract route in v1 took its id on faith: a contract could
+be created and its id echoed once, but never found again. It pages by keyset
+(``?cursor=``), filters on ``status``, and exposes no customer value and no
+filesystem path — see :class:`ContractListItem`.
 """
 
 from __future__ import annotations
@@ -52,6 +58,7 @@ from app.core.documents import (
 )
 from app.core.middleware import correlation_id_or_new
 from app.core.principal import Principal
+from app.db.base import as_utc
 from app.db.enums import (
     Channel,
     ContractSource,
@@ -68,7 +75,13 @@ from app.db.repositories.audit import (
     AUDIT_ENTITY_CONTRACT,
     AuditLogRepository,
 )
-from app.db.repositories.contracts import ContractRepository, apply_consent, consent_state
+from app.db.repositories.contracts import (
+    DEFAULT_CONTRACT_PAGE_LIMIT,
+    MAX_CONTRACT_PAGE_LIMIT,
+    ContractRepository,
+    apply_consent,
+    consent_state,
+)
 from app.db.repositories.fields import ExtractedFieldRepository
 from app.db.repositories.outbox import enqueue_event
 
@@ -224,6 +237,138 @@ def _summary(contract: Contract, *, outbox_event_id: uuid.UUID) -> ContractSumma
         version=contract.version,
         created_at=contract.created_at,
         outbox_event_id=outbox_event_id,
+    )
+
+
+class ContractListItem(BaseModel):
+    """One contract as a list shows it.
+
+    Nothing here is a customer value: ``customer_ref`` is the pseudonymous label
+    the model documents, and the identity lives in the encrypted
+    ``ExtractedField`` rows, which this route never touches.
+
+    Two columns are deliberately **not** exposed:
+
+    ``storage_path``
+        An absolute path inside the API container. A viewer has no use for it and
+        it maps the deployment's filesystem for anyone who does. What a caller
+        actually needs to know — "is there a document behind this row?" — is
+        answered by ``has_document``.
+
+    ``created_by``
+        An internal user id. Nothing renders it, and it would let a viewer
+        enumerate accounts by scrolling a contract list.
+    """
+
+    id: int
+    customer_ref: str
+    status: ContractStatus
+    source: ContractSource
+    risk: RiskLevel
+    start_date: date | None
+    end_date: date | None
+    timezone: str
+    #: Per-tenant dedupe key — the metadata fingerprint, or the document hash when
+    #: the row came from ``POST /contracts/document`` (gap 12). A fingerprint of
+    #: content, not the content itself, so it is safe to list.
+    sha256: str | None
+    #: ``storage_path is not None``. A boolean rather than the path: see above.
+    has_document: bool
+    consent_email: bool
+    consent_sms: bool
+    consent_voice: bool
+    do_not_contact: bool
+    #: Derived from the flags by the model, so this listing cannot disagree with
+    #: what the decision policy will refuse.
+    consent_channels: list[Channel]
+    may_contact: bool
+    version: int
+    created_at: datetime
+
+
+class ContractListResponse(BaseModel):
+    """One keyset page of the tenant's contracts, newest first."""
+
+    items: list[ContractListItem]
+    count: int
+    #: Echoed so a caller reading a filtered list knows which filter produced it.
+    status: ContractStatus | None
+    #: The id to pass back as ``?cursor=`` for the next page, or ``None`` when this
+    #: page reached the end. Set only when a row was actually seen beyond the page,
+    #: so ``None`` is a real completeness claim rather than "the page looked full".
+    next_cursor: int | None
+
+
+def _list_item(contract: Contract) -> ContractListItem:
+    """Serialize one contract for the listing.
+
+    ``created_at`` is re-attached to UTC here for the same reason the decision view
+    does it: MySQL's ``DATETIME`` discards the offset, so ``as_utc`` is the single
+    place the timezone is put back (D2-01).
+    """
+    return ContractListItem(
+        id=contract.id,
+        customer_ref=contract.customer_ref,
+        status=contract.status,
+        source=contract.source,
+        risk=contract.risk,
+        start_date=contract.start_date,
+        end_date=contract.end_date,
+        timezone=contract.timezone,
+        sha256=contract.sha256,
+        has_document=contract.storage_path is not None,
+        consent_email=contract.consent_email,
+        consent_sms=contract.consent_sms,
+        consent_voice=contract.consent_voice,
+        do_not_contact=contract.do_not_contact,
+        consent_channels=sorted(contract.consent_channels, key=lambda channel: channel.value),
+        may_contact=contract.may_contact,
+        version=contract.version,
+        created_at=as_utc(contract.created_at) or contract.created_at,
+    )
+
+
+@router.get(
+    "",
+    response_model=ContractListResponse,
+    summary="List the caller's contracts, newest first",
+)
+def list_contracts(
+    contract_status: Annotated[ContractStatus | None, Query(alias="status")] = None,
+    cursor: Annotated[int | None, Query(ge=1)] = None,
+    limit: Annotated[int, Query(ge=1, le=MAX_CONTRACT_PAGE_LIMIT)] = DEFAULT_CONTRACT_PAGE_LIMIT,
+    principal: Principal = Depends(
+        require_roles(UserRole.ADMIN, UserRole.OPERATOR, UserRole.VIEWER)
+    ),
+    session: Session = Depends(get_request_session),
+) -> ContractListResponse:
+    """Read the contracts this tenant holds.
+
+    Until now the aggregate root had a write path and no read path: a contract
+    could be ingested, and every later route took its id on faith. This is the
+    listing an operator needs to find that id — it is what makes the other
+    per-contract routes reachable without reading one out of an ingest response.
+
+    Viewer is allowed, because nothing here is a customer value.
+
+    The parameter is named ``contract_status`` and aliased to ``status``: the
+    module already imports ``fastapi.status`` and a parameter shadowing it would
+    turn the next ``status.HTTP_...`` in this function into an ``AttributeError``
+    at the worst possible moment.
+
+    ``limit + 1`` rows are fetched to decide whether a next page exists. Asking
+    for one row more is what lets ``next_cursor`` be a fact about the database
+    rather than an inference from "the page looked full".
+    """
+    repository = ContractRepository(session, principal.tenant_id)
+    rows = repository.recent(limit=limit + 1, status=contract_status, after=cursor)
+
+    items = [_list_item(row) for row in rows[:limit]]
+    return ContractListResponse(
+        items=items,
+        count=len(items),
+        status=contract_status,
+        next_cursor=items[-1].id if len(rows) > limit else None,
     )
 
 

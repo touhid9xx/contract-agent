@@ -29,7 +29,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.base import utc_now
-from app.db.enums import ContractSource
+from app.db.enums import ContractSource, ContractStatus
 from app.db.models import Contract
 from app.db.repositories.base import TenantScopedRepository
 
@@ -47,6 +47,13 @@ CONSENT_FLAG_COLUMNS = (
     "do_not_contact",
 )
 
+#: How many contracts a listing returns when the caller does not say, and the
+#: ceiling it is clamped to. Same shape as ``DEFAULT_DECISION_HISTORY_LIMIT`` and
+#: for the same reason: the bound lives at the query, so no caller can ask for a
+#: whole tenant's contract table in one response.
+DEFAULT_CONTRACT_PAGE_LIMIT = 50
+MAX_CONTRACT_PAGE_LIMIT = 200
+
 
 class ContractRepository(TenantScopedRepository[Contract]):
     """Tenant-scoped access to the contracts of one organisation."""
@@ -59,6 +66,42 @@ class ContractRepository(TenantScopedRepository[Contract]):
         """
         stmt = self.scoped(Contract).where(Contract.sha256 == sha256)
         return self.session.execute(stmt).scalar_one_or_none()
+
+    def recent(
+        self,
+        *,
+        limit: int = DEFAULT_CONTRACT_PAGE_LIMIT,
+        status: ContractStatus | None = None,
+        after: int | None = None,
+    ) -> list[Contract]:
+        """The tenant's contracts, newest first, as one keyset page.
+
+        ``id`` is both the sort key and the cursor, which is not a shortcut: the
+        column is autoincrement, so ``ORDER BY id DESC`` *is* insertion order and
+        therefore newest-first. Using it instead of ``created_at`` avoids the tie
+        that ``AgentDecisionRepository.recent`` has to break with a second column —
+        ``created_at`` is a ``DATETIME`` without fractional seconds, so two
+        contracts ingested in the same second store the same timestamp and
+        "newest" would stop being a total order.
+
+        ``after`` is the id of the last row of the previous page, so paging is
+        ``WHERE id < after``: a scroll through the list touches each contract once
+        and cannot skip or repeat a row when other rows are being ingested
+        underneath it. That property is what ``OFFSET`` cannot give, and it is the
+        same reason the review queue pages by sort key (D8-06).
+
+        The cursor is a **position, not an authorisation**: it is only ever
+        combined with the tenant predicate from :meth:`scoped`, so a guessed id
+        from another organisation narrows this tenant's own rows rather than
+        disclosing someone else's.
+        """
+        stmt = self.scoped(Contract)
+        if status is not None:
+            stmt = stmt.where(Contract.status == status)
+        if after is not None:
+            stmt = stmt.where(Contract.id < after)
+        stmt = stmt.order_by(Contract.id.desc()).limit(limit)
+        return list(self.session.execute(stmt).scalars())
 
     def create(
         self,
