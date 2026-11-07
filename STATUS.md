@@ -438,6 +438,26 @@ resolves. The scope sentence reads the **server's echoed** `contract_id`, not th
 reference defined both ways. **No backend change, no schema change, no migration (`0006`)** — the
 parameter already existed on the wire.
 
+**Then the scope vocabulary gets a test** (`D10-37`, one commit: `test(web)` `df81b8e`): `D10-36` closed on a
+limit it could not pay for — `frontend/src/lib/contract-scope.ts`, the one frontend module whose
+entire job is branching on strings, was exercised by nothing but `tsc`. The module had already been
+shaped for the test that did not exist (`ReadableParams` is a structural
+`{ get(name): string | null }`, so a stub stands in for a router), and this slice writes it: **19
+tests in three tables** — what is no scope, what is a contract, and what is malformed, the last
+chosen as the inputs `Number()` would *rescue* (`"0"`, `"012"`, `"12abc"`, `"1e3"`, `"0x10"`,
+`"9007199254740992"`) — plus `readResolved`, both writers, a read-after-write round trip, the
+composition of `?contract=` and `?resolved=1`, `contractIdFromInput` and `inputNamesAContract`. The
+table **failed on its first run**, on `contractIdFromInput(" 12 ")`: the address is read verbatim
+and the typed box trims, a rule that existed only as an implication of two separate regexes and is
+now an expectation of its own. Vitest is the runner because the spec needs no DOM, no JSX and no
+build config — the import is relative, so **no `vitest.config.ts` exists** and the `@/` alias never
+has to be taught to a second resolver — and it runs in the **commit gate** as a `frontend-test`
+hook, because a suite nothing runs is a suite that rots. Teeth were checked by breaking the code:
+`/^[0-9]+$/` without the `Number.isSafeInteger` guard turns **2 of 19** red, and
+`contract-scope.ts` was restored byte-identical afterwards, which is why this is `test(web)` and not
+`feat(web)`. **No backend change, no schema change, no migration (`0006`)**; the frontend still has
+**no component, browser or integration test**, so the three scoped screens remain unrendered.
+
 ## Phase history
 
 | Phase | State |
@@ -3830,13 +3850,15 @@ in a way no amount of typechecking does. `ReadableParams` is a structural
 `{ get(name): string | null }` precisely so such a test could pass a stub instead of a router. It is
 written to be testable and remains untested. **No browser has rendered any of these screens**, and
 the key counts are a script's output rather than a reading of the Bengali catalogue by somebody who
-reads Bengali.
+reads Bengali. **Amended, not deleted (`D10-37`):** the table now exists and the runner is in the
+commit gate; the paragraph stays because it is the reason the module was shaped to be testable.
 
 ### What this does not do — stated, not buried
 
 - **No frontend test runner.** The gap is older than this slice; this slice is the one that pays for
   it, because `contract-scope.ts` is the first pure module in the frontend with branching logic that
-  nothing calls in a test.
+  nothing calls in a test. **Amended (`D10-37`):** the runner arrived with exactly that one spec, and
+  the hook that runs it is part of the gate. There are still no component or browser tests.
 - **Nothing on the escalation queue screen is tested either.** It now has a filter control and a
   resolved toggle in the address, and both are reached by hand only.
 - **The scope form is a text box, not a picker.** It takes an id because that is what the parameter
@@ -3848,6 +3870,64 @@ reads Bengali.
   parameter they needed landed in `5421338`.
 - **Gap 5 is untouched.** The `contract.ingested` consumer is still unwritten and still blocked on an
   owner decision, exactly where `D10-35` left it.
+
+## The scope vocabulary has a test ✅ (`D10-37` — a runner, one spec, and a gate that runs it)
+
+`D10-36` closed with a limit it could not pay for: `frontend/src/lib/contract-scope.ts` — the one
+frontend module whose entire job is branching on strings — was exercised by nothing but `tsc`. The
+module had already been shaped for the test that did not exist: `ReadableParams` is a structural
+`{ get(name): string | null }` rather than `URLSearchParams`, so a stub can stand in for a router.
+This slice writes that table, adds the smallest runner that can execute it, and puts the runner in
+the **commit gate** rather than on disk — a suite nothing runs is a suite that rots.
+
+| Change | Detail |
+| --- | --- |
+| `frontend/src/lib/contract-scope.test.ts` | **New, 213 lines, 19 tests.** Three tables: what is no scope (`absent`, `""`), what is a contract (`"1"`, `"12"`, `"9007199254740991"`), and what is malformed — the set chosen as the inputs `Number()` would *rescue*. Plus `readResolved`, both writers, a write→read round trip, the `?contract=` + `?resolved=1` composition, `contractIdFromInput` and `inputNamesAContract`. |
+| `frontend/package.json` | `vitest@^5.1.0` as a `devDependency` and a `test` script (`vitest run`); the lockfile grows by ~1,000 lines because a runner brings its own bundler. |
+| `.pre-commit-config.yaml` | A `frontend-test` hook beside the two existing frontend checks, gated on `frontend/**/*.{ts,tsx}`. |
+| `scripts/run-frontend-check.mjs` | `"test"` added to `ALLOWED`, so the hook drives `npm run test` in the project directory the same way it already drives `typecheck` and `lint`. |
+| `package.json` (root) | `npm test` delegating with `--prefix frontend`, matching the existing `typecheck` and `lint` entries. |
+| `DECISIONS.md` | `D10-37`, plus an amend-not-delete pointer on `D10-36`'s "it is written to be testable and remains untested". |
+| No backend change, no schema change | `alembic` head stays `0006`; nothing outside `frontend/`, the hook, the bridge script and the root script list changed. |
+
+### Why vitest, and why there is no config file at all
+
+The spec imports a `.ts` module, calls it, and compares plain objects. Vitest transforms TypeScript
+out of the box and defaults to a `node` environment, so it brings no DOM, no JSX and no mocking layer
+into a module that needs none — a runner that required a build config to read one pure module would
+have been more machinery than the thing it checks. The spec imports `describe`/`it`/`expect` from
+`"vitest"` rather than enabling `globals: true`, so **no ambient types are declared** and
+`tsconfig.json` is untouched; `tsc --noEmit` already includes `**/*.ts`, so the spec is typechecked
+by the same gate as the source it tests. The import is relative (`./contract-scope`) and therefore
+**no `vitest.config.ts` exists** — the `@/` alias never has to be taught to a second resolver.
+
+### The table found a real asymmetry, and it was mine
+
+The first run **failed**, on `contractIdFromInput(" 12 ")` — which is `12`. The malformed list
+cannot be shared between the two paths, because the two paths deliberately differ: **the address is
+read verbatim, the typed box trims.** That rule existed only as an implication of two separate
+regexes; it is now its own expectation (`" 1 "` is a typed id but a malformed address), which is the
+version a future edit is least likely to break by accident.
+
+### Teeth, checked by breaking the code
+
+A green suite is not evidence that it would go red. Replacing `/^[1-9][0-9]*$/` with `/^[0-9]+$/`
+and dropping the `Number.isSafeInteger` guard made **2 of 19** tests fail (`raw=0` read as contract
+`0`). The source was then restored and `git diff` on `contract-scope.ts` is **empty** — this slice
+touches no production behaviour, which is why it is `test(web)` and not `feat(web)`.
+
+### What this still does not test — stated, not buried
+
+- **The three screens.** `agent/page.tsx`, `notifications/page.tsx` and `escalations/page.tsx` need
+  React, a router, a query client and a browser. A jsdom renderer would prove the components *mount*,
+  not that the screens behave, and claiming otherwise is the overclaim `D10-36` refused to make. The
+  frontend still has **no component tests, no browser test and no integration test**.
+- **The key parity and the Bengali strings.** Still a script's output, still unread by anyone who
+  reads Bengali.
+- **The advisories.** `npm install` printed **7 moderate severity** advisories for the frontend tree.
+  An `npm audit` run was attempted and did not complete, so nothing is claimed about whether they are
+  new, pre-existing, or development-only.
+- **Gap 5 is untouched.** The `contract.ingested` consumer is still blocked on an owner decision.
 
 ## Next permitted step
 
@@ -3874,6 +3954,10 @@ gap 15 is closed too: a reply is now recorded and an SLA clock is now opened
 and the editor now ships on `/[locale]/contracts`, so the sentence above no longer names
 outstanding work. What is left is what `D10-33` lists instead — no bulk editor, no
 frontend test runner, and no channel consented by default on a fresh database.
+**Amended, not deleted (`D10-37`, `df81b8e`):** one of those three is now paid. `frontend/`
+has a runner — `vitest`, one `test` script, and a `frontend-test` hook in the commit gate —
+so the residue is narrower than the sentence reads but not gone: **one pure module is the
+whole of what runs**, and no component, browser or integration test exists for any screen.
 
 - `app/db/models/` — every table in the flow now has a writer: `Contract`
   (`POST /contracts`), `ExtractedField` (`python -m app.cli extract`,

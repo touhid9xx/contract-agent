@@ -3440,5 +3440,68 @@ partial-record lookups (`if (refusalKey !== undefined)`) interpolated as a key *
 most expensive: the module is pure, total and free of React, so a table of a dozen addresses would
 have pinned the whole vocabulary in a way no amount of typechecking does — and `ReadableParams` is a
 structural `{ get(name): string | null }` precisely so such a test could pass a stub instead of a
-router. It is written to be testable and remains untested. **No browser has rendered any of these
-screens**, the Bengali keys are mine and unread by anyone who reads Bengali, and gap 5 is untouched.
+router. It is written to be testable and remains untested. **Amended, not deleted (`D10-37`):** that
+table now exists, the runner is in the commit gate, and the stub type is used by it; the paragraph is
+kept because it is the reason the module was shaped the way it was.
+
+**No browser has rendered any of these screens**, the Bengali keys are mine and unread by anyone who
+reads Bengali, and gap 5 is untouched.
+
+### D10-37 — The compiler is not a test: the scope vocabulary gets a runner
+
+`D10-36` ended by naming the limit it could not pay for. `frontend/src/lib/contract-scope.ts` is
+pure, total and free of React — the one module in the frontend whose entire job is branching on
+strings — and nothing but `tsc` exercised it. It had even been shaped for the test that did not
+exist: `ReadableParams` is a structural `{ get(name): string | null }` rather than
+`URLSearchParams`, precisely so a table of addresses could be passed in without a router. This slice
+writes that table. It is a small slice on purpose: closing the gap is worth doing, inventing a
+frontend test *culture* in the same commit is not.
+
+- **Vitest, because every alternative costs a config file.** The spec needs to import a `.ts` module,
+  call it, and compare plain objects. Vitest transforms TypeScript out of the box, defaults to a
+  `node` environment, and brings no DOM, no JSX and no mocking layer into a module that needs none.
+  A runner that required a build config to read one pure module would have been more machinery than
+  the thing it checks.
+- **Named imports, never globals.** The spec imports `describe`, `it` and `expect` from `"vitest"`
+  instead of enabling `globals: true`, so **no ambient types are declared** and no `tsconfig.json`
+  entry changes. That matters because `tsc --noEmit` already includes `**/*.ts`: the spec is
+  typechecked by the same gate as the source it tests, for free, and a mistake in the test is a
+  compile error rather than a silently skipped file.
+- **No `vitest.config.ts` exists.** The spec imports `./contract-scope` relatively, so the `@/` alias
+  never has to be taught to a second resolver. A config file would be one more place for the module
+  graph to be described differently from what `tsc` and Next.js see.
+- **The runner is in the gate, not just on disk.** A test runner nobody runs rots: the first failing
+  expectation is then discovered by whoever finally types `npm test`, months later. A `frontend-test`
+  hook joins the two frontend checks in `.pre-commit-config.yaml`, and `npm test` joins
+  `typecheck`/`lint` in both `package.json` files, so the same command that exists locally is the one
+  the gate runs. The hook fires only on `frontend/**/*.{ts,tsx}` and the whole suite takes well under
+  a second.
+- **What the table pins.** `readContractScope` over absent, empty, whole numbers up to
+  `Number.MAX_SAFE_INTEGER`, and a malformed set chosen to be the ones `Number()` would *rescue* —
+  `"0"`, `"00"`, `"012"`, `"12abc"`, `"1.5"`, `"+12"`, `" 12"`, `"12 "`, `"0x10"`, `"1e3"`, `"12,"`
+  and `"9007199254740992"`. Plus `readResolved` (only `"1"` is yes), both writers, a round-trip that
+  reads back every address the writers produce, and the composition that keeps `?contract=` when
+  `?resolved=1` is added.
+- **The table found a real asymmetry, and it was mine.** The first run failed on
+  `contractIdFromInput(" 12 ")`, which is `12` — so the malformed list cannot be shared between the
+  two paths. The difference is deliberate and was previously only implied by two separate regexes:
+  **the address is read verbatim, the typed box trims.** Whitespace is now stated as its own
+  expectation instead of being folded into "malformed", which is the version of the rule a future
+  edit is least likely to break by accident.
+- **Teeth, checked by breaking the code.** A spec that passes is not evidence that it would fail.
+  Replacing `/^[1-9][0-9]*$/` with `/^[0-9]+$/` and dropping the `Number.isSafeInteger` guard made
+  **2 of the 19** tests fail (`raw=0` read as contract `0`); the source was then restored and
+  `git diff` on `contract-scope.ts` is empty, so only the spec and its plumbing are in this slice.
+
+**What this deliberately does not test.** The three screens. `agent/page.tsx`,
+`notifications/page.tsx` and `escalations/page.tsx` need React, a router, a query client and a
+browser; a jsdom renderer standing in for those would prove that the components mount, not that the
+screens behave, and claiming otherwise is the overclaim every record in `D10-36` avoided. So the
+frontend still has **no component tests, no browser test, and no integration test** — what it now
+has is one honest unit test of the one module that is pure enough for a unit test to mean something.
+
+**Dependency cost, stated.** `vitest@^5.1.0` as a `devDependency` of `frontend/`; the lockfile grows
+by roughly a thousand lines because a runner brings its own bundler. `npm install` printed **7
+moderate severity advisories** for the tree. I did **not** complete an `npm audit` run — it hung and
+wedged the shell — so nothing is claimed here about whether those are new, pre-existing, or
+development-only. `alembic` head stays `0006`, and no backend file changed.
