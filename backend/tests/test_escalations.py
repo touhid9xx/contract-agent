@@ -501,6 +501,73 @@ def test_the_queue_filters_by_status(
     assert [item["id"] for item in response.json()["items"]] == [open_row.id]
 
 
+def test_the_queue_can_be_narrowed_to_one_contract(
+    client: TestClient,
+    headers: Callable[..., Any],
+    make_contract: Callable[..., Contract],
+    make_escalation: Callable[..., Escalation],
+) -> None:
+    """A detail page asks "what happened here", so closed rows stay in the answer."""
+    now = _now_naive()
+    contract = make_contract()
+    closed = make_escalation(
+        contract, deadline=now - timedelta(hours=5), status=EscalationStatus.RESOLVED
+    )
+    open_row = make_escalation(contract, deadline=now + timedelta(hours=1))
+    make_escalation(make_contract(), deadline=now + timedelta(hours=1))
+
+    response = client.get(QUEUE_PATH, params={"contract_id": contract.id}, headers=headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    # Deadline order, oldest first — for a single contract, oldest escalation first.
+    assert [item["id"] for item in body["items"]] == [closed.id, open_row.id]
+    assert body["count"] == 2
+    # The echo is what lets a page tell "none for this contract" from "empty queue".
+    assert body["contract_id"] == contract.id
+
+
+def test_a_contract_filter_answers_another_tenants_contract_with_nothing(
+    client: TestClient,
+    headers: Callable[..., Any],
+    make_contract: Callable[..., Contract],
+    make_escalation: Callable[..., Escalation],
+    other_tenant: Tenant,
+) -> None:
+    """The id is applied after the tenant predicate, so it cannot be used to probe."""
+    theirs = make_contract(owner=other_tenant)
+    make_escalation(theirs, deadline=_now_naive() + timedelta(hours=1))
+    mine = make_contract()
+    make_escalation(mine, deadline=_now_naive() + timedelta(hours=1))
+
+    response = client.get(QUEUE_PATH, params={"contract_id": theirs.id}, headers=headers())
+
+    assert response.status_code == 200
+    assert response.json()["items"] == []
+    assert response.json()["count"] == 0
+    # Echoing back an id that matched nothing is not a disclosure: the caller sent it.
+    assert response.json()["contract_id"] == theirs.id
+
+
+def test_a_viewer_may_read_one_contracts_escalations(
+    client: TestClient,
+    headers: Callable[..., Any],
+    make_contract: Callable[..., Contract],
+    make_escalation: Callable[..., Escalation],
+) -> None:
+    contract = make_contract()
+    row = make_escalation(contract, deadline=_now_naive() + timedelta(hours=1))
+
+    response = client.get(
+        QUEUE_PATH,
+        params={"contract_id": contract.id},
+        headers=headers(email="viewer@acme.test", role=UserRole.VIEWER),
+    )
+
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()["items"]] == [row.id]
+
+
 def test_the_queue_never_shows_another_tenants_rows(
     client: TestClient,
     headers: Callable[..., Any],

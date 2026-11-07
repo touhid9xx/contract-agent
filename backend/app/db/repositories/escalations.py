@@ -128,17 +128,30 @@ class EscalationRepository(TenantScopedRepository[Escalation]):
         *,
         limit: int,
         statuses: Sequence[EscalationStatus] | None = None,
+        contract_id: int | None = None,
     ) -> list[Escalation]:
         """The oldest deadline first, which is also the most urgent row first.
 
         Ordering by ``sla_deadline`` rather than ``created_at`` is deliberate: an
         operator works the queue in the order the SLA will punish them, and two
         escalations raised minutes apart can already have different deadlines if
-        the SLA is changed between them.
+        the SLA is changed between them. The same order reads correctly when
+        ``contract_id`` narrows the result to one contract's history, because a
+        contract's escalations are raised one after another: oldest deadline first
+        is oldest escalation first.
+
+        ``contract_id`` narrows the queue, it does not replace the tenant
+        predicate — the filter is applied *after* ``scoped()``, so another tenant's
+        id yields an empty list rather than their rows, and cannot be used to probe
+        which ids exist. It lives here rather than in a second ``for_contract``
+        method so "most urgent first" is decided in exactly one place; a copy would
+        be free to drift from this one.
         """
         stmt = self.scoped(Escalation)
         if statuses is not None:
             stmt = stmt.where(Escalation.status.in_(list(statuses)))
+        if contract_id is not None:
+            stmt = stmt.where(Escalation.contract_id == contract_id)
         stmt = stmt.order_by(Escalation.sla_deadline.asc(), Escalation.id.asc()).limit(limit)
         return list(self.session.execute(stmt).scalars())
 

@@ -122,6 +122,11 @@ class EscalationListResponse(BaseModel):
     overdue: int
     #: Echoed so the UI can say "48 h" without hard-coding the configured value.
     sla_hours: int
+    #: Echo of the filter, so a caller can tell "this contract has none" from
+    #: "the queue is empty" without re-reading its own query string. ``None``
+    #: means the whole queue, the same convention ``AgentDecisionListResponse``
+    #: uses.
+    contract_id: int | None = None
 
 
 class CustomerResponseView(BaseModel):
@@ -445,6 +450,7 @@ def raise_escalation(
 )
 def list_escalations(
     statuses: list[EscalationStatus] | None = Query(default=None, alias="status"),
+    contract_id: int | None = Query(default=None, gt=0),
     limit: int = Query(default=DEFAULT_ESCALATION_QUEUE_LIMIT, ge=1, le=MAX_ESCALATION_QUEUE_LIMIT),
     principal: Principal = Depends(
         require_roles(UserRole.ADMIN, UserRole.OPERATOR, UserRole.VIEWER)
@@ -458,8 +464,20 @@ def list_escalations(
     repeated (``?status=open&status=in_progress``); omitting it returns every
     state, including resolved ones, which is what an auditor wants and what a
     working queue filters out.
+
+    ``?contract_id=`` narrows the same queue to one contract, which is what makes
+    a contract's own page able to say whether it is late instead of sending the
+    reader to a tenant-wide list to search for it. Unlike ``status``, naming a
+    contract returns its *closed* rows too: the question a detail page asks is
+    "what happened here", and hiding the escalation that was already resolved
+    would answer it with a half-history. A contract id from another tenant is an
+    empty list rather than a 404, because the tenant predicate is applied before
+    the id — the same opacity ``GET /agent/decisions`` and ``GET /notifications``
+    give their own filters.
     """
-    rows = EscalationRepository(session, principal.tenant_id).queue(limit=limit, statuses=statuses)
+    rows = EscalationRepository(session, principal.tenant_id).queue(
+        limit=limit, statuses=statuses, contract_id=contract_id
+    )
     now = utc_now()
     items = [_view(row, now) for row in rows]
     return EscalationListResponse(
@@ -467,6 +485,7 @@ def list_escalations(
         count=len(items),
         overdue=sum(1 for item in items if item.overdue),
         sla_hours=settings.escalation_sla_hours,
+        contract_id=contract_id,
     )
 
 
