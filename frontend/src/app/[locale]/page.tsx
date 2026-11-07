@@ -122,12 +122,21 @@ export default function HomePage() {
           <p className="text-sm text-muted-foreground">{t("home.body")}</p>
 
           {/*
-            The three screens that do work rather than report it are linked from
-            here instead of being reachable only by URL. Shown whether or not
-            there is a session: each asks for one itself, and hiding the links
-            would leave a signed-out visitor no way to learn they exist.
+            The screens that do work rather than report it are linked from here
+            instead of being reachable only by URL. Shown whether or not there is
+            a session: each asks for one itself, and hiding the links would leave
+            a signed-out visitor no way to learn they exist.
+
+            `contracts` leads because it is the one screen every other per-contract
+            route depends on: they all take a contract id, and until this listing
+            existed the only place to get one was an ingest response.
           */}
           <div className="flex flex-wrap items-center gap-2">
+            <Link href={`/${locale}/contracts`}>
+              <Button size="sm" variant="secondary">
+                {t("nav.contracts")}
+              </Button>
+            </Link>
             <Link href={`/${locale}/review`}>
               <Button size="sm" variant="secondary">
                 {t("nav.review")}

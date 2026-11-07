@@ -598,6 +598,89 @@ export const agent = {
     }),
 };
 
+/** Wire values of `app.db.enums.ContractSource`. */
+export type ContractSource = "pdf" | "api";
+
+/** Wire values of `app.db.enums.RiskLevel`. */
+export type RiskLevel = "low" | "medium" | "high";
+
+/**
+ * One stored contract (`app.api.v1.contracts.ContractListItem`).
+ *
+ * The route withholds two columns and this shape is the reason: `storage_path` is
+ * an absolute path inside the API container and `created_by` is an internal user
+ * id, so neither is modelled here. `has_document` answers the one question a
+ * reader has about the stored file, and modelling a `path` field would invite a
+ * screen to render it.
+ *
+ * `may_contact` and `consent_channels` are computed by the model, not by this
+ * client: a UI that re-derived them from the four booleans would be a second
+ * implementation of the contact policy, free to disagree with the one the
+ * decision worker enforces.
+ */
+export interface ContractListItem {
+  id: number;
+  customer_ref: string;
+  status: ContractStatus;
+  source: ContractSource;
+  risk: RiskLevel;
+  /** `YYYY-MM-DD`, or `null` when the contract carries no term. */
+  start_date: string | null;
+  end_date: string | null;
+  /** The customer's wall clock, which is what reminder milestones are measured on. */
+  timezone: string;
+  /** Per-tenant dedupe key: the metadata fingerprint, or the document's hash. */
+  sha256: string | null;
+  has_document: boolean;
+  consent_email: boolean;
+  consent_sms: boolean;
+  consent_voice: boolean;
+  do_not_contact: boolean;
+  consent_channels: ContactChannel[];
+  may_contact: boolean;
+  version: number;
+  created_at: string;
+}
+
+/** One keyset page of contracts, newest first. */
+export interface ContractList {
+  items: ContractListItem[];
+  /** How many rows this page carries, not how many the tenant holds. */
+  count: number;
+  /** Echo of the filter; `null` means every status. */
+  status: ContractStatus | null;
+  /** Pass back as `cursor`. `null` is a completeness claim, not "looked full". */
+  next_cursor: number | null;
+}
+
+/**
+ * The contract surface (the read half of the aggregate root).
+ *
+ * Reading needs any authenticated role: nothing in the payload is a customer
+ * value — `customer_ref` is the pseudonymous label, and identity lives in the
+ * encrypted `ExtractedField` rows this route never touches. There is no write
+ * function here yet: ingestion is a route without a screen.
+ */
+export const contracts = {
+  /**
+   * One page, newest first.
+   *
+   * The cursor is `Contract.id`, which is insertion order — so a scroll touches
+   * each contract once even while new rows arrive underneath it. It is a
+   * position, not an authorisation: the server always ANDs it with the tenant
+   * predicate, so a guessed id narrows this tenant's own rows.
+   */
+  list: (accessToken: string, options: { status?: ContractStatus; cursor?: number } = {}) => {
+    const params = new URLSearchParams();
+    if (options.status !== undefined) params.set("status", options.status);
+    if (options.cursor !== undefined) params.set("cursor", String(options.cursor));
+    const query = params.toString();
+    return request<ContractList>(query === "" ? "/contracts" : `/contracts?${query}`, {
+      accessToken,
+    });
+  },
+};
+
 /**
  * Liveness probe.
  *

@@ -14,7 +14,7 @@
   "home": {
     "phaseLabel": "Phase 1 foundation",
     "heading": "Foundation is being built",
-    "body": "Ingestion, extraction, human review, channel selection and reminders are live in the API. Three screens can complete work today — review, channel decisions and escalations. Ingestion and notifications still need a client.",
+    "body": "Ingestion, extraction, human review, channel selection and reminders are live in the API. Three screens can complete work today — review, channel decisions and escalations — and a fourth lists the contracts they all take by id. Ingestion and notifications still need a client.",
     "healthHeading": "Backend connectivity",
     "healthOk": "API reachable",
     "healthFail": "API unreachable",
@@ -238,6 +238,63 @@
     "channelEmail": "Email",
     "channelSms": "SMS",
     "channelVoice": "Voice"
+  },
+  "contracts": {
+    "title": "Contracts",
+    "subtitle": "Everything this organisation has ingested, newest first. This listing exists to find a contract the other screens take by id — it does not sort or filter by expiry, so \"what expires next\" is still not answerable here.",
+    "signInRequired": "Sign in to see the contracts this organisation holds.",
+    "signIn": "Sign in",
+    "backToHome": "Back",
+    "filterLabel": "Status",
+    "filterAll": "All",
+    "countLabel": "{count} in view",
+    "loading": "Loading the contracts…",
+    "loadingMore": "Loading…",
+    "loadMore": "Load more",
+    "retry": "Try again",
+    "empty": "No contract matches this filter.",
+    "emptyHint": "A contract appears here once it has been ingested.",
+    "contractLabel": "contract #{id}",
+    "refLabel": "Reference",
+    "sourceLabel": "Source",
+    "riskLabel": "Risk",
+    "datesLabel": "Term",
+    "noDates": "No dates recorded",
+    "timezoneLabel": "Time zone",
+    "documentLabel": "Document",
+    "documentStored": "Stored",
+    "documentMissing": "Metadata only",
+    "contactLabel": "Contact",
+    "contactPermitted": "Allowed on {channels}",
+    "contactNoChannels": "No channel consented",
+    "contactOptedOut": "Opted out — do not contact",
+    "createdAtLabel": "Ingested",
+    "shaLabel": "Fingerprint",
+    "offline": "The API is not reachable. Is the backend running?",
+    "forbidden": "Your role cannot read the contract list.",
+    "failed": "That did not work. Try again.",
+    "sources": {
+      "pdf": "uploaded document",
+      "api": "API"
+    },
+    "risks": {
+      "low": "low",
+      "medium": "medium",
+      "high": "high"
+    },
+    "statuses": {
+      "active": "active",
+      "reminder_sent": "reminder sent",
+      "responded": "responded",
+      "renewed": "renewed",
+      "expired": "expired",
+      "escalated": "escalated"
+    },
+    "channels": {
+      "email": "email",
+      "sms": "SMS",
+      "voice": "voice"
+    }
   },
   "common": {
     "language": "Language",

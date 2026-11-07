@@ -260,6 +260,19 @@ tests whether it is `None`, and nothing yet turns the bytes into text, so gap 12
 stays half-closed and gap 5 stays blocked. The suite moved from **827** to **840**
 (825 passed, the same 15 environmental skips). No migration: the head stays `0006`.
 
+**Then the listing gets a face** (`D10-28`, `feat(web)`): `/[locale]/contracts` is the
+first screen that reads the contract aggregate — a status-filtered, cursor-paged list of
+the caller's tenant's contracts, linked from the home nav instead of reachable only by
+typing a URL. It is read-only on purpose: ingestion still has no screen, so there is no
+create action, and there is no expiry countdown because "expiring soon" needs a
+definition the API does not offer yet. Contactability is **read** (`may_contact`,
+`consent_channels`), never re-derived from the four consent flags, so the screen cannot
+disagree with the policy the decision worker enforces. No backend file changed, no
+migration, no new dependency. Both locales carry **271 keys**, with zero used-but-missing,
+zero unused and zero placeholder drift, checked by a script rather than by eye. No
+frontend test runner exists in this repo, so what is proven is that audit and the
+type/lint gate — **not** that a browser has rendered the screen.
+
 ## Phase history
 
 | Phase | State |
@@ -2860,9 +2873,12 @@ what makes the figures above still the figures the commit carries.
 
 ### What this does not do — stated, not buried
 
-- **No screen consumes it.** This slice is backend-only. `frontend/src/lib/api.ts`
+- ~~**No screen consumes it.** This slice is backend-only. `frontend/src/lib/api.ts`
   has no client for the route, so nothing in the product renders this listing and
-  the contracts screen stays unbuilt.
+  the contracts screen stays unbuilt.~~ **Falsified by `D10-28`, and amended rather
+  than deleted:** both halves are now false — `api.ts` has a `contracts.list` client
+  and `/[locale]/contracts` renders the listing. Correct when written; the slice that
+  consumed it came next.
 - **Newest-first is the only ordering.** There is no search, no sort parameter and
   no `end_date` filter — so "which contracts expire soon", the question the
   product exists to answer, is still not answerable from this route. The listing
@@ -2875,6 +2891,67 @@ what makes the figures above still the figures the commit carries.
   `has_document` tests `storage_path is not None`. Nothing turns the stored bytes
   into text, so the claim this slice can support is narrower than "the column is
   read now": gap 12 stays half-closed and gap 5 stays blocked.
+
+## The contract list has a screen ✅ (`D10-28` — read-only, on purpose)
+
+`GET /api/v1/contracts` landed with no consumer. `/[locale]/contracts` is that consumer:
+the caller's tenant's contracts, newest first, one cursor page at a time, filterable by
+status, and linked from the home screen instead of reachable only by typing a URL.
+
+| Change | Detail |
+| --- | --- |
+| `frontend/src/lib/api.ts` | `ContractSource`, `RiskLevel`, `ContractListItem`, `ContractList` wire types mirroring `app/api/v1/contracts.py`, plus `contracts.list(accessToken, {status, cursor})`. `storage_path` and `created_by` are **absent from the type**, so rendering one is a compile error rather than a review catch. |
+| `frontend/src/app/[locale]/contracts/page.tsx` | The screen: sign-in gate, status chips, `useInfiniteQuery` + `authorized()` paging, one card per contract. |
+| `frontend/src/i18n/messages/en.json`, `bn.json` | A `contracts` namespace (34 keys); `home.body` amended to say a fourth screen lists the contracts the others take by id. |
+| `frontend/src/app/[locale]/page.tsx` | Nav link to `/contracts`, placed first because every other per-contract screen takes an id this listing is the only non-ingest source of. |
+| No backend change | No route, no migration (`alembic` head stays `0006`), no new dependency. |
+
+### The defect this slice caught in its own first draft
+
+The enum→message-key maps were written against **flat** keys — `statusActive`,
+`sourcePdf`, `riskLow`, `channelEmail` — while the translations had been written as
+**nested** namespaces (`statuses.active`, `sources.pdf`, …). Both halves were valid
+JSON and both halves typechecked, because `t()` is not called with a literal here: the
+screen would have rendered `contracts.statusActive` as visible text on every row. Found
+by flattening both locales and intersecting them with the keys the page actually
+reaches, which is what the audit script does. The maps now hold nested paths, so
+``t(`contracts.${STATUS_KEYS[row.status]}`)`` resolves while a new enum member is still a
+compile error.
+
+Two keys were resolved rather than left dead: `statusLabel` was deleted — it duplicated
+`filterLabel` ("Status") — and `riskLabel` became its own `<dt>`, so risk reads as a
+labelled field instead of a bare `low` after the source.
+
+### Verification actually run (`D10-28`)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Key parity + reachability | `python .agent-cache/contracts_i18n_audit.py` (a **local, gitignored** script — `.agent-cache/` is not in the repo, so this command is reproducible only on the machine that ran it) | **271 keys per locale**; 0 only-in-en, 0 only-in-bn, 0 unused, 0 referenced-but-absent, 0 placeholder drift; 47 `contracts` keys reached by the page |
+| Types (frontend) | commit gate: `tsc --noEmit` | recorded below, by the follow-up commit that names the hash |
+| Lint (frontend) | commit gate: `eslint` | recorded below, by that same follow-up commit |
+
+**What is not proven here.** This repo has no frontend test runner, so no test covers
+this screen and none was written that would run. Nothing in this session rendered it in a
+browser or called the API from one: the page is `next-intl` + TanStack Query code that has
+passed a compiler and a linter and nothing more. That distinction is the whole reason the
+row above says "see below" instead of "passed".
+
+### What this does not do — stated, not buried
+
+- **No create action.** `POST /contracts` and `POST /contracts/document` still have no
+  screen, so in a real deployment the only way into this list remains an API call. The
+  screen was written to *find* contracts, not to make them.
+- **No expiry ordering or countdown.** "Expires in N days" needs the contract's own
+  `timezone` and a product definition of the window, and the route offers no `end_date`
+  sort or filter to ask either question — so "which contracts expire soon" stays
+  unanswerable, exactly as `D10-27` recorded.
+- **No search, client-side or server-side.** A filter over one keyset page would claim to
+  search the tenant's contracts while holding a page of them.
+- **Nothing is clickable.** Each card names `contract #{id}`; there is no
+  `/[locale]/contracts/[id]` route, so an id cannot be followed from here to the fields,
+  decisions, notifications or consent that take one.
+- **Gap 5 is untouched.** The `contract.ingested` consumer is still unwritten and still
+  blocked on an owner decision; a listing does not change what a consumer could do.
 
 ## Next permitted step
 
@@ -2933,7 +3010,9 @@ gap 15 is closed too: a reply is now recorded and an SLA clock is now opened
   Nothing else does — the contract, review, agent and notification routes have still
   only ever been called by `TestClient`. **Amended since this was written:** `review`
   (`da82111`), `agent` (`25886aa`) and `escalation` (`00e9b54`) now have screens that call
-  them; `contract` and `notification` are still `TestClient`-only.
+  them. **Also amended by `D10-28`:** `contract` now has one too — `/[locale]/contracts`
+  calls `GET /api/v1/contracts` — so `notification` is the last v1 router that only a
+  `TestClient` has ever called.
   **Corrected while editing this paragraph:**
   it previously said "`frontend/src/app/*` still calls the mocked demo backend", which
   was never true — the mock is `demo/backend`, and it is consumed by

@@ -2764,3 +2764,78 @@ blocked on an owner decision, and this listing is only its prerequisite.
   about the commit and not merely about a snapshot of the working tree. The gate
   row in this entry's `STATUS.md` counterpart, and the hash itself, were added by
   the follow-up `docs(status)` commit rather than back-dated into the slice.
+
+### D10-28 — The contract list gets a face, and it is deliberately read-only
+
+`D10-27` gave the aggregate root a read side over HTTP and left it with no consumer:
+`frontend/src/lib/api.ts` had no client for `GET /api/v1/contracts`, so the listing could
+be curled and nothing in the product showed it. `/[locale]/contracts` is that consumer —
+a status-filtered, cursor-paged list of the caller's tenant's contracts, linked from the
+home screen rather than reachable only by typing a URL.
+
+- **It reuses the data path the other screens already proved.** `useAuth().isAuthenticated`
+  for the gate, `authorized()` from `@/lib/session` for the call, `useInfiniteQuery` for
+  the pages — the same triple `review`, `escalations` and `agent` use. The page never sees
+  a token: `authorized` hands one to the callback, dedupes a concurrent rotation behind a
+  single in-flight promise, and retries once on 401. A screen that read the session store
+  itself would be a second implementation of refresh, and the one place it would differ is
+  the day the token expires mid-scroll.
+- **The wire type is the redaction.** `ContractListItem` in `api.ts` omits `storage_path`
+  and `created_by` because `ContractListItem` in `app/api/v1/contracts.py` withholds them.
+  Modelling the omission rather than the server's full row makes rendering either one a
+  compile error instead of a review catch — the same argument `D10-27` made for asserting
+  the path's absence from the response text rather than from the model.
+- **The enum→message-key maps hold nested paths, and the first draft of this slice got
+  that wrong.** `STATUS_KEYS` and its three siblings are
+  `as const satisfies Record<ContractStatus, string>`, so a status the backend adds is a
+  compile error here rather than a raw key on screen. But they were first written against
+  **flat** keys (`statusActive`, `sourcePdf`, …) while the translations were written as
+  **nested** namespaces (`statuses.active`, `sources.pdf`, …). Both halves were valid JSON,
+  both halves typechecked — `t()` receives a template literal here, not a literal, so
+  nothing checks the value against the catalogue — and the screen would have rendered
+  `contracts.statusActive` as visible text on every row. The maps now carry the nested
+  paths. This is the class of defect a type system does not reach, which is why the slice
+  was verified with a key audit (flatten both locales, intersect with what the page
+  reaches) rather than by reading the screen.
+- **Calendar dates and instants are formatted differently on purpose.** `start_date` and
+  `end_date` are calendar dates — a contract that ends on the 31st ends on the 31st for
+  everyone — so they are formatted with `timeZone: "UTC"`. `created_at` is an instant and
+  is formatted in the reader's zone. Formatting a calendar date in local time moves it a
+  day for anyone west of UTC, which is the same trap `D6-03` recorded for validating
+  timezones by shape rather than by host rules.
+- **Contactability is read, never recomputed.** The card shows `may_contact` and
+  `consent_channels` as returned. Deriving them from `do_not_contact` and the four channel
+  flags would be a second copy of the contact policy — and the copy on the screen is the
+  one an operator would believe.
+- **Read-only is a decision, not an omission.** No create action, because `POST /contracts`
+  and `POST /contracts/document` have no screen and a button that posted a contract would
+  be inventing an ingestion flow (fingering, source, timezone, dates) that no one has
+  designed. No expiry countdown, because "expires in N days" needs the contract's own
+  `timezone` and a product definition of the window, and the route accepts neither an
+  `end_date` sort nor a filter to ask it. No search, because filtering one keyset page
+  client-side would claim to search the tenant's contracts while holding a page of them.
+- **`statusLabel` was deleted rather than left dead; `riskLabel` earned a field.** The
+  screen shows status as a pill and the filter chip group already labels itself "Status",
+  so a third "Status" string was a duplicate. Risk was rendering as a bare `low` after the
+  source; it now has its own `<dt>`. Both locales were edited together, because
+  `Messages = typeof en` makes `bn` a compile-time obligation rather than a convention.
+- **The nav link leads, and the home copy was amended rather than deleted.** Every other
+  per-contract screen takes an id, and until `D10-27` the only place to get one was an
+  ingest response — so the listing is the entry point, and it is listed first. `home.body`
+  said "three screens can complete work today"; that is still true (this one completes
+  nothing), but a fourth screen now exists that the sentence implied did not, so it names
+  it instead of being silently superseded.
+- **No backend change, no migration, no new dependency.** `alembic` head stays `0006`, and
+  the screen is built from `Button`, `Card` and the existing `globals.css` tokens.
+
+**What this proves and what it does not.** Proven by running: a key audit over both
+locales — **271 keys each**, zero only-in-en, zero only-in-bn, zero unused, zero
+referenced-but-absent, zero placeholder drift, 47 `contracts` keys reached by the page.
+Not proven, and stated rather than buried: **this repo has no frontend test runner**, so
+no test covers this screen and none was written that could run; nothing in this session
+rendered it in a browser or called the API from one. The screen is `next-intl` + TanStack
+Query code that has passed a compiler and a linter and nothing more. The type/lint gate
+and the commit hash are recorded by the follow-up `docs(status)` commit, the same
+convention `D10-27` used. Also unchanged: **gap 5** — the `contract.ingested` consumer is
+still unwritten and still blocked on an owner decision. A listing does not give a consumer
+work it could correctly do; it only gives an operator a way to find a contract id.
