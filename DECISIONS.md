@@ -2839,3 +2839,17 @@ and the commit hash are recorded by the follow-up `docs(status)` commit, the sam
 convention `D10-27` used. Also unchanged: **gap 5** — the `contract.ingested` consumer is
 still unwritten and still blocked on an owner decision. A listing does not give a consumer
 work it could correctly do; it only gives an operator a way to find a contract id.
+
+  The slice landed as `07c31ab`, and `git commit` ran the full 17-hook gate green over it:
+  `ruff`, `ruff format`, `mypy --strict`, `bandit`, `check json` (this slice edits two
+  message catalogues) and the root **and** demo `tsc --noEmit` and `eslint` hooks each
+  reported **Passed**, not "(no files to check)". The key audit figures above were measured
+  before that commit and no `frontend/` source file changed in between — which is the only
+  reason they still describe the commit rather than a snapshot of the working tree. The
+  hash and the gate rows in this entry's `STATUS.md` counterpart were added by the
+  follow-up `docs(status)` commit rather than back-dated into the slice.
+
+  One correction to how the audit is described: the script that produced those counts lives
+  in `.agent-cache/`, which is gitignored. The counts are reproducible, the command is not
+  — a reader with this repo cannot re-run it as written, so `STATUS.md` says so instead of
+  citing a path that does not exist in the tree.

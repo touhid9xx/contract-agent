@@ -2927,14 +2927,23 @@ labelled field instead of a bare `low` after the source.
 | Check | Command | Result |
 | --- | --- | --- |
 | Key parity + reachability | `python .agent-cache/contracts_i18n_audit.py` (a **local, gitignored** script — `.agent-cache/` is not in the repo, so this command is reproducible only on the machine that ran it) | **271 keys per locale**; 0 only-in-en, 0 only-in-bn, 0 unused, 0 referenced-but-absent, 0 placeholder drift; 47 `contracts` keys reached by the page |
-| Types (frontend) | commit gate: `tsc --noEmit` | recorded below, by the follow-up commit that names the hash |
-| Lint (frontend) | commit gate: `eslint` | recorded below, by that same follow-up commit |
+| Types (frontend) | commit gate: `tsc --noEmit` | **Passed** on `07c31ab` — the root `frontend typecheck` hook, not a `(no files to check)` skip |
+| Lint (frontend) | commit gate: `eslint` | **Passed** on the same commit |
+| Commit gate | `git commit` (all 17 hooks) | **all green** — plus `check json` (this slice edits two JSON catalogues), `ruff`, `mypy --strict`, `bandit` and the demo `tsc`/`eslint` hooks |
 
 **What is not proven here.** This repo has no frontend test runner, so no test covers
 this screen and none was written that would run. Nothing in this session rendered it in a
 browser or called the API from one: the page is `next-intl` + TanStack Query code that has
 passed a compiler and a linter and nothing more. That distinction is the whole reason the
-row above says "see below" instead of "passed".
+type and lint rows above are stated as gate results rather than as evidence the screen
+works.
+
+The slice landed as **`07c31ab`**, and the commit ran the full 17-hook gate green over it.
+That hash and the two gate rows were added by the follow-up `docs(status)` commit that
+named it, not back-dated into the slice — the same convention `D10-26` and `D10-27`
+used. No `frontend/` source file changed between the audit above and this commit, which is
+the only reason the key counts still describe the commit rather than a snapshot of the
+working tree.
 
 ### What this does not do — stated, not buried
 
