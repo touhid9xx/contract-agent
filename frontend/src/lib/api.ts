@@ -143,7 +143,13 @@ export class ApiError extends Error {
 }
 
 interface RequestOptions {
-  method?: "GET" | "POST" | "PATCH" | "DELETE";
+  /**
+   * `PUT` is here for one route: `PUT /contracts/{id}/consent`. It replaces the
+   * whole consent state because a `PATCH` of one flag cannot express a withdrawal —
+   * and a withdrawal that looks like a partial update is the failure this API is
+   * least willing to have.
+   */
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   /** Serialised as JSON. `undefined` sends no body at all. */
   body?: unknown;
   /**
@@ -731,6 +737,44 @@ export interface ContractIngestRequest {
 }
 
 /**
+ * A contract's channel consent, as `PUT /contracts/{id}/consent` returns it
+ * (`app.api.v1.contracts.ConsentView`).
+ *
+ * The four booleans are what is stored. `consent_channels` and `may_contact` are
+ * **derived by the model**, and that is the whole point of carrying them: a screen
+ * that recomputed them from the flags would be a second implementation of the
+ * contact policy, free to disagree with the one the decision worker enforces. Show
+ * the derived answer; never rebuild it.
+ */
+export interface ConsentState {
+  contract_id: number;
+  consent_email: boolean;
+  consent_sms: boolean;
+  consent_voice: boolean;
+  do_not_contact: boolean;
+  consent_channels: ContactChannel[];
+  may_contact: boolean;
+  consent_updated_at: string | null;
+  version: number;
+}
+
+/**
+ * The **complete** consent state, plus the version the operator was looking at.
+ *
+ * All four flags are required, because the route replaces the whole picture rather
+ * than patching one flag: a body carrying only `consent_email: true` must not
+ * silently revoke SMS consent it never mentioned. `version` is the optimistic-lock
+ * token — a mismatch is a 409, so two operators cannot overwrite each other.
+ */
+export interface ConsentUpdateRequest {
+  consent_email: boolean;
+  consent_sms: boolean;
+  consent_voice: boolean;
+  do_not_contact: boolean;
+  version: number;
+}
+
+/**
  * The media type `POST /contracts/document` declares for its body
  * (`app.api.v1.contracts.DOCUMENT_MEDIA_TYPE`).
  *
@@ -803,6 +847,32 @@ export const contracts = {
       accessToken,
     });
   },
+
+  /**
+   * Record one contract's channel consent and opt-out state (gap 18).
+   *
+   * `PUT`, and the body carries the **complete** state: a partial write is the
+   * dangerous mistake here, because it cannot express a withdrawal and cannot be
+   * told apart from one. The flags default to `false`, so every contract that
+   * predates the migration is un-contactable until somebody records consent — that
+   * is fail-closed and correct, and this is the write path that makes it usable.
+   *
+   * Three answers a caller has to tell apart, all of which the screen maps by
+   * status rather than by prose: **409** `VERSION_CONFLICT` when another operator
+   * recorded consent from a different version (the body's `details.current` holds
+   * the state now stored), **403** for a viewer (both write routes are
+   * `require_roles(ADMIN, OPERATOR)`), and **404** for a contract in another tenant
+   * — a 403 there would confirm the row exists.
+   *
+   * A submission identical to what is stored writes nothing and returns the same
+   * `version`, which is how a caller can tell a no-op from a recorded change.
+   */
+  updateConsent: (accessToken: string, contractId: number, payload: ConsentUpdateRequest) =>
+    request<ConsentState>(`/contracts/${contractId}/consent`, {
+      method: "PUT",
+      body: payload,
+      accessToken,
+    }),
 };
 
 /** Dispatch state of a reminder row. Mirrors `app.db.enums.NotificationStatus`. */

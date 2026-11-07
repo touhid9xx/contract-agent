@@ -12,6 +12,7 @@ import { FieldLabel, Input } from "@/components/ui/input";
 import { ApiError, contracts } from "@/lib/api";
 import type {
   ContactChannel,
+  ConsentUpdateRequest,
   ContractIngestRequest,
   ContractListItem,
   ContractSource,
@@ -77,6 +78,46 @@ const CHANNEL_KEYS = {
 } as const satisfies Record<ContactChannel, string>;
 
 /**
+ * The three channel flags, in the order the editor offers them.
+ *
+ * `do_not_contact` is deliberately *not* in this list. It is not a fourth channel:
+ * it outranks all three, so offering it among them would suggest a customer can be
+ * "opted out of email" while still consented to SMS. It gets its own control.
+ */
+const CONSENT_FLAGS = ["consent_email", "consent_sms", "consent_voice"] as const;
+
+/**
+ * Label per consent flag.
+ *
+ * The values are namespace-relative, and the call sites prefix `contracts.`. That
+ * prefix is not optional: passing a bare `t(CHANNEL_KEYS[x])` renders the literal
+ * text `channels.email` on screen, and neither `tsc` nor `eslint` notices — the
+ * validator only sees a string either way.
+ */
+const CONSENT_LABELS = {
+  consent_email: "consentEmailLabel",
+  consent_sms: "consentSmsLabel",
+  consent_voice: "consentVoiceLabel",
+} as const satisfies Record<(typeof CONSENT_FLAGS)[number], string>;
+
+/**
+ * What one card knows about its own consent write, and nothing else.
+ *
+ * The mutation itself lives once, in the page, because there is one `PUT` to make
+ * and one version token to carry. This is the per-row projection of that mutation
+ * a card renders from: "is *my* write in flight, did it land, and what did the
+ * server say". Deriving it from `consent.variables` is what keeps two operators'
+ * rows from sharing a spinner.
+ */
+interface ConsentRowState {
+  canRecord: boolean;
+  busy: boolean;
+  error: string | null;
+  /** `unchanged` is a real answer, not a failure: the stored flags already matched. */
+  outcome: "saved" | "unchanged" | null;
+}
+
+/**
  * Tone per status. Two states mean "this needs a person": `escalated` and
  * `expired`. The rest are lifecycle steps, not alarms, so they stay muted.
  */
@@ -119,6 +160,12 @@ const STATUS_TONES = {
  *   `consent_channels` come from the model. Rebuilding them from the four booleans
  *   would be a second implementation of the contact policy, free to disagree with
  *   the one the decision worker enforces.
+ * * **Consent is written from the row, whole.** The editor sends all four flags and
+ *   the `version` it was displayed against, because `PUT` replaces the state and a
+ *   version carried anywhere but the row would age differently from the row. The
+ *   read-only contact line above it stays derived, so the screen states consent's
+ *   current answer *and* offers the one write path that changes it — neither of
+ *   which is allowed to re-implement the other.
  */
 export default function ContractsPage() {
   const t = useTranslations();
@@ -204,6 +251,79 @@ export default function ContractsPage() {
     if (endDate !== "") metadata.end_date = endDate;
     if (timezone.trim() !== "") metadata.timezone = timezone.trim();
     ingest.mutate({ metadata, document });
+  }
+
+  /**
+   * `PUT /contracts/{id}/consent` needs the same two write roles as ingestion
+   * (`require_roles(ADMIN, OPERATOR)`), so a viewer is answered 403 by the server
+   * and is not offered the controls. The read-only contact line above the editor
+   * already states the derived truth, so nothing is hidden from them — only the
+   * writing is.
+   */
+  const canRecordConsent = user !== null && user.role !== "viewer";
+
+  const consent = useMutation({
+    mutationFn: (input: { contractId: number; payload: ConsentUpdateRequest }) =>
+      authorized((accessToken) =>
+        contracts.updateConsent(accessToken, input.contractId, input.payload),
+      ),
+    onSuccess: async () => {
+      // The stored version climbs on a real change, and the card keys its editor on
+      // that version — so refetching is what clears the draft back to server truth.
+      await queryClient.invalidateQueries({ queryKey: ["contracts", "list"] });
+    },
+    onError: async (cause) => {
+      // A 409 means somebody else's consent is now the stored one. Showing the old
+      // flags beside "try again" would invite the operator to re-submit a picture
+      // that is already out of date, so reload before they can.
+      if (cause instanceof ApiError && cause.isConflict) {
+        await queryClient.invalidateQueries({ queryKey: ["contracts", "list"] });
+      }
+    },
+  });
+
+  /**
+   * A refused consent write, keyed on status.
+   *
+   * All four flags and the version are always sent, so the route's 422 (a body
+   * missing a flag, or a version below 1) is out of reach of this form — there is
+   * no free-text field to get wrong. The three answers left are real:
+   * **409** another operator recorded consent first, **403** this role may not
+   * write, **404** the contract is not in this tenant (not 403 — a 403 would
+   * confirm the row exists elsewhere).
+   */
+  function describeConsentFailure(cause: unknown): string {
+    if (cause instanceof ApiError) {
+      if (cause.isOffline) return t("contracts.offline");
+      if (cause.isConflict) return t("contracts.consentConflict");
+      if (cause.isForbidden) return t("contracts.consentForbidden");
+      if (cause.status === 404) return t("contracts.consentNotFound");
+    }
+    return t("contracts.failed");
+  }
+
+  /** What the card for `row` knows about its own consent write, if anything. */
+  function consentStateFor(row: ContractListItem): ConsentRowState {
+    const variables = consent.variables;
+    const mine = variables !== undefined && variables.contractId === row.id;
+
+    return {
+      canRecord: canRecordConsent,
+      busy: mine && consent.isPending,
+      error: mine && consent.isError ? describeConsentFailure(consent.error) : null,
+      /**
+       * A no-op answers the version it was given; a recorded change answers a
+       * higher one. That difference is the only way to tell an operator their
+       * click did nothing because the flags already matched — which is a
+       * reassuring answer, not a failure.
+       */
+      outcome:
+        mine && consent.isSuccess && variables !== undefined
+          ? consent.data.version === variables.payload.version
+            ? "unchanged"
+            : "saved"
+          : null,
+    };
   }
 
   /**
@@ -462,7 +582,16 @@ export default function ContractsPage() {
           )}
 
           {items.map((row) => (
-            <ContractCard key={row.id} row={row} dateFormat={formatDate} instantFormat={instantFormat} />
+            <ContractCard
+              key={row.id}
+              row={row}
+              dateFormat={formatDate}
+              instantFormat={instantFormat}
+              consent={consentStateFor(row)}
+              onConsentSave={(contractId, payload) => {
+                consent.mutate({ contractId, payload });
+              }}
+            />
           ))}
 
           {list.hasNextPage && (
@@ -495,6 +624,10 @@ interface ContractCardProps {
   dateFormat: (value: string) => string;
   /** For the columns that are instants rather than calendar dates. */
   instantFormat: Intl.DateTimeFormat;
+  /** This row's slice of the page's one consent mutation. */
+  consent: ConsentRowState;
+  /** Submits the complete consent state for this contract. */
+  onConsentSave: (contractId: number, payload: ConsentUpdateRequest) => void;
 }
 
 /**
@@ -504,7 +637,7 @@ interface ContractCardProps {
  * contactable, does it have a document, where in its life is it — and nothing
  * about who it belongs to, because no name is stored here to show.
  */
-function ContractCard({ row, dateFormat, instantFormat }: ContractCardProps) {
+function ContractCard({ row, dateFormat, instantFormat, consent, onConsentSave }: ContractCardProps) {
   const t = useTranslations();
 
   const term =
@@ -578,8 +711,157 @@ function ContractCard({ row, dateFormat, instantFormat }: ContractCardProps) {
             </>
           )}
         </dl>
+
+        {consent.canRecord ? (
+          /*
+            Keyed on the stored version: a recorded change bumps it, the list
+            refetches, and the editor remounts with server truth in its draft. A
+            draft that survived a write would be a second opinion about consent.
+          */
+          <ConsentEditor
+            key={row.version}
+            row={row}
+            state={consent}
+            onSave={(payload) => {
+              onConsentSave(row.id, payload);
+            }}
+          />
+        ) : (
+          <p className="border-t border-border pt-3 text-xs text-muted-foreground">
+            {t("contracts.consentViewerNote")}
+          </p>
+        )}
       </CardContent>
     </Card>
+  );
+}
+
+/** The four booleans the editor may change. `version` is not one of them. */
+type ConsentDraft = Omit<ConsentUpdateRequest, "version">;
+
+interface ConsentEditorProps {
+  row: ContractListItem;
+  state: ConsentRowState;
+  /** Handed the complete state — the route replaces all four flags at once. */
+  onSave: (payload: ConsentUpdateRequest) => void;
+}
+
+/**
+ * The consent editor for one contract (gap 18).
+ *
+ * This is the screen half of a write path that has existed since F9 and that only
+ * `curl` had ever reached, and until now the flags defaulted to `false` with no
+ * way to change them from a browser — so every contract was un-contactable by
+ * policy and the decision worker's `NO_CONSENT` refusal was the only answer a
+ * person could get.
+ *
+ * Four choices are deliberate:
+ *
+ * * **The whole state is sent, always.** `PUT` replaces rather than patches,
+ *   because a body carrying only `consent_email` cannot express a withdrawal and
+ *   cannot be told apart from one. Sending all four also means no flag can be
+ *   left out by a form that forgot it.
+ * * **The version comes from the row, not from the draft.** The token is "the
+ *   state I was looking at when I decided", which is exactly `row.version`; a
+ *   draft that carried its own copy would age differently from the row it is
+ *   displayed against.
+ * * **A no-op is a visible success.** The button stays enabled when nothing was
+ *   changed, and the server answers with the version it was given — which reads
+ *   here as "already recorded", not as a failure. Suppressing that answer, or
+ *   pre-comparing the draft against the row, would be a fourth place to get the
+ *   four flags wrong.
+ * * **`do_not_contact` outranks the channels and is drawn apart from them.** It
+ *   is not a fourth channel; a customer who opts out cannot be contacted on any
+ *   channel the three flags allow.
+ */
+function ConsentEditor({ row, state, onSave }: ConsentEditorProps) {
+  const t = useTranslations();
+
+  /**
+   * The draft is the four editable flags only. It is seeded from the row once and
+   * reset by the remount described at the call site, never patched from the row —
+   * a draft that followed the server mid-edit would discard what was typed.
+   */
+  const [draft, setDraft] = useState<ConsentDraft>({
+    consent_email: row.consent_email,
+    consent_sms: row.consent_sms,
+    consent_voice: row.consent_voice,
+    do_not_contact: row.do_not_contact,
+  });
+
+  /**
+   * Whether the draft has moved since the last submission.
+   *
+   * The outcome and error messages describe a *request*, so leaving one on screen
+   * while the operator edits the flags would caption a state that no longer exists
+   * with the result of an earlier one.
+   */
+  const [edited, setEdited] = useState(false);
+
+  function toggle(flag: keyof ConsentDraft) {
+    setDraft((current) => ({ ...current, [flag]: !current[flag] }));
+    setEdited(true);
+  }
+
+  return (
+    <div className="space-y-2 border-t border-border pt-3">
+      <p className="text-xs font-medium text-muted-foreground">{t("contracts.consentHeading")}</p>
+
+      <div className="flex flex-wrap gap-2">
+        {CONSENT_FLAGS.map((flag) => (
+          <Button
+            key={flag}
+            size="sm"
+            variant={draft[flag] ? "primary" : "outline"}
+            aria-pressed={draft[flag]}
+            onClick={() => {
+              toggle(flag);
+            }}
+          >
+            {t(`contracts.${CONSENT_LABELS[flag]}`)}
+          </Button>
+        ))}
+
+        {/* Separated: an opt-out is not a fourth channel, it overrides these three. */}
+        <Button
+          size="sm"
+          variant={draft.do_not_contact ? "danger" : "outline"}
+          aria-pressed={draft.do_not_contact}
+          onClick={() => {
+            toggle("do_not_contact");
+          }}
+        >
+          {t("contracts.consentOptOutLabel")}
+        </Button>
+      </div>
+
+      <p className="text-xs text-muted-foreground">{t("contracts.consentNote")}</p>
+
+      <Button
+        size="sm"
+        disabled={state.busy}
+        onClick={() => {
+          setEdited(false);
+          onSave({ ...draft, version: row.version });
+        }}
+      >
+        {state.busy ? t("contracts.consentSaving") : t("contracts.consentAction")}
+      </Button>
+
+      {!edited && state.outcome !== null && (
+        <p className="text-xs" role="status">
+          {state.outcome === "saved"
+            ? t("contracts.consentSaved")
+            : t("contracts.consentUnchanged")}
+        </p>
+      )}
+
+      {!edited && state.error !== null && (
+        <p className="text-xs text-danger" role="alert">
+          {state.error}
+        </p>
+      )}
+    </div>
   );
 }
 

@@ -1629,6 +1629,12 @@ committed together. That pairing is the milestone; extraction and review follow.
   answered only by the shared correlation id, not by a first-class record. And a
   `StaleDataError` rolls the whole run back rather than reporting a partly-applied sheet;
   the retry is the operator's, because only they can see what changed underneath.
+  **Amended, not deleted (`D10-33`):** the first clause is no longer true — a consent editor
+  now ships on `/[locale]/contracts`, so consent *can* be granted from a screen. Everything
+  else in this trade-off still stands, and the two are complements rather than rivals: the
+  editor writes one contract from the row it was displayed against, the sheet writes many
+  in one audited run, and only the sheet can backfill a tenant. The missing provenance
+  record is a property of the command, so the editor does not make it worse.
 - **What this proves and what it does not.** Fifteen tests in
   `backend/tests/test_consent_import.py` cover the apply path, the audit shape, a
   revocation, a multi-row sheet, an idempotent re-run, `--dry-run`, a malformed cell, a
@@ -2057,6 +2063,9 @@ JavaScript-held value are both possible.
   without a session — the API refuses, which is the real boundary); there is no password-reset or
   user-administration screen, so `PATCH /auth/users/{id}` and the reset route still have no caller;
   and the consent screen (gap 18) is a separate owner decision, not folded in here.
+  **Amended, not deleted (`D10-33`):** the consent editor is now built — but not folded in
+  *here*. It was taken as its own slice, on `/[locale]/contracts`, which is why this
+  paragraph's list of missing callers is still being paid down one screen at a time.
 
 ### D10-20 — A reply and an escalation are two separate facts, and the SLA is a server-derived clock
 
@@ -3151,3 +3160,64 @@ present in both files and all **20** referenced by the page.
 **Verified, with the usual limit.** Typecheck and lint pass on the four touched files; the key
 counts above came from a script over both catalogues, not from reading. There is still no
 frontend test runner here, so nothing tests this form and **no browser has rendered it**.
+
+### D10-33 — Consent gets an editor, and the screen refuses to re-derive contactability
+
+`PUT /contracts/{id}/consent` was built in F9, tested in two suites, version-checked and audited
+— and had no caller in a browser. The four flags and `do_not_contact` all default to `false`, so
+on a fresh deployment every contract is un-contactable. That is the right fail-closed default
+and it is not a state a product can ship in: the decision worker's answer to everything is
+`NO_CONSENT`, and until now the only ways to change that were `curl` and
+`python -m app.cli consent-import`. The per-contract editor now sits on each card at
+`/[locale]/contracts`. Gap 18's owner decision — which `D10-19` explicitly deferred — is taken.
+
+- **The whole state, every time.** All four flags plus the `version` the row was rendered from.
+  The route *replaces* consent rather than patching a flag (D9-01), because a partial body
+  cannot express a withdrawal and cannot be told apart from one. The version travels from the
+  row rather than from component state, so it cannot age differently from the flags beside it.
+  The consequence: the route's 422 (a missing flag, `version < 1`) is **unreachable from this
+  form** — there is no free-text input to get wrong, which is why the screen maps only 409, 403,
+  404 and offline.
+- **`do_not_contact` is not a fourth channel.** It outranks all three grants, so listing it among
+  them would suggest a customer can be opted out of email while still consented to SMS. It gets
+  its own control and its own sentence.
+- **Contactability is read, never recomputed.** `may_contact` and `consent_channels` are
+  properties of the model, and they are what the decision policy enforces. Rebuilding either
+  from four booleans in the browser would be a second contact policy free to disagree with the
+  first, and the disagreement would show up as a reminder sent to somebody who had not agreed to
+  it.
+- **A no-op is a reassuring answer, not a failure.** The route writes nothing and answers the
+  same `version` when the submitted flags already match what is stored — no version bump, no
+  audit row. The editor compares the returned version with the one it sent: equal means "already
+  recorded", higher means "recorded". Without that distinction, saving unchanged flags and a
+  swallowed click look identical on screen.
+- **409 reloads before the next attempt.** On a version conflict the page invalidates the
+  contract list, which re-renders the editor from the stored row (keyed on `row.version`), so the
+  draft cannot be re-submitted against a picture that has already changed. The 409 body carries
+  `details.current`, and it is deliberately **not** painted into the draft: a draft patched from
+  a conflict response would be the browser deciding what the new consent state should be. The
+  server already decided; the screen's job is to show it.
+- **404, not 403, for another tenant's contract.** The repository's `get` returns `None` outside
+  the caller's tenant, so the id cannot be used to probe which contracts exist elsewhere. A
+  viewer does get 403 — from the route, which is the party that decides.
+- **Role-gated by hiding, the route still deciding.** `require_roles(ADMIN, OPERATOR)`; a viewer
+  keeps the read-only derived contact line and gets a note in place of the controls, so nothing
+  is withheld except the writing.
+- **This is not a bulk tool.** `consent-import` stays the only backfill: ticking four boxes per
+  contract across a sheet would be a bulk write to the most sensitive state in the product,
+  without the dry run, the all-or-nothing validation or the closed cell vocabulary that make the
+  CLI path auditable. The editor and the sheet are complements, not duplicates.
+
+**No backend change and no migration.** `RequestOptions.method` gained `"PUT"` — the union did
+not carry it — `ConsentState` mirrors `ConsentView` including the two derived fields,
+`ConsentUpdateRequest` makes all four flags **required** beside `version`, and
+`contracts.updateConsent` wraps the route. `alembic` head stays `0006`.
+
+**Verified, with the same limit `D10-32` recorded.** Typecheck and lint pass; both catalogues
+carry 14 `contracts.consent*` keys at the same offsets and the page reaches all 14. There is
+still no frontend test runner in this repo, so nothing tests this editor, and **no browser has
+rendered it or saved consent from it** — a compiler and a linter, nothing more.
+
+**Gap 18 is narrowed, not closed.** Consent is now changeable from the product one contract at a
+time; a fresh database still consents nothing by default, and the bulk backfill still needs the
+sheet and somebody to own it.
