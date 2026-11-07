@@ -29,18 +29,24 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
-from app.db.enums import Channel, EscalationStatus, ResponseType
-from app.db.models import CustomerResponse, Escalation
+from sqlalchemy import ColumnElement, Exists, and_, exists, select
+from sqlalchemy.orm import Session
+
+from app.db.enums import Channel, ContractStatus, EscalationStatus, NotificationStatus, ResponseType
+from app.db.models import Contract, CustomerResponse, Escalation, Notification
 from app.db.repositories.base import TenantScopedRepository
 
 __all__ = [
+    "CONTACTED_STATUSES",
     "DEFAULT_ESCALATION_QUEUE_LIMIT",
     "DEFAULT_RESPONSE_HISTORY_LIMIT",
     "MAX_ESCALATION_QUEUE_LIMIT",
     "MAX_RESPONSE_HISTORY_LIMIT",
     "OPEN_ESCALATION_STATUSES",
+    "SCANNABLE_CONTRACT_STATUSES",
     "CustomerResponseRepository",
     "EscalationRepository",
+    "claim_silent_contracts",
 ]
 
 #: Rows one queue page returns. Bounded like every other list in the repo, so an
@@ -62,6 +68,34 @@ OPEN_ESCALATION_STATUSES: tuple[EscalationStatus, ...] = (
     EscalationStatus.OPEN,
     EscalationStatus.IN_PROGRESS,
     EscalationStatus.SLA_BREACHED,
+)
+
+#: ``Notification.status`` values that mean the transport accepted the row.
+#:
+#: Expressed by exclusion — everything past ``pending`` that is not one of the two
+#: failure states — because those are the only two ways a row stops without
+#: reaching anybody. ``machine`` counts as contact on purpose: a voicemail reached
+#: a mailbox even though the spec is explicit that it is *not* a response, which is
+#: precisely the situation an escalation exists for.
+CONTACTED_STATUSES: tuple[NotificationStatus, ...] = (
+    NotificationStatus.SENT,
+    NotificationStatus.DELIVERED,
+    NotificationStatus.ANSWERED,
+    NotificationStatus.MACHINE,
+)
+
+#: Contract states the scanner may escalate *from*.
+#:
+#: ``responded`` is excluded because the customer answered. ``renewed``/``expired``
+#: are excluded because the file is closed
+#: (:data:`app.workers.escalation.CLOSED_CONTRACT_STATUSES`). ``escalated`` is
+#: excluded for a less obvious reason: ``DECISIONS.md`` D10-20 makes an operator
+#: resolving an escalation by hand leave the contract in that state, so re-opening
+#: one automatically would undo a decision a person deliberately made. A contract
+#: that has to be chased again gets a new escalation from a person, not from a clock.
+SCANNABLE_CONTRACT_STATUSES: tuple[ContractStatus, ...] = (
+    ContractStatus.ACTIVE,
+    ContractStatus.REMINDER_SENT,
 )
 
 
@@ -185,3 +219,87 @@ class CustomerResponseRepository(TenantScopedRepository[CustomerResponse]):
         self.add(row)
         self.session.flush()
         return row
+
+
+def claim_silent_contracts(
+    session: Session,
+    *,
+    cutoff: datetime,
+    limit: int,
+) -> list[Contract]:
+    """Contracts that have gone quiet since ``cutoff``, **read under a write lock**.
+
+    This is the third unscoped query in the codebase, and it is unscoped for the
+    same structural reason as :func:`~app.db.repositories.notifications.
+    claim_next_due` and :func:`~app.db.repositories.outbox.claim_due`: the scanner
+    is one process serving every tenant, so it cannot name a tenant before it has
+    picked a row. It also returns the rows themselves rather than bare ids, so the
+    caller can read each row's ``tenant_id`` and scope every follow-up query by it.
+
+    "Silent" is four conditions, and each one is a distinct reason a contract must
+    not be escalated:
+
+    * it was **contacted** — at least one notification the transport accepted — and
+      the last such contact is older than ``cutoff``;
+    * nothing has been accepted **since** ``cutoff``, so a contract whose reminders
+      are still going out is not escalated halfway through its own sequence;
+    * it has **not replied** — any row in ``customer_responses`` takes it out;
+    * it has **no open escalation**, so a contract already in the queue is not
+      entered twice.
+
+    ``sla_breached`` is in :data:`OPEN_ESCALATION_STATUSES` on purpose: a row
+    already marked late is still somebody's job, and re-opening it would reset a
+    deadline that has demonstrably already been missed.
+
+    The two "contacted" clauses are written as a pair of ``EXISTS`` rather than one
+    ``MAX(sent_at) < cutoff`` subquery in the select list. They mean the same thing
+    and read the same way, but only this shape keeps the statement to a single
+    table in ``FOR UPDATE``, which is what makes ``SKIP LOCKED`` safe to reason
+    about: the lock is taken on the contract rows the caller is about to mutate.
+    """
+
+    def _contacted(instant: ColumnElement[bool]) -> Exists:
+        """One accepted contact for this contract, at ``instant``.
+
+        Shared by both clauses so the pair cannot drift into disagreeing about
+        which notification statuses count — the failure that would let a contract
+        be escalated while its own reminder sequence was still running.
+        """
+        return exists().where(
+            and_(
+                Notification.contract_id == Contract.id,
+                Notification.status.in_(list(CONTACTED_STATUSES)),
+                Notification.sent_at.is_not(None),
+                instant,
+            )
+        )
+
+    contacted_before_cutoff = _contacted(Notification.sent_at < cutoff)
+    contacted_since_cutoff = _contacted(Notification.sent_at >= cutoff)
+    replied = exists().where(CustomerResponse.contract_id == Contract.id)
+    already_open = exists().where(
+        and_(
+            Escalation.contract_id == Contract.id,
+            Escalation.status.in_(list(OPEN_ESCALATION_STATUSES)),
+        )
+    )
+
+    stmt = (
+        select(Contract)
+        .where(
+            Contract.status.in_(list(SCANNABLE_CONTRACT_STATUSES)),
+            contacted_before_cutoff,
+            ~contacted_since_cutoff,
+            ~replied,
+            ~already_open,
+        )
+        # Ordered by id rather than by how long the contract has been silent. The
+        # batch drains in a single transaction, and a contract that was escalated
+        # stops matching, so no row is starved; a stable order is worth more here
+        # than an urgency order nobody reads, because it is what makes "the same
+        # tick sees the same rows" true in a test.
+        .order_by(Contract.id)
+        .limit(limit)
+        .with_for_update(skip_locked=True, of=Contract)
+    )
+    return list(session.execute(stmt).scalars())

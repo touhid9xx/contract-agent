@@ -206,6 +206,23 @@ class Settings(BaseSettings):
     #: failed". The ceiling is deliberately loose: this is a business clock an
     #: operator may legitimately stretch, not a security parameter.
     escalation_sla_hours: int = Field(default=48, ge=1, le=720)
+    #: Days of silence after the last accepted contact before the scanner hands a
+    #: contract to a human. This is the *other* clock: the window that decides
+    #: whether an escalation is raised at all, as distinct from
+    #: :attr:`escalation_sla_hours`, which starts counting once one is.
+    #:
+    #: Fourteen days matches the Phase-0 demo's two-week no-response queue and the
+    #: ``T-14`` reminder milestone. The floor is 1 because 0 would escalate a
+    #: contract in the same tick that contacted it.
+    escalation_no_response_days: int = Field(default=14, ge=1, le=90)
+    #: Contracts the scanner claims per tick. Unlike the notification scheduler this
+    #: bounds one *transaction* (the claim and the writes it authorises must share a
+    #: lock), so it also bounds how long the scanner holds row locks.
+    escalation_scan_batch_size: int = Field(default=50, gt=0, le=1000)
+    #: How long the scanner waits between passes. Five minutes, not five seconds:
+    #: the window it measures is fourteen *days*, so a finer sweep would only add
+    #: load without finding anything sooner.
+    escalation_scan_poll_interval_seconds: float = Field(default=300.0, gt=0, le=3600)
 
     # --- smtp transport --------------------------------------------------
     # Read only when ``notification_transport == "smtp"``. ``smtp_host`` is the

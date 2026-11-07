@@ -42,6 +42,7 @@ __all__ = [
     "ACTION_USER_UPDATED",
     "ACTOR_SYSTEM",
     "ACTOR_USER",
+    "ACTOR_WORKER",
     "AUDIT_ENTITY_CONTRACT",
     "AUDIT_ENTITY_DECISION",
     "AUDIT_ENTITY_ESCALATION",
@@ -76,6 +77,15 @@ ACTOR_USER = "user"
 #: naming an operator who did not run it would fabricate exactly the fact the
 #: audit log exists to carry.
 ACTOR_SYSTEM = "system"
+
+#: ``AuditLog.actor_type`` value for a background worker acting on its own
+#: timetable. Distinct from :data:`ACTOR_SYSTEM` because the two answer different
+#: questions: ``system`` means "a command was run" (an operator caused it, one step
+#: removed), while ``worker`` means "a process decided this while nobody was
+#: watching". The escalation scanner is the first writer of this value — it opens
+#: escalations on a clock, and an auditor reconstructing why a contract was
+#: escalated needs to see that no human raised it.
+ACTOR_WORKER = "worker"
 
 #: ``AuditLog.entity`` for user rows.
 #:
