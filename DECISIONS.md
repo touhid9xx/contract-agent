@@ -3339,9 +3339,14 @@ answer.
   their address, so `?contract=12` would look like a filter and show the tenant's whole queue. The
   card says that in the note under its heading rather than presenting three links that lie. Adding
   the address filters would be a routing decision on the screens that own them, not a ride-along here.
+  **Amended, not deleted (`D10-36`):** that routing decision was then taken on all three screens, so
+  the card's links now carry `?contract=` and the note says what the scope does rather than why there
+  is none. The clause is kept because it is the reason the parameter had to be honoured *before* the
+  links could be filtered — not the other way round.
 - **`D10-34`'s "it does not link" bullet is amended, not deleted.** The clause was true when written
   and the reason it gave — a query string that silently shows everything — is still why the links are
-  plain.
+  plain. **Amended again (`D10-36`):** the links are no longer plain; the reason survives as the
+  precondition that made filtering them safe.
 
 **No schema change and no repository method beyond the one parameter.** `alembic` head stays `0006`.
 `EscalationQuery` in `api.ts` gained `contractId`, and `escalations.queue` grew the options object the
@@ -3358,4 +3363,82 @@ placeholder drift; the page reaches **86** message keys, all defined in both loc
 tests this card and **no browser has rendered it**. The counts above are a script's output, not a
 reading of the Bengali catalogue by somebody who reads Bengali. The filter is additive: the queue
 screen still reads the tenant-wide list, so nothing on that screen exercises the new parameter. Gap 5
-is untouched.
+is untouched. **Amended, not deleted (`D10-36`):** the queue screen now reads `?contract=` out of its
+own address, so the parameter has a caller in the product and the sentence above is history.
+
+### D10-36 — A contract's scope is a fact about the address, not about the page
+
+`D10-35` ended with a card whose three links were deliberately plain, because no screen read a
+contract out of its address. The wire had been ready for two of the three since the routes that own
+them were built, and the escalation queue gained the parameter in `5421338` — which left a
+parameter with tests and **no caller in the product at all**. This slice gives it three callers and
+the contract page's three links, so "which of these are *this* contract's" is answerable by clicking
+a link instead of by reading a whole queue and matching ids by eye.
+
+- **The scope lives in the query string, not in `useState`.** Local state survives a click and
+  nothing else: not a reload, not a bookmark, not the back button, and not the copy-paste that sends
+  the address to a colleague. A link whose filter silently evaporates is worse than no link, which is
+  exactly the objection `D10-35` recorded, so the parameter had to be honoured *before* the links
+  could be filtered rather than after.
+- **One module spells it, in both directions.** `frontend/src/lib/contract-scope.ts` holds
+  `readContractScope` (address → scope) and `withContractScope` (scope → address) beside
+  `contractIdFromInput` (typed id → scope). A parameter written by one screen and parsed by another
+  is the classic place for a rename to half-land, so the name is a constant and there is no second
+  spelling of `"contract"` anywhere: the detail page builds its links with the same function the
+  screens parse with.
+- **The parameter is `contract`, not the wire's `contract_id`.** The address bar is the reader's
+  vocabulary; `contract_id` is the route's. Naming the address after the wire would freeze a transport
+  name into every bookmark, and the agent screen's route already proves the two can differ without
+  anyone being confused.
+- **Three outcomes, not `number | undefined`.** "The address names no contract" and "the address
+  names something that cannot be a contract" call for two different screens, so the type is
+  `none | contract | invalid`. Falling through to the tenant-wide list on a malformed filter would
+  answer a question nobody asked — the same lie as ignoring the filter, only louder — so an invalid
+  address shows a card saying so and the query stays `enabled: false` rather than widening.
+- **Parsing is hand-checked, for `D10-34`'s reason.** `/^[1-9][0-9]*$/` then `Number.isSafeInteger`,
+  never `Number(raw)`: `Number("12abc")` is `12` and `Number("")` is `0`, so a malformed address would
+  quietly become a real filter on a contract nobody named. The server's path parameter is an `int`
+  and its query parameters are `gt=0`, so the browser tests the shape the server enforces.
+- **The way in and the way out test the same shape.** `contractIdFromInput` is the single answer to
+  "what is a usable typed id", and `inputNamesAContract` disables the submit button with that same
+  predicate — so a typed id can never be one the screen then calls malformed on its way back out.
+  A second regex for the button would have been free to drift from the one that parses.
+- **`?resolved=1`, and only `1`.** The escalation queue already had a resolved toggle; it is now the
+  address rather than local state, for the same reason as the scope. Anything other than `1` — `0`,
+  `true`, a typo — means the working queue: a value this module did not write is not a filter
+  somebody asked for, and reading `resolved=false` as "yes" would be the surprise.
+- **`router.replace`, not `push`.** Toggling a filter twice should not leave two history entries for
+  one question. The address is the description of what is listed; it is not a trail of keystrokes.
+- **Filters compose, so applying one cannot drop the other.** The escalations form navigates to
+  `withResolved(withContractScope(base, id), showResolved)`. Setting a contract through a helper that
+  answered only its own parameter would have cleared the resolved flag on the way.
+- **The scope sentence reads the server's echo.** `EscalationQueue` and `NotificationList` both carry
+  `contract_id`, so the screen says "these are contract 12's" from the answer it received rather than
+  from its own query string. If the two ever disagree, the server's filter is the one that happened.
+- **The draft box follows the address.** The input is `useState` seeded from the address and re-synced
+  by an effect on it, so a link, the back button or a typed address moves the box without a remount —
+  and the box is a draft until submitted, so half-typed digits never navigate.
+- **Each route is a `Suspense` shell over a screen.** `useSearchParams` suspends while the address is
+  resolved, so the boundary has to exist for the route to prerender. Keeping the shell thin means the
+  hooks live in one component and the boundary is stated once per route instead of being rediscovered
+  the next time a page reaches for the address.
+
+**No backend change and no schema change.** `contract_id` was already on both list routes before this
+slice and the escalation parameter landed in `5421338`; `alembic` head stays `0006`. `api.ts` gained
+`NotificationList.contract_id` — a field the route has always sent.
+
+**Verified.** Both catalogues carry **464** leaf keys with `enOnly []`, `bnOnly []` and **0**
+placeholder drift; every `t()` key the four screens reference exists in both, **249** keys reached.
+Neither file contains a duplicate object key — checked separately, because `json.load` keeps the last
+one and a duplicate would make a parity count read clean while a string went missing. The audit's
+"bare map value" line lists two sites, `agent.refusalKey` and `notifications.key`; both are guarded
+partial-record lookups (`if (refusalKey !== undefined)`) interpolated as a key *suffix*, not the
+`07c31ab` trap of handing a translated string back to `t()`.
+
+**The honest limit, and the one place it costs the most.** There is still no frontend test runner, so
+`contract-scope.ts` is exercised by nothing but the compiler. This is the slice where that gap is
+most expensive: the module is pure, total and free of React, so a table of a dozen addresses would
+have pinned the whole vocabulary in a way no amount of typechecking does — and `ReadableParams` is a
+structural `{ get(name): string | null }` precisely so such a test could pass a stub instead of a
+router. It is written to be testable and remains untested. **No browser has rendered any of these
+screens**, the Bengali keys are mine and unread by anyone who reads Bengali, and gap 5 is untouched.

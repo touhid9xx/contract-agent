@@ -403,12 +403,40 @@ and the response **echoes** `contract_id` so a page can tell "none" from "an emp
 card now states each read's own `count`, the latest decision's channel, the earliest reminder slot
 as sent (a calendar date on the contract's clock), and the route's own `overdue`/`sla_hours` —
 three separate queries, because they fail independently, and nothing summed in the browser from
-`sla_deadline`. Its three links stay **unfiltered on purpose**: the screens still do not read a
+`sla_deadline`. Its three links stayed **unfiltered on purpose**: the screens still did not read a
 contract out of their address, and a query string they ignore would look like a filter while
-showing everything. **52 passed** on `test_escalations.py`, three of them new; **444** leaf keys
+showing everything. **Amended, not deleted (`D10-36`):** the screens now read it, so the links carry
+`?contract=`; the clause is kept because it is the reason the parameter had to land first.
+**52 passed** on `test_escalations.py`, three of them new; **444** leaf keys
 per locale, **86** message keys reached and all defined both ways. No schema change, no migration
 (`0006`), no new repository method. The gap 18 and gap 12 limits above are unchanged — the queue
-screen still reads the tenant-wide list, so nothing on that screen exercises the new parameter.
+screen still read the tenant-wide list at the time, so nothing on that screen exercised the new
+parameter. **Amended (`D10-36`):** it reads `?contract=` now and has a control to set it.
+
+**Then a contract's scope becomes part of the address** (`D10-36`, one commit: `feat(web)`
+`fbd65f8`): the escalation filter above shipped with tests and **no caller in the product at
+all** — the queue screen read the tenant-wide list, so `?contract_id=` was reached only by
+`TestClient`. All three neighbour screens now read a contract out of their own address and the
+contract page's three links carry it, so "which of these are *this* contract's" is answerable by
+clicking rather than by matching ids by eye. The vocabulary is one module,
+`frontend/src/lib/contract-scope.ts`: `readContractScope` in, `withContractScope` out, and
+`contractIdFromInput` for a typed id, so the parameter a link writes is the parameter a screen
+parses — the classic half-rename is not available. The parameter is `contract`, **not** the wire's
+`contract_id`: the address bar is the reader's vocabulary and bookmarks should not freeze a
+transport name. Parsing is hand-checked (`/^[1-9][0-9]*$/` then `Number.isSafeInteger`), never
+`Number(raw)`, for `D10-34`'s reason — `Number("12abc")` is `12` and `Number("")` is `0`, which would
+turn a malformed address into a real filter on a contract nobody named. The scope type is
+`none | contract | invalid` rather than `number | undefined`, and an **invalid address does not fall
+back to the tenant-wide list**: the query stays idle and a card says so, because answering a
+malformed filter with everything is the same lie as ignoring it, only louder. The escalation queue's
+resolved toggle moved into the address too (`?resolved=1`, and only `1`), every change is
+`router.replace` so toggling twice leaves one history entry, and the two parameters compose
+(`withResolved(withContractScope(…))`) so setting one cannot clear the other. Each screen is a thin
+`Suspense` shell over a screen component because `useSearchParams` suspends while the address
+resolves. The scope sentence reads the **server's echoed** `contract_id`, not the address read back.
+**464** leaf keys per locale, no duplicates in either file, every `t()` key the four screens
+reference defined both ways. **No backend change, no schema change, no migration (`0006`)** — the
+parameter already existed on the wire.
 
 ## Phase history
 
@@ -3662,7 +3690,10 @@ calls fail independently, so one refusal cannot blank the other two.
 **The links stay unfiltered, on purpose.** The three *screens* still do not read a contract out of
 their address, so `?contract=12` on any of them would look like a filter while showing everything.
 The note under the heading says that instead of presenting three links that lie; adding the address
-filters is a routing decision on the screens that own them.
+filters is a routing decision on the screens that own them. **Amended, not deleted (`D10-36`):** that
+routing decision was taken on all three screens, so the links now carry `?contract=` — the paragraph
+above is the reason the parameter had to land *before* the links could be filtered, not the other way
+round.
 
 ### Verification actually run (`D10-35`)
 
@@ -3690,14 +3721,126 @@ a reading of the Bengali catalogue by somebody who reads Bengali.
 
 - **The queue screen still reads the tenant-wide list.** It gained no filter control, so nothing on
   that screen exercises `?contract_id=`; the only caller today is this card. A control there is a
-  screen decision, not a ride-along.
+  screen decision, not a ride-along. **Amended (`D10-36`):** the screen now reads `?contract=` from
+  its own address and has a filter control, so the parameter has a caller in the product.
 - **The three links are still plain.** That is the deliberate refusal above, not an oversight.
+  **Amended (`D10-36`):** the three links now carry `?contract=`, built by the same helper the screens
+  parse it with. The refusal was unconditional only until the screens could honour the parameter.
 - **No new endpoint, no aggregation.** The card composes three existing routes; there is no
   `/contracts/{id}/summary` and no sixth serializer to keep in step.
 - **No field value, no reveal, no expiry countdown, no consent edit here.** All four stay where
   `D10-34` put them: on the review queue, nowhere, on the listing's cards, and behind one screen.
 - **Gap 5 is untouched.** The `contract.ingested` consumer is still unwritten and still blocked on an
   owner decision.
+
+## The address carries the contract ✅ (`D10-36` — the parameter gets three callers)
+
+`5421338` gave the escalation queue `?contract_id=` with three tests and **no caller in the product
+at all**: the queue screen still read the tenant-wide list, so the parameter was reached only by
+`TestClient`, and the contract page's card explained in prose why it offered no links. That was the
+honest state of the slice, not a defect — a filter written before the screens own it is a filter
+nobody has asked for. This slice asks for it: all three neighbour screens read a contract out of
+their own address, the contract page's three links carry it, and "which of these are *this*
+contract's" becomes a click instead of reading a queue and matching ids by eye.
+
+| Change | Detail |
+| --- | --- |
+| `frontend/src/lib/contract-scope.ts` | **New, +101.** `CONTRACT_PARAM`/`RESOLVED_PARAM`, `ContractScope` (`none` \| `contract` \| `invalid`), `readContractScope`, `readResolved`, `withContractScope`, `withResolved`, `contractIdFromInput`, `inputNamesAContract`. One module spells the parameter in both directions. |
+| `frontend/src/app/[locale]/agent/page.tsx` | **+93/−20**: `AgentPage` becomes a `Suspense` shell over `AgentScreen`, scope moves from `useState` into the address, `scopeToAddress` uses `router.replace`, and the invalid-address card suppresses the loading card while the address is unusable. |
+| `frontend/src/app/[locale]/notifications/page.tsx` | **+140/−9**: a scope form (numeric input, apply/clear, submit disabled while the typed id cannot be a contract), the invalid-address card, loading gated on `!scopeIsInvalid`, and a contract-specific empty sentence. |
+| `frontend/src/app/[locale]/escalations/page.tsx` | **+172/−8**: the largest of the three, because **both** filters live in the address — the contract scope *and* the resolved toggle (`?resolved=1`), composed so applying one cannot clear the other. |
+| `frontend/src/app/[locale]/contracts/[id]/page.tsx` | **+14/−7**: `RelatedReads` takes a required `contractId`, and the three `href`s are built by `withContractScope` rather than concatenated by hand. |
+| `frontend/src/i18n/messages/en.json`, `bn.json` | **+20** each, no deletions: 21 keys across `agent`, `notifications` and `escalations`. |
+| `frontend/src/lib/api.ts` | **+6**, no deletions: `NotificationList.contract_id` — a field the route has always sent. |
+| `DECISIONS.md` | `D10-36`, plus **three** amend-not-delete closures of `D10-34` and `D10-35` bullets that assumed the screens would keep ignoring the parameter. |
+| No backend change, no schema change | `contract_id` was already on both list routes and landed on the queue in `5421338`; `alembic` head stays `0006`. |
+
+`git diff-tree --numstat -r fbd65f8` sums to **+566/−44** across the eight files — **610** changed lines,
+and the per-file splits above are that command's output, not a recollection of them.
+
+### Why the scope is in the address and not in `useState`
+
+Local state survives a click and nothing else — not a reload, not a bookmark, not the back button,
+and not the copy-paste that sends the address to a colleague. A link whose filter silently evaporates
+is precisely the objection `D10-35` recorded, and it is why the parameter had to be honoured *before*
+the links could be filtered rather than after. The three screens still own their own parameter, but
+none of them owns a private copy of it.
+
+**The parameter is `contract`, not the wire's `contract_id`.** The address bar is the reader's
+vocabulary; `contract_id` is the route's. Naming the address after the wire would freeze a transport
+name into every bookmark, and the agent screen's route already proves the two can differ without
+anyone being confused.
+
+### Three outcomes, and what an invalid one does not do
+
+`ContractScope` is `none | contract | invalid`, not `number | undefined`. "The address names no
+contract" and "the address names something that cannot be a contract" call for two different
+screens, and collapsing them is what produces the surprise. **An invalid address does not widen to
+the tenant-wide list:** the query stays `enabled: false` and a card says the address is malformed.
+Falling through to everything would answer a question nobody asked — the same lie as ignoring the
+filter, only louder.
+
+Parsing is hand-checked (`/^[1-9][0-9]*$/` then `Number.isSafeInteger`), never `Number(raw)`, for
+`D10-34`'s reason: `Number("12abc")` is `12` and `Number("")` is `0`, so a malformed address would
+quietly become a real filter on a contract nobody named. The way in and the way out share one
+predicate — `inputNamesAContract` disables the submit button with the same test `contractIdFromInput`
+uses — so a typed id can never be one the screen then calls malformed on its way back out.
+
+### `?resolved=1`, and only `1`
+
+The escalation queue already had a resolved toggle; it is now the address rather than local state,
+for the same reason as the scope. Anything other than `1` — `0`, `true`, a typo — means the working
+queue, because a value this module did not write is not a filter somebody asked for.
+
+**Filters compose.** The form navigates to `withResolved(withContractScope(base, id), showResolved)`,
+so applying a contract cannot drop the resolved flag on the way. Toggling either uses `router.replace`
+rather than `push`: the address describes what is listed, it is not a trail of keystrokes, and two
+toggles should not leave two history entries for one question.
+
+**The scope sentence reads the server's echo.** `EscalationQueue` and `NotificationList` both carry
+`contract_id`, so the screen says "these are contract 12's" from the answer it received rather than
+from its own query string. If the two ever disagree, the server's filter is the one that happened.
+
+### Verification actually run (`D10-36`)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Key parity | a throwaway script over both catalogues, measured **both ways** | **464** leaf keys per locale; `enOnly []`, `bnOnly []`; **0** placeholder drift. |
+| Duplicate object keys | the same script, with an `object_pairs_hook` counter | `[]` in **both** files. Checked separately because `json.load` keeps the last of a duplicate, which would let parity read clean while a string went missing. |
+| Reachability | the same script | **249** `t()` keys reached across the four screens, every one defined in both locales; nothing missing from either catalogue. |
+| Bare map values passed to `t()` | the same script | Two sites flagged, `agent.refusalKey` and `notifications.key` — both guarded partial-record lookups interpolated as a key *suffix*, not the `07c31ab` trap of handing a translated string back to `t()`. |
+| Diff shape | `--stat` on the commit | **8 files, +566/−44** (**610** changed lines); per-file counts in the table above. |
+| Backend | not run | There is no backend change, so no test count is claimed for this slice; `alembic` head stays `0006`. |
+| Commit gate | the hooks on the commit | **18 of 19 hooks ran, 17 Passed**, `forbid-submodules` `(no files to check)`. `ruff`, `ruff format`, `mypy (strict)`, `bandit`, both frontend `tsc` runs and frontend `eslint` all **Passed**; `gitleaks` stays `stages: [manual]`. `npx commitlint --edit` returned **0** before the commit ran. |
+
+One code commit, then this one: **`fbd65f8`** (`feat(web)`, 8 files, **+566/−44**) — the scope module,
+three screens, the contract page's links, both catalogues and the one wire field.
+
+**What is not proven here.** No frontend test runner exists, so `contract-scope.ts` is exercised by
+nothing but the compiler — and this is the slice where that costs the most, because the module is
+pure, total and free of React, so a table of a dozen addresses would have pinned the whole vocabulary
+in a way no amount of typechecking does. `ReadableParams` is a structural
+`{ get(name): string | null }` precisely so such a test could pass a stub instead of a router. It is
+written to be testable and remains untested. **No browser has rendered any of these screens**, and
+the key counts are a script's output rather than a reading of the Bengali catalogue by somebody who
+reads Bengali.
+
+### What this does not do — stated, not buried
+
+- **No frontend test runner.** The gap is older than this slice; this slice is the one that pays for
+  it, because `contract-scope.ts` is the first pure module in the frontend with branching logic that
+  nothing calls in a test.
+- **Nothing on the escalation queue screen is tested either.** It now has a filter control and a
+  resolved toggle in the address, and both are reached by hand only.
+- **The scope form is a text box, not a picker.** It takes an id because that is what the parameter
+  is; suggesting contracts requires either a second read of the listing or a typeahead, and neither
+  is in this slice.
+- **No cross-screen navigation from the queue.** A row does not link to its contract; the contract
+  page links *out*, which is the direction `D10-35` established and this slice completed.
+- **No new endpoint, no aggregation.** The screens read the routes that already existed; the one
+  parameter they needed landed in `5421338`.
+- **Gap 5 is untouched.** The `contract.ingested` consumer is still unwritten and still blocked on an
+  owner decision, exactly where `D10-35` left it.
 
 ## Next permitted step
 
