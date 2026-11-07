@@ -3267,7 +3267,8 @@ now an address, and the card that shows a contract links to the page that explai
   would use the reader's zone and could be a day out. It does not link to agent decisions,
   notifications or escalations, because none of those screens reads a contract out of its address
   yet — a query string would look like a filter and silently show everything, so the card says why
-  instead.
+  instead. **Amended, not deleted (`D10-35`):** the card now states all three reads' counts, and its
+  links still go unfiltered, for exactly the reason above.
 - **Field vocabularies are borrowed, not copied.** Field names and review states are labelled from
   the `review.*` namespace. Duplicating them into `contracts.*` would give one enum two
   vocabularies, and the screen that decides a field and the screen that reports it would eventually
@@ -3293,3 +3294,68 @@ nothing tests this page, and **no browser has rendered it** — a compiler and a
 The key counts are a script's output, not a reading of two translated files by somebody who reads
 Bengali. Gap 12 stays narrowed rather than closed: an uploaded document now has a contract page, but
 nothing parses it — `extract` still takes `--text-file`.
+
+### D10-35 — The detail page stops saying its neighbours' reads are unreachable
+
+`D10-34` left the new page with a card that explained, in prose, why it offered no links: agent
+decisions, notifications and escalations each had their own screen, and none of those screens read a
+contract out of its address. Two of the three reads **already took a contract filter** —
+`GET /agent/decisions?contract_id=` and `GET /notifications?contract_id=` were built with the routes
+that own them. The escalation queue was the one that could not be narrowed, so "which of the tenant's
+escalations are *this* contract's" was answerable only by reading the whole queue and matching
+`contract_id` by eye. The slice is one query parameter, one response field, and the card that can now
+answer.
+
+- **The filter lives in `queue()`, not in a second `for_contract` method.** `EscalationRepository.queue`
+  gained `contract_id: int | None`, and "oldest deadline first" stays decided in exactly one place.
+  A parallel method would be a copy of the ordering rule, free to drift from the queue screen's — and
+  the whole point of this card is that it and the queue cannot disagree about what is late.
+- **The filter is applied after `scoped()`.** The tenant predicate is built first and the contract id
+  narrows what it returned, so another tenant's id is an **empty list** rather than their rows and
+  cannot be used to probe which contract ids exist. That is the same opacity `GET /agent/decisions`
+  and `GET /notifications` give their own filters.
+- **Naming a contract returns closed rows too.** `?status=` defaults to "every state" and a working
+  queue filters it down; a contract page asks the opposite question — "what happened here" — so
+  hiding a resolved escalation would answer it with half a history. The route's docstring says so,
+  because the two filters read alike and answer differently.
+- **Empty list, not 404, for a foreign id — and the single read stays 404.** These look
+  inconsistent and are not. `GET /contracts/{id}` is an *address*: it either names a row the caller
+  may open or it does not, so 404 is the honest answer. A list filter is not an address; it can only
+  say "no rows match", and answering 404 would require a second existence query the queue does not
+  make — turning a filter into a permission probe while pretending not to.
+- **`contract_id` is echoed on the list response.** Same convention as `AgentDecisionListResponse`:
+  without the echo a page cannot tell "this contract has none" from "the queue is empty", and would
+  have to trust its own query string instead of the answer it received.
+- **Three separate queries on the page, not one combined call.** The card and the queue screen parse
+  the same response types from the same routes, and nothing is folded into a bespoke endpoint: a
+  contract summary that aggregated all three would be a sixth read path with its own serializer, and
+  the first thing to drift. They are separate `useQuery` calls because they fail independently — a
+  failure in one must not blank the other two.
+- **Every number is the server's.** The counts are each response's own `count`, and "past their
+  deadline" is each row's `overdue`, summed by the route. Nothing is derived in the browser from
+  `sla_deadline`: that column is a timestamp the server compares against *its* clock, and a client
+  that recomputed it would disagree with the queue screen by whatever the clock skew is.
+- **The links still go unfiltered, deliberately.** The three screens do not read a contract out of
+  their address, so `?contract=12` would look like a filter and show the tenant's whole queue. The
+  card says that in the note under its heading rather than presenting three links that lie. Adding
+  the address filters would be a routing decision on the screens that own them, not a ride-along here.
+- **`D10-34`'s "it does not link" bullet is amended, not deleted.** The clause was true when written
+  and the reason it gave — a query string that silently shows everything — is still why the links are
+  plain.
+
+**No schema change and no repository method beyond the one parameter.** `alembic` head stays `0006`.
+`EscalationQuery` in `api.ts` gained `contractId`, and `escalations.queue` grew the options object the
+notifications client already used, which is why its one existing call site changed.
+
+**Verified.** `pytest tests/test_escalations.py` → **52 passed**, three of them new: narrowing returns
+only that contract's rows in deadline order *including* the resolved one, with the echo; a
+cross-tenant id answers an empty list and echoes the caller's own id back; and a viewer may read a
+filtered queue. Both catalogues carry **444** leaf keys with `enOnly []`, `bnOnly []` and **0**
+placeholder drift; the page reaches **86** message keys, all defined in both locales, and all **16**
+`contracts.detail*` keys are reached.
+
+**The same limit again, recorded rather than smoothed over.** No frontend test runner, so nothing
+tests this card and **no browser has rendered it**. The counts above are a script's output, not a
+reading of the Bengali catalogue by somebody who reads Bengali. The filter is additive: the queue
+screen still reads the tenant-wide list, so nothing on that screen exercises the new parameter. Gap 5
+is untouched.

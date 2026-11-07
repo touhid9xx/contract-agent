@@ -388,6 +388,28 @@ Gap 12 is **narrowed, not closed**: the page says whether a document is stored, 
 `extract` still requires `--text-file`, so a PDF reaches extraction only after a shell step.
 No schema change, no migration (`0006`), no new repository method.
 
+**Then the detail page reads its neighbours** (`D10-35`, two commits: `feat(api)` `5421338`,
+`feat(web)` `dc34e09`): that page had shipped a card explaining why it offered no links, on the
+grounds that the agent, notification and escalation screens do not read a contract out of their
+address. Two of the three **routes** already did — the escalation queue was the one that could
+genuinely not be narrowed — so the card was answering an accurate question with an out-of-date
+fact. `EscalationRepository.queue` grew `contract_id` as a **parameter rather than a second
+`for_contract` method**, so "oldest deadline first" stays decided in one place and the card and
+the queue cannot disagree about what is late; the predicate is applied **after `scoped()`**, so a
+cross-tenant id is an **empty list** rather than their rows and cannot be used to probe which
+contracts exist — the same opacity the other two filters give. A named contract returns **closed
+rows too**, because a contract page asks "what happened here" and half a history is not an answer,
+and the response **echoes** `contract_id` so a page can tell "none" from "an empty queue". The
+card now states each read's own `count`, the latest decision's channel, the earliest reminder slot
+as sent (a calendar date on the contract's clock), and the route's own `overdue`/`sla_hours` —
+three separate queries, because they fail independently, and nothing summed in the browser from
+`sla_deadline`. Its three links stay **unfiltered on purpose**: the screens still do not read a
+contract out of their address, and a query string they ignore would look like a filter while
+showing everything. **52 passed** on `test_escalations.py`, three of them new; **444** leaf keys
+per locale, **86** message keys reached and all defined both ways. No schema change, no migration
+(`0006`), no new repository method. The gap 18 and gap 12 limits above are unchanged — the queue
+screen still reads the tenant-wide list, so nothing on that screen exercises the new parameter.
+
 ## Phase history
 
 | Phase | State |
@@ -3103,7 +3125,12 @@ working tree.
   still cannot reach is a *filtered* agent, notification or escalation view: none of those
   screens reads a contract out of its address, and the detail page says so instead of
   offering a link that would silently show everything. The bullet stands as the record of
-  what this slice set out to do.
+  what this slice set out to do. **Amended again by `D10-35`, not deleted:** all three
+  *routes* take a `contract_id` now — the escalation queue was the last without one — so
+  the detail page states each read's count instead of apologising. The *screens* still do
+  not read a contract out of their address, so the links it offers remain unfiltered and
+  the note says why; reaching a filtered view from the browser still needs a filter control
+  on the screen that owns it.
 - **Gap 5 is untouched.** The `contract.ingested` consumer is still unwritten and still
   blocked on an owner decision; a listing does not change what a consumer could do.
 
@@ -3498,7 +3525,7 @@ listing is now the link into it.
 | `frontend/src/app/[locale]/contracts/[id]/page.tsx` | **New, 500 lines.** Contract header reusing the listing's `STATUS_TONES`/`SOURCE_KEYS`/`RISK_KEYS`/`CHANNEL_KEYS` semantics; the four consent flags as **read-only** text; a fields table with the blocking count; a "related reads" card that says plainly why it has no links. |
 | `frontend/src/app/[locale]/contracts/page.tsx` | **+15/−1**: the card title is a `Link` to `/{locale}/contracts/{id}`, carrying the same `text-primary underline-offset-4 hover:underline` classes as every other back-link in the app. |
 | `frontend/src/i18n/messages/en.json`, `bn.json` | **18** `contracts.*` detail keys per locale (**434** leaf keys each), full Bengali. |
-| `DECISIONS.md` | `D10-34`, plus one amend-not-delete pointer: the listing slice's "nothing is clickable" bullet (`STATUS.md:3098`). |
+| `DECISIONS.md` | `D10-34`, plus one amend-not-delete pointer: the listing slice's "nothing is clickable" bullet (`STATUS.md:3120`). |
 | No schema change | No migration (`alembic` head stays `0006`) and no new repository method — the route is a model reuse over `get`. |
 
 ### The two things the page refuses to compute
@@ -3522,7 +3549,9 @@ day out).
 **Why the "related reads" card has no links.** The agent, notification and escalation screens do
 not read a contract out of their address. A `?contract=12` link to one of them would look like a
 filter and silently show everything, so the card states where those reads live instead of offering
-a link that lies.
+a link that lies. **Amended, not deleted (`D10-35`):** the card now states each read's count, because
+all three *routes* take a contract id — the three *screens* still do not, so the links stay
+unfiltered for exactly the reason above.
 
 ### Verification actually run (`D10-34`)
 
@@ -3556,7 +3585,9 @@ who reads Bengali.
 - **No filtered per-contract views.** Agent decisions, notifications and escalations still cannot be
   read *for one contract* from the UI: none of those routes filters by contract in its address, and
   the detail page says so rather than linking to a view that would show everything. That is the next
-  obvious read, and it is a backend change, not a screen.
+  obvious read, and it is a backend change, not a screen. **Closed since (`D10-35`):** all three
+  routes take a `contract_id`, and the page's related-reads card reports each one's own count. The
+  *screens* still read tenant-wide lists — see the slice below for why that is deliberate.
 - **No field value, no reveal.** The value lives behind the audited reveal on the review queue, and
   the table names that instead of implying a broken column.
 - **No expiry countdown.** Same reason `D10-27` recorded: the number needs the contract's own clock
@@ -3569,6 +3600,104 @@ who reads Bengali.
   owns the size cap and tamper detection; this page surfaces `has_document`, never the path.
 - **Gap 5 is untouched.** The `contract.ingested` consumer is still unwritten and still blocked on
   an owner decision.
+
+## The detail page reads its neighbours ✅ (`D10-35` — the last missing contract filter)
+
+The page that `D10-34` added carried a card that explained, in prose, why it offered no links: agent
+decisions, notifications and escalations each had their own screen, and none of those screens read a
+contract out of its address. Two of the three **routes** already took a contract filter —
+`GET /agent/decisions?contract_id=` and `GET /notifications?contract_id=` were built with the routes
+that own them, and the card was written as though none of them had. The escalation queue was the one
+that genuinely could not be narrowed, so "which of this tenant's escalations are *this* contract's"
+was answerable only by reading the whole queue and matching `contract_id` by eye. One query
+parameter, one echoed response field, and a card that states what the system recorded.
+
+| Change | Detail |
+| --- | --- |
+| `backend/app/db/repositories/escalations.py` | `queue()` gained `contract_id: int \| None = None` (**+14/−1**), applied **after** `scoped()`. No second `for_contract` method. |
+| `backend/app/api/v1/escalations.py` | `GET /escalations` gained `contract_id: int \| None = Query(default=None, gt=0)`; `EscalationListResponse` gained `contract_id: int \| None` as an **echo**, the convention `AgentDecisionListResponse` already uses (**+20/−1**). |
+| `backend/tests/test_escalations.py` | **Three** new tests (**+67**): narrowing returns only that contract's rows in deadline order **including the resolved one**, with the echo; a cross-tenant id answers an empty list and echoes the caller's own id; a viewer may read a filtered queue. |
+| `frontend/src/lib/api.ts` | **+32/−7**: `EscalationQueue.contract_id`, new `EscalationQuery { statuses?, contractId? }`, and `escalations.queue` takes that options object the way `notifications.list` already did. |
+| `frontend/src/app/[locale]/contracts/[id]/page.tsx` | **+228/−16**: the placeholder card becomes three `useQuery` calls keyed `["contracts","detail",id,"…"]`, `enabled: isAuthenticated && validId`, `retry: false`, plus `RelatedReads` and a documented `RelatedQuery<T>` prop type. |
+| `frontend/src/app/[locale]/escalations/page.tsx` | **+3/−1**: the queue screen's one call site moves to the options object, so `WORKING_STATUSES` still applies. |
+| `frontend/src/i18n/messages/en.json`, `bn.json` | Ten new `contracts.detail*` keys plus one rewritten note per locale (**+11/−1** each, **444** leaf keys each). |
+| `DECISIONS.md` | `D10-35`, plus an amend-not-delete of `D10-34`'s "it does not link" bullet. |
+| No schema change | No migration (`alembic` head stays `0006`) and no new repository method — one parameter on an existing one. |
+
+### Why the filter is a parameter, not a second method
+
+`EscalationRepository.queue` builds the queue's ordering — oldest deadline first, with the
+"working" statuses passed in rather than assumed. A parallel `for_contract` method would be a copy of
+that rule, free to drift from the queue screen's, and the whole point of this card is that it and the
+queue **cannot disagree about what is late**. So the method grew a parameter and nothing else moved.
+
+The order of the two predicates is the security-relevant part: `scoped()` builds the tenant predicate
+first, and the contract id narrows what it returned. Another tenant's id is therefore an **empty
+list**, not their rows, and cannot be used to probe which contract ids exist. That is the opacity
+`GET /agent/decisions` and `GET /notifications` already give their own filters.
+
+**Empty list here, 404 there — deliberately.** `GET /contracts/{id}` is an *address*: it either names
+a row the caller may open or it does not, so `D10-34` answered 404. A list filter is not an address;
+it can only say "no rows match", and answering 404 would need a second existence query the queue does
+not make — turning a filter into a permission probe while pretending not to be one.
+
+**Naming a contract returns closed rows.** `?status=` defaults to every state and the working queue
+narrows it; a contract page asks the opposite question — "what happened here" — so hiding a resolved
+escalation would answer it with half a history. The route's docstring says so, because the two
+filters read alike and answer differently.
+
+### What the card states, and what it refuses to compute
+
+Each of the three reads gets a count taken from **its own response's `count`** — decisions, reminders
+(numbered slots), and this contract's escalations with the route's own `overdue` count and
+`sla_hours`. The latest decision is named by channel only, the earliest reminder slot is printed as
+the server sent it (it is a calendar date on the *contract's* clock), and nothing is summed in the
+browser: `sla_deadline` is a timestamp the server compares against its clock, so a client that
+recomputed lateness would disagree with the queue screen by whatever the skew is.
+
+Three separate `useQuery` calls, not one combined endpoint: a contract summary that aggregated all
+three would be a sixth read path with its own serializer and the first thing to drift — and separate
+calls fail independently, so one refusal cannot blank the other two.
+
+**The links stay unfiltered, on purpose.** The three *screens* still do not read a contract out of
+their address, so `?contract=12` on any of them would look like a filter while showing everything.
+The note under the heading says that instead of presenting three links that lie; adding the address
+filters is a routing decision on the screens that own them.
+
+### Verification actually run (`D10-35`)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| The filter | `python -m pytest tests/test_escalations.py -q` | **52 passed** (`EXITCODE=0`), three of them new. |
+| Closed rows survive the filter | same suite | A resolved escalation on the named contract is returned; the row order is still deadline-first. |
+| Cross-tenant id | same suite | **Empty list** with the caller's own id echoed back — not their rows, not a 404. |
+| Roles | same suite | A viewer may read a filtered queue; the write routes' refusals are unchanged. |
+| Key parity | script over both catalogues, measured **both ways** | **444** leaf keys per locale; `enOnly []`, `bnOnly []`; **0** placeholder drift. |
+| Reachability | same script | **86** message keys reached, all defined in both locales; **16/16** `contracts.detail*` keys reached; **0** bare map values passed to `t()`. |
+| Diff shape | `git --no-pager diff --numstat` | `escalations.py` **+20/−1**, repository **+14/−1**, tests **+67**; page **+228/−16**, queue page **+3/−1**, `api.ts` **+32/−7**, `en.json`/`bn.json` **+11/−1** each. |
+| Commit gate | the hooks on both commits | **18 of 19 hooks ran, 17 Passed**, `forbid-submodules` `(no files to check)`. `ruff`, `ruff format`, `mypy (strict)`, `bandit`, both frontend `tsc` runs and frontend `eslint` all **Passed**; `gitleaks` stays `stages: [manual]`. |
+
+Two commits, then this one: **`5421338`** (`feat(api)` — the filter, its echo and three tests:
+`escalations.py` **+20/−1**, repository **+14/−1**, tests **+67**) and **`dc34e09`** (`feat(web)` — the
+card, the client, both catalogues: **285** insertions, **26** deletions across five files). Each
+message was checked with `npx commitlint --edit` before its commit ran.
+
+**What is not proven here.** No frontend test runner exists, so nothing tests this card and **no
+browser has rendered it** — it is a compiler and a linter. The key counts are a script's output, not
+a reading of the Bengali catalogue by somebody who reads Bengali.
+
+### What this does not do — stated, not buried
+
+- **The queue screen still reads the tenant-wide list.** It gained no filter control, so nothing on
+  that screen exercises `?contract_id=`; the only caller today is this card. A control there is a
+  screen decision, not a ride-along.
+- **The three links are still plain.** That is the deliberate refusal above, not an oversight.
+- **No new endpoint, no aggregation.** The card composes three existing routes; there is no
+  `/contracts/{id}/summary` and no sixth serializer to keep in step.
+- **No field value, no reveal, no expiry countdown, no consent edit here.** All four stay where
+  `D10-34` put them: on the review queue, nowhere, on the listing's cards, and behind one screen.
+- **Gap 5 is untouched.** The `contract.ingested` consumer is still unwritten and still blocked on an
+  owner decision.
 
 ## Next permitted step
 
