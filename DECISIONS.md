@@ -3221,3 +3221,75 @@ rendered it or saved consent from it** — a compiler and a linter, nothing more
 **Gap 18 is narrowed, not closed.** Consent is now changeable from the product one contract at a
 time; a fresh database still consents nothing by default, and the bulk backfill still needs the
 sheet and somebody to own it.
+
+### D10-34 — A contract gets an address, and the detail read is the listing's own serializer
+
+Ingestion, the consent editor and the review queue all address a contract **by id**, and until now
+an id read off the contracts list was usable nowhere: there was no route that read one contract and
+no screen to open it on. Every per-contract route below took its id on faith. `GET
+/contracts/{contract_id}` and the page at `/[locale]/contracts/[id]` close that: a listing row is
+now an address, and the card that shows a contract links to the page that explains it.
+
+- **One serializer, two callers.** The route answers `ContractListItem` — the listing's own model,
+  built by the same `_list_item` — rather than a second "detail" model. A detail model is how a
+  summary and the page it links to start disagreeing field by field, and the fields most likely to
+  drift are the derived ones: `may_contact`, `consent_channels` and `has_document` are model
+  properties, and a second model would be free to compute them its own way. The consequence is
+  testable as an assertion about the whole body: the detail read equals the listing's first item,
+  as a dict, after a consent write.
+- **The widest read role is `VIEWER`.** The listing already shows these columns to a viewer, so
+  refusing the single read would hide nothing — it would only make the id un-openable. `storage_path`
+  and `created_by` are withheld once, in `ContractListItem`, and are therefore withheld here.
+- **404, not 403, for another tenant's contract.** `TenantScopedRepository.get` returns `None`
+  outside the caller's tenant, so the route cannot be used to probe which contract ids exist
+  elsewhere — the same answer `/contracts/{id}/fields` already gives, and the reason the page's
+  `isForbidden` branch is reachable only by a genuinely under-privileged role.
+- **Registered before the literal paths.** `/{contract_id}` is declared above `POST ""`,
+  `POST /document` and the `/{contract_id}/…` routes. FastAPI matches in registration order and a
+  `POST`/`PUT` cannot be shadowed by a `GET`, but keeping the int path above the literal ones means
+  the ordering argument does not have to be re-derived the day one of them changes method.
+- **`ContractRepository` is used only as the tenant-scoping seam.** No repository method was added:
+  `get` already exists on the base class and already scopes. The slice is a route, a model reuse and
+  a test block, not a second query path.
+- **The fields read existed and had no client.** `GET /contracts/{id}/fields` was built in F7 and
+  never called, so the extraction state of a contract was invisible from the product. `ContractField`
+  carries **no `value`** and there is no field to add one to: the route is value-free by `D7-05`, and
+  revealing one value is the audited `POST /review/{id}/reveal`. The page says that in place of the
+  column rather than leaving an empty cell that reads as a defect.
+- **`blocks_pipeline` and `blocking` are read, not counted.** Both come from the model, so the page
+  and the review queue cannot disagree about whether a contract can be contacted. Counting
+  `status === "approved"` in the browser would be a second definition of the pipeline gate.
+- **What the page deliberately is not.** It does not edit consent — one screen owns that write, so
+  there is one place where a stale version can be submitted and one place to fix, which is why the
+  four flags appear as read-only text with a pointer to the list. It does not re-derive
+  contactability from those flags. It does not compute "expires in N days": that is measured on the
+  **contract's** clock, which is why the row carries a time zone, and deriving it in the browser
+  would use the reader's zone and could be a day out. It does not link to agent decisions,
+  notifications or escalations, because none of those screens reads a contract out of its address
+  yet — a query string would look like a filter and silently show everything, so the card says why
+  instead.
+- **Field vocabularies are borrowed, not copied.** Field names and review states are labelled from
+  the `review.*` namespace. Duplicating them into `contracts.*` would give one enum two
+  vocabularies, and the screen that decides a field and the screen that reports it would eventually
+  call the same state different things.
+- **The route segment is validated, not coerced.** `Number.parseInt` plus a `/^\d+$/` guard, because
+  the path parameter is an `int` server-side: `"12abc"` must be an invalid id rather than silently
+  reading as 12, and an empty segment must never become 0.
+
+**No schema change and no repository method.** `alembic` head stays `0006`. `ContractField` and
+`ContractFields` mirror `ExtractedFieldSummary`/`ContractFieldsResponse`, and `contracts.get` /
+`contracts.fields` are the two new calls.
+
+**Verified.** `pytest tests/test_contracts.py` → **39 passed**, six of them new: the whole-dict
+equality with the listing, `storage_path` withheld from body and raw text, cross-tenant 404 in
+**both** directions, an unknown id as 404, a viewer reaching the row, and an unauthenticated read as
+401. Both catalogues carry **434** leaf keys with `enOnly`/`bnOnly` empty and no placeholder drift
+in either direction; the page reaches **68** message keys, all defined in both locales, **18** of
+them new under `contracts.*` and every one of them reached. No bare map value is passed to `t()`
+(the `07c31ab` trap).
+
+**The same limit `D10-32` and `D10-33` recorded.** There is no frontend test runner in this repo, so
+nothing tests this page, and **no browser has rendered it** — a compiler and a linter, nothing more.
+The key counts are a script's output, not a reading of two translated files by somebody who reads
+Bengali. Gap 12 stays narrowed rather than closed: an uploaded document now has a contract page, but
+nothing parses it — `extract` still takes `--text-file`.

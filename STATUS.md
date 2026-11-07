@@ -368,6 +368,26 @@ closed**: one contract at a time, a fresh database still consents nothing, and t
 backfill stays with `consent-import` and its sheet. No backend file changed, no migration
 (`0006`).
 
+**Then a contract gets an address** (`D10-34`, two commits: `feat(api)` `00e8d1e`,
+`feat(web)` `46628a5`): every per-contract route in v1 takes an **id**, and the listing was
+the only screen that could produce one — so an id read off a card was usable by paging back
+to that card and nothing else. `GET /contracts/{contract_id}` returns the listing's own
+`ContractListItem` through the listing's own `_list_item`, so a card and its page cannot
+describe the same row differently, and it is declared above `POST ""` and above every
+`/{contract_id}/…` read so a literal path can never be shadowed by the int path. A
+cross-tenant id answers **404, not 403**: `TenantScopedRepository.get` scopes the query and
+returns `None`, and a 403 would confirm the row exists in some other tenant. The card title
+on `/[locale]/contracts` now links here. The page states `may_contact`, `consent_channels`,
+`blocks_pipeline` and `blocking` **as the model computed them** rather than rebuilding them
+from the four flags or counting `status === "approved"`, and it shows no field value: the
+route withholds every one and revealing one is the audited `POST /review/{id}/reveal`, so the
+table says so. It also refuses an "expires in N days" countdown, which would be measured on
+the reader's clock rather than the contract's `timezone`. **18** `contracts.*` detail keys
+per locale against **434** leaf keys, **68** message keys reached and all defined both ways.
+Gap 12 is **narrowed, not closed**: the page says whether a document is stored, but
+`extract` still requires `--text-file`, so a PDF reaches extraction only after a shell step.
+No schema change, no migration (`0006`), no new repository method.
+
 ## Phase history
 
 | Phase | State |
@@ -3077,7 +3097,13 @@ working tree.
   search the tenant's contracts while holding a page of them.
 - **Nothing is clickable.** Each card names `contract #{id}`; there is no
   `/[locale]/contracts/[id]` route, so an id cannot be followed from here to the fields,
-  decisions, notifications or consent that take one.
+  decisions, notifications or consent that take one. **Amended by `D10-34`, not deleted:**
+  the route exists now and the card title is a link to it, so an id can be followed — to the
+  contract's own page, which reads its fields and states its consent as text. What the card
+  still cannot reach is a *filtered* agent, notification or escalation view: none of those
+  screens reads a contract out of its address, and the detail page says so instead of
+  offering a link that would silently show everything. The bullet stands as the record of
+  what this slice set out to do.
 - **Gap 5 is untouched.** The `contract.ingested` consumer is still unwritten and still
   blocked on an owner decision; a listing does not change what a consumer could do.
 
@@ -3454,6 +3480,95 @@ two translated files by someone who reads Bengali.
   does not have.
 - **Gap 5 is untouched.** The `contract.ingested` consumer is still unwritten and still blocked
   on an owner decision.
+
+## A contract gets an address ✅ (`D10-34` — the listing's rows become openable)
+
+Every per-contract route in v1 — fields, consent, decisions, notifications, escalations — takes a
+contract **id**, and two of them now have screens that produce one. Nothing read a *single*
+contract, and nothing in the browser opened one: the listing could find an id and no screen could
+use it, so the id an operator read off a card was only usable by paging back to that card.
+`GET /contracts/{contract_id}` and `/[locale]/contracts/[id]` close that, and the card title on the
+listing is now the link into it.
+
+| Change | Detail |
+| --- | --- |
+| `backend/app/api/v1/contracts.py` | `read_contract` (**+36**): `GET /{contract_id}`, `response_model=ContractListItem`, `require_roles(ADMIN, OPERATOR, VIEWER)`, built by the listing's own `_list_item`, raised **404** when `TenantScopedRepository.get` returns `None`. Declared at `:375` — above `POST ""` (`:411`), `POST /document` (`:492`) and the `/{contract_id}/…` reads (`:688`, `:773`). |
+| `backend/tests/test_contracts.py` | **Six** new tests under `# --- the single read ---` (**+99**), plus a `_one` helper. |
+| `frontend/src/lib/api.ts` | **+64**: `ContractField` (no `value` field by design), `ContractFields` (`contract_id`/`fields`/`blocking`), `contracts.get`, `contracts.fields`. |
+| `frontend/src/app/[locale]/contracts/[id]/page.tsx` | **New, 500 lines.** Contract header reusing the listing's `STATUS_TONES`/`SOURCE_KEYS`/`RISK_KEYS`/`CHANNEL_KEYS` semantics; the four consent flags as **read-only** text; a fields table with the blocking count; a "related reads" card that says plainly why it has no links. |
+| `frontend/src/app/[locale]/contracts/page.tsx` | **+15/−1**: the card title is a `Link` to `/{locale}/contracts/{id}`, carrying the same `text-primary underline-offset-4 hover:underline` classes as every other back-link in the app. |
+| `frontend/src/i18n/messages/en.json`, `bn.json` | **18** `contracts.*` detail keys per locale (**434** leaf keys each), full Bengali. |
+| `DECISIONS.md` | `D10-34`, plus one amend-not-delete pointer: the listing slice's "nothing is clickable" bullet (`STATUS.md:3098`). |
+| No schema change | No migration (`alembic` head stays `0006`) and no new repository method — the route is a model reuse over `get`. |
+
+### The two things the page refuses to compute
+
+**Whether a customer may be contacted.** `may_contact` and `consent_channels` arrive from the model
+and are what the decision policy enforces; the page states them and never rebuilds them from the
+four flags. Reading the flags as the answer instead would be a second contact policy, free to
+disagree with the one that decides whether a reminder goes out.
+
+**Whether a contract is blocked.** `blocks_pipeline` per field and `blocking` per contract are
+model properties, so counting `status === "approved"` in the browser would be a second definition of
+the pipeline gate — and the page would then disagree with the review queue about whether the same
+contract can be contacted.
+
+It also refuses two smaller things: a field's **value** (the route withholds every one, and
+revealing one is the audited `POST /review/{id}/reveal`, so the table says so rather than showing
+an empty column) and **"expires in N days"** (measured on the *contract's* clock — which is why the
+row carries a `timezone` — so deriving it in the browser would use the reader's zone and could be a
+day out).
+
+**Why the "related reads" card has no links.** The agent, notification and escalation screens do
+not read a contract out of their address. A `?contract=12` link to one of them would look like a
+filter and silently show everything, so the card states where those reads live instead of offering
+a link that lies.
+
+### Verification actually run (`D10-34`)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Route contract | read `backend/app/api/v1/contracts.py:375-408` | One serializer: `response_model=ContractListItem` from `_list_item`, so `storage_path` and `created_by` are withheld once, in the model. `require_roles(ADMIN, OPERATOR, VIEWER)`; **404** — not 403 — outside the caller's tenant, because `get` scopes and returns `None`. |
+| The read and the listing cannot disagree | `python -m pytest tests/test_contracts.py` | **39 passed.** The new equality test asserts the whole body equals the listing's first item *as a dict*, after a consent write, so the derived fields are exercised. |
+| The withheld column, both ways | same suite | `has_document` is `true` while `"storage_path"` is absent from the body **and** the path string is absent from the raw response text. |
+| Tenant scoping, both directions | same suite | A tenant's own row reads **200** in both tenants and the other tenant's row reads **404** in both. |
+| Unknown id · viewer · no token | same suite | `999999` → **404**; a viewer reads the same row → **200**; no bearer token → **401**. |
+| Key parity | script over both catalogues, reported **both ways** | **434** leaf keys per locale; `enOnly []`, `bnOnly []`; **0** placeholder drift in either direction. |
+| Reachability | same script, expanding the five label maps | **68** message keys reached, **all** defined in both locales; **18** new `contracts.*` keys defined and all 18 reached; **0** bare map values passed to `t()` (the `07c31ab` trap). |
+| Diff shape | `git --no-pager diff --numstat` | `contracts.py` **+36**, `test_contracts.py` **+99**, `api.ts` **+64**, `contracts/page.tsx` **+15/−1**, `en.json` **+18**, `bn.json` **+18**, new page **500** lines. |
+
+Three commits, not one: `feat(api)` for the route and its tests, `feat(web)` for the screen and both
+catalogues, then this `docs(status)` that names both hashes — the convention `D10-26`…`D10-33` used.
+The two are **`00e8d1e`** (the read: `contracts.py` **+36**, `test_contracts.py` **+99**) and
+**`46628a5`** (the screen: the new page, `api.ts` **+64**, `contracts/page.tsx` **+15/−1**, both
+catalogues **+18** each). They are recorded here and in the phase history rather than between the
+rows above, because those rows record *checks*, not commits, and the commit-gate row lands in its own
+follow-up. Each message was checked with `npx commitlint --edit` before its commit ran, so no subject
+carries a capitalised proper noun or a route path.
+
+**What is not proven here.** No frontend test runner exists in this repo, so nothing tests this page
+and none was written that would run. **No browser has rendered it.** The key counts are a script's
+output — a parity dict and a reachability set — not a reading of two translated files by somebody
+who reads Bengali.
+
+### What this does not do — stated, not buried
+
+- **No filtered per-contract views.** Agent decisions, notifications and escalations still cannot be
+  read *for one contract* from the UI: none of those routes filters by contract in its address, and
+  the detail page says so rather than linking to a view that would show everything. That is the next
+  obvious read, and it is a backend change, not a screen.
+- **No field value, no reveal.** The value lives behind the audited reveal on the review queue, and
+  the table names that instead of implying a broken column.
+- **No expiry countdown.** Same reason `D10-27` recorded: the number needs the contract's own clock
+  and a product definition of the window, and no route offers one.
+- **No consent edit here.** One screen owns `PUT /contracts/{id}/consent` — the listing's cards — so
+  there is one place where a stale version can be submitted and one place to fix it.
+- **Gap 12 is narrowed, not closed.** An uploaded document now has a contract page that says whether
+  a document is stored, but **nothing parses it**: `extract` still requires `--text-file`
+  (`app/cli.py:351`), so a PDF reaches extraction only after a shell step. `DocumentStore.save`
+  owns the size cap and tamper detection; this page surfaces `has_document`, never the path.
+- **Gap 5 is untouched.** The `contract.ingested` consumer is still unwritten and still blocked on
+  an owner decision.
 
 ## Next permitted step
 
