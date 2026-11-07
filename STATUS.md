@@ -3158,7 +3158,11 @@ working tree.
   the detail page states each read's count instead of apologising. The *screens* still do
   not read a contract out of their address, so the links it offers remain unfiltered and
   the note says why; reaching a filtered view from the browser still needs a filter control
-  on the screen that owns it.
+  on the screen that owns it. **Amended again by `D10-36`, not deleted:** the three screens
+  now read `?contract=` out of their own address, the detail page's three links carry it,
+  and each screen has a control that sets it — so a filtered view *is* reachable from the
+  browser. The clause above survives as the reason the parameter had to be honoured before
+  the links could be filtered, which is the order this slice did it in.
 - **Gap 5 is untouched.** The `contract.ingested` consumer is still unwritten and still
   blocked on an owner decision; a listing does not change what a consumer could do.
 
@@ -3553,7 +3557,7 @@ listing is now the link into it.
 | `frontend/src/app/[locale]/contracts/[id]/page.tsx` | **New, 500 lines.** Contract header reusing the listing's `STATUS_TONES`/`SOURCE_KEYS`/`RISK_KEYS`/`CHANNEL_KEYS` semantics; the four consent flags as **read-only** text; a fields table with the blocking count; a "related reads" card that says plainly why it has no links. |
 | `frontend/src/app/[locale]/contracts/page.tsx` | **+15/−1**: the card title is a `Link` to `/{locale}/contracts/{id}`, carrying the same `text-primary underline-offset-4 hover:underline` classes as every other back-link in the app. |
 | `frontend/src/i18n/messages/en.json`, `bn.json` | **18** `contracts.*` detail keys per locale (**434** leaf keys each), full Bengali. |
-| `DECISIONS.md` | `D10-34`, plus one amend-not-delete pointer: the listing slice's "nothing is clickable" bullet (`STATUS.md:3120`). |
+| `DECISIONS.md` | `D10-34`, plus one amend-not-delete pointer: the listing slice's "nothing is clickable" bullet (`STATUS.md:3148`). |
 | No schema change | No migration (`alembic` head stays `0006`) and no new repository method — the route is a model reuse over `get`. |
 
 ### The two things the page refuses to compute
@@ -3579,7 +3583,10 @@ not read a contract out of their address. A `?contract=12` link to one of them w
 filter and silently show everything, so the card states where those reads live instead of offering
 a link that lies. **Amended, not deleted (`D10-35`):** the card now states each read's count, because
 all three *routes* take a contract id — the three *screens* still do not, so the links stay
-unfiltered for exactly the reason above.
+unfiltered for exactly the reason above. **Amended again by `D10-36`, not deleted:** the three
+screens read `?contract=` now, so the card's links carry it and its note says what the scope does
+instead of why there is none. The clause survives as the order the work had to happen in — the
+parameter had to be honoured by the screen before a link carrying it could be honest.
 
 ### Verification actually run (`D10-34`)
 
@@ -3750,7 +3757,7 @@ contract's" becomes a click instead of reading a queue and matching ids by eye.
 | `frontend/src/app/[locale]/notifications/page.tsx` | **+140/−9**: a scope form (numeric input, apply/clear, submit disabled while the typed id cannot be a contract), the invalid-address card, loading gated on `!scopeIsInvalid`, and a contract-specific empty sentence. |
 | `frontend/src/app/[locale]/escalations/page.tsx` | **+172/−8**: the largest of the three, because **both** filters live in the address — the contract scope *and* the resolved toggle (`?resolved=1`), composed so applying one cannot clear the other. |
 | `frontend/src/app/[locale]/contracts/[id]/page.tsx` | **+14/−7**: `RelatedReads` takes a required `contractId`, and the three `href`s are built by `withContractScope` rather than concatenated by hand. |
-| `frontend/src/i18n/messages/en.json`, `bn.json` | **+20** each, no deletions: 21 keys across `agent`, `notifications` and `escalations`. |
+| `frontend/src/i18n/messages/en.json`, `bn.json` | **+20** each, no deletions: 20 keys — ten under `escalations`, nine under `notifications`, one `agent.filterInvalidHint` — which is the 444 → 464 leaf growth measured in both catalogues. |
 | `frontend/src/lib/api.ts` | **+6**, no deletions: `NotificationList.contract_id` — a field the route has always sent. |
 | `DECISIONS.md` | `D10-36`, plus **three** amend-not-delete closures of `D10-34` and `D10-35` bullets that assumed the screens would keep ignoring the parameter. |
 | No backend change, no schema change | `contract_id` was already on both list routes and landed on the queue in `5421338`; `alembic` head stays `0006`. |
