@@ -639,6 +639,7 @@ interface ContractCardProps {
  */
 function ContractCard({ row, dateFormat, instantFormat, consent, onConsentSave }: ContractCardProps) {
   const t = useTranslations();
+  const locale = useLocale();
 
   const term =
     row.start_date === null && row.end_date === null
@@ -664,7 +665,20 @@ function ContractCard({ row, dateFormat, instantFormat, consent, onConsentSave }
   return (
     <Card>
       <CardHeader className="flex flex-wrap items-baseline justify-between gap-2">
-        <CardTitle>{t("contracts.contractLabel", { id: row.id })}</CardTitle>
+        {/*
+          The title is the link to the row's own page. A card shows what the list
+          can show; the fields, decisions and per-contract reads live behind this
+          address, and an id read off this list was previously only usable by
+          scrolling back to it.
+        */}
+        <CardTitle>
+          <Link
+            className="text-primary underline-offset-4 hover:underline"
+            href={`/${locale}/contracts/${row.id}`}
+          >
+            {t("contracts.contractLabel", { id: row.id })}
+          </Link>
+        </CardTitle>
         <span
           className={`rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_TONES[row.status]}`}
         >

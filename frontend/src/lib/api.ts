@@ -675,6 +675,46 @@ export interface ContractListItem {
   created_at: string;
 }
 
+/**
+ * One extracted field's review state — **without its value**
+ * (`app.api.v1.contracts.ExtractedFieldSummary`).
+ *
+ * There is no `value` here and there is no field to add one to. The route
+ * withholds every extracted value because it is PII, and `review.reveal` is the
+ * audited call that shows exactly one. A client that invented a looser shape
+ * would leak identity through whichever screen reused it (DECISIONS.md D7-05).
+ *
+ * `blocks_pipeline` is computed by the model, not by this client: one definition
+ * of "this field stops the notification pipeline" is what keeps a contract page
+ * and the review queue from disagreeing about whether a contract can be contacted.
+ */
+export interface ContractField {
+  field_name: FieldName;
+  status: FieldStatus;
+  confidence: number;
+  /** Review decisions echo this back; the server refuses a stale one with 409. */
+  version: number;
+  source_page: number | null;
+  source_line: number | null;
+  reviewed_at: string | null;
+  review_reason: string | null;
+  blocks_pipeline: boolean;
+}
+
+/**
+ * What extraction produced for one contract (`app.api.v1.contracts.ContractFieldsResponse`).
+ *
+ * `blocking` is the number an operator acts on. An empty `fields` list means
+ * extraction has not run, which is not the same as "this contract is clean" —
+ * which is why the count is carried separately rather than derived by counting.
+ */
+export interface ContractFields {
+  contract_id: number;
+  fields: ContractField[];
+  /** How many of these still hold the notification pipeline. */
+  blocking: number;
+}
+
 /** One keyset page of contracts, newest first. */
 export interface ContractList {
   items: ContractListItem[];
@@ -811,6 +851,30 @@ export const contracts = {
       accessToken,
     });
   },
+
+  /**
+   * One contract by id, in exactly the shape the listing uses.
+   *
+   * The same `ContractListItem` rather than a second type, because a card and the
+   * page it links to must not be able to disagree field by field — one serializer
+   * server-side, one shape here.
+   *
+   * Any authenticated role may read it; a contract in another tenant is answered
+   * **404**, not 403, because the server scopes the lookup by tenant and cannot be
+   * used to learn which ids exist.
+   */
+  get: (accessToken: string, contractId: number) =>
+    request<ContractListItem>(`/contracts/${contractId}`, { accessToken }),
+
+  /**
+   * One contract's extraction state — values withheld by the route.
+   *
+   * A viewer may read it: this is what the review queue lists, without the PII.
+   * Revealing one value is `review.reveal`, which is audited; there is deliberately
+   * no way to ask for values in bulk.
+   */
+  fields: (accessToken: string, contractId: number) =>
+    request<ContractFields>(`/contracts/${contractId}/fields`, { accessToken }),
 
   /**
    * Register a contract from metadata alone.
