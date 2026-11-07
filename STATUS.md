@@ -307,7 +307,7 @@ single-connection constraint so the next threaded test meets the rule rather tha
 The suite is **840 collected, 825 passed, 15 skipped, 0 failed** — identical to before the
 fix, because the test was never legitimately failing.
 
-**Then the account routes get a caller** (`D10-31`, `feat(web)`):
+**Then the account routes get a caller** (`D10-31`, `feat(web)` `137b11f`):
 `GET|POST /auth/users`, `PATCH /auth/users/{id}` and `POST /auth/users/{id}/password-reset`
 were the last router in the API with no consumer outside `TestClient` and `curl` — which
 made "add the second administrator" a shell exercise on a system whose first administrator
@@ -3209,11 +3209,20 @@ held the `auth/` calls (`login`, `refresh`, `logout`, `me`) at `api.ts:235-254`.
 | Key parity (both directions) | `python` over both catalogues: flatten, then compare key sets | **382 / 382** leaf keys; **44 / 44** under `users`; `en`-only `[]`, `bn`-only `[]`, whole-file `en`-only `[]`, `bn`-only `[]` |
 | Route contracts | read all four route bodies in `backend/app/api/v1/auth.py` (766-1079) | `require_roles(ADMIN)` on each; `409` `_SELF_CHANGE_REFUSED` on `PATCH` and reset; `409` `_ACCOUNT_INACTIVE` on reset; `_end_sessions` on any real change; 422 on a short password (`main.py:150-165`) |
 | Server password floor | `backend/app/core/security.py:53` | `MIN_PASSWORD_LENGTH = 12` — the client's copy matches, as a label only |
+| Types (frontend) | commit gate: `tsc --noEmit` | **Passed** on `137b11f` — the root `frontend typecheck` hook, not a `(no files to check)` skip |
+| Demo types | commit gate: `tsc --noEmit` (`demo/frontend`) | **Passed** — no demo file changed, and the hook still ran its own check |
+| Lint (frontend) | commit gate: `eslint` | **Passed** on `137b11f` — the root `frontend eslint` hook |
+| Commit gate | `git commit` | **`137b11f`**, 7 files, **+872/−12**. Nineteen hooks are defined; `gitleaks` is `stages: [manual]` and never joins a commit (D1-03), so **18** ran: **17 reported Passed**, `forbid-submodules` reported `(no files to check) Skipped`. No other hook skipped — the same 17-of-18 shape `bcfce75` and `6fe7c36` recorded. `check json` ran because this slice edits two JSON catalogues. |
 
-**The `tsc` / `eslint` / commit-gate rows belong to the follow-up `docs(status)` commit that
-names the hash**, not to this section — the convention `D10-26`…`D10-30` used, and the mistake
-`D10-30` recorded after writing a commit *type* before the commit existed. No `frontend/` source
-file may change between the audit above and that commit, or the counts stop describing it.
+The slice landed as **`137b11f`**. That hash and the three gate rows above were added by the
+follow-up `docs(status)` commit that names it, not back-dated into the slice — the convention
+`D10-26`…`D10-30` used, and the trap `D10-30` recorded after writing a commit *type* before the
+commit existed. The message was checked with `npx commitlint --edit` (EXIT 0) **before** the
+commit ran, so a rejection could not cost a full hook pass. The subject is lower-case with no
+proper noun — `subject-case` (`commitlint.config.mjs:7`) rejects any subject containing a
+capitalised product name, as `D10-30` found the hard way. No `frontend/` source file changed
+between the audit above and this commit, which is the only reason the key counts still describe
+`137b11f` rather than a snapshot of the working tree.
 
 **What is not proven here.** This repo has no frontend test runner, so no test covers this
 screen and none was written that would run. Nothing in this session rendered it in a browser or
