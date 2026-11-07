@@ -158,6 +158,18 @@ and the deadline is derived once per pass (D10-21). Contracts already `escalated
 `responded`, `renewed` or `expired` are excluded, so the worker cannot undo the
 hand-resolve D10-20 defines. No migration; the audit rows it writes carry a third actor
 type, `worker`. The suite went **780 → 805**.
+**The slice on top of that is the first screen that can finish work** (`da82111`,
+`feat(review)`): GATE 2's carried item 5 said the `review` routes had only ever been
+reached by `TestClient`, which for the F8 gate meant no person could actually approve a
+field outside a test. `/[locale]/review` now reads the cursor-paged queue, decides with
+the `version` it loaded, and reveals a value only through the audited `POST …/reveal`,
+holding it in component state for the visit and never caching it. A `409` reloads the
+queue rather than splicing it, because the row leaves the queue and the page's
+`next_cursor` would otherwise go stale (D10-22). The `bn as Messages` cast was deleted,
+so an `en`-only key is now a compile error instead of a runtime hole (107 keys on both
+sides). This is **part** of P2-C, not the milestone: the queue still takes no row lock
+and the screen shows no diff of a proposed correction. No `backend/` file changed, so the
+suite stays **805**.
 
 ## Phase history
 
@@ -2002,6 +2014,53 @@ unscoped repository query.
   signal; nothing pages anyone, and the same contract is re-claimed and re-refused every
   poll interval until someone reads the log.
 
+## The review gate now has a screen ✅ (F8, `D10-22`)
+
+GATE 2 carried item 5 has said since the sign-off that the `review`, `agent`,
+`notification` and now `escalation` routes "have still only ever been reached by
+`TestClient`". For the review routes that was the worst of the four, because F8 is the
+gate the non-negotiables rest on: no field below the confidence threshold may reach a
+customer until a person decides about it, and a gate only a test can operate is a gate
+the product does not have. `frontend/src/app/[locale]/review/page.tsx` is the first
+screen that can *complete* work rather than report it. No `backend/` file changed, so the
+suite stays at **805**; this slice is frontend only.
+
+| Area | Detail |
+| --- | --- |
+| The type is the route's shape | `ReviewItem` in `frontend/src/lib/api.ts` mirrors `app/api/v1/review.py` field for field and has **no** `value` member, because the queue route has none. `FieldName`, `FieldStatus` and `ContractStatus` are copied from `app.db.enums`, so a new enum member (or a new status the screen does not translate) is a compile error rather than a raw string on a card. |
+| Cursor paging, not offset | `useInfiniteQuery` passes the opaque `next_cursor` straight back as `?cursor=`, so the screen inherits `c90423b`'s keyset paging and a backlog larger than `MAX_REVIEW_QUEUE_LIMIT` is reachable rather than truncated. |
+| A conflict reloads | A decision carries the `version` the reviewer loaded. On `409` — or a `404` for a row someone else already decided — the screen invalidates the queue instead of retrying or splicing. Splicing would leave the list answering with a stale `next_cursor` for the rest of the visit, which is a paging bug that only shows up under concurrency. |
+| Reveal is an action, not a read | The value is fetched by a separate `POST /review/{id}/reveal`, held in component state for the visit only, and never cached or persisted. It is the only route in the API that returns a decrypted value, so the screen never displays one it did not audited-fetch. |
+| Role gating is shown *and* enforced | `viewer` gets the queue with no decision controls and a sentence saying why. The real boundary stays the route's `403`, which the screen translates rather than assuming impossible. |
+| One error per card | The mutation takes `{fieldId, decision}` so the error can be attributed by comparing `variables` with the card's id. A shared banner would blame every card on the page for one refusal. |
+| Messages are at parity, and now *checked* | The `bn as Messages` cast in `frontend/src/i18n/messages.ts` is deleted: uncast, `Record<Locale, Messages>` makes an `en`-only key a compile error. Both files hold **107 keys each**, 65 of them under `review`. |
+| The link is in the UI | `/[locale]` links to the queue for signed-out visitors too — the queue asks for a session and offers the sign-in link, and hiding the entry point would leave a visitor no way to learn the screen exists. |
+
+### Verification actually run (review screen)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Types | `npm run typecheck` (`tsc --noEmit`), `frontend/` | Clean. Also reported through the editor for each edited file as it was written. |
+| Lint | `eslint` (the `frontend-eslint` pre-commit hook) | Passed at commit; no warnings. |
+| Tests | not run and not applicable | There is **no frontend test runner** in `frontend/package.json` — no vitest, no jest, no Playwright. This slice adds none, so it adds no test count either. |
+| Backend | `pytest backend/tests` **not** re-run for this slice | No `backend/` file changed, so the last measured green (805 collected, 804 passed, 1 skipped at `6fe6158`) still describes the tree. Re-running it would produce the same number and prove nothing about this change. |
+
+### What this does not do — state it, do not bury it
+
+- **No browser has run it.** The screen is typechecked and linted, and its wire shapes
+  were read out of `backend/app/api/v1/review.py` rather than guessed — but nothing has
+  clicked a button. "It works" here means "it agrees with the route's contract", which
+  is weaker evidence than any test in `backend/tests`.
+- **The concurrency path has never been raced.** The `409` branch is written and
+  translated, but two real reviewers have never collided on one field.
+- **The read-only viewer path has never been seen.** The gating is a role comparison and
+  a route refusal; no `viewer` session has loaded the queue.
+- **A reload still signs the user out**, so a reviewer loses both their session and their
+  revealed values on refresh. Both are deliberate (memory-only session, D10-19) and both
+  are still rough.
+- **Three route families remain `TestClient`-only** — `agent`, `notification` and
+  `escalation`. The item is narrowed by one, not closed.
+
 ## Known gaps / issues
 
 1. **`gitleaks` needs Docker** and is manual-stage only (D1-03). Run
@@ -2602,9 +2661,15 @@ sign-off, not footnotes:**
    called by `TestClient`.~~ **Corrected after the sign-off:** the first clause was
    never true — the mock is `demo/backend` and it is consumed by `demo/frontend`; the
    real app had no API caller at all, which is what gap 7 was. The auth UI (`feat(web)`,
-   `D10-19`) now calls `/auth/*`, so *a* screen does. The rest stands: the `review`,
+   `D10-19`) now calls `/auth/*`, so *a* screen does. ~~The rest stands: the `review`,
    `agent`, `notification` and now `escalation` routes have still only ever been
-   reached by `TestClient`.
+   reached by `TestClient`.~~ **Narrowed again by `D10-22`, not deleted:** the review
+   queue now has a screen (`/[locale]/review`) that reads `/review/queue`, decides with
+   `PATCH /review/{id}` and reveals with `POST /review/{id}/reveal`, so the F8 gate is
+   operable outside `TestClient` for the first time. The residue is honest and smaller:
+   **`agent`, `notification` and `escalation` are still `TestClient`-only** — three of
+   the four — and no browser has run even the review screen, because `frontend/` has no
+   test runner and no e2e suite.
 6. ~~**`normalized_value` is still plaintext** (gap 20) — the one place a shipped
    column contradicts "no raw PII at rest", and it needs a decision (encrypt +
    compare on a blind index, or keep it and record the exception), not a patch.~~
