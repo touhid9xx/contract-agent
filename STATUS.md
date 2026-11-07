@@ -307,6 +307,27 @@ single-connection constraint so the next threaded test meets the rule rather tha
 The suite is **840 collected, 825 passed, 15 skipped, 0 failed** — identical to before the
 fix, because the test was never legitimately failing.
 
+**Then the account routes get a caller** (`D10-31`, `feat(web)`):
+`GET|POST /auth/users`, `PATCH /auth/users/{id}` and `POST /auth/users/{id}/password-reset`
+were the last router in the API with no consumer outside `TestClient` and `curl` — which
+made "add the second administrator" a shell exercise on a system whose first administrator
+needs a CLI. `/[locale]/users` is that consumer: the organisation's accounts,
+an inline create form, role chips, deactivate/reactivate, and a confirmed password reset
+whose one-time generated value is rendered at page level so a refetch cannot destroy the
+only copy. Role changes and deactivation end the target's sessions because the role travels
+inside the access token they already hold (`_end_sessions`, `D10-18`), and the caller's own
+row offers no controls — mirroring the server's 409 rather than trusting the client to be
+polite. Reading the four route bodies turned up a **defect the screen had already written
+down wrong**: `CreateUserRequest.password` carries `Field(min_length=MIN_PASSWORD_LENGTH)`
+and `main.py:151` answers a `RequestValidationError` with the app's **422** envelope, not a
+400 — so a too-short password, the likeliest first mistake, would have fallen through to the
+generic failure message. The screen's status mapping and the comment beside its password
+hint now both say 422. The namespace is
+**44 keys** in each locale, and `messages.ts` casts nothing, so `en` and `bn` must match
+structurally for `tsc` to pass at all: parity is now a compile error rather than a raw key
+on screen. `bn`'s `home.body` was still claiming the notification screen did not exist and
+was corrected with the rest. No backend file changed, no migration (`0006`).
+
 ## Phase history
 
 | Phase | State |
@@ -1964,11 +1985,13 @@ works after an administrator believes they killed it.
   nothing per-address, exactly like `/login` (gap 9).
 - **No live-server test.** The proof goes through the ASGI app, not a served port — the
   same limit `create-admin`, `consent-import` and `reseal-fields` carry.
-- ~~**Nothing consumes these routes yet.**~~ — **amended by `D10-19`.** `/auth/login`,
-  `/auth/refresh`, `/auth/logout`, `/auth/logout-all` and `/auth/me` now have a caller under
-  `frontend/src/`. The two **admin** routes still have none: there is no
-  user-administration screen, so `PATCH /auth/users/{id}` and the password reset remain
-  exercised by `TestClient` alone.
+- ~~**Nothing consumes these routes yet.**~~ — **amended by `D10-19` and, for the
+  admin pair, by `D10-31`.** `/auth/login`, `/auth/refresh`, `/auth/logout`,
+  `/auth/logout-all` and `/auth/me` have a caller under `frontend/src/`. The two **admin**
+  routes now have one too: `/[locale]/users` calls `PATCH /auth/users/{id}` and
+  `POST /auth/users/{id}/password-reset` (and `GET`/`POST /auth/users`). No route in this
+  router is `TestClient`-only any more; what remains true is that no browser has run the
+  screen, because there is no frontend test runner.
 
 ## A screen can sign in now ✅ (gap 7, `D10-19`)
 
@@ -2023,9 +2046,10 @@ family-revocation path, and the symptom would look like a backend bug.
 - **No route is protected.** Anyone can load any page; the API refuses, which is the real
   boundary. There is no redirect-to-login middleware, so a deep link into a future
   authenticated page will render its shell and then fail its queries.
-- **The admin routes still have no screen.** `PATCH /auth/users/{id}` and
-  `/auth/users/{id}/password-reset` remain `TestClient`-only — there is no user
-  administration UI, which is a larger slice than a login form.
+- ~~**The admin routes still have no screen.**~~ — **closed by `D10-31`, not deleted.**
+  `PATCH /auth/users/{id}` and `/auth/users/{id}/password-reset` (plus `GET`/`POST
+  /auth/users`) now have a caller at `/[locale]/users`. The limit the note actually
+  recorded still holds for every screen in this repo: no browser has run it.
 - **No password-reset request flow for end users.** `D10-18` deliberately keeps the
   generated password in a human's hands; the UI neither asks for nor displays one.
 - **Production must proxy `/health` too.** The rewrite is Next-side configuration; a
@@ -3142,6 +3166,76 @@ rate for that specific test. The structural argument does not need it: the probe
 shared connection and the fault, and the old body demonstrably did the unsafe thing. The probe
 and repeat-driver scripts live in `.agent-cache/`, which is gitignored — reproducible on the
 machine that ran them, not from the repo.
+
+## The account routes have a caller ✅ (`D10-31` — provisioning stops being a hand-written request)
+
+`GET|POST /auth/users`, `PATCH /auth/users/{id}` and `POST /auth/users/{id}/password-reset`
+were the last router collection in the API with no consumer outside `TestClient` and `curl`.
+That is worse than it sounds, for the reason `D10-29` recorded about notifications: these four
+routes are **load-bearing on a fresh deployment**. `login` fails for a tenant with no user, and
+the only two things that can produce the first user are `create-admin` on a shell and
+`POST /auth/users` — so "add the second administrator" was a `curl` exercise on a system whose
+first administrator already needed a terminal. `/[locale]/users` is that consumer: the
+organisation's accounts, an inline create form, role chips, deactivate/reactivate, and a
+confirmed password reset.
+
+| Change | Detail |
+| --- | --- |
+| `frontend/src/lib/api.ts` | `PasswordReset` wire type plus the `users` client (`list`, `create`, `update`, `resetPassword`) at `api.ts:814-867`, each typed against the route bodies rather than against a guess — including `update`'s two *optional* fields, because the server refuses a body with neither set rather than treating it as a no-op. |
+| `frontend/src/app/[locale]/users/page.tsx` | The screen (**518** lines): sign-in gate, admin gate, create form, per-row role chips, `is_active` badge, confirmed reset whose one-time value renders at **page level** so a refetch cannot destroy the only copy that will ever exist. |
+| `frontend/src/i18n/messages/en.json`, `bn.json` | A `users` namespace — **44 leaf keys per locale** — plus `nav.users`. `bn`'s `home.body` still claimed the notification screen did not exist; corrected with the rest. |
+| `frontend/src/app/[locale]/page.tsx` | Sixth nav link (`page.tsx:160-169`), deliberately **not** role-gated, with the reason in a comment: hiding it would leave an operator with no way to learn the route exists. |
+| No backend change | No route, no migration (`alembic` head stays `0006`), no new dependency. |
+
+### The defect reading the routes caught
+
+`CreateUserRequest.password` carries `Field(min_length=MIN_PASSWORD_LENGTH)` and `main.py:151`
+answers a `RequestValidationError` with the app's **422** envelope. The screen's failure mapper
+handled `400` only, so a too-short password — the likeliest first mistake on a create form —
+would have fallen through to the generic "something went wrong". `describeFailure` now maps
+`422` **and** `400`, and the comment beside `MIN_PASSWORD_LENGTH` repeats the corrected claim.
+The client still does not *enforce* the floor: the constant is a **label-only hint**, the submit
+button stays enabled, and the server decides. Duplicating a bound that is not on the wire would
+be wrong the day `app.core.security.MIN_PASSWORD_LENGTH` moved.
+
+Two claims I had written down were wrong and are now stated narrowly: these are **one route
+collection, not four routes**, and "no API consumer" needed narrowing because `api.ts` already
+held the `auth/` calls (`login`, `refresh`, `logout`, `me`) at `api.ts:235-254`.
+
+### Verification actually run (`D10-31`)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Key parity (both directions) | `python` over both catalogues: flatten, then compare key sets | **382 / 382** leaf keys; **44 / 44** under `users`; `en`-only `[]`, `bn`-only `[]`, whole-file `en`-only `[]`, `bn`-only `[]` |
+| Route contracts | read all four route bodies in `backend/app/api/v1/auth.py` (766-1079) | `require_roles(ADMIN)` on each; `409` `_SELF_CHANGE_REFUSED` on `PATCH` and reset; `409` `_ACCOUNT_INACTIVE` on reset; `_end_sessions` on any real change; 422 on a short password (`main.py:150-165`) |
+| Server password floor | `backend/app/core/security.py:53` | `MIN_PASSWORD_LENGTH = 12` — the client's copy matches, as a label only |
+
+**The `tsc` / `eslint` / commit-gate rows belong to the follow-up `docs(status)` commit that
+names the hash**, not to this section — the convention `D10-26`…`D10-30` used, and the mistake
+`D10-30` recorded after writing a commit *type* before the commit existed. No `frontend/` source
+file may change between the audit above and that commit, or the counts stop describing it.
+
+**What is not proven here.** This repo has no frontend test runner, so no test covers this
+screen and none was written that would run. Nothing in this session rendered it in a browser or
+called the API from one: the page has passed a compiler and a linter and nothing more. Worth
+stating precisely because `messages.ts` casts nothing — a key missing from `bn` is a `tsc`
+failure, so **parity is a compile error rather than a raw key on screen**, and that is the only
+guarantee the key counts give.
+
+### What this does not do — stated, not buried
+
+- **No delete.** There is no `DELETE /auth/users/{id}`, so deactivation is the only off-switch
+  and a deactivated account still appears in the list. The screen shows it for that reason.
+- **No self-service reset request.** `D10-18` deliberately keeps reset admin-initiated with no
+  mail transport; an end-user "forgot my password" flow does not exist and this screen does not
+  invent one.
+- **The list is unpaged**, matching the route: a tenant's staff is small, and `GET /auth/users`
+  takes no cursor to page with.
+- **No role editing for the caller's own row.** The server refuses a self change with 409; the
+  controls are hidden so the screen does not offer an action whose only outcome is a refusal.
+  The route is still the enforcement.
+- **Gap 5 is untouched.** The `contract.ingested` consumer is still unwritten and still blocked
+  on an owner decision.
 
 ## Next permitted step
 

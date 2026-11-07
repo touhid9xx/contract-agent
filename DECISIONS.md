@@ -3012,3 +3012,80 @@ the unsafe thing. Second, this slice touched **two test files and no documentati
 entry and its `STATUS.md` counterpart**; the backend suite was re-run here because test code
 changed, and the commit gate result for it is recorded in the follow-up `docs(status)` commit,
 not back-dated into this one.
+
+### D10-31 — The account routes get a screen, and provisioning stops being a hand-written request
+
+The four `/auth/users` routes were the last ones only `curl` had reached. That was not a
+cosmetic gap either, and it was a sharper one than `D10-29`'s: they are **load-bearing**.
+`login` fails for a tenant with no user, so the first account comes from `create-admin` or from
+`POST /auth/users` and nowhere else, and every later colleague — a promotion, an account
+switched off, a temporary password after a lockout — was a request someone typed by hand.
+`/[locale]/users` is the consumer: the caller's tenant's accounts, a create form, three role
+chips per row, activate/deactivate, and a password reset.
+
+- **It reuses the data path the other five screens already proved.** `useAuth()` for the
+  session, `authorized()` from `@/lib/session` for the calls, `useQuery` + `useMutation` with the
+  mutation's own `variables` for per-row error attribution, `api.ts` as the only module that
+  touches `fetch`. Same rule as `D10-22`/`D10-29`: one shared banner would blame every visible
+  row for one refusal.
+- **Admin only, and the page says why.** All four routes are `require_roles(UserRole.ADMIN)`.
+  The query is not even *fired* for anyone else (`enabled: isAdmin`) — a 403 an operator can do
+  nothing about is noise, not information — and the non-admin branch explains the rule instead
+  of showing an empty list that looks like an organisation with no accounts.
+- **The caller's own row offers no controls, and that is not the enforcement.** The server
+  answers `409 _SELF_CHANGE_REFUSED` on both `PATCH /users/{id}` and
+  `POST /users/{id}/password-reset`. Hiding the buttons only stops the screen offering an action
+  whose single possible outcome is a refusal; the route still decides, which is why the card
+  also keeps the reason visible (`users.selfNote`) rather than silently missing controls.
+- **A role change and a deactivation are one action with one consequence.** Both end the
+  target's sessions: `update_user` calls `_end_sessions`, which bumps `token_epoch` and revokes
+  the refresh family, because the role travels *inside* the access token and `require_roles`
+  reads it from there. The screen states that once, above the list, instead of pretending the
+  change is invisible until the next request.
+- **A reset is a handover, not a password choice.** The request takes no body: the server calls
+  `generate_password()` (24 url-safe characters, past `MIN_PASSWORD_LENGTH = 12`) and the
+  response is the **only** copy that will ever exist — the hash is all that is stored, nothing
+  logs it, and there is no mail transport to resend it. So the screen renders it at **page
+  level**, above the list, because a row-level block would vanish with the row on the next
+  refetch and take the one copy of the value with it.
+- **The role chips are the whole control.** Three buttons showing the current value by being
+  `primary` — the idiom the status filters already use — because this design system has no
+  `<select>` primitive and inventing one for this screen would be a new pattern for one page.
+  `ROLE_KEYS` is `as const satisfies Record<UserRole, string>`, so a new member of
+  `app.db.enums.UserRole` becomes a compile error here instead of a missing key at run time, and
+  the call site is a **prefixed** template (`t(\`users.${ROLE_KEYS[candidate]}\`)`) — the
+  root-scoped-`t()` defect from `D10-29` cannot recur in this file.
+- **Errors key on status, never on English prose.** These four routes carry human `detail`
+  strings rather than machine codes, so matching text would break the first time a message was
+  reworded. The two 409s the screen can still provoke (own account, inactive target) are
+  already prevented by the cards that offer the buttons, so 409 gets one generic message.
+- **422 is the real validation status, and this slice corrected a claim that said 400.**
+  `CreateUserRequest.password` carries `Field(min_length=MIN_PASSWORD_LENGTH)`, and
+  `main.py`'s `RequestValidationError` handler answers **422** with the app's error envelope —
+  so a too-short password or a malformed email lands on 422. The first draft of this screen
+  mapped 400 only, which meant the likeliest first mistake an administrator makes fell through
+  to the generic failure. 400 is kept for `_NOTHING_TO_CHANGE`, which this screen cannot
+  provoke because every mutation sends at least one field.
+
+**The parity rule earned its keep here.** `i18n/messages.ts` deliberately does **not** cast `bn`
+to `typeof en`, so a namespace present in one locale and absent from the other is a *compile*
+error rather than a raw key on a Bengali screen. That is exactly what a missing `users` block
+turned out to be — found by the typechecker, not by a user. Measured after the fix: **44** keys
+under `users` in each locale, **0** one-sided, **0** referenced-but-absent, **0** present-but-
+unused, **382** keys total in each file, **0** placeholder drift across the whole file. `bn`'s
+`home.body` was also stale — it still said the notifications screen was pending, and described
+three working screens — while `en`'s equivalent had already been corrected in `bcfce75`; both
+now agree with the five-screens-plus-admins-sixth structure the app actually has.
+
+**No backend change and no migration.** The routes, the audit actions
+(`ACTION_USER_UPDATED`, `ACTION_USER_CREDENTIAL_RESET`) and the refusal constants all shipped
+with the account-lifecycle slice; this adds a client, four typed methods in `api.ts`
+(`users.list/create/update/resetPassword`) and the `PasswordReset` wire type. The
+`MIN_PASSWORD_LENGTH = 12` in the page is a **hint only** — the server is the authority, the
+constant is not on the wire, and the submit button stays enabled so the screen cannot be wrong
+the day the server's floor moves.
+
+**Verified, and one honest limit.** The typecheck and the linter pass on the three touched
+files, and the key counts above were measured rather than estimated. There is still **no
+frontend test runner in this repo**, so nothing here is tested and no browser has rendered the
+screen: "verified" means a compiler and a linter, not a rendered page.

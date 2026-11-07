@@ -804,6 +804,69 @@ export const notifications = {
 };
 
 /**
+ * A reset password, visible exactly once (`app.api.v1.auth.PasswordResetResponse`).
+ *
+ * The value is in the response because there is no mail transport: an
+ * administrator has to read it to the person whose account it belongs to. The
+ * server stores only its Argon2id hash, so a client that fails to show it has
+ * destroyed it — which is why the screen renders it outside the row it came from.
+ */
+export interface PasswordReset {
+  user: UserSummary;
+  temporary_password: string;
+}
+
+/**
+ * The account-admin surface — the four routes in `app.api.v1.auth` that manage
+ * colleagues inside the caller's own tenant.
+ *
+ * All four are `ADMIN` only, and all four are tenant-scoped by the route's own
+ * `UserRepository(session, principal.tenant_id)`: an id from another organisation
+ * answers 404 rather than 403, so the route cannot be used as a directory probe.
+ * `update` ends the target's sessions because the role travels inside the access
+ * token — that consequence belongs on the screen, not only here.
+ *
+ * `create` deliberately sends the password the admin typed rather than asking the
+ * server to generate one: creation is the one case where an admin is expected to
+ * hand over a first credential. A *reset* is the opposite and takes no body at
+ * all.
+ */
+export const users = {
+  /** Everyone in the caller's organisation. Unpaged: a tenant's staff is small. */
+  list: (accessToken: string) => request<UserSummary[]>("/auth/users", { accessToken }),
+
+  create: (
+    accessToken: string,
+    payload: { email: string; password: string; role: UserRole },
+  ) => request<UserSummary>("/auth/users", { method: "POST", body: payload, accessToken }),
+
+  /**
+   * Promote, demote, deactivate or reactivate.
+   *
+   * Two optional fields rather than separate calls, mirroring the route: the
+   * server refuses a body with neither set rather than treating it as a no-op, so
+   * a caller bug stays visible.
+   */
+  update: (
+    accessToken: string,
+    userId: string,
+    payload: { role?: UserRole; is_active?: boolean },
+  ) =>
+    request<UserSummary>(`/auth/users/${userId}`, {
+      method: "PATCH",
+      body: payload,
+      accessToken,
+    }),
+
+  /** No body: the server generates the password and returns it once. */
+  resetPassword: (accessToken: string, userId: string) =>
+    request<PasswordReset>(`/auth/users/${userId}/password-reset`, {
+      method: "POST",
+      accessToken,
+    }),
+};
+
+/**
  * Liveness probe.
  *
  * Built on `fetch` directly rather than on {@link request} because `/health`

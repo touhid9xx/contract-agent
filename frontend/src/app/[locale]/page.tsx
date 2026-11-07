@@ -157,6 +157,16 @@ export default function HomePage() {
                 {t("nav.notifications")}
               </Button>
             </Link>
+            {/*
+              Last, and not role-gated: the screen says for itself that only an
+              admin may use it, and hiding the link would leave an operator with
+              no way to learn that the route exists.
+            */}
+            <Link href={`/${locale}/users`}>
+              <Button size="sm" variant="secondary">
+                {t("nav.users")}
+              </Button>
+            </Link>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
