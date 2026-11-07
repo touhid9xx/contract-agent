@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_PROJECT = "frontend";
 
-const ALLOWED = new Set(["typecheck", "lint"]);
+const ALLOWED = new Set(["typecheck", "lint", "test"]);
 
 const task = process.argv[2];
 const projectName = process.argv[3] ?? DEFAULT_PROJECT;

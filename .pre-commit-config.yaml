@@ -105,6 +105,18 @@ repos:
         files: ^frontend/.*\.(ts|tsx|mjs)$
         pass_filenames: false
 
+      # The frontend had no test runner until D10-37, so the one module that is
+      # pure enough to test cheaply (src/lib/contract-scope.ts) was checked by
+      # the compiler alone. Gating the suite here is what stops a runner that
+      # nothing runs from rotting: `vitest run` over the current spec takes well
+      # under a second, and it runs only when frontend sources change.
+      - id: frontend-test
+        name: frontend tests (vitest run)
+        entry: node scripts/run-frontend-check.mjs test
+        language: system
+        files: ^frontend/.*\.(ts|tsx)$
+        pass_filenames: false
+
       # The Phase 0 demo is a shipped deliverable (GATE 1) with its own Next.js
       # app. It has a typecheck script but no eslint config, so only the former
       # is gated here. Without this hook nothing checked demo/frontend at all,

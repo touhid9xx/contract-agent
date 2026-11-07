@@ -12,6 +12,7 @@
     "build": "npm --prefix frontend run build",
     "lint": "npm --prefix frontend run lint",
     "typecheck": "npm --prefix frontend run typecheck",
+    "test": "npm --prefix frontend run test",
     "format": "prettier --write \"frontend/src/**/*.{ts,tsx,css}\" \"*.{json,mjs}\"",
     "prepare": "husky"
   },
