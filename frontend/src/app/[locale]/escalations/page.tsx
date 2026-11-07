@@ -3,7 +3,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocale, useTranslations } from "next-intl";
 import Link from "next/link";
-import { useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useState } from "react";
 
 import { useAuth } from "@/components/auth-provider";
 import { Button } from "@/components/ui/button";
@@ -16,6 +17,14 @@ import type {
   EscalationStatus,
   EscalationUpdate,
 } from "@/lib/api";
+import {
+  contractIdFromInput,
+  inputNamesAContract,
+  readContractScope,
+  readResolved,
+  withContractScope,
+  withResolved,
+} from "@/lib/contract-scope";
 import { authorized } from "@/lib/session";
 
 /**
@@ -67,24 +76,74 @@ const CHANNEL_KEYS = {
  *   adding one would put the largest PII surface in the app in plaintext.
  */
 export default function EscalationsPage() {
+  return (
+    // `useSearchParams` suspends while the address is resolved, so the route needs
+    // a boundary to prerender. `null` is enough: this shell only runs before
+    // hydration, and the screen under it renders its own translated cards.
+    <Suspense fallback={null}>
+      <EscalationsScreen />
+    </Suspense>
+  );
+}
+
+function EscalationsScreen() {
   const t = useTranslations();
   const locale = useLocale();
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const queryClient = useQueryClient();
   const { user, isAuthenticated } = useAuth();
 
   const canWork = user !== null && user.role !== "viewer";
 
-  /** Resolved rows are history, not work: hidden until an operator asks for them. */
-  const [showResolved, setShowResolved] = useState(false);
+  /** The address this screen owns, before any filter is added to it. */
+  const basePath = `/${locale}/escalations`;
 
-  const queueKey = ["escalations", "queue", showResolved] as const;
+  /**
+   * Both filters live in the address, not in `useState`.
+   *
+   * The contract a contract's own page links here for, and whether closed rows are
+   * shown, are both facts about *which question is being asked* — so they belong
+   * where a reload, a bookmark, the back button and a copied link can all carry
+   * them (`D10-36`). `readContractScope` keeps "no contract named" apart from
+   * "named something that cannot be a contract", because the second must not fall
+   * through to the tenant-wide queue.
+   */
+  const scope = readContractScope(searchParams);
+  const scopeId = scope.kind === "contract" ? scope.id : undefined;
+  const scopeIsInvalid = scope.kind === "invalid";
+  const scopeInAddress = scopeId === undefined ? "" : String(scopeId);
+
+  /** Resolved rows are history, not work: absent from the address until asked for. */
+  const showResolved = readResolved(searchParams);
+
+  const [draftContract, setDraftContract] = useState(scopeInAddress);
+
+  /** A link, the back button or a typed address change `scopeId` without a remount. */
+  useEffect(() => {
+    setDraftContract(scopeInAddress);
+  }, [scopeInAddress]);
+
+  const trimmedContract = draftContract.trim();
+  // The shape `readContractScope` accepts on the way back out, so a typed id cannot
+  // be one this screen then calls malformed.
+  const contractIsUsable = inputNamesAContract(trimmedContract);
+
+  const queueKey = ["escalations", "queue", showResolved, scopeId ?? "all"] as const;
 
   const queue = useQuery({
     queryKey: queueKey,
+    // An address naming something that cannot be a contract is not a filter, and it
+    // is not permission to show the tenant's whole queue either: the screen says so
+    // and the read stays idle until the address is fixed.
+    enabled: !scopeIsInvalid,
     queryFn: () =>
       authorized((accessToken) =>
         escalations.queue(accessToken, {
           statuses: showResolved ? undefined : WORKING_STATUSES,
+          // Omitted rather than sent as `undefined`: the client builds the query
+          // string, and a `null` would be neither a filter nor an absence.
+          ...(scopeId === undefined ? {} : { contractId: scopeId }),
         }),
       ),
   });
@@ -188,16 +247,112 @@ export default function EscalationsPage() {
         </Card>
       ) : (
         <>
+          {/*
+            Every change to a filter is a navigation, never local state: the address
+            stays the one description of what is being listed, so the back button and
+            a shared link both work. `replace`, not `push`, so toggling twice does not
+            leave two history entries for one question.
+          */}
+          <form
+            className="flex flex-wrap items-end gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!contractIsUsable) return;
+              const id = contractIdFromInput(trimmedContract);
+              if (id === undefined) return;
+              setDraftContract(String(id));
+              router.replace(withResolved(withContractScope(basePath, id), showResolved));
+            }}
+          >
+            <div className="space-y-1">
+              <FieldLabel htmlFor="escalations-contract-filter">
+                {t("escalations.contractFilterLabel")}
+              </FieldLabel>
+              <Input
+                id="escalations-contract-filter"
+                className="w-40"
+                inputMode="numeric"
+                autoComplete="off"
+                placeholder={t("escalations.contractPlaceholder")}
+                value={draftContract}
+                onChange={(event) => {
+                  setDraftContract(event.target.value);
+                }}
+              />
+            </div>
+            <Button size="sm" type="submit" disabled={!contractIsUsable}>
+              {t("escalations.contractApply")}
+            </Button>
+            {scopeId !== undefined || scopeIsInvalid ? (
+              <Button
+                size="sm"
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  setDraftContract("");
+                  router.replace(withResolved(basePath, showResolved));
+                }}
+              >
+                {t("escalations.contractClear")}
+              </Button>
+            ) : null}
+            {!contractIsUsable && draftContract.trim() !== "" ? (
+              <p className="text-xs text-danger" role="alert">
+                {t("escalations.contractInvalid")}
+              </p>
+            ) : null}
+          </form>
+
+          {/*
+            A contract id the address names but this screen cannot read is shown as
+            such. It is deliberately not treated as "no filter": falling back to the
+            tenant-wide queue would answer a question nobody asked.
+          */}
+          {scopeIsInvalid && (
+            <Card>
+              <CardContent className="space-y-3">
+                <p className="text-sm text-danger" role="alert">
+                  {t("escalations.contractInvalid")}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {t("escalations.contractInvalidHint")}
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setDraftContract("");
+                    router.replace(basePath);
+                  }}
+                >
+                  {t("escalations.clearFilter")}
+                </Button>
+              </CardContent>
+            </Card>
+          )}
+
           {data !== undefined && (
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground">
               <span>{t("escalations.countLabel", { count: data.count })}</span>
+              {/*
+                The server's echo, not the address read back: it is the filter the
+                route actually applied, so the sentence cannot claim a narrower
+                list than the one on screen.
+              */}
+              <span>
+                {data.contract_id === null
+                  ? t("escalations.scopeAllContracts")
+                  : t("escalations.scopeContract", { id: data.contract_id })}
+              </span>
               <span>{t("escalations.overdueLabel", { overdue: data.overdue })}</span>
               <span>{t("escalations.slaLabel", { hours: data.sla_hours })}</span>
               <Button
                 size="sm"
                 variant="outline"
                 onClick={() => {
-                  setShowResolved((current) => !current);
+                  router.replace(
+                    withResolved(withContractScope(basePath, scopeId), !showResolved),
+                  );
                 }}
               >
                 {showResolved ? t("escalations.hideResolved") : t("escalations.showResolved")}
@@ -233,7 +388,7 @@ export default function EscalationsPage() {
             </p>
           )}
 
-          {queue.isPending && (
+          {!scopeIsInvalid && queue.isPending && (
             <Card>
               <CardContent>
                 <p className="text-sm text-muted-foreground">{t("escalations.loading")}</p>
@@ -260,11 +415,20 @@ export default function EscalationsPage() {
             </Card>
           )}
 
-          {!queue.isPending && !queue.isError && items.length === 0 && (
+          {!scopeIsInvalid && !queue.isPending && !queue.isError && items.length === 0 && (
             <Card>
               <CardContent className="space-y-1">
+                {/*
+                  Scoped and unscoped empties mean different things: "this contract
+                  has nothing waiting" is a good answer about one contract, and must
+                  not read like the queue itself is clear.
+                */}
                 <p className="text-sm">
-                  {showResolved ? t("escalations.nothingResolved") : t("escalations.empty")}
+                  {scopeId === undefined
+                    ? showResolved
+                      ? t("escalations.nothingResolved")
+                      : t("escalations.empty")
+                    : t("escalations.emptyForContract")}
                 </p>
                 <p className="text-xs text-muted-foreground">{t("escalations.emptyHint")}</p>
               </CardContent>

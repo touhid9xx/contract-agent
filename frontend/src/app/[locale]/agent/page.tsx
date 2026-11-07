@@ -3,7 +3,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocale, useTranslations } from "next-intl";
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useMemo, useState } from "react";
 
 import { useAuth } from "@/components/auth-provider";
 import { Button } from "@/components/ui/button";
@@ -11,6 +12,12 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { FieldLabel, Input } from "@/components/ui/input";
 import { agent, ApiError } from "@/lib/api";
 import type { AgentDecision, ContactChannel } from "@/lib/api";
+import {
+  contractIdFromInput,
+  inputNamesAContract,
+  readContractScope,
+  withContractScope,
+} from "@/lib/contract-scope";
 import { authorized } from "@/lib/session";
 
 /** The channels an override may ask for — one per `app.db.enums.Channel`. */
@@ -96,22 +103,64 @@ function permittedChannelsFrom(cause: ApiError): ContactChannel[] {
  *   lets the policy answer, then reports what the policy said.
  */
 export default function AgentPage() {
+  return (
+    // `useSearchParams` suspends while the address is resolved, and Next refuses to
+    // prerender a route that reads it without a boundary. The fallback is `null`
+    // rather than a translated sentence because this shell is only ever reached
+    // before hydration — the screen underneath renders its own loading card, with
+    // the catalogue's own words, as soon as it runs.
+    <Suspense fallback={null}>
+      <AgentScreen />
+    </Suspense>
+  );
+}
+
+function AgentScreen() {
   const t = useTranslations();
   const locale = useLocale();
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const queryClient = useQueryClient();
   const { user, isAuthenticated } = useAuth();
 
   const canDecide = user !== null && user.role !== "viewer";
 
-  /** The contract the operator narrowed to, if any. */
-  const [scope, setScope] = useState<number | undefined>(undefined);
-  const [draftFilter, setDraftFilter] = useState("");
+  /**
+   * The contract this address names, if it names one.
+   *
+   * The scope lives in the address rather than in `useState`, so that a link from a
+   * contract's own page (`D10-36`) still filters after a reload, a bookmark or the
+   * back button. `readContractScope` distinguishes "no contract named" from "named
+   * something that cannot be a contract", which is the difference between showing
+   * the tenant-wide history and refusing to.
+   */
+  const scope = readContractScope(searchParams);
+  const scopeId = scope.kind === "contract" ? scope.id : undefined;
+  const scopeIsInvalid = scope.kind === "invalid";
+  const scopeInAddress = scopeId === undefined ? "" : String(scopeId);
 
-  const decisionsKey = ["agent", "decisions", scope ?? "recent"] as const;
+  const [draftFilter, setDraftFilter] = useState(scopeInAddress);
+
+  /**
+   * The input follows the address.
+   *
+   * A link, the back button and a typed address all change `scopeId` without
+   * remounting this component, and an input still holding the previous id would
+   * contradict the list underneath it.
+   */
+  useEffect(() => {
+    setDraftFilter(scopeInAddress);
+  }, [scopeInAddress]);
+
+  const decisionsKey = ["agent", "decisions", scopeId ?? "recent"] as const;
 
   const decisions = useQuery({
     queryKey: decisionsKey,
-    queryFn: () => authorized((accessToken) => agent.decisions(accessToken, scope)),
+    // An address that names nothing is not a filter, and it is also not permission
+    // to show every decision in the tenant: the screen says so and this query stays
+    // idle until the address is fixed.
+    enabled: !scopeIsInvalid,
+    queryFn: () => authorized((accessToken) => agent.decisions(accessToken, scopeId)),
   });
 
   async function refresh() {
@@ -216,7 +265,21 @@ export default function AgentPage() {
   }, [items]);
 
   const trimmedFilter = draftFilter.trim();
-  const filterIsValid = trimmedFilter === "" || /^[1-9][0-9]*$/.test(trimmedFilter);
+  // The same shape `readContractScope` accepts on the way back out, so a typed id
+  // cannot be one the address then pronounces malformed.
+  const filterIsValid = inputNamesAContract(trimmedFilter);
+
+  /**
+   * Put the scope in the address, which is the only place it lives.
+   *
+   * `replace`, not `push`: a half-typed id followed by a few corrections is not
+   * several pages an operator wants to step back through. A link arriving from
+   * another screen still pushes — that is the difference between coming here and
+   * editing where you already are.
+   */
+  function scopeToAddress(id: number | undefined) {
+    router.replace(withContractScope(`/${locale}/agent`, id));
+  }
 
   return (
     <main className="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 px-6 py-12">
@@ -241,7 +304,7 @@ export default function AgentPage() {
             onSubmit={(event) => {
               event.preventDefault();
               if (!filterIsValid) return;
-              setScope(trimmedFilter === "" ? undefined : Number(trimmedFilter));
+              scopeToAddress(contractIdFromInput(trimmedFilter));
             }}
           >
             <div className="space-y-1.5">
@@ -261,16 +324,8 @@ export default function AgentPage() {
             <Button size="sm" type="submit" disabled={!filterIsValid}>
               {t("agent.filterApply")}
             </Button>
-            {scope !== undefined && (
-              <Button
-                size="sm"
-                type="button"
-                variant="ghost"
-                onClick={() => {
-                  setDraftFilter("");
-                  setScope(undefined);
-                }}
-              >
+            {(scopeId !== undefined || scopeIsInvalid) && (
+              <Button size="sm" type="button" variant="ghost" onClick={() => scopeToAddress(undefined)}>
                 {t("agent.filterClear")}
               </Button>
             )}
@@ -280,6 +335,24 @@ export default function AgentPage() {
               </p>
             )}
           </form>
+
+          {scopeIsInvalid && (
+            // A hand-edited address, or a stale bookmark of a route that never had
+            // this parameter. Saying "no such contract" and offering the way back is
+            // the only honest screen: falling through to the tenant-wide history
+            // would show every contract's decisions under a filter that never ran.
+            <Card>
+              <CardContent className="space-y-3">
+                <p className="text-sm text-danger" role="alert">
+                  {t("agent.filterInvalid")}
+                </p>
+                <p className="text-xs text-muted-foreground">{t("agent.filterInvalidHint")}</p>
+                <Button size="sm" variant="outline" onClick={() => scopeToAddress(undefined)}>
+                  {t("agent.filterClear")}
+                </Button>
+              </CardContent>
+            </Card>
+          )}
 
           {data !== undefined && (
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
@@ -304,7 +377,7 @@ export default function AgentPage() {
             </p>
           )}
 
-          {decisions.isPending && (
+          {!scopeIsInvalid && decisions.isPending && (
             <Card>
               <CardContent>
                 <p className="text-sm text-muted-foreground">{t("agent.loading")}</p>
@@ -335,7 +408,7 @@ export default function AgentPage() {
             <Card>
               <CardContent className="space-y-1">
                 <p className="text-sm">
-                  {scope === undefined ? t("agent.empty") : t("agent.emptyForContract")}
+                  {scopeId === undefined ? t("agent.empty") : t("agent.emptyForContract")}
                 </p>
                 <p className="text-xs text-muted-foreground">{t("agent.emptyHint")}</p>
               </CardContent>

@@ -3,11 +3,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocale, useTranslations } from "next-intl";
 import Link from "next/link";
-import { useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useState } from "react";
 
 import { useAuth } from "@/components/auth-provider";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { FieldLabel, Input } from "@/components/ui/input";
 import { ApiError, notifications } from "@/lib/api";
 import type {
   ContactChannel,
@@ -15,6 +17,12 @@ import type {
   NotificationRow,
   NotificationStatus,
 } from "@/lib/api";
+import {
+  contractIdFromInput,
+  inputNamesAContract,
+  readContractScope,
+  withContractScope,
+} from "@/lib/contract-scope";
 import { authorized } from "@/lib/session";
 
 /**
@@ -151,8 +159,21 @@ const REFUSAL_KEYS: Record<string, string> = {
  *   train people to click through dialogs before the one that matters.
  */
 export default function NotificationsPage() {
+  return (
+    // `useSearchParams` suspends while the address is resolved, so the route needs a
+    // boundary to prerender. `null` is enough: this shell is only reached before
+    // hydration, and the screen under it renders a translated loading card itself.
+    <Suspense fallback={null}>
+      <NotificationsScreen />
+    </Suspense>
+  );
+}
+
+function NotificationsScreen() {
   const t = useTranslations();
   const locale = useLocale();
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const queryClient = useQueryClient();
   const { user, isAuthenticated } = useAuth();
 
@@ -161,13 +182,52 @@ export default function NotificationsPage() {
   const [statusFilter, setStatusFilter] = useState<NotificationStatus | null>(null);
   const [channelFilter, setChannelFilter] = useState<ContactChannel | null>(null);
 
+  /**
+   * The contract this address names, if it names one.
+   *
+   * In the address rather than in `useState` so a link from a contract's own page
+   * survives a reload, a bookmark and the back button (`D10-36`), and so the count
+   * the contract page quoted is the count this screen asks the server for.
+   */
+  const scope = readContractScope(searchParams);
+  const scopeId = scope.kind === "contract" ? scope.id : undefined;
+  const scopeIsInvalid = scope.kind === "invalid";
+  const scopeInAddress = scopeId === undefined ? "" : String(scopeId);
+
+  const [draftContract, setDraftContract] = useState(scopeInAddress);
+
+  /** A link, the back button or a typed address change `scopeId` without a remount. */
+  useEffect(() => {
+    setDraftContract(scopeInAddress);
+  }, [scopeInAddress]);
+
+  const trimmedContract = draftContract.trim();
+  // The shape `readContractScope` accepts on the way out, so a typed id cannot be
+  // one this screen then calls malformed.
+  const contractIsUsable = inputNamesAContract(trimmedContract);
+
+  /**
+   * Put the scope in the address, which is where it lives.
+   *
+   * `replace`, not `push`: typing an id and correcting it is not several pages to
+   * step back through. A link arriving here still pushes.
+   */
+  function scopeToAddress(id: number | undefined) {
+    router.replace(withContractScope(`/${locale}/notifications`, id));
+  }
+
   const list = useQuery({
-    queryKey: ["notifications", "list", statusFilter, channelFilter],
+    queryKey: ["notifications", "list", statusFilter, channelFilter, scopeId ?? "all"],
+    // An address naming something that cannot be a contract is not a filter, and it
+    // is not permission to show the tenant's whole queue either: the screen says so
+    // and the query stays idle.
+    enabled: !scopeIsInvalid,
     queryFn: () =>
       authorized((accessToken) =>
         notifications.list(accessToken, {
           // Omitted rather than sent as `undefined`: the client builds the query
           // string, and a `null` would be neither a filter nor an absence.
+          ...(scopeId === undefined ? {} : { contractId: scopeId }),
           ...(statusFilter === null ? {} : { status: statusFilter }),
           ...(channelFilter === null ? {} : { channel: channelFilter }),
         }),
@@ -246,7 +306,8 @@ export default function NotificationsPage() {
     return t("notifications.failed");
   }
 
-  const items = list.data?.items ?? [];
+  const listData = list.data;
+  const items = listData?.items ?? [];
 
   const busyId = send.isPending
     ? send.variables
@@ -272,6 +333,64 @@ export default function NotificationsPage() {
         </Card>
       ) : (
         <>
+          <form
+            className="flex flex-wrap items-end gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!contractIsUsable) return;
+              scopeToAddress(contractIdFromInput(trimmedContract));
+            }}
+          >
+            <div className="space-y-1.5">
+              <FieldLabel htmlFor="notifications-contract-filter">
+                {t("notifications.contractFilterLabel")}
+              </FieldLabel>
+              <Input
+                id="notifications-contract-filter"
+                name="notifications-contract-filter"
+                className="w-40"
+                inputMode="numeric"
+                value={draftContract}
+                placeholder={t("notifications.contractPlaceholder")}
+                onChange={(event) => {
+                  setDraftContract(event.target.value);
+                }}
+              />
+            </div>
+            <Button size="sm" type="submit" disabled={!contractIsUsable}>
+              {t("notifications.contractApply")}
+            </Button>
+            {(scopeId !== undefined || scopeIsInvalid) && (
+              <Button size="sm" type="button" variant="ghost" onClick={() => scopeToAddress(undefined)}>
+                {t("notifications.contractClear")}
+              </Button>
+            )}
+            {!contractIsUsable && (
+              <p className="text-xs text-danger" role="alert">
+                {t("notifications.contractInvalid")}
+              </p>
+            )}
+          </form>
+
+          {scopeIsInvalid && (
+            // The same screen the agent route shows for the same address: an id
+            // that cannot be a contract is not permission to list the tenant's
+            // whole queue behind a filter that never ran.
+            <Card>
+              <CardContent className="space-y-3">
+                <p className="text-sm text-danger" role="alert">
+                  {t("notifications.contractInvalid")}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {t("notifications.contractInvalidHint")}
+                </p>
+                <Button size="sm" variant="outline" onClick={() => scopeToAddress(undefined)}>
+                  {t("notifications.contractClear")}
+                </Button>
+              </CardContent>
+            </Card>
+          )}
+
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-xs font-medium text-muted-foreground">
               {t("notifications.statusFilterLabel")}
@@ -314,10 +433,20 @@ export default function NotificationsPage() {
             ))}
           </div>
 
-          {list.data !== undefined && (
-            <p className="text-xs text-muted-foreground">
-              {t("notifications.countLabel", { count: list.data.count })}
-            </p>
+          {listData !== undefined && (
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+              <span>{t("notifications.countLabel", { count: listData.count })}</span>
+              {/*
+                The server's own echo, not the address read back: `contract_id` is
+                the filter the route actually applied, so the sentence cannot say
+                "contract #12 only" over a list the server answered unfiltered.
+              */}
+              <span>
+                {listData.contract_id === null
+                  ? t("notifications.scopeAllContracts")
+                  : t("notifications.scopeContract", { id: listData.contract_id })}
+              </span>
+            </div>
           )}
 
           {!canAct && (
@@ -343,7 +472,7 @@ export default function NotificationsPage() {
             </p>
           )}
 
-          {list.isPending && (
+          {!scopeIsInvalid && list.isPending && (
             <Card>
               <CardContent>
                 <p className="text-sm text-muted-foreground">{t("notifications.loading")}</p>
@@ -373,7 +502,9 @@ export default function NotificationsPage() {
           {!list.isPending && !list.isError && items.length === 0 && (
             <Card>
               <CardContent className="space-y-1">
-                <p className="text-sm">{t("notifications.empty")}</p>
+                <p className="text-sm">
+                  {scopeId === undefined ? t("notifications.empty") : t("notifications.emptyForContract")}
+                </p>
                 <p className="text-xs text-muted-foreground">{t("notifications.emptyHint")}</p>
               </CardContent>
             </Card>

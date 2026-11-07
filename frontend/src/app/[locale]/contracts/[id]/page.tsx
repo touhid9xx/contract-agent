@@ -22,6 +22,7 @@ import type {
   NotificationList,
   RiskLevel,
 } from "@/lib/api";
+import { withContractScope } from "@/lib/contract-scope";
 import { authorized } from "@/lib/session";
 
 /**
@@ -308,6 +309,7 @@ export default function ContractDetailPage() {
               />
 
               <RelatedReads
+                contractId={contractId}
                 decisions={decisions}
                 reminders={reminders}
                 escalationsHere={escalationsHere}
@@ -541,6 +543,8 @@ type RelatedQuery<T> = {
 };
 
 interface RelatedReadsProps {
+  /** The contract whose address this card belongs to; carried into every link. */
+  contractId: number;
   decisions: RelatedQuery<AgentDecisionList>;
   reminders: RelatedQuery<NotificationList>;
   escalationsHere: RelatedQuery<EscalationQueue>;
@@ -556,6 +560,7 @@ interface RelatedReadsProps {
  * responses' own `count`, so nothing is summed up on the client.
  */
 function RelatedReads({
+  contractId,
   decisions,
   reminders,
   escalationsHere,
@@ -574,15 +579,17 @@ function RelatedReads({
       </CardHeader>
       <CardContent className="space-y-3">
         {/*
-          This card used to say none of these reads took a contract at all. They all
-          do now, so it says what it does instead. The links stay unfiltered on
-          purpose: the screens do not read a contract out of their address, and a
-          query string they ignore would look like a filter while showing everything.
+          This card used to say none of these reads took a contract at all, and then
+          that its links stayed unfiltered because the screens ignored a contract in
+          their address. Both are now false, so the note says what the card does. The
+          links carry the contract id through `withContractScope`, the same helper
+          each screen parses with, so a link cannot spell the parameter differently
+          from the screen that reads it.
         */}
         <p className="text-xs text-muted-foreground">{t("contracts.detailRelatedNote")}</p>
 
         <RelatedRead
-          href={`/${locale}/agent`}
+          href={withContractScope(`/${locale}/agent`, contractId)}
           label={t("contracts.detailDecisionsLabel")}
           linkLabel={t("contracts.detailOpen")}
           state={decisions}
@@ -605,7 +612,7 @@ function RelatedReads({
         />
 
         <RelatedRead
-          href={`/${locale}/notifications`}
+          href={withContractScope(`/${locale}/notifications`, contractId)}
           label={t("contracts.detailNotificationsLabel")}
           linkLabel={t("contracts.detailOpen")}
           state={reminders}
@@ -628,7 +635,7 @@ function RelatedReads({
         />
 
         <RelatedRead
-          href={`/${locale}/escalations`}
+          href={withContractScope(`/${locale}/escalations`, contractId)}
           label={t("contracts.detailEscalationsLabel")}
           linkLabel={t("contracts.detailOpen")}
           state={escalationsHere}

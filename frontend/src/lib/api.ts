@@ -1016,6 +1016,12 @@ export interface NotificationRow {
 export interface NotificationList {
   items: NotificationRow[];
   count: number;
+  /**
+   * Echo of the filter: the contract these rows belong to, or `null` for the whole
+   * tenant. `app.api.v1.notifications.NotificationListResponse` always sends it, so
+   * a screen can state what it is showing instead of trusting its own query string.
+   */
+  contract_id: number | null;
 }
 
 /**
