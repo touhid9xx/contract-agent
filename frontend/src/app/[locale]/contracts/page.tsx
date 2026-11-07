@@ -196,7 +196,9 @@ export default function ContractsPage() {
                   setStatusFilter(candidate);
                 }}
               >
-                {candidate === null ? t("contracts.filterAll") : t(STATUS_KEYS[candidate])}
+                {candidate === null
+                  ? t("contracts.filterAll")
+                  : t(`contracts.${STATUS_KEYS[candidate]}`)}
               </Button>
             ))}
           </div>

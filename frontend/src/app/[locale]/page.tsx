@@ -152,6 +152,11 @@ export default function HomePage() {
                 {t("nav.escalations")}
               </Button>
             </Link>
+            <Link href={`/${locale}/notifications`}>
+              <Button size="sm" variant="secondary">
+                {t("nav.notifications")}
+              </Button>
+            </Link>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">

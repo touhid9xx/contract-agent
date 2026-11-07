@@ -273,6 +273,23 @@ zero unused and zero placeholder drift, checked by a script rather than by eye. 
 frontend test runner exists in this repo, so what is proven is that audit and the
 type/lint gate — **not** that a browser has rendered the screen.
 
+**Then the notification queue gets a face** (`D10-29`, `feat(web)`): `/[locale]/notifications`
+is the screen that finally consumes `GET /notifications`, `POST /{id}/retry` and
+`POST /{id}/dispatch`, which until now only a `TestClient` had called — which mattered
+because `NotificationScheduler` raises and parks rows by itself, so a parked reminder was
+invisible work. Building it caught a class of bug that neither `tsc` nor `eslint` can see:
+`t()` receives a *template literal*, so the catalogue is never checked against it, and
+filter chips passing namespace-relative map values rendered `statuses.pending` as literal
+text. Grepping for the pattern found the **same defect already shipped** in
+`contracts/page.tsx` (`07c31ab`), two lines from a correctly-prefixed call. The slice also
+corrected `refusalNeedsReview`, which described `PIPELINE_BLOCKED`'s meaning instead of
+`NEEDS_REVIEW`'s, after reading both raise sites. Both locales carry **337 keys** (66 under
+`notifications`), with zero one-sided, unused, missing or placeholder-drifted keys, and zero
+bare map keys reaching `t()` — checked by a script, not by eye. No backend file changed, no
+migration (`0006`), no new dependency. With this, **no v1 router is `TestClient`-only**;
+what still holds is that no browser has run any screen, because there is no frontend test
+runner.
+
 ## Phase history
 
 | Phase | State |
@@ -2253,8 +2270,13 @@ tree is clean.
   gating is a role comparison plus the route's `403`, which the screen translates.
 - **`sla_breached` still has no writer.** The badge is computed from the deadline; no row
   in any database holds that status, and no alert fires when a queue item goes late.
-- **One route family remains `TestClient`-only** — `notification`. Carried item 5 is
-  narrowed again by `D10-24`, not closed: `agent` now has a screen.
+- ~~**One route family remains `TestClient`-only** — `notification`.~~ Carried item 5 is
+  narrowed again by `D10-24`, not closed: `agent` now has a screen. **Struck by `D10-29`,
+  not deleted:** `/[locale]/notifications` calls `GET /notifications`, `POST /{id}/retry`
+  and `POST /{id}/dispatch`, so **no v1 router is `TestClient`-only any more**. What carried
+  item 5 still stands on is narrower than "no screen": no screen has ever been *run* against
+  a real deployment, because this repo has no frontend test runner and no browser was
+  involved in any of these slices.
 
 ## The channel decisions now have a screen ✅ (F9's human half, `D10-24`)
 
@@ -2962,6 +2984,83 @@ working tree.
 - **Gap 5 is untouched.** The `contract.ingested` consumer is still unwritten and still
   blocked on an owner decision; a listing does not change what a consumer could do.
 
+## The notification queue has a screen ✅ (`D10-29` — the last `TestClient`-only router)
+
+`notification` was the last v1 router that only a `TestClient` had ever called. That
+mattered more than it sounds: `NotificationScheduler` raises and parks rows on its own, so
+"did the reminder go out, and if not why not?" was answerable only with curl. The queue was
+a worker doing something no operator could read or correct — the same shape `review` and
+`escalation` had before their screens.
+
+`/[locale]/notifications` is that consumer: the caller's tenant's rows, newest first,
+filterable by status and channel, with a dispatch attempt and a requeue.
+
+| Change | Detail |
+| --- | --- |
+| `frontend/src/lib/api.ts` | `NotificationStatus`, `NotificationRow`, `NotificationList`, `DispatchOutcome` wire types plus `notifications.list/retry/dispatch`. The row type is named `NotificationRow`, not `Notification`, because the DOM lib already defines a global `Notification`. |
+| `frontend/src/app/[locale]/notifications/page.tsx` | The screen (~570 lines): sign-in gate, status + channel chips, `useQuery` over the bounded recent list, role gating (`viewer` reads), confirmation before a send. |
+| `frontend/src/i18n/messages/en.json`, `bn.json` | A `notifications` namespace, including a refusal-code vocabulary. |
+| `frontend/src/app/[locale]/page.tsx` | Nav link to `/notifications`. |
+| `frontend/src/app/[locale]/contracts/page.tsx` | **A bug fix on a screen committed in `07c31ab`** — see below. |
+| No backend change | No route, no migration (`alembic` head stays `0006`), no new dependency. |
+
+### The defect this slice caught, and the one it found in already-committed code
+
+`useTranslations()` is called with no argument, so `t` is **root-scoped**. The filter chips
+passed *namespace-relative* map values — `t(STATUS_KEYS[candidate])` → `"statuses.pending"`
+→ which `t` dutifully resolves to nothing and then renders as that literal string. Every
+filter chip would have shown `statuses.pending` as its label.
+
+Grepping for the pattern found the identical bug at `contracts/page.tsx:199`, shipped in
+`07c31ab`, in a file that prefixes the key correctly two lines away for the row status
+(``t(`contracts.${STATUS_KEYS[row.status]}`)``). Both now use the prefixed template, so the
+map stays compile-checked and the key resolves.
+
+Neither `tsc` nor `eslint` could have caught either instance: `t()` is called with a
+template literal here, so there is no literal for the type system to check against a
+catalogue. That is why this slice was verified with a key audit rather than by re-reading
+the screen — the audit reports bare map keys passed to `t()` as its own row.
+
+### A refusal message that said the wrong thing
+
+`refusalNeedsReview` described `PIPELINE_BLOCKED`'s meaning ("a field still needs a person
+to approve it") rather than `NEEDS_REVIEW`'s. Reading the raise sites settled it:
+`NEEDS_REVIEW` (`dispatch.py:500-504`) is *the agent decision is flagged for human review*;
+`PIPELINE_BLOCKED` (`dispatch.py:509-518`) is *extracted fields are unapproved*. The
+sentence would have sent an operator to re-review a field when the thing to clear was a
+flagged decision. Both sentences now match the code that raises them.
+
+### Verification actually run (`D10-29`)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Key parity + reachability + placeholders | `python .agent-cache/notifications_i18n_audit.py` (a **local, gitignored, deleted-before-commit** script — not in the tree, so reproducible only on the machine that ran it) | **337 keys per locale**; **66** under `notifications`; 0 one-sided, 0 unused, 0 referenced-but-absent, 0 placeholder drift, **0 bare map keys passed to `t()`** |
+| Refusal vocabulary | read `app/workers/dispatch.py` and `app/api/v1/notifications.py` | **14** dispatch codes + **5** route codes. The screen maps all 14 plus the 2 its buttons can provoke (`NOT_FAILED`, `CONCURRENT_UPDATE`). `NOTIFICATION_EXISTS`/`NO_DECISION`/`DECISION_MISMATCH` come only from `POST /notifications`, which has no button here; `TENANT_MISMATCH` only reaches `last_error`. |
+| Types (frontend) | commit gate: `tsc --noEmit` | **Passed** — see the commit row |
+| Lint (frontend) | commit gate: `eslint` | **Passed** — see the commit row |
+| Commit gate | `git commit` (all 17 hooks) | recorded in the follow-up `docs(status)` commit that names the hash, the same convention `D10-26`…`D10-28` used |
+
+**What is not proven here.** This repo has no frontend test runner, so no test covers this
+screen and none was written that would run. Nothing in this session rendered it in a browser
+or called the API from one: the page is `next-intl` + TanStack Query code that has passed a
+compiler and a linter and nothing more. The type and lint rows are gate results, not evidence
+the screen works.
+
+### What this does not do — stated, not buried
+
+- **It does not close gap 25.** A default stack runs `EVENT_TRANSPORT=none`, so every event
+  is parked and `doctor` exits `EXIT_ATTENTION`. This screen makes the *notification* half of
+  that state legible and correctable; it does nothing for the outbox half.
+- **No recipient is shown.** The route does not return one — a row records *that* a contact
+  was attempted, not who it reached — and the screen does not reconstruct it.
+- **No scheduling from here.** `POST /notifications` (schedule from a decision) still has no
+  button; the agent screen's decision list is where a row would come from.
+- **The list is bounded, not paged.** `GET /notifications` calls `recent(limit=…)`; there is
+  no cursor to page. `useQuery` rather than `useInfiniteQuery` is the route's shape, not a
+  shortcut.
+- **Gap 5 is untouched.** The `contract.ingested` consumer is still unwritten and still
+  blocked on an owner decision.
+
 ## Next permitted step
 
 **F10 (step 6) is committed (`b344c17`), three gap-closing slices have landed since
@@ -3021,7 +3120,10 @@ gap 15 is closed too: a reply is now recorded and an SLA clock is now opened
   (`da82111`), `agent` (`25886aa`) and `escalation` (`00e9b54`) now have screens that call
   them. **Also amended by `D10-28`:** `contract` now has one too — `/[locale]/contracts`
   calls `GET /api/v1/contracts` — so `notification` is the last v1 router that only a
-  `TestClient` has ever called.
+  `TestClient` has ever called. **Amended again by `D10-29`:** it no longer is —
+  `/[locale]/notifications` calls list, retry and dispatch, so **every v1 router now has a
+  screen that calls it**. That closes the "no screen at all" form of the gap and leaves the
+  other form open: none of these screens has been run against a real deployment.
   **Corrected while editing this paragraph:**
   it previously said "`frontend/src/app/*` still calls the mocked demo backend", which
   was never true — the mock is `demo/backend`, and it is consumed by
@@ -3123,6 +3225,10 @@ have only ever been called by `TestClient`, because no screen talks to them yet.
 **Amended after this record was signed, not deleted:** `review` has a screen
 (`da82111`), `agent` has one (`25886aa`) and `escalation` — which this sentence did not
 name — has one (`00e9b54`); only `notification` is still `TestClient`-only.
+**Amended once more by `D10-29`:** it is not. `/[locale]/notifications` calls list, retry
+and dispatch, so **no v1 router is `TestClient`-only** — the sentence this paragraph keeps
+narrowing has now been narrowed to nothing. The claim that survives is the last one below:
+no browser has rendered any of these screens.
 **Nothing has ever been sent to a real customer** (gap 15): the shipped default
 transport still refuses, and the SMTP path has only ever spoken to a loopback relay
 this suite started and certified itself — so `sent: true` over HTTP is proven against
@@ -3299,6 +3405,12 @@ sign-off, not footnotes:**
    **`agent` and `notification` are still `TestClient`-only** — two of the four — and no
    browser has run *any* of these screens, because `frontend/` has no test runner and no
    e2e suite. The UI is typechecked and linted, which is weaker than a test.
+   **Amended by `D10-29`, and this sentence had already gone stale before it:** `agent`
+   stopped being `TestClient`-only when `D10-24` shipped `/[locale]/agent` (`25886aa`), and
+   this line was not updated then — the two amendment chains above and here disagreed. With
+   `/[locale]/notifications` (`D10-29`) calling list, retry and dispatch, **zero of the four
+   routers are `TestClient`-only**. What remains true, unchanged and now the *only* residue:
+   no browser has run any of these screens.
 6. ~~**`normalized_value` is still plaintext** (gap 20) — the one place a shipped
    column contradicts "no raw PII at rest", and it needs a decision (encrypt +
    compare on a blind index, or keep it and record the exception), not a patch.~~

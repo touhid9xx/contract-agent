@@ -681,6 +681,128 @@ export const contracts = {
   },
 };
 
+/** Dispatch state of a reminder row. Mirrors `app.db.enums.NotificationStatus`. */
+export type NotificationStatus =
+  | "pending"
+  | "sent"
+  | "delivered"
+  | "answered"
+  | "machine"
+  | "failed"
+  | "suppressed";
+
+/**
+ * One outbound reminder, as `GET /notifications` returns it.
+ *
+ * Named `NotificationRow` rather than `Notification` because the DOM lib already
+ * defines a global `Notification` (the Web Notifications API). A local interface
+ * would shadow it inside this module, which typechecks but makes every later
+ * reader wonder which one a signature meant.
+ *
+ * There is no recipient field, and that is the route's design rather than an
+ * omission: the row records *that* a contact was attempted, on which channel, for
+ * which milestone and how it ended. Reading the address a reminder went to is the
+ * review reveal route's job, which is audited because it is the exception.
+ */
+export interface NotificationRow {
+  id: number;
+  contract_id: number;
+  channel: ContactChannel;
+  /**
+   * The milestone label (`T-60`/`T-30`/`T-14`), not a rendered body.
+   *
+   * Typed `string`, not a union, on purpose: the milestones come from
+   * `DEFAULT_MILESTONE_DAYS`, which is configuration. A union here would claim a
+   * closed set the server does not enforce.
+   */
+  template: string;
+  status: NotificationStatus;
+  /** A calendar date in the contract's own time zone. Never format this locally. */
+  scheduled_date: string;
+  /** When quiet hours pushed the attempt later; `null` when it is not deferred. */
+  scheduled_at: string | null;
+  sent_at: string | null;
+  attempts: number;
+  /** Redacted relay text, safe to show. Never contains the contact address. */
+  last_error: string | null;
+  provider_message_id: string | null;
+  idempotency_key: string;
+}
+
+/** One page of reminders. `count` is how many rows this response carries. */
+export interface NotificationList {
+  items: NotificationRow[];
+  count: number;
+}
+
+/**
+ * The answer to a dispatch attempt.
+ *
+ * `sent: false` is not an error: a transport failure is a *recorded attempt*, and
+ * the row now carries `attempts`/`last_error`. `deferred_until` is the system
+ * working (quiet hours), which is why it is a 200 and not a 409.
+ */
+export interface DispatchOutcome {
+  notification: NotificationRow;
+  sent: boolean;
+  deferred_until: string | null;
+  error: string | null;
+}
+
+/**
+ * The notification surface.
+ *
+ * Reading needs any authenticated role — a row carries no recipient value — while
+ * dispatching and retrying are `OPERATOR`/`ADMIN` only, because one sends to a
+ * customer and the other spends a retry budget on their behalf.
+ *
+ * `retry` and `dispatch` are separate calls because they answer different
+ * questions: dispatch asks "send this now", retry lifts a parked verdict. Folding
+ * them together would give every transient failure an unlimited loop.
+ */
+export const notifications = {
+  /** Newest slot first. Omitted filters return every status and channel. */
+  list: (
+    accessToken: string,
+    options: {
+      status?: NotificationStatus;
+      channel?: ContactChannel;
+      contractId?: number;
+      limit?: number;
+    } = {},
+  ) => {
+    const params = new URLSearchParams();
+    // `status` and `channel` are ignored by the server when `contract_id` is set,
+    // so they are not sent alongside it: a query string that describes a filter the
+    // answer ignored is worse than a shorter one.
+    if (options.contractId !== undefined) {
+      params.set("contract_id", String(options.contractId));
+    } else {
+      if (options.status !== undefined) params.set("status", options.status);
+      if (options.channel !== undefined) params.set("channel", options.channel);
+    }
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    const query = params.toString();
+    return request<NotificationList>(query === "" ? "/notifications" : `/notifications?${query}`, {
+      accessToken,
+    });
+  },
+
+  /** Reset a `failed` or `suppressed` row to `pending` with a fresh budget. */
+  retry: (accessToken: string, notificationId: number) =>
+    request<NotificationRow>(`/notifications/${notificationId}/retry`, {
+      method: "POST",
+      accessToken,
+    }),
+
+  /** Attempt the send now, and report what actually happened. */
+  dispatch: (accessToken: string, notificationId: number) =>
+    request<DispatchOutcome>(`/notifications/${notificationId}/dispatch`, {
+      method: "POST",
+      accessToken,
+    }),
+};
+
 /**
  * Liveness probe.
  *
