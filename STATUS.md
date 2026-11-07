@@ -184,7 +184,7 @@ field for what the customer said. Messages are at exact parity again (**165** fl
 keys each, 58 under `escalations`), measured rather than eyeballed. No `backend/` file
 changed, so the suite stays **805** — and this slice adds no test count of its own,
 because `frontend/` still has no test runner.
-**The next slice gives the channel decisions a screen** (`<HASH>`, `feat(agent)`): the
+**The next slice gives the channel decisions a screen** (`25886aa`, `feat(agent)`): the
 third of the four `TestClient`-only families to get one, and the family every
 notification is scheduled from, so re-running the policy had no caller outside a test.
 `/[locale]/agent` lists the tenant's recent decisions or one contract's history, re-runs
@@ -197,11 +197,14 @@ The override offers all three channels and lets the refusal's `details.permitted
 what the policy allows, rather than keeping a second copy of `permitted_channels` in the
 browser — which is why `ApiError` now carries `details` as `unknown`. Messages are at
 parity again (**224** flattened keys each, 58 under `agent`), counted rather than
-eyeballed. As written, this slice is **uncommitted and ungated**: project-wide typecheck
-and lint had not run, because the shell could not start any process in that session, so
-the verification table says "not run" rather than "passed". No `backend/` file changed, so
-the suite stays **805** — and this slice adds no test count of its own, because
-`frontend/` still has no test runner.
+eyeballed. **Written uncommitted and ungated, then committed and gated:** for the two
+sessions that wrote this code the shell could not start any process, so project-wide
+typecheck and lint were recorded as "not run" rather than "passed". Restarting the IDE
+cleared the fault, `git commit` then ran the full 17-hook gate green — `tsc --noEmit` and
+`eslint` among them — and the slice landed as `25886aa`. The rows below keep both facts
+rather than being rewritten to look like one. No `backend/` file changed, so the suite
+stays **805** — and this slice adds no test count of its own, because `frontend/` still
+has no test runner.
 
 ## Phase history
 
@@ -2199,31 +2202,34 @@ changed, so the suite stays at **805**; this slice is frontend only and adds no 
 | Check | Command | Result |
 | --- | --- | --- |
 | Types | TypeScript language service, per edited file: `[locale]/agent/page.tsx`, `lib/api.ts`, `i18n/messages.ts`, `[locale]/page.tsx` | **No errors, no warnings.** Narrower than a project compile: it proves each file is internally consistent and that every imported symbol resolves, not that the whole project builds. |
-| Types (project-wide) | `npm run typecheck` (`frontend typecheck` pre-commit hook) | **Not run.** The shell could not start a process at all in the session that wrote this (see below), and no commit happened, so the hook never fired either. |
-| Lint | `eslint` (`frontend-eslint` pre-commit hook) | **Not run**, for the same reason. |
-| Message parity | flattened-key count of `en.json` vs `bn.json`, plus a reachability check of every `agent.*` literal against both files | 224/224 keys, 0 missing, 0 extra; 58 under `agent`; no one-sided key and no unreachable one. Counted by reading both files end to end rather than by script: app 2, nav 6, home 14, auth 13, review 65, escalations 58, agent 58, common 8 — which is why the same files measured 165 in the slice above, the difference being `agent`'s 58 plus `nav.agent`. The 58 `agent` keys divide exactly into 50 reached by literal `t("agent.…")`, 3 through `CHANNEL_KEYS` and 5 through `REFUSAL_KEYS`. |
+| Types (project-wide) | `npm run typecheck` (`frontend typecheck` pre-commit hook) | **Passed**, but not in the session that wrote the code: the shell could not start a process there, so the hook never fired. It fired on the commit that landed the slice (`25886aa`) and returned clean, so `tsc --noEmit` has now run over the whole project. |
+| Lint | `eslint` (`frontend-eslint` pre-commit hook) | **Passed** by the same hook run, on the same commit. |
+| Message parity | flattened-key count of `en.json` vs `bn.json`, plus a reachability check of every `agent.*` literal against both files | 224/224 keys, 0 missing, 0 extra; 58 under `agent`; no one-sided key and no unreachable one. Counted by reading both files end to end, then re-measured mechanically in the session that committed (`en.json` and `bn.json` flattened: 224 each, same per-namespace split, zero one-sided keys): app 2, nav 6, home 14, auth 13, review 65, escalations 58, agent 58, common 8 — which is why the same files measured 165 in the slice above, the difference being `agent`'s 58 plus `nav.agent`. The 58 `agent` keys divide exactly into 50 reached by literal `t("agent.…")`, 3 through `CHANNEL_KEYS` and 5 through `REFUSAL_KEYS`. |
 | Tests | not run and not applicable | There is still no frontend test runner (no vitest, no jest, no Playwright), so this slice adds none — and adds no test count. |
 | Backend | `pytest backend/tests` **not** re-run | No `backend/` file changed. The last measured green — **805** collected, 804 passed, 1 skipped at `6fe6158` — still describes the tree. |
 | Schema | `alembic current` **not** re-run | No migration, no model change; the head is still `0006`. |
 
-**The shell failed again, differently, and this time it is not the pager.** Every command
-returned only its own **first character** and exit code 1 — `git --version` → `g`, `echo hi`
-→ `e`, `"echo"` → `"`. A bare `printf 'abcdefghij\n'` coming back as `p` is what pins the
-mechanism: the command's first byte is echoed instead of executed, so no process starts at
-all and `git`, `pytest`, `npm` and the 17 hooks are equally out of reach. That is not a
-pager blocking on stdin (the previous session's cause, and `--no-pager` is already used
-here). It reproduced identically in the session that then re-checked this slice's parity
-figures by reading both message files end to end. Nothing was committed: the six files this
-slice touches are in the working tree only, and the `<HASH>` in the phase history below is
-a placeholder until a session can run git again. The rows above say "not run" because "not
-run" is what happened.
+**The shell failed, differently from the pager, and then recovered.** For two sessions
+every command returned only its own **first character** and exit code 1 — `git --version`
+→ `g`, `echo hi` → `e`, `"echo"` → `"`. A bare `printf 'abcdefghij\n'` coming back as `p`
+is what pinned the mechanism: the command's first byte was echoed instead of executed, so
+no process started at all and `git`, `pytest`, `npm` and the 17 hooks were equally out of
+reach. That was not a pager blocking on stdin (the previous session's cause, and
+`--no-pager` was already in use here). It was a fault in the harness's command path, not in
+the repository, and **restarting the IDE cleared it** — the next session ran `git`, `node`,
+`pytest` and `npm` normally. During the fault nothing was committed: the seven files this
+slice touches sat untracked and modified in the working tree, and the phase history above
+could only carry a placeholder where a commit hash belongs. Both are resolved now — the
+slice is `25886aa`, every hash site names it, and the two rows above read "passed" because
+a hook finally ran and passed.
 
 ### What this does not do — state it, do not bury it
 
-- **No browser has run it.** Typechecked per file and its wire shapes were read out of
-  `backend/app/api/v1/agent.py` rather than guessed — but nothing has clicked a button, and
-  the project-wide typecheck and lint have not run at all. "It works" here means "it agrees
-  with the route's contract", which is weaker evidence than any test in `backend/tests`.
+- **No browser has run it.** Typechecked per file, then project-wide by the pre-commit
+  hook, and its wire shapes were read out of `backend/app/api/v1/agent.py` rather than
+  guessed — but nothing has clicked a button. "It works" here means "it compiles and it
+  agrees with the route's contract", which is weaker evidence than any test in
+  `backend/tests`, and no test in `backend/tests` covers this file at all.
 - **The concurrency path has never been raced.** The `VERSION_CONFLICT` branch is written
   and translated, but two operators have never corrected the same contract at once, and no
   one has tried to correct a superseded row.
@@ -2579,7 +2585,7 @@ gap 15 is closed too: a reply is now recorded and an SLA clock is now opened
   `/[locale]/login` and the account card reach `/auth/*` (`feat(web)`, D10-19).
   Nothing else does — the contract, review, agent and notification routes have still
   only ever been called by `TestClient`. **Amended since this was written:** `review`
-  (`da82111`), `agent` (`<HASH>`) and `escalation` (`00e9b54`) now have screens that call
+  (`da82111`), `agent` (`25886aa`) and `escalation` (`00e9b54`) now have screens that call
   them; `contract` and `notification` are still `TestClient`-only.
   **Corrected while editing this paragraph:**
   it previously said "`frontend/src/app/*` still calls the mocked demo backend", which
@@ -2680,7 +2686,7 @@ still has to look; no live
 Ollama has answered anything; and the `review`, `agent` and `notification` routes
 have only ever been called by `TestClient`, because no screen talks to them yet.
 **Amended after this record was signed, not deleted:** `review` has a screen
-(`da82111`), `agent` has one (`<HASH>`) and `escalation` — which this sentence did not
+(`da82111`), `agent` has one (`25886aa`) and `escalation` — which this sentence did not
 name — has one (`00e9b54`); only `notification` is still `TestClient`-only.
 **Nothing has ever been sent to a real customer** (gap 15): the shipped default
 transport still refuses, and the SMTP path has only ever spoken to a loopback relay

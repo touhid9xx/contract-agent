@@ -2342,16 +2342,17 @@ are about which distinctions the screen refuses to collapse.
   reports no error in any edited file, and every wire shape (`EscalationView`,
   `EscalationListResponse`, `EscalationUpdateRequest`, `RecordResponseResponse`, the
   repeated `?status=` query, the `overdue`/`sla_hours` echoes) was read out of
-  `app/api/v1/escalations.py` rather than guessed. Not proven: **`npm run typecheck` and
-  `eslint` have not been run on it** — the shell was unavailable for the whole of the
+  `app/api/v1/escalations.py` rather than guessed. At authoring time **`npm run typecheck`
+  and `eslint` had not been run on it** — the shell was unavailable for the whole of the
   session that wrote the screen, so no process could start, and "the language service is
-  quiet per file" is a weaker statement than "the project compiles and lints". Also not
-  proven: **no browser has run it** — there is still no frontend test
-  runner, so this slice adds no test count at all; no two operators have collided on a
-  `409`; no `viewer` session has loaded the queue; and nothing in the repo starts the
-  scanner that raises the rows this screen lists (no compose service, systemd unit or
-  cron entry), so in a real deployment the queue fills only if an operator runs the
-  worker by hand.
+  quiet per file" is a weaker statement than "the project compiles and lints". **Since
+  resolved:** the screen was committed as `00e9b54`, whose pre-commit hook ran both over
+  the whole project and passed. Still not proven: **no browser has run it** — there is
+  still no frontend test runner, so this slice adds no test count at all; no two
+  operators have collided on a `409`; no `viewer` session has loaded the queue; and
+  nothing in the repo starts the scanner that raises the rows this screen lists (no
+  compose service, systemd unit or cron entry), so in a real deployment the queue fills
+  only if an operator runs the worker by hand.
 
 ### D10-24 — The decision screen offers the choice and lets the policy refuse
 
@@ -2420,12 +2421,14 @@ by default.
   the `?contract_id=` filter) was read out of `app/api/v1/agent.py`, not guessed; the
   five policy refusal codes and the two route-level codes were read out of
   `app/workers/decision.py` and `agent.py`; and the TypeScript language service reports
-  no error in any edited file. Not proven: **no browser has run it**, **the project-wide
-  typecheck and `eslint` have not been run at all** — the shell could not start a process
-  in the session that wrote this, so nothing was gated and nothing was committed, and the
-  per-file language-service check quoted above is the only type evidence — and there is
-  still no frontend test runner, so this slice adds no test count; the gate is typecheck
-  plus lint, which is weaker than any test in `backend/tests`. No two operators have raced a
-  `409` here, no `viewer` session has loaded the list, and the override path has never
-  been exercised against a customer whose consent was withdrawn between page load and
-  click.
+  no error in any edited file. **The project-wide gate did eventually run:** the session
+  that wrote this code could not start any process (the harness echoed each command's first
+  byte and exited 1), so at authoring time nothing was gated and nothing was committed;
+  restarting the IDE cleared the fault, the commit then ran all 17 hooks green — including
+  `tsc --noEmit` and `eslint` — and the slice landed as `25886aa`. Not proven: **no browser
+  has run it** — nothing has clicked a button, so the per-file and project-wide type checks
+  are the only evidence about behaviour — and there is still no frontend test runner, so
+  this slice adds no test count; the gate is typecheck plus lint, which is weaker than any
+  test in `backend/tests`. No two operators have raced a `409` here, no `viewer` session has
+  loaded the list, and the override path has never been exercised against a customer whose
+  consent was withdrawn between page load and click.
