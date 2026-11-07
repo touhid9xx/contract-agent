@@ -10,6 +10,8 @@
 #   scanner   — escalation scanner worker (gap 15): opens an escalation when a
 #               contract has gone quiet, so `escalated` is reachable without an
 #               operator noticing by hand.
+#   documents — a named volume, not a service: uploaded contract documents, mounted
+#               at the same path in the API and in every worker (gap 12).
 # Kafka: the transport landed in F4 (EVENT_TRANSPORT=kafka, read from .env by
 #        every worker), but no broker is defined here yet, so the relay defaults
 #        to EVENT_TRANSPORT=none and parks events instead of dropping them.
@@ -36,6 +38,13 @@ x-worker: &worker
     # Overrides whatever host-side URL .env holds: inside the network the
     # database is reachable as `mysql`, never as 127.0.0.1.
     DATABASE_URL: mysql+pymysql://${MYSQL_USER:-contract_agent}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE:-contract_agent}?charset=utf8mb4
+    # Uploaded documents (gap 12). Absolute because every process resolves a
+    # relative path against its own working directory, and the mount below is
+    # what makes it writable at all: `read_only: true` means an unmounted store
+    # path fails at the first upload, not at boot.
+    DOCUMENT_STORE_PATH: ${DOCUMENT_STORE_PATH:-/var/lib/contract-agent/documents}
+  volumes:
+    - documents:/var/lib/contract-agent/documents
   depends_on:
     mysql:
       condition: service_healthy
@@ -93,6 +102,11 @@ services:
       # Overrides whatever host-side URL .env holds: inside the network the
       # database is reachable as `mysql`, never as 127.0.0.1.
       DATABASE_URL: mysql+pymysql://${MYSQL_USER:-contract_agent}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE:-contract_agent}?charset=utf8mb4
+      # Same absolute path and the same volume as the workers: whichever process
+      # writes a document, the one that reads it back finds it.
+      DOCUMENT_STORE_PATH: ${DOCUMENT_STORE_PATH:-/var/lib/contract-agent/documents}
+    volumes:
+      - documents:/var/lib/contract-agent/documents
     depends_on:
       mysql:
         condition: service_healthy
@@ -148,3 +162,7 @@ services:
 
 volumes:
   mysql-data:
+  # Uploaded contract documents, shared by the API and every worker. A named
+  # volume rather than a bind mount so the files survive `docker compose down`
+  # and never depend on the host's path layout.
+  documents:

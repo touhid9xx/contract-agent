@@ -70,6 +70,7 @@ class ContractRepository(TenantScopedRepository[Contract]):
         end_date: date | None,
         timezone: str,
         created_by: uuid.UUID | None,
+        storage_path: str | None = None,
     ) -> Contract:
         """Add one ingested contract to this tenant.
 
@@ -78,6 +79,14 @@ class ContractRepository(TenantScopedRepository[Contract]):
         outbox event can carry the contract id as its partition key). Flushing in
         the repository would hide that ordering from the caller, and the ordering
         is the whole point of writing the event in the same transaction.
+
+        ``storage_path`` is set at create rather than in a follow-up update
+        because a document upload produces both facts at once — the bytes have
+        already been sealed to disk by the time this is called, and a second
+        ``UPDATE`` would only add a window in which the row names no document it
+        was created with. It stays optional so metadata-only ingestion
+        (``POST /contracts``) is unchanged: a contract whose text never arrived is
+        legitimate, and ``None`` is the honest way to say so.
         """
         contract = Contract(
             customer_ref=customer_ref,
@@ -86,6 +95,7 @@ class ContractRepository(TenantScopedRepository[Contract]):
             start_date=start_date,
             end_date=end_date,
             timezone=timezone,
+            storage_path=storage_path,
             created_by=created_by,
         )
         return self.add(contract)

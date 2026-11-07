@@ -11,7 +11,7 @@ from __future__ import annotations
 import base64
 import ssl
 from functools import lru_cache
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
 
 from pydantic import Field, field_validator, model_validator
@@ -162,6 +162,26 @@ class Settings(BaseSettings):
     extraction_review_threshold: float = Field(default=0.8, gt=0, le=1)
     #: Upper bound on the document text handed to a backend, in characters.
     extraction_max_document_chars: int = Field(default=20_000, gt=0, le=200_000)
+
+    # --- contract documents (gap 12) -------------------------------------
+    #: Where ingested document bytes are kept.
+    #:
+    #: Configurable because both things that can go wrong here are local: the API
+    #: container's root filesystem is read-only, so the store has to be a mounted
+    #: volume, and a development checkout wants the bytes beside it rather than
+    #: under ``/var/lib``. Relative in development, **absolute** in
+    #: staging/production — enforced below, because the API, the workers and an
+    #: operator's CLI do not share a working directory and a disagreement there
+    #: presents as a stored document that cannot be found.
+    document_store_path: str = Field(default="var/documents", min_length=1)
+    #: Largest document accepted, in bytes, checked before anything is written.
+    #:
+    #: The cap is a correctness bound rather than a tuning knob: the store holds
+    #: the file in memory whole (plaintext, then sealed), and an unbounded upload
+    #: is a denial-of-service lever against a process that is also serving the
+    #: API. 10 MiB clears a scanned contract with room to spare and stays far
+    #: below anything that would trouble the host.
+    document_max_bytes: int = Field(default=10 * 1024 * 1024, gt=0, le=100 * 1024 * 1024)
 
     # --- notification dispatch (F10) -------------------------------------
     notification_transport: NotificationTransport = "none"
@@ -484,6 +504,19 @@ class Settings(BaseSettings):
                 "CORS_ORIGINS must not contain loopback development origins in "
                 f"{self.app_env}: {insecure_origins}"
             )
+        # A relative store resolves against each process's working directory, so
+        # the API (``/app``), a worker under systemd and an operator's CLI would
+        # each write or look for documents somewhere different. That failure is
+        # silent until a document is needed and then presents as a missing file,
+        # so it is refused at boot instead. Development keeps the default
+        # relative path; staging/production must name an absolute one.
+        if not _is_absolute_path(self.document_store_path):
+            raise ValueError(
+                "DOCUMENT_STORE_PATH must be an absolute path in "
+                f"{self.app_env}; got {self.document_store_path!r}. A relative path "
+                "resolves against each process's working directory, so the API, the "
+                "workers and the CLI would disagree about where documents live."
+            )
 
     # --- derived values --------------------------------------------------
     @property
@@ -571,6 +604,19 @@ def _is_plausible_address(value: str) -> bool:
 def _is_loopback(origin: str) -> bool:
     host = origin.split("://", 1)[-1].split("/", 1)[0].rsplit(":", 1)[0]
     return host in _LOOPBACK_HOSTS
+
+
+def _is_absolute_path(value: str) -> bool:
+    """Whether ``value`` is anchored, in *either* path notation.
+
+    ``pathlib.Path`` is the wrong tool here: it is flavoured by the host OS, so
+    ``Path("/var/lib/app/documents").is_absolute()`` is ``False`` on Windows. A
+    developer running the tests on Windows would then be told the deployment's
+    absolute POSIX path is relative — the same host-flavour trap ``D6-03``
+    recorded for ``ZoneInfo``. Both pure flavours are asked instead, so the
+    answer depends on the string, not on the machine reading it.
+    """
+    return PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()
 
 
 @lru_cache(maxsize=1)

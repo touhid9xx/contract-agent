@@ -79,7 +79,21 @@ class FieldCipher:
         Always with the current key, never a retired one: a rotation that kept
         writing old tokens would never finish.
         """
-        return self._fernet.encrypt(value.encode("utf-8")).decode("ascii")
+        return self.encrypt_bytes(value.encode("utf-8")).decode("ascii")
+
+    def encrypt_bytes(self, payload: bytes) -> bytes:
+        """Encrypt arbitrary bytes, for a value that is not UTF-8 text.
+
+        The only caller is the document store (gap 12): a contract PDF is stored
+        sealed by the same key ring as a field value, because a document holds
+        every field on the page at once and writing one in the clear would undo
+        gap 20's whole argument. Bytes in, bytes out — a PDF does not encode.
+
+        Same envelope and same timestamped token as :meth:`encrypt`, so a sealed
+        document answers :func:`is_sealed` the same way and is rewrapped by the
+        same rotation.
+        """
+        return self._fernet.encrypt(payload)
 
     def decrypt(self, token: str) -> str:
         """Recover the plaintext from a token produced by :meth:`encrypt`.
@@ -92,6 +106,17 @@ class FieldCipher:
         PII and an error string is the easiest way for PII to reach a log. It does
         name both variables, because "rotation is supported" is the thing an
         operator needs to know when this fires.
+        """
+        return self.decrypt_bytes(token.encode("ascii")).decode("utf-8")
+
+    def decrypt_bytes(self, token: bytes) -> bytes:
+        """Recover the bytes sealed by :meth:`encrypt_bytes`.
+
+        The primitive, with :meth:`decrypt` the text-shaped wrapper over it, so
+        there is one implementation of the key-ring walk rather than one per
+        caller. Raises the same exception with the same message: the caller
+        cannot tell, and does not need to, whether a failed unseal was a field
+        value or a document.
         """
         plaintext = self._decrypt_with(self._fernet, token)
         if plaintext is not None:
@@ -118,9 +143,13 @@ class FieldCipher:
         :func:`is_sealed` avoids: the question here is *which key* sealed this,
         not *whether* it is a token at all.
         """
-        if self._decrypt_with(self._fernet, token) is not None:
+        # Encoded once, because the private helpers below speak bytes: the ring
+        # walk is shared with :meth:`decrypt_bytes`, and a sealed document goes
+        # through the same path as a sealed field value.
+        encoded = token.encode("ascii")
+        if self._decrypt_with(self._fernet, encoded) is not None:
             return None
-        plaintext = self._from_retired(token)
+        plaintext = self._from_retired(encoded)
         if plaintext is None:
             # Names the variable that fixes it, for the same reason ``decrypt``
             # does: "the value cannot be read" is the symptom an operator already
@@ -131,9 +160,9 @@ class FieldCipher:
                 "that key to ENCRYPTION_KEY_PREVIOUS and re-run, otherwise the value "
                 "cannot be re-sealed under ENCRYPTION_KEY"
             )
-        return self.encrypt(plaintext)
+        return self.encrypt(plaintext.decode("utf-8"))
 
-    def _from_retired(self, token: str) -> str | None:
+    def _from_retired(self, token: bytes) -> bytes | None:
         for retired in self._retired:
             plaintext = self._decrypt_with(retired, token)
             if plaintext is not None:
@@ -141,10 +170,10 @@ class FieldCipher:
         return None
 
     @staticmethod
-    def _decrypt_with(fernet: Fernet, token: str) -> str | None:
+    def _decrypt_with(fernet: Fernet, token: bytes) -> bytes | None:
         """``None`` on a wrong key, so the ring can try the next one."""
         try:
-            return fernet.decrypt(token.encode("ascii")).decode("utf-8")
+            return fernet.decrypt(token)
         except InvalidToken:
             return None
 

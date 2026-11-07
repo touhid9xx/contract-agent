@@ -11,6 +11,10 @@ from app.core.config import DEV_SECRET_PLACEHOLDER, MAX_RETIRED_ENCRYPTION_KEYS,
 
 VALID_PRODUCTION_SECRET = "a" * 40
 VALID_PRODUCTION_ORIGINS = "https://app.example.com"
+#: Production has to name an absolute document store: the default is relative,
+#: which is right for a checkout and wrong for three processes with three working
+#: directories (see ``Settings._reject_insecure_production_defaults``).
+PRODUCTION_DOCUMENT_PATH = "/var/lib/contract-agent/documents"
 
 
 def make_production(**overrides: object) -> Settings:
@@ -18,6 +22,7 @@ def make_production(**overrides: object) -> Settings:
         "app_env": "production",
         "secret_key": VALID_PRODUCTION_SECRET,
         "cors_origins": VALID_PRODUCTION_ORIGINS,
+        "document_store_path": PRODUCTION_DOCUMENT_PATH,
     }
     values.update(overrides)
     return Settings(**values)  # type: ignore[arg-type]
@@ -59,6 +64,16 @@ def test_production_rejects_plain_text_logs() -> None:
 def test_production_rejects_loopback_cors_origin() -> None:
     with pytest.raises(ValidationError, match="loopback"):
         make_production(cors_origins="https://app.example.com,http://localhost:3000")
+
+
+def test_production_rejects_a_relative_document_store_path() -> None:
+    with pytest.raises(ValidationError, match="absolute path"):
+        make_production(document_store_path="var/documents")
+
+
+def test_a_relative_document_store_path_is_fine_in_development() -> None:
+    # The default, in the environment that wants documents beside the checkout.
+    assert Settings(app_env="development", log_json=False).document_store_path == "var/documents"
 
 
 def test_wildcard_cors_is_rejected_everywhere() -> None:

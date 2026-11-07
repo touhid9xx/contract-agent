@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
 from app.core.crypto import FieldCipher, MissingEncryptionKeyError, build_cipher
+from app.core.documents import DocumentStore, build_document_store
 from app.core.principal import Principal
 from app.core.security import InvalidTokenError, TokenExpiredError, decode_access_token
 from app.db.enums import UserRole
@@ -53,7 +54,7 @@ def app_settings(request: Request) -> Settings:
     return cast(Settings, request.app.state.settings)
 
 
-def cipher_or_503(settings: Settings) -> FieldCipher:
+def cipher_or_503(settings: Settings = Depends(app_settings)) -> FieldCipher:
     """The configured field cipher, or a 503 explaining what is missing.
 
     ``ENCRYPTION_KEY`` is optional at start-up (an installation that only ingests
@@ -61,18 +62,37 @@ def cipher_or_503(settings: Settings) -> FieldCipher:
     Failing closed here means an unconfigured installation cannot decrypt — and,
     on the write side, cannot quietly store a value in plaintext.
 
-    It lives here rather than in a router because two do the same thing: ``review``
-    reveals and stores field values, and ``notifications`` must decrypt one to
-    address a message. Two copies of this mapping is how one route starts
-    answering 500 for a missing key while the other answers 503.
+    It lives here rather than in a router because three do the same thing: ``review``
+    reveals and stores field values, ``notifications`` must decrypt one to address a
+    message, and ``contracts`` seals an uploaded document. Three copies of this
+    mapping is how one route starts answering 500 for a missing key while another
+    answers 503.
+
+    The message says "encrypted data" rather than "field values" since documents
+    joined that set (gap 12): an operator reading it needs to know which variable
+    is missing, not which of the two kinds of ciphertext happened to be asked for.
     """
     try:
         return build_cipher(settings)
     except MissingEncryptionKeyError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Field values cannot be read: ENCRYPTION_KEY is not configured",
+            detail="Encrypted data cannot be stored or read: ENCRYPTION_KEY is not configured",
         ) from None
+
+
+def document_store_or_503(
+    settings: Settings = Depends(app_settings),
+    cipher: FieldCipher = Depends(cipher_or_503),
+) -> DocumentStore:
+    """The document store, or the same 503 a missing key produces everywhere else.
+
+    Built per request rather than held on ``app.state``: a
+    :class:`~app.core.documents.DocumentStore` is a root path and a cipher with no
+    open handles or cache, so there is nothing to pool, and building it here keeps
+    the failure to start serving documents in one place.
+    """
+    return build_document_store(settings, cipher=cipher)
 
 
 def _unauthorized() -> HTTPException:

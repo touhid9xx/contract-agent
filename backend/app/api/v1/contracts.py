@@ -34,15 +34,22 @@ import json
 import re
 import uuid
 from datetime import date, datetime
+from typing import Annotated
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
-from app.api.deps import get_request_session, require_roles
+from app.api.deps import document_store_or_503, get_request_session, require_roles
+from app.core.documents import (
+    DocumentStore,
+    DocumentTooLargeError,
+    EmptyDocumentError,
+    document_digest,
+)
 from app.core.middleware import correlation_id_or_new
 from app.core.principal import Principal
 from app.db.enums import (
@@ -91,6 +98,35 @@ _TIMEZONE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_+\-]*(?:/[A-Za-z0-9_+\-]+)*$")
 #: Column width of ``contracts.timezone``.
 MAX_TIMEZONE_LENGTH = 64
 
+#: Media type of the upload body (``POST /contracts/document``).
+#:
+#: Declared rather than inferred because FastAPI decides how to read a body from
+#: its media type. Anything ``application/json`` is parsed as JSON, so a client
+#: that sent a PDF under that header would get a JSON decode error instead of its
+#: document stored — a confusing answer to a plausible mistake.
+DOCUMENT_MEDIA_TYPE = "application/octet-stream"
+
+
+def _clean_customer_ref(value: str) -> str:
+    """Trim a customer label and reject a blank one.
+
+    Module-level so the metadata route and the document route cannot disagree
+    about what a usable label is: two copies of "strip, then refuse empty" is
+    exactly the pair that drifts into one path accepting ``"   "``.
+    """
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError("must not be blank")
+    return cleaned
+
+
+def _clean_timezone(value: str) -> str:
+    """Validate an IANA-shaped zone name (see ``_TIMEZONE_RE``)."""
+    candidate = value.strip()
+    if not _TIMEZONE_RE.match(candidate):
+        raise ValueError("must be an IANA time zone name such as 'Europe/London'")
+    return candidate
+
 
 class ContractCreateRequest(BaseModel):
     """The content needed to register one contract.
@@ -111,18 +147,12 @@ class ContractCreateRequest(BaseModel):
     @field_validator("customer_ref")
     @classmethod
     def _strip_ref(cls, value: str) -> str:
-        cleaned = value.strip()
-        if not cleaned:
-            raise ValueError("must not be blank")
-        return cleaned
+        return _clean_customer_ref(value)
 
     @field_validator("timezone")
     @classmethod
     def _check_timezone(cls, value: str) -> str:
-        candidate = value.strip()
-        if not _TIMEZONE_RE.match(candidate):
-            raise ValueError("must be an IANA time zone name such as 'Europe/London'")
-        return candidate
+        return _clean_timezone(value)
 
     @model_validator(mode="after")
     def _check_date_order(self) -> ContractCreateRequest:
@@ -274,6 +304,146 @@ def ingest_contract(
         contract_id=contract.id,
         outbox_event_id=str(summary.outbox_event_id),
         source=payload.source.value,
+    )
+    return summary
+
+
+@router.post(
+    "/document",
+    response_model=ContractSummary,
+    status_code=status.HTTP_201_CREATED,
+    summary="Ingest a contract from an uploaded document",
+)
+def ingest_contract_document(
+    customer_ref: Annotated[str, Query(min_length=1, max_length=200)],
+    payload: Annotated[bytes, Body(media_type=DOCUMENT_MEDIA_TYPE)],
+    start_date: Annotated[date | None, Query()] = None,
+    end_date: Annotated[date | None, Query()] = None,
+    timezone: Annotated[str, Query(max_length=MAX_TIMEZONE_LENGTH)] = "UTC",
+    principal: Principal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
+    session: Session = Depends(get_request_session),
+    store: DocumentStore = Depends(document_store_or_503),
+) -> ContractSummary:
+    """Register a contract **and** keep the document it was read from (gap 12).
+
+    This is the route that gives ``Contract.storage_path`` its first writer, and
+    therefore the first route after which ``extract_contract`` has text to work
+    with. It is deliberately a sibling of ``POST /contracts`` rather than an
+    extension of it: metadata ingestion is a JSON body and a hash of the request,
+    while this is opaque bytes and a hash of the file, and folding the two into
+    one endpoint would mean one schema with a mutually exclusive body.
+
+    The bytes are **not** parsed here. Storing and reading a document are separate
+    concerns, and a route that also tried to extract text would put an unbounded
+    CPU cost (PDF parsing) inside a request that is otherwise a write. What this
+    route guarantees is narrower and testable: a document that arrives is sealed,
+    addressed by its own hash, and named by a committed row.
+    """
+    try:
+        clean_ref = _clean_customer_ref(customer_ref)
+        clean_timezone = _clean_timezone(timezone)
+    except ValueError as exc:
+        # The same rules ``ContractCreateRequest`` applies to a JSON body, applied
+        # to query parameters, and answered with the status FastAPI would have
+        # used for the body: a caller should not have to know which half of the
+        # request a bad value was in.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from None
+    if start_date and end_date and end_date < start_date:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="end_date must not be before start_date",
+        )
+
+    # Fingerprint first, store second: a duplicate is refused without sealing a
+    # document that no row would ever name. The hash is over the plaintext, so it
+    # is stable across sealings and usable as the per-tenant idempotency key.
+    digest = document_digest(payload)
+    repository = ContractRepository(session, principal.tenant_id)
+    existing = repository.by_sha256(digest)
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"This document has already been ingested as contract {existing.id}",
+        )
+
+    try:
+        stored = store.save(payload)
+    except DocumentTooLargeError as exc:
+        # 413 rather than 422: the request is well-formed and the client's only
+        # problem is the size, which is what 413 exists to say.
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail={
+                "code": "DOCUMENT_TOO_LARGE",
+                "message": str(exc),
+                "details": {"size": exc.size, "limit": exc.limit},
+            },
+        ) from None
+    except EmptyDocumentError:
+        # Unreachable through this route (FastAPI rejects a zero-length body as a
+        # missing field), kept because the store is also used from the CLI, where
+        # there is no request parser to catch it first.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="The request body must contain the document bytes",
+        ) from None
+
+    try:
+        contract = repository.create(
+            customer_ref=clean_ref,
+            sha256=stored.sha256,
+            source=ContractSource.PDF,
+            start_date=start_date,
+            end_date=end_date,
+            timezone=clean_timezone,
+            created_by=principal.user_id,
+            # Written before the commit, on purpose: a crash between the two
+            # leaves an unreferenced blob (harmless, deduplicated, reused on
+            # re-upload), where the opposite order would leave a row pointing at
+            # a document that does not exist.
+            storage_path=stored.key,
+        )
+        session.flush()
+
+        event = enqueue_event(
+            session,
+            tenant_id=principal.tenant_id,
+            correlation_id=correlation_id_or_new(),
+            event_type=CONTRACT_INGESTED_EVENT,
+            topic=CONTRACT_EVENTS_TOPIC,
+            partition_key=str(contract.id),
+            # The same five keys the metadata route publishes. A consumer must not
+            # be able to tell which route produced the fact; what differs is
+            # ``source`` (``pdf`` here, ``api`` there), which is a field it already
+            # reads.
+            payload={
+                "contract_id": contract.id,
+                "end_date": contract.end_date.isoformat() if contract.end_date else None,
+                "sha256": contract.sha256,
+                "source": contract.source.value,
+                "status": contract.status.value,
+            },
+        )
+        summary = _summary(contract, outbox_event_id=event.event_id)
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This document has already been ingested",
+        ) from None
+
+    log.info(
+        "contract_document_ingested",
+        contract_id=contract.id,
+        outbox_event_id=str(summary.outbox_event_id),
+        # Size and key only: the digest is a fingerprint of a document that
+        # contains PII, and the log's job here is to make a stored file findable,
+        # not to record its contents.
+        document_bytes=stored.size,
+        storage_key=stored.key,
     )
     return summary
 

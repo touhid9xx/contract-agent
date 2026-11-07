@@ -2519,3 +2519,142 @@ never started is indistinguishable from a worker that is broken; both are silent
   `0006`; this slice adds no test count of its own, which is the same limit `D10-22`,
   `D10-23` and `D10-24` recorded and the reason the verification above is a table of
   commands rather than a count.
+
+### D10-26 — Ingestion keeps the document, sealed and addressed by its own hash
+
+`Contract.storage_path` has existed since migration `0001` (line 144) with **no
+writer and no reader**, and that single fact was the whole of gap 12. The
+metadata route accepts a JSON body, so it knows what a contract *is* and has
+never held what it *says*; `extract_contract` takes a `document_text` that
+nothing in `backend/app` can produce. This is why work on gap 5 stalled: the
+consumer of `contract.ingested` has no correct work today, because the payload
+carries ids and dates and the extraction it would drive needs text. The first
+thing to build was therefore not the consumer but the input it would consume.
+
+- **A sibling route, not a wider one.** `POST /contracts` takes JSON metadata and
+  fingerprints *the request*; `POST /contracts/document` takes opaque bytes and
+  fingerprints *the file*. Folding them together would mean one schema with a
+  mutually exclusive body, so the second is its own route with its own media
+  type, sharing the pieces that must not drift: `_clean_customer_ref`,
+  `_clean_timezone`, `ContractSummary`, and the five payload keys of the outbox
+  event, so a consumer cannot tell which route produced a fact it reads.
+- **The media type is declared rather than inferred.** FastAPI decides how to read
+  a body from its content type, and anything `application/json` is parsed as
+  JSON. A client that sent a PDF under the sensible-looking JSON header would get
+  a decode error instead of its document stored — a confusing answer to a
+  plausible mistake — so the route names `application/octet-stream` explicitly.
+- **The key is the hash of the plaintext, not of the ciphertext.** Content
+  addressing makes the store idempotent for free: the same file uploaded twice is
+  one blob, and a re-upload recognises it instead of re-sealing it under whatever
+  key ring the new process happens to hold. The digest is also what
+  `contracts.sha256` was already for, and its uniqueness is `(tenant_id, sha256)`
+  — so two tenants uploading one file share the *bytes* but keep their own rows,
+  which is right: the blob is the immutable input, the row is the tenant's
+  relationship to it.
+- **Sealed by the same key ring as field values, or not stored at all.** A PDF
+  holds every field on the page at once — name, address, date of birth — so a
+  document kept in the clear would undo gap 20's entire argument about
+  `ExtractedField.raw_value`. Rather than a second cipher and a second rotation
+  story, `FieldCipher` grew `encrypt_bytes`/`decrypt_bytes` and `encrypt`,
+  `decrypt`, `rewrap`, `_from_retired` and `_decrypt_with` were rebuilt on top of
+  them, so there is **one** ring walk rather than two copies of it. A process
+  with no `ENCRYPTION_KEY` cannot accept a document; `document_store_or_503`
+  reuses the field-value refusal, whose message now says "encrypted data" because
+  documents joined that set and the operator needs the variable name, not the
+  kind.
+- **A stored key is untrusted input.** It is a string in a column, and a row
+  edited by hand must not be able to name `../../etc/passwd`. `_path_for` checks
+  the shape (`<two hex>/<sha256>`) *and* resolves and re-checks containment inside
+  the root, because a shape rule cannot see a symlink planted in a shard
+  directory. The refusal never echoes the offending value: a key is a path, and a
+  path read back from a row is exactly the string that must not reach a log.
+- **The bytes are written before the row that names them is committed.** A crash
+  between the two leaves an unreferenced blob — harmless, deduplicated, and
+  reachable again the moment the same document is re-uploaded. The opposite order
+  leaves a row pointing at nothing, which no retry can repair. The digest is also
+  computed *first*, so a duplicate is refused without sealing a document no row
+  will ever reference.
+- **Nothing is parsed here.** Storing and reading are separate concerns, and PDF
+  text extraction is unbounded CPU work that does not belong inside a request
+  that is otherwise one write. `storage_path` is the handoff and this route's
+  guarantee is the narrow, testable one: a document that arrives is sealed,
+  named by its commit, and addressed by its own hash.
+- **`DOCUMENT_STORE_PATH` must be absolute outside development, and
+  `Path.is_absolute()` was the wrong test for it.** `pathlib.Path` is flavoured by
+  the host OS, so `Path("/var/lib/contract-agent/documents").is_absolute()` is
+  **`False` on Windows** — the validator would have rejected a correct POSIX
+  deployment path on every Windows developer's machine while passing in CI. This
+  is the same host-flavour trap `D6-03` recorded for `ZoneInfo`, and it was caught
+  by a new config test rather than by reasoning. `_is_absolute_path` asks
+  `PurePosixPath` *and* `PureWindowsPath`, so the answer depends on the string and
+  not on the machine reading it.
+- **`cipher_or_503` was a function, not a dependency, and nothing said so.** This
+  is the defect the new tests found, and it is worth recording because the code
+  looked fine. `review.py:345,443` and `notifications.py:440` call
+  `cipher_or_503(settings)` **directly**, passing settings they got from
+  `Depends(app_settings)` themselves, so the parameter had never been introspected
+  by FastAPI. The moment this route used it as `Depends(cipher_or_503)`, the bare
+  `settings: Settings` became a **second body field**: every request answered 422
+  naming `body.settings` and `body.payload`, and the body could not even be read as
+  raw bytes. The fix is `= Depends(app_settings)`, which direct callers ignore. The
+  general lesson is the one to keep: a helper that is only ever *called* is not
+  thereby a *dependency*; those are two different contracts, the first is exercised
+  by every test that calls it and the second only by a test that goes through the
+  ASGI app.
+- **413, 422 and 409 answer three different mistakes.** An oversized body is
+  `413` with `DOCUMENT_TOO_LARGE` and **both** numbers, because "too large" without
+  the limit is a message the caller cannot act on; a bad query value is `422`,
+  the status FastAPI would have used had it been in the body; a duplicate is `409`
+  naming the contract id that already holds that content, and no second outbox
+  event is created. An empty body is structurally unreachable through this route
+  (FastAPI rejects it as a missing field) and is kept in the store anyway,
+  because the store is also used where no request parser runs first.
+- **The cap bounds what is stored, not what is read.** `DOCUMENT_MAX_BYTES`
+  (10 MiB, ceiling 100 MiB) is checked before anything is written, but FastAPI has
+  already buffered the body by the time the store sees it, and the store holds the
+  plaintext and the sealed copy in memory at once. The real defence against a
+  memory-exhausting upload is a request-size limit at the proxy; this number is
+  the bound on what the installation will keep, and it should not be read as the
+  former.
+- **The volume is on every service, because the API container is read-only.**
+  `x-worker` and `api` both carry `read_only: true` with only `/tmp` on tmpfs, so
+  a document write would fail at runtime rather than at boot — the worst kind of
+  deployment bug. A named `documents` volume is mounted at an absolute
+  `/var/lib/contract-agent/documents` on the API and all three workers, and
+  compose names that absolute path as the default while `.env.example` keeps the
+  relative `var/documents` that a checkout wants.
+- **This doubles the producers of events that a default stack cannot publish.**
+  With `EVENT_TRANSPORT=none`, `UnavailablePublisher` (`outbox_relay.py:60`) raises
+  on every publish, `record_outcome` retries to `outbox_max_attempts` and then
+  parks the row `failed`, so **every** ingested contract — and now every uploaded
+  document — dead-letters and `python -m app.cli doctor` exits `EXIT_ATTENTION`.
+  That is a pre-existing property of the default configuration, not a defect this
+  slice introduced, but this slice adds a second way to reach it and the record
+  should say so rather than let the next reader discover it from a red doctor run.
+- **What this proves and what it does not.** Proven by running: `pytest` from
+  `backend/` is **827 collected — 812 passed, 15 skipped**, of which
+  `tests/test_documents.py` contributes **20** and `tests/test_config.py` two, the
+  previous baseline being 805 collected / 804 passed / 1 skipped. The skips are
+  environmental: 13 MySQL-unreachable, 1 Kafka live-broker opt-in, and 1 symlink
+  test that Windows will not create without privileges. The blob on disk is
+  asserted to contain no plaintext; a tampered blob raises rather than returning
+  garbage; a round-trip is readable after a key rotation through the retired ring;
+  and the upload route is exercised end to end through the real ASGI app for 201,
+  409, 413, 422, role refusal, tenant sharing and the no-key 503. **No migration
+  was added**: `storage_path` and `sha256` exist in `0001`, `ContractSource.PDF`
+  already exists, so the head stays `0006`. Not proven: **no real PDF has ever been
+  stored** — the payloads are plausible-sized byte strings, so "PDF" here means
+  bytes with that content type and nothing has parsed one; **`storage_path` still
+  has no reader**, so gap 5 remains blocked and this slice closes only the input
+  half of gap 12; there is no upload screen, no proxy request-size limit, no
+  per-tenant quota, no garbage collection for the unreferenced blobs the
+  write-before-commit order can leave behind, and no re-wrapping of already sealed
+  blobs during a rotation (they stay readable through `ENCRYPTION_KEY_PREVIOUS`
+  until re-uploaded). Finally, the harness's shell died partway through writing
+  this entry — the same fault `D10-24` recorded — so the counts above are from a
+  run earlier in the same session, and **no `backend/` file changed between that
+  run and these edits**, which is what keeps them accurate. What has **not**
+  happened, for the same reason: **the commit.** Nothing could start a process,
+  so the hook gate that would re-run `ruff` and `mypy` over this change has not
+  run either, and that is recorded as "not run" rather than "passed" — the same
+  distinction `D10-24` had to make.
