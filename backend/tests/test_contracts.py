@@ -543,3 +543,102 @@ def test_the_page_parameters_are_bounded(
     """A negative or unbounded page size, an unusable cursor and an unknown status
     are all 422 rather than a silently clamped or empty answer."""
     assert _listing(client, token, **params).status_code == 422
+
+
+# --- the single read (GET /contracts/{id}) --------------------------------
+def _one(client: TestClient, token: str, contract_id: Any) -> Response:
+    return client.get(f"{CONTRACTS_PATH}/{contract_id}", headers=_auth(token))
+
+
+def test_one_contract_is_the_same_row_the_listing_shows(client: TestClient, token: str) -> None:
+    """The detail read and the listing cannot disagree, because they are one model.
+
+    Asserted as whole-dict equality rather than field by field: the guarantee under
+    test is that ``ContractListItem`` is the *only* serializer for a contract, so the
+    flags a card shows and the flags a page shows are the same flags — including the
+    derived ones (``consent_channels``, ``may_contact``) that a second model would
+    have been free to recompute differently.
+    """
+    contract_id = _ingest(client, token).json()["id"]
+    client.put(
+        f"{CONTRACTS_PATH}/{contract_id}/consent",
+        json={
+            "consent_email": True,
+            "consent_sms": False,
+            "consent_voice": False,
+            "do_not_contact": False,
+            "version": 1,
+        },
+        headers=_auth(token),
+    )
+
+    response = _one(client, token, contract_id)
+    assert response.status_code == 200, response.text
+
+    listed = _listing(client, token).json()["items"][0]
+    assert response.json() == listed
+
+
+def test_the_single_read_withholds_the_stored_document_path(
+    client: TestClient,
+    token: str,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The column the listing hides is hidden here too — by reusing it, not by luck."""
+    contract_id = _ingest(client, token).json()["id"]
+    path = "/var/lib/contract-agent/documents/ef/ab0123456789.enc"
+
+    with session_scope(session_factory) as session:
+        row = session.get(Contract, contract_id)
+        assert row is not None
+        row.storage_path = path
+
+    response = _one(client, token, contract_id)
+    assert response.status_code == 200, response.text
+    assert response.json()["has_document"] is True
+    assert "storage_path" not in response.json()
+    assert path not in response.text
+
+
+def test_one_contract_is_tenant_scoped_in_both_directions(
+    client: TestClient,
+    token: str,
+    other_tenant: Tenant,
+    make_user: Callable[..., Any],
+) -> None:
+    """404, never 403: a 403 would confirm the row exists in another organisation."""
+    other_user = make_user(other_tenant, email="ops@globex.test", role=UserRole.OPERATOR)
+    other_token = _token(client, other_tenant, other_user.email)
+
+    mine = _ingest(client, token).json()["id"]
+    theirs = _ingest(client, other_token, customer_ref="Another org").json()["id"]
+
+    assert _one(client, token, mine).status_code == 200
+    assert _one(client, other_token, theirs).status_code == 200
+
+    crossed = _one(client, token, theirs)
+    assert crossed.status_code == 404, crossed.text
+    assert _one(client, other_token, mine).status_code == 404
+
+
+def test_an_unknown_contract_id_reads_as_not_found(client: TestClient, token: str) -> None:
+    response = _one(client, token, 999_999)
+    assert response.status_code == 404, response.text
+
+
+def test_a_viewer_may_read_one_contract(
+    client: TestClient,
+    token: str,
+    tenant: Tenant,
+    make_user: Callable[..., Any],
+) -> None:
+    """Read-only is a role, not a route: the viewer reaches the same row."""
+    make_user(tenant, email="viewer@acme.test", role=UserRole.VIEWER)
+    viewer_token = _token(client, tenant, "viewer@acme.test")
+    contract_id = _ingest(client, token).json()["id"]
+
+    assert _one(client, viewer_token, contract_id).status_code == 200
+
+
+def test_reading_one_contract_requires_a_token(client: TestClient) -> None:
+    assert client.get(f"{CONTRACTS_PATH}/1").status_code == 401

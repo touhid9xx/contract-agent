@@ -372,6 +372,42 @@ def list_contracts(
     )
 
 
+@router.get(
+    "/{contract_id}",
+    response_model=ContractListItem,
+    summary="Read one contract",
+)
+def read_contract(
+    contract_id: int,
+    principal: Principal = Depends(
+        require_roles(UserRole.ADMIN, UserRole.OPERATOR, UserRole.VIEWER)
+    ),
+    session: Session = Depends(get_request_session),
+) -> ContractListItem:
+    """One contract, in exactly the shape the listing uses.
+
+    ``ContractListItem`` rather than a second model, because a detail screen and the
+    list it was reached from must not be able to disagree field by field: one
+    serializer means the consent flags a card shows are the same flags a page shows,
+    and the two columns this route withholds — ``storage_path`` and ``created_by`` —
+    are withheld once, in the model's own docstring, rather than twice.
+
+    Without this route a screen holding an id had no way to read that row except by
+    paging the listing and hoping the contract was on a page it had reached. Every
+    per-contract route below takes an id on faith; this is the read that makes an id
+    checkable.
+
+    Viewer is allowed: nothing here is a customer value. A contract belonging to
+    another tenant is answered 404, not 403 — ``TenantScopedRepository.get`` returns
+    ``None`` for a row outside this tenant, so the route cannot be used to learn
+    which contract ids exist (IDOR/BOLA), exactly as ``/{contract_id}/fields`` does.
+    """
+    contract = ContractRepository(session, principal.tenant_id).get(Contract, contract_id)
+    if contract is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Contract not found")
+    return _list_item(contract)
+
+
 @router.post(
     "",
     response_model=ContractSummary,
