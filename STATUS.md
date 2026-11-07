@@ -329,11 +329,12 @@ structurally for `tsc` to pass at all: parity is now a compile error rather than
 on screen. `bn`'s `home.body` was still claiming the notification screen did not exist and
 was corrected with the rest. No backend file changed, no migration (`0006`).
 
-**Then ingestion gets a client** (`D10-32`, `feat(web)`): `/[locale]/contracts` could list
-contracts that nothing in a browser could create. `POST /contracts` and
-`POST /contracts/document` — the two routes that mint the row every other screen takes by id,
-and the one place `Contract.storage_path` is ever written — had only ever been reached by
-`curl`, so the first contract on a fresh deployment still arrived as a hand-written request.
+**Then ingestion gets a client** (`D10-32`, `feat(web)` `e067516`):
+`/[locale]/contracts` could list contracts that nothing in a browser could create.
+`POST /contracts` and `POST /contracts/document` — the two routes that mint the row every
+other screen takes by id, and the one place `Contract.storage_path` is ever written — had only
+ever been reached by `curl`, so the first contract on a fresh deployment still arrived as a
+hand-written request.
 The listing now carries the form. Writing it exposed something the client could not express at
 all: `request()` had one body kind and `JSON.stringify`'d everything under
 `application/json`, while the document route parses **raw bytes** under
@@ -3306,6 +3307,19 @@ that rather than on `payload`.
 | Document route contract | read `backend/app/api/v1/contracts.py:456-536` | `require_roles(ADMIN, OPERATOR)`; metadata in `Query`, bytes in `Body`; **409** on a duplicate hash, **413** `DOCUMENT_TOO_LARGE` with `{size, limit}`, **422** on a bad zone or an inverted term, **503** from `document_store_or_503` |
 | Metadata route contract | read `backend/app/api/v1/contracts.py:381-453` | the same roles; **409** on a duplicate fingerprint; `source` is stamped server-side (`api` here, `pdf` on the document route) |
 | Diff shape | `git diff --numstat` | 5 files, **+456/−18** — `page.tsx` +226/−10, `api.ts` +132/−8, `DECISIONS.md` +58, both catalogues +20 each |
+| Types (frontend) | commit gate: `tsc --noEmit` | **Passed** on `e067516` — the root `frontend typecheck` hook, not a `(no files to check)` skip |
+| Demo types | commit gate: `tsc --noEmit` (`demo/frontend`) | **Passed** — no demo file changed, and the hook still ran its own check |
+| Lint (frontend) | commit gate: `eslint` | **Passed** on `e067516` — the root `frontend eslint` hook |
+| Commit gate | `git commit` | **`e067516`**, 6 files, **+551/−23**. Nineteen hooks are defined; `gitleaks` is `stages: [manual]` and never joins a commit (D1-03), so **18** ran: **17 reported Passed**, `forbid-submodules` reported `(no files to check) Skipped` — the same 17-of-18 shape `bcfce75`, `6fe7c36` and `137b11f` recorded. `check json` ran because this slice edits two JSON catalogues, and `ruff`, `ruff format`, `mypy (strict)` and `bandit` all reported Passed rather than skipped even though no backend file changed. |
+
+The slice landed as **`e067516`**. That hash and the four gate rows above were added by the
+follow-up `docs(status)` commit that names it, not back-dated into the slice — the convention
+`D10-26`…`D10-31` used, and the trap `D10-30` recorded after writing a commit *type* before the
+commit existed. The message was checked with `npx commitlint --edit` (EXIT 0) **before** the
+commit ran, so a rejection could not cost a full hook pass; the subject is lower-case with no
+proper noun, which `subject-case` (`commitlint.config.mjs:7`) requires. No `frontend/` source
+file changed between the key measurement above and the commit, which is the only reason those
+counts still describe `e067516` rather than a snapshot of the working tree.
 
 **What is not proven here.** This repo has no frontend test runner, so nothing tests this form
 and none was written that would run. Nothing in this session rendered it in a browser or
