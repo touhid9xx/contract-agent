@@ -170,6 +170,20 @@ so an `en`-only key is now a compile error instead of a runtime hole (107 keys o
 sides). This is **part** of P2-C, not the milestone: the queue still takes no row lock
 and the screen shows no diff of a proposed correction. No `backend/` file changed, so the
 suite stays **805**.
+**The slice on top of that gives the escalation queue a screen** (`00e9b54`,
+`feat(escalations)`): the third of the `TestClient`-only route families, and the one the
+previous slice made urgent — `6fe6158` now *notices* a silent contract on its own, so a
+queue nobody can work is a strictly worse state than no queue. `/[locale]/escalations`
+reads `GET /escalations`, claims and resolves through `PATCH /escalations/{id}` with the
+`version` it loaded, and records a customer reply through
+`POST /contracts/{id}/response`. It keeps two facts apart that the API keeps apart:
+resolving closes the *queue item* and leaves the contract `escalated`, while only a
+recorded reply moves it to `responded` (D10-23). Lateness is read from the server rather
+than recomputed, `sla_breached` is neither filter nor settable target, and there is no
+field for what the customer said. Messages are at exact parity again (**165** flattened
+keys each, 58 under `escalations`), measured rather than eyeballed. No `backend/` file
+changed, so the suite stays **805** — and this slice adds no test count of its own,
+because `frontend/` still has no test runner.
 
 ## Phase history
 
@@ -1945,8 +1959,14 @@ fills already existed and was unused by any other path, so the migration head st
   and raises the escalation itself. What survives is narrower and worth keeping in
   view — **nothing runs the scanner**: no compose service, unit or cron invokes it, so
   a deployment that does not start the process still escalates only when a person asks.
-- **No screen calls any of these five routes.** They are exercised by `TestClient` only,
-  the same limit the review, agent and notification routes carry.
+- ~~**No screen calls any of these five routes.** They are exercised by `TestClient` only,
+  the same limit the review, agent and notification routes carry.~~ **Closed by
+  `D10-23`, not deleted:** `/[locale]/escalations` reads `GET /escalations`, works a row
+  through `PATCH /escalations/{id}` and records a reply through
+  `POST /contracts/{id}/response`. The two it does not call — `POST
+  /contracts/{id}/escalation` (the scanner raises escalations now) and the queue's
+  resolved view — stay reachable only by `TestClient` and `curl`, and no browser has run
+  the screen that does exist.
 - **A response has no deduplication.** Two identical replies are two rows. That is
   correct for an audit trail, but a caller retrying on a timeout will double-record.
 - **No outbox event is emitted.** A reply arriving is invisible to anything downstream —
@@ -2007,8 +2027,10 @@ unscoped repository query.
   is not taken here; `contract status` and `what we sent` remain two separate records.
 - **`sla_breached` is still unreachable as a stored status.** The scanner opens
   escalations; nothing flips an overdue row, and no alert is attached to the count.
-- **There is still no screen.** `GET /escalations` and `PATCH /escalations/{id}` remain
-  `TestClient`-only.
+- ~~**There is still no screen.** `GET /escalations` and `PATCH /escalations/{id}` remain
+  `TestClient`-only.~~ **Closed by `D10-23`, not deleted:** this was true when the
+  scanner shipped, and it was the reason the scanner made the missing screen urgent
+  rather than cosmetic. `/[locale]/escalations` now works the rows this worker raises.
 - **A refused contract is skipped, not retried with a different rule.** If the claim
   query and the policy ever disagree, the log line and `ScanResult.refused` are the only
   signal; nothing pages anyone, and the same contract is re-claimed and re-refused every
@@ -2058,8 +2080,75 @@ suite stays at **805**; this slice is frontend only.
 - **A reload still signs the user out**, so a reviewer loses both their session and their
   revealed values on refresh. Both are deliberate (memory-only session, D10-19) and both
   are still rough.
-- **Three route families remain `TestClient`-only** — `agent`, `notification` and
-  `escalation`. The item is narrowed by one, not closed.
+- **Two route families remain `TestClient`-only** — `agent` and `notification`. This was
+  three when the review screen shipped; `D10-23` below gives `escalation` a screen, so the
+  item is narrowed again, not closed. Still no browser has run any of them.
+
+## The escalation queue now has a screen ✅ (gap 15, `D10-23`)
+
+The previous slice (`6fe6158`) taught the system to *notice* a contract that went quiet:
+`EscalationScanner` raises the row on its own. That made the missing screen urgent rather
+than cosmetic, because a queue nobody can work is a strictly worse state than no queue —
+the system would accumulate work no person could do anything about without a `curl`.
+`frontend/src/app/[locale]/escalations/page.tsx` closes that loop. No `backend/` file
+changed, so the suite stays at **805**; this slice is frontend only and adds no test count
+of its own.
+
+| Area | Detail |
+| --- | --- |
+| Resolving ≠ responding | Two separate actions, worded differently: "Close the queue item" (`PATCH /escalations/{id}`) and "Customer replied on …" (`POST /contracts/{id}/response`). A hand-resolved escalation leaves the contract `escalated`, because nobody has heard from the customer; only a recorded reply moves it to `responded` and closes the open escalation in the same transaction. One shared "done" button would let an operator report an answer they never received. |
+| Lateness is read, not recomputed | `overdue` is the server's answer, decided against the clock that wrote `sla_deadline`, so a wrong client clock cannot make the queue disagree with itself. `sla_breached` is neither a filter nor a settable target — it is derived, and both the request validator and `refusal_to_transition` refuse it. |
+| A reply has no body | No textarea for what the customer said, because the request model has no field for it: `customer_responses` stores *that* they answered, on which channel and when. The largest PII surface in the app stays out of plaintext. |
+| A conflict reloads | Updates carry the `version` the operator loaded. On `409`/`404` the queue is invalidated rather than spliced — a resolved row leaves the working queue, so the loaded page is no longer what the server would answer (same rule as D10-22). |
+| The two refusals are named separately | `ESCALATION_CLOSED` and `INVALID_TRANSITION` are different facts — "someone closed this under you" versus "that is not a move this queue allows" — and `403`/offline/other each get their own sentence. |
+| One error per card | Attribution again comes from the mutation's `variables` (`update.variables?.id`), and one mutation serves both claim and resolve so the busy state cannot outlive its request. A reply's outcome is reported at page level instead, because recording it usually removes the card that would have shown it. |
+| Enum drift is a compile error | `CHANNEL_KEYS` is `as const satisfies Record<ContactChannel, string>`, and `EscalationStatus`/`ResponseType`/`ContactChannel`/`ContractStatus` are copied from `app.db.enums`. A new channel or status fails the build instead of rendering `escalations.statuses.undefined` — which matters here because there is no test that would. |
+| Messages at exact parity | **165** flattened keys on both sides, 0 one-sided, 58 under `escalations`; the comparison was run, and it caught an unused `statusLabel` that was deleted from both files rather than shipped. |
+| The link is in the UI | `/[locale]` links both working screens, signed-out included: each asks for a session itself, and hiding the entry point leaves a visitor no way to learn it exists. |
+
+### Verification actually run (escalation screen)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Types | TypeScript language service, per edited file: `[locale]/escalations/page.tsx`, `lib/api.ts`, `i18n/messages.ts`, `[locale]/page.tsx` | **No errors, no warnings.** Cheaper than `npm run typecheck` and narrower: it proves each file is internally consistent and that every imported symbol resolves, not that the whole project compiles. |
+| Types (project-wide) | `npm run typecheck` (`tsc --noEmit`), `frontend/` (`frontend typecheck` pre-commit hook) | **Passed** at `00e9b54`. The whole project compiles, not just the four files seen below. |
+| Lint | `eslint` (`frontend-eslint` pre-commit hook) | **Passed** at `00e9b54`. |
+| Message parity | flattened-key comparison of `en.json` vs `bn.json` | 165/165 keys, 0 missing, 0 extra; every literal on the page resolves to a key that exists. |
+| Tests | not run and not applicable | There is still no frontend test runner (no vitest, no jest, no Playwright), so this slice adds none. |
+| Backend | `pytest backend/tests` **not** re-run | No `backend/` file changed. The last measured green — **805** collected, 804 passed, 1 skipped at `6fe6158` — still describes the tree. |
+
+**Why this took three sessions, and what the shell actually did.** The session that wrote
+this screen hit a wall that looked like a dead shell: `git status`, `echo shell-alive` and
+`python -c "print(1)"` all timed out with no output, so the screen was checked with the
+editor's TypeScript language service (per file, quoted above) and by reading the router
+rather than by running the gates. The diagnosis in the prose above was **wrong**. The
+shell was never dead — `git` was starting `less` as its pager and blocking on stdin, and
+the `echo` probe only *looked* dead because it ran in the same response as a hung git
+call. The proof was in the working tree: a stray root file named `hell-alive` held 336
+lines of `less` help text, and `contract-agent` held ANSI-coloured `git diff` output. With
+`--no-pager` (or `GIT_PAGER=cat`) every command returns immediately. The screen was then
+committed normally and all 17 hooks ran, including `frontend typecheck` and
+`frontend eslint` — which is where the two rows above stopped saying "not yet run". The
+parity figure was re-measured by script rather than inherited: **165 keys each, 0
+one-sided, 58 under `escalations`** on both sides. Both artifacts are deleted and the
+tree is clean.
+
+### What this does not do — state it, do not bury it
+
+- **Nothing starts the scanner.** This screen lists what `EscalationScanner` raises, and
+  no compose service, systemd unit, cron entry or `make` target runs that worker. In a
+  real deployment the queue stays empty until an operator starts it by hand.
+- **No browser has run it.** Typechecked, linted, and its wire shapes were read out of
+  `backend/app/api/v1/escalations.py` — but nothing has clicked a button. "It works" here
+  means "it agrees with the route's contract".
+- **The concurrency path has never been raced.** The `409` branch is written and
+  translated; two operators have never collided on one row.
+- **The read-only `viewer` path has never been seen** with a real viewer session — the
+  gating is a role comparison plus the route's `403`, which the screen translates.
+- **`sla_breached` still has no writer.** The badge is computed from the deadline; no row
+  in any database holds that status, and no alert fires when a queue item goes late.
+- **Two route families remain `TestClient`-only** — `agent` and `notification`. Carried
+  item 5 is narrowed again, not closed.
 
 ## Known gaps / issues
 
@@ -2666,10 +2755,15 @@ sign-off, not footnotes:**
    reached by `TestClient`.~~ **Narrowed again by `D10-22`, not deleted:** the review
    queue now has a screen (`/[locale]/review`) that reads `/review/queue`, decides with
    `PATCH /review/{id}` and reveals with `POST /review/{id}/reveal`, so the F8 gate is
-   operable outside `TestClient` for the first time. The residue is honest and smaller:
+   operable outside `TestClient` for the first time. ~~The residue is honest and smaller:
    **`agent`, `notification` and `escalation` are still `TestClient`-only** — three of
-   the four — and no browser has run even the review screen, because `frontend/` has no
-   test runner and no e2e suite.
+   the four —~~ **narrowed once more by `D10-23`, not deleted:** the escalation queue now
+   has a screen (`/[locale]/escalations`) that reads `GET /escalations`, works a row
+   through `PATCH /escalations/{id}` and records a reply through
+   `POST /contracts/{id}/response`, so the scanner's rows are actionable outside a test.
+   **`agent` and `notification` are still `TestClient`-only** — two of the four — and no
+   browser has run *any* of these screens, because `frontend/` has no test runner and no
+   e2e suite. The UI is typechecked and linted, which is weaker than a test.
 6. ~~**`normalized_value` is still plaintext** (gap 20) — the one place a shipped
    column contradicts "no raw PII at rest", and it needs a decision (encrypt +
    compare on a blind index, or keep it and record the exception), not a patch.~~
