@@ -3502,6 +3502,18 @@ has is one honest unit test of the one module that is pure enough for a unit tes
 
 **Dependency cost, stated.** `vitest@^5.1.0` as a `devDependency` of `frontend/`; the lockfile grows
 by roughly a thousand lines because a runner brings its own bundler. `npm install` printed **7
-moderate severity advisories** for the tree. I did **not** complete an `npm audit` run — it hung and
+moderate severity advisories** for the tree. ~~I did **not** complete an `npm audit` run — it hung and
 wedged the shell — so nothing is claimed here about whether those are new, pre-existing, or
-development-only. `alembic` head stays `0006`, and no backend file changed.
+development-only.~~ **Amended, not deleted (`D10-37`, `5a30256`):** the audit has now been run, in a
+job that can be killed rather than a command that can wedge a session, and the answer is that **this
+slice introduced none of them**. All seven are **one chain** — `typescript-eslint` (a direct
+`devDependency`) → `@typescript-eslint/{eslint-plugin,parser,type-utils,typescript-estree,utils}` →
+`minimatch` — carrying advisory **GHSA-g3hv-75wg-m249**, a denial of service via globparts
+amplification, range `>=7.0.0 <11.0.1`, against the nested `minimatch@10.2.6`. The lockfile at
+`7cc8541`, the commit this slice branched from, already carries **both minimatch entries at the same
+versions** (`10.2.6` nested under `typescript-estree`, `3.1.5` hoisted and outside the range), so the
+advisories predate the runner. **No `high`, no `critical`, nothing in the runtime bundle**: the
+`dependencies` block of `frontend/package.json` is untouched — the diff adds one `scripts` entry and
+one `devDependencies` entry. `npm audit` does report a fix available, which means bumping
+`typescript-eslint`; that is a slice of its own and not a side effect of adding a test runner.
+`alembic` head stays `0006`, and no backend file changed.

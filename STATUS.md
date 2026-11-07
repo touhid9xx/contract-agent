@@ -3926,7 +3926,14 @@ touches no production behaviour, which is why it is `test(web)` and not `feat(we
   reads Bengali.
 - **The advisories.** `npm install` printed **7 moderate severity** advisories for the frontend tree.
   An `npm audit` run was attempted and did not complete, so nothing is claimed about whether they are
-  new, pre-existing, or development-only.
+  new, pre-existing, or development-only. **Amended, not deleted (`D10-37`, `5a30256`):** the audit
+  has since run, in a killable job, and they are neither new nor this slice's. All seven are one
+  chain — `typescript-eslint` → `@typescript-eslint/*` → `minimatch` — for GHSA-g3hv-75wg-m249
+  against the nested `minimatch@10.2.6`; the lockfile at `7cc8541` carries both minimatch entries at
+  the **same versions**, so they predate the runner. No `high`, no `critical`, **no runtime
+  dependency changed** — `frontend/package.json` gained one `scripts` entry and one `devDependency`.
+  The residue that survives is real but small: a fix available means bumping `typescript-eslint`,
+  which is its own slice.
 - **Gap 5 is untouched.** The `contract.ingested` consumer is still blocked on an owner decision.
 
 ## Next permitted step
