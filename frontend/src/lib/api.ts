@@ -146,6 +146,16 @@ interface RequestOptions {
   method?: "GET" | "POST" | "PATCH" | "DELETE";
   /** Serialised as JSON. `undefined` sends no body at all. */
   body?: unknown;
+  /**
+   * A body of opaque bytes, sent verbatim under its own media type.
+   *
+   * A sibling of `body` rather than a union with it, because the two cannot be
+   * mixed: `body` goes through `JSON.stringify` under `application/json`, while
+   * `POST /contracts/document` declares `application/octet-stream`
+   * (`DOCUMENT_MEDIA_TYPE`) and parses the raw bytes. Sending a PDF down the JSON
+   * path would hand FastAPI a JSON decode error instead of a document.
+   */
+  upload?: { blob: Blob; contentType: string };
   /** Bearer token to attach. Omitted for the two unauthenticated routes. */
   accessToken?: string | null;
   signal?: AbortSignal;
@@ -179,7 +189,24 @@ async function failure(response: Response): Promise<ApiError> {
 }
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { method = "GET", body, accessToken, signal } = options;
+  const { method = "GET", body, upload, accessToken, signal } = options;
+
+  /**
+   * The two body kinds, resolved once.
+   *
+   * `upload` wins when both are given: it is the more specific instruction, and
+   * the alternative is a request that announces `application/json` over bytes no
+   * JSON parser can read. An `undefined` `contentType` means "no body at all",
+   * which is why the header is spread on it rather than on `payload`.
+   */
+  const payload: BodyInit | undefined =
+    upload !== undefined ? upload.blob : body === undefined ? undefined : JSON.stringify(body);
+  const contentType =
+    upload !== undefined
+      ? upload.contentType
+      : body === undefined
+        ? undefined
+        : "application/json";
 
   let response: Response;
   try {
@@ -189,10 +216,10 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
       signal,
       headers: {
         Accept: "application/json",
-        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+        ...(contentType === undefined ? {} : { "Content-Type": contentType }),
         ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: payload,
     });
   } catch (cause) {
     // A caller-cancelled request is not a failure worth showing anyone.
@@ -654,12 +681,73 @@ export interface ContractList {
 }
 
 /**
- * The contract surface (the read half of the aggregate root).
+ * What either ingestion route returns (`app.api.v1.contracts.ContractSummary`).
  *
- * Reading needs any authenticated role: nothing in the payload is a customer
- * value — `customer_ref` is the pseudonymous label, and identity lives in the
- * encrypted `ExtractedField` rows this route never touches. There is no write
- * function here yet: ingestion is a route without a screen.
+ * One shape for both, by design: a consumer must not be able to tell which route
+ * produced the row except by `source`. `has_document` is deliberately absent even
+ * though the list carries it, because `POST /contracts` cannot store a document —
+ * a screen that needed to know refetches the list instead of inferring it here.
+ */
+export interface ContractSummary {
+  id: number;
+  customer_ref: string;
+  status: ContractStatus;
+  source: ContractSource;
+  risk: RiskLevel;
+  /** `YYYY-MM-DD`, or `null` when the contract carries no term. */
+  start_date: string | null;
+  end_date: string | null;
+  timezone: string;
+  sha256: string | null;
+  version: number;
+  created_at: string;
+  /** The outbox row written in the same transaction, serialised as a UUID string. */
+  outbox_event_id: string;
+}
+
+/**
+ * The four content fields, shared by **both** ingestion routes.
+ *
+ * One type rather than two, because the fields are the same and only their
+ * transport differs: a JSON body on `POST /contracts`, query parameters on
+ * `POST /contracts/document`. Two near-identical interfaces is precisely how the
+ * two paths would drift into accepting different date formats.
+ *
+ * There is no `source`, and that is the point: the server stamps `pdf` on the
+ * document route and defaults to `api` on the metadata one. A picker here would
+ * let a client label a metadata-only row as a document — a claim about provenance
+ * the server is better placed to make, since it is the one that read the bytes.
+ *
+ * Dates are `YYYY-MM-DD` strings: calendar dates, not instants, matching the
+ * `date` columns. An empty string is not "no date" — the server would answer 422
+ * — so an absent date is an omitted key.
+ */
+export interface ContractIngestRequest {
+  customer_ref: string;
+  start_date?: string;
+  end_date?: string;
+  /** IANA-shaped zone name; anything else is refused with 422. */
+  timezone?: string;
+}
+
+/**
+ * The media type `POST /contracts/document` declares for its body
+ * (`app.api.v1.contracts.DOCUMENT_MEDIA_TYPE`).
+ *
+ * `application/octet-stream` rather than the browser's `File.type`: the route
+ * parses the body as opaque bytes, and browsers are not reliable about reporting
+ * a PDF's type in the first place.
+ */
+const DOCUMENT_MEDIA_TYPE = "application/octet-stream";
+
+/**
+ * The contract surface: the read half of the aggregate root, and its writers.
+ *
+ * Reading needs any authenticated role — nothing in the payload is a customer
+ * value, since `customer_ref` is the pseudonymous label and identity lives in the
+ * encrypted `ExtractedField` rows this route never touches. Writing needs `admin`
+ * or `operator`: both routes are `require_roles(ADMIN, OPERATOR)`, so a viewer is
+ * answered 403 and the screen checks the role before offering the form.
  */
 export const contracts = {
   /**
@@ -676,6 +764,42 @@ export const contracts = {
     if (options.cursor !== undefined) params.set("cursor", String(options.cursor));
     const query = params.toString();
     return request<ContractList>(query === "" ? "/contracts" : `/contracts?${query}`, {
+      accessToken,
+    });
+  },
+
+  /**
+   * Register a contract from metadata alone.
+   *
+   * The dedupe key is a fingerprint of this request's content, not an id — so
+   * submitting the same form twice is refused with 409 rather than creating a
+   * second reminder clock for one contract.
+   */
+  ingest: (accessToken: string, payload: ContractIngestRequest) =>
+    request<ContractSummary>("/contracts", { method: "POST", body: payload, accessToken }),
+
+  /**
+   * Register a contract **and** keep the document it was read from (gap 12).
+   *
+   * Not multipart: the bytes are the entire body and the metadata travels as
+   * query parameters. The route stores and addresses the document but does not
+   * parse it, so text extraction stays a separate step — uploading closes "the
+   * file is kept", not "the file is read".
+   *
+   * Three refusals a caller has to tell apart, which is why the screen maps by
+   * status rather than by message: **409** for a document this tenant already
+   * holds (the hash of the bytes), **413** when it exceeded the store's size cap,
+   * and **503** when the deployment has no `ENCRYPTION_KEY`, so it cannot seal a
+   * document at all — a configuration state, not a bug in the request.
+   */
+  ingestDocument: (accessToken: string, metadata: ContractIngestRequest, document: Blob) => {
+    const params = new URLSearchParams({ customer_ref: metadata.customer_ref });
+    if (metadata.start_date !== undefined) params.set("start_date", metadata.start_date);
+    if (metadata.end_date !== undefined) params.set("end_date", metadata.end_date);
+    if (metadata.timezone !== undefined) params.set("timezone", metadata.timezone);
+    return request<ContractSummary>(`/contracts/document?${params.toString()}`, {
+      method: "POST",
+      upload: { blob: document, contentType: DOCUMENT_MEDIA_TYPE },
       accessToken,
     });
   },

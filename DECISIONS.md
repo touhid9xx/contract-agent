@@ -2813,8 +2813,12 @@ home screen rather than reachable only by typing a URL.
 - **Read-only is a decision, not an omission.** No create action, because `POST /contracts`
   and `POST /contracts/document` have no screen and a button that posted a contract would
   be inventing an ingestion flow (fingering, source, timezone, dates) that no one has
-  designed. No expiry countdown, because "expires in N days" needs the contract's own
-  `timezone` and a product definition of the window, and the route accepts neither an
+  designed. **Partly superseded by `D10-32`, and left standing:** that flow has since been
+  designed and the form now lives on this screen. What survives is narrower and still true —
+  the *listing* completes nothing, and the choice that made it read-only was about not
+  inventing a flow, not about ingestion being undesigned forever. No expiry countdown,
+  because "expires in N days" needs the contract's own `timezone` and a product
+  definition of the window, and the route accepts neither an
   `end_date` sort nor a filter to ask it. No search, because filtering one keyset page
   client-side would claim to search the tenant's contracts while holding a page of them.
 - **`statusLabel` was deleted rather than left dead; `riskLabel` earned a field.** The
@@ -3089,3 +3093,61 @@ the day the server's floor moves.
 files, and the key counts above were measured rather than estimated. There is still **no
 frontend test runner in this repo**, so nothing here is tested and no browser has rendered the
 screen: "verified" means a compiler and a linter, not a rendered page.
+
+### D10-32 — Ingestion gets a client, and an upload needs a body the client could not send
+
+`/contracts` could list contracts that nothing in the browser was able to create. The two routes
+that mint the aggregate every other screen takes by id — `POST /contracts` and
+`POST /contracts/document` — had only ever been reached by `curl`, so the first row on a fresh
+deployment still came from a hand-written request. `/[locale]/contracts` now carries the form.
+
+- **The client physically could not send a document.** `request()` had one body kind: it
+  `JSON.stringify`'d whatever it was given and announced `application/json`.
+  `POST /contracts/document` declares `DOCUMENT_MEDIA_TYPE = "application/octet-stream"`, parses
+  raw bytes, and takes its four metadata fields as **query parameters** — not multipart, not
+  JSON. So `RequestOptions` gained `upload?: { blob, contentType }` as a *sibling* of `body`
+  rather than a flag on it: two body kinds, one of which is not encodable, and a boolean would
+  have left `JSON.stringify` one `if` away from a corrupt upload. `upload` wins if both are set,
+  and `contentType === undefined` is what "no body at all" means, so the header spreads on it.
+- **Two routes, one form.** They take the same four content fields and differ only in transport,
+  so attaching a file is what chooses the route. Two screens would have been two copies of the
+  date and time-zone rules, and the second copy is the one that drifts.
+- **No source picker, on purpose.** The server stamps `pdf` on the document route and defaults to
+  `api` on the metadata one. A picker would let a client label a metadata-only row as having come
+  from a document that was never sent — a claim about provenance the server is better placed to
+  make, since it is the only party that knows whether bytes arrived.
+- **Nothing about the term is validated in the browser.** `_clean_timezone`, `_check_date_order`
+  and pydantic's date parsing already refuse a bad zone, an inverted term and a malformed date,
+  for both routes, in one place. A client-side copy would be the copy that goes stale — the same
+  reasoning that kept `MIN_PASSWORD_LENGTH` a hint in `D10-31`.
+- **Empty is omitted, not sent empty.** An untouched date input yields `""`, which is not a date
+  and would be a 422 rather than "not recorded", so `submitIngest` removes the key instead.
+- **Refusals key on status, never on prose.** Neither route returns a machine code; both answer
+  with a human `detail` string. The four a person can provoke: **409** (already held — by
+  metadata fingerprint on one route, by document hash on the other, which is why the message
+  names both), **413** (over the store's cap), **422** (dates or zone), **503**
+  (`document_store_or_503` — no `ENCRYPTION_KEY` or no `DOCUMENT_STORE`, a deployment state
+  rather than a mistake in what was typed, so it gets its own sentence).
+- **Role-gated by hiding, not by trusting.** Both routes are `require_roles(ADMIN, OPERATOR)`; a
+  viewer gets 403. The form is not rendered for one, and a note explains the absence — the same
+  choice as the review screen, and the route still decides.
+- **The file input is remounted to be cleared.** A file input's value cannot be controlled, so
+  clearing `document` in state leaves the filename on screen for a file already uploaded; the
+  input is keyed on a counter bumped in `onSuccess`.
+
+**Gap 12 is only half closed, and the slice says so.** `POST /contracts/document` now has a
+caller and the document is sealed, addressed and kept — but nothing parses it. `app/cli.py`
+still documents that `extract` takes a `--text-file` because there is no upload-to-text path, so
+a PDF uploaded here reaches extraction only after a shell step. The form therefore promises that
+the *original* is kept, not that its contents are read; `contracts.ingestedNote` says extraction
+is a separate step.
+
+**No backend change and no migration.** Two typed methods in `api.ts`
+(`contracts.ingest/ingestDocument`), the `ContractSummary` and `ContractIngestRequest` wire
+types, one `upload` branch in `request()`, and the form. Measured after the change: **402**
+leaf keys per locale, **0** one-sided, **0** placeholder drift, **20** `contracts.ingest*` keys
+present in both files and all **20** referenced by the page.
+
+**Verified, with the usual limit.** Typecheck and lint pass on the four touched files; the key
+counts above came from a script over both catalogues, not from reading. There is still no
+frontend test runner here, so nothing tests this form and **no browser has rendered it**.

@@ -1,6 +1,6 @@
 "use client";
 
-import { useInfiniteQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocale, useTranslations } from "next-intl";
 import Link from "next/link";
 import { useState } from "react";
@@ -8,8 +8,16 @@ import { useState } from "react";
 import { useAuth } from "@/components/auth-provider";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { FieldLabel, Input } from "@/components/ui/input";
 import { ApiError, contracts } from "@/lib/api";
-import type { ContactChannel, ContractListItem, ContractSource, ContractStatus, RiskLevel } from "@/lib/api";
+import type {
+  ContactChannel,
+  ContractIngestRequest,
+  ContractListItem,
+  ContractSource,
+  ContractStatus,
+  RiskLevel,
+} from "@/lib/api";
 import { authorized } from "@/lib/session";
 
 /**
@@ -82,19 +90,26 @@ const STATUS_TONES = {
 } as const satisfies Record<ContractStatus, string>;
 
 /**
- * The contract listing — the read half of the aggregate root.
+ * The contract listing, and the form that puts a contract in it.
  *
- * Until this screen the API could mint a contract id and echo it once, and every
+ * Until the listing the API could mint a contract id and echo it once, and every
  * other per-contract route (consent, fields, decisions, notifications) took that
- * id on faith. `GET /contracts` closed that on the server; this is the screen that
+ * id on faith. `GET /contracts` closed that on the server; this screen is what
  * makes it usable, and it is the first place in the product where a contract is
  * visible at all rather than merely existing.
  *
- * Three choices are deliberate:
+ * Five choices are deliberate:
  *
- * * **No create action.** Ingestion is a route without a screen (`POST /contracts`
- *   and `POST /contracts/document`), so there is nothing truthful to put here. A
- *   disabled button would be the same lie the demo's placeholder upload button is.
+ * * **One form, not two.** `POST /contracts` and `POST /contracts/document` take
+ *   the same four content fields and differ only in transport, so attaching a
+ *   file is what switches routes. Two screens would have been two places to keep
+ *   the date and time-zone rules in step, and the second would have drifted.
+ * * **No source picker.** The server stamps `pdf` on the document route and
+ *   defaults to `api` on the metadata one. A picker here would let a client claim
+ *   a contract came from a document that was never sent.
+ * * **The dates are not validated here.** The route refuses an inverted term and
+ *   a malformed zone with 422, in one place, for both routes. A second copy of
+ *   those rules in the browser is the copy that goes stale.
  * * **No "expires in N days".** That number is computed against the *contract's*
  *   time zone, which is exactly why the row carries one. Deriving it in the
  *   browser would use the reader's zone and could be a day out, so the screen
@@ -108,10 +123,34 @@ const STATUS_TONES = {
 export default function ContractsPage() {
   const t = useTranslations();
   const locale = useLocale();
-  const { isAuthenticated } = useAuth();
+  const queryClient = useQueryClient();
+  const { user, isAuthenticated } = useAuth();
 
   /** `null` means every status — the same meaning as an omitted `?status=`. */
   const [statusFilter, setStatusFilter] = useState<ContractStatus | null>(null);
+
+  /**
+   * Both ingestion routes are `require_roles(ADMIN, OPERATOR)`, so a viewer is
+   * answered 403 by the server. The form is hidden rather than shown disabled:
+   * the boundary is the route's, and offering an action whose only possible
+   * outcome is a refusal is noise. A note takes its place, so the absence has a
+   * reason on the screen rather than looking like a bug.
+   */
+  const canIngest = user !== null && user.role !== "viewer";
+
+  const [customerRef, setCustomerRef] = useState("");
+  /** `YYYY-MM-DD` from a date input, or `""` for "not recorded". */
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  /** Mirrors the route's own default, so an untouched form sends what it assumes. */
+  const [timezone, setTimezone] = useState("UTC");
+  const [document, setDocument] = useState<File | null>(null);
+  /**
+   * Remount key for the file input. Clearing `document` does not clear the DOM
+   * input — a file input's value cannot be controlled — so without this it would
+   * keep showing the filename of a document that has already been uploaded.
+   */
+  const [documentEpoch, setDocumentEpoch] = useState(0);
 
   const list = useInfiniteQuery({
     queryKey: ["contracts", "list", statusFilter],
@@ -127,6 +166,70 @@ export default function ContractsPage() {
     initialPageParam: undefined as number | undefined,
     getNextPageParam: (last) => last.next_cursor ?? undefined,
   });
+
+  /**
+   * One mutation for both routes.
+   *
+   * Which route runs is decided here, from whether a file was staged, rather than
+   * by giving the operator two buttons. The metadata is identical either way, and
+   * asking them to know which endpoint a file triggers is asking them to think
+   * about transport instead of about the contract.
+   */
+  const ingest = useMutation({
+    mutationFn: (input: { metadata: ContractIngestRequest; document: File | null }) =>
+      authorized((accessToken) =>
+        input.document === null
+          ? contracts.ingest(accessToken, input.metadata)
+          : contracts.ingestDocument(accessToken, input.metadata, input.document),
+      ),
+    onSuccess: async () => {
+      setCustomerRef("");
+      setStartDate("");
+      setEndDate("");
+      setTimezone("UTC");
+      setDocument(null);
+      setDocumentEpoch((epoch) => epoch + 1);
+      // Every status filter is its own cache entry and the new row lands in
+      // whichever one it matches, so the whole prefix is invalidated rather than
+      // the entry currently on screen.
+      await queryClient.invalidateQueries({ queryKey: ["contracts", "list"] });
+    },
+  });
+
+  function submitIngest() {
+    const metadata: ContractIngestRequest = { customer_ref: customerRef.trim() };
+    // Omitted, not sent empty: `""` is not a date, and the route answers a blank
+    // optional field with 422 rather than reading it as "not recorded".
+    if (startDate !== "") metadata.start_date = startDate;
+    if (endDate !== "") metadata.end_date = endDate;
+    if (timezone.trim() !== "") metadata.timezone = timezone.trim();
+    ingest.mutate({ metadata, document });
+  }
+
+  /**
+   * A refused write, keyed on status.
+   *
+   * Neither route returns a machine-readable code — the bodies carry a human
+   * `detail` string — so matching the prose would break on the first rewording.
+   * These are the four a person can actually provoke:
+   *
+   * **409** the tenant already holds this contract, by metadata fingerprint or by
+   * document hash. **413** the file exceeded the store's cap. **422** a date, the
+   * zone name, or an inverted term. **503** this deployment has no encryption key
+   * or no document store, so it cannot seal a document at all — a deployment
+   * state, not a bug in what was typed, which is why it says so in its own words.
+   */
+  function describeIngestFailure(cause: unknown): string {
+    if (cause instanceof ApiError) {
+      if (cause.isOffline) return t("contracts.offline");
+      if (cause.isForbidden) return t("contracts.ingestForbidden");
+      if (cause.status === 409) return t("contracts.ingestConflict");
+      if (cause.status === 413) return t("contracts.ingestTooLarge");
+      if (cause.status === 422) return t("contracts.ingestInvalid");
+      if (cause.status === 503) return t("contracts.ingestUnavailable");
+    }
+    return t("contracts.failed");
+  }
 
   /**
    * A refusal in the reader's own language.
@@ -182,6 +285,119 @@ export default function ContractsPage() {
         </Card>
       ) : (
         <>
+          {canIngest ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>{t("contracts.ingestHeading")}</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="space-y-1">
+                  <FieldLabel htmlFor="ingest-ref">{t("contracts.ingestRefLabel")}</FieldLabel>
+                  <Input
+                    id="ingest-ref"
+                    value={customerRef}
+                    autoComplete="off"
+                    onChange={(event) => {
+                      setCustomerRef(event.target.value);
+                    }}
+                  />
+                  <p className="text-xs text-muted-foreground">{t("contracts.ingestRefHint")}</p>
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="space-y-1">
+                    <FieldLabel htmlFor="ingest-start">{t("contracts.ingestStartLabel")}</FieldLabel>
+                    <Input
+                      id="ingest-start"
+                      type="date"
+                      value={startDate}
+                      onChange={(event) => {
+                        setStartDate(event.target.value);
+                      }}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <FieldLabel htmlFor="ingest-end">{t("contracts.ingestEndLabel")}</FieldLabel>
+                    <Input
+                      id="ingest-end"
+                      type="date"
+                      value={endDate}
+                      onChange={(event) => {
+                        setEndDate(event.target.value);
+                      }}
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <FieldLabel htmlFor="ingest-timezone">
+                    {t("contracts.ingestTimezoneLabel")}
+                  </FieldLabel>
+                  <Input
+                    id="ingest-timezone"
+                    value={timezone}
+                    autoComplete="off"
+                    onChange={(event) => {
+                      setTimezone(event.target.value);
+                    }}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t("contracts.ingestTimezoneHint")}
+                  </p>
+                </div>
+
+                <div className="space-y-1">
+                  <FieldLabel htmlFor="ingest-document">
+                    {t("contracts.ingestDocumentLabel")}
+                  </FieldLabel>
+                  <Input
+                    key={documentEpoch}
+                    id="ingest-document"
+                    type="file"
+                    onChange={(event) => {
+                      setDocument(event.target.files?.[0] ?? null);
+                    }}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t("contracts.ingestDocumentHint")}
+                  </p>
+                </div>
+
+                <p className="text-xs text-muted-foreground">{t("contracts.ingestDatesHint")}</p>
+
+                <Button
+                  size="sm"
+                  disabled={ingest.isPending || customerRef.trim() === ""}
+                  onClick={submitIngest}
+                >
+                  {ingest.isPending ? t("contracts.ingesting") : t("contracts.ingestAction")}
+                </Button>
+
+                {ingest.isSuccess && (
+                  <div className="space-y-1 rounded-lg bg-muted px-3 py-2" role="status">
+                    <p className="text-xs">
+                      {t("contracts.ingested", {
+                        id: ingest.data.id,
+                        ref: ingest.data.customer_ref,
+                      })}
+                    </p>
+                    <p className="text-xs text-muted-foreground">{t("contracts.ingestedNote")}</p>
+                  </div>
+                )}
+
+                {ingest.isError && (
+                  <p className="text-xs text-danger" role="alert">
+                    {describeIngestFailure(ingest.error)}
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+          ) : (
+            <p className="rounded-lg bg-muted px-3 py-2 text-xs text-muted-foreground">
+              {t("contracts.ingestViewerNote")}
+            </p>
+          )}
+
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-xs font-medium text-muted-foreground">
               {t("contracts.filterLabel")}

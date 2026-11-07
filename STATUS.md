@@ -263,8 +263,9 @@ stays half-closed and gap 5 stays blocked. The suite moved from **827** to **840
 **Then the listing gets a face** (`D10-28`, `feat(web)`): `/[locale]/contracts` is the
 first screen that reads the contract aggregate — a status-filtered, cursor-paged list of
 the caller's tenant's contracts, linked from the home nav instead of reachable only by
-typing a URL. It is read-only on purpose: ingestion still has no screen, so there is no
-create action, and there is no expiry countdown because "expiring soon" needs a
+typing a URL. It was read-only on purpose — ~~ingestion still has no screen, so there is no
+create action~~ **amended by `D10-32`: ingestion has a caller now, and it is this same
+screen** — and there is no expiry countdown because "expiring soon" needs a
 definition the API does not offer yet. Contactability is **read** (`may_contact`,
 `consent_channels`), never re-derived from the four consent flags, so the screen cannot
 disagree with the policy the decision worker enforces. No backend file changed, no
@@ -327,6 +328,23 @@ hint now both say 422. The namespace is
 structurally for `tsc` to pass at all: parity is now a compile error rather than a raw key
 on screen. `bn`'s `home.body` was still claiming the notification screen did not exist and
 was corrected with the rest. No backend file changed, no migration (`0006`).
+
+**Then ingestion gets a client** (`D10-32`, `feat(web)`): `/[locale]/contracts` could list
+contracts that nothing in a browser could create. `POST /contracts` and
+`POST /contracts/document` — the two routes that mint the row every other screen takes by id,
+and the one place `Contract.storage_path` is ever written — had only ever been reached by
+`curl`, so the first contract on a fresh deployment still arrived as a hand-written request.
+The listing now carries the form. Writing it exposed something the client could not express at
+all: `request()` had one body kind and `JSON.stringify`'d everything under
+`application/json`, while the document route parses **raw bytes** under
+`application/octet-stream` and takes its four metadata fields as **query parameters** — so no
+arrangement of that helper's arguments could send a PDF. `RequestOptions` gained `upload` as a
+*sibling* of `body`. One form drives both routes, attaching a file being what chooses one, and
+refusals map on **status** (409/413/422/503) because neither route returns a machine code.
+Gap 12 is **half closed and says so**: the document is sealed, addressed and kept, but nothing
+parses it, so an uploaded PDF still reaches extraction only after a shell step. **20**
+`contracts.ingest*` keys per locale against **402** leaf keys, zero one-sided, zero
+placeholder drift, all 20 reached by the page. No backend file changed, no migration (`0006`).
 
 ## Phase history
 
@@ -3013,7 +3031,10 @@ working tree.
 
 - **No create action.** `POST /contracts` and `POST /contracts/document` still have no
   screen, so in a real deployment the only way into this list remains an API call. The
-  screen was written to *find* contracts, not to make them.
+  screen was written to *find* contracts, not to make them. **Amended by `D10-32`, not
+  deleted:** both routes have a caller now and it is this screen — the form sits above the
+  list this bullet was scoped to — so the only way in is no longer an API call. The bullet
+  stands as the record of what this slice set out to do.
 - **No expiry ordering or countdown.** "Expires in N days" needs the contract's own
   `timezone` and a product definition of the window, and the route offers no `end_date`
   sort or filter to ask either question — so "which contracts expire soon" stays
@@ -3245,6 +3266,71 @@ guarantee the key counts give.
   The route is still the enforcement.
 - **Gap 5 is untouched.** The `contract.ingested` consumer is still unwritten and still blocked
   on an owner decision.
+
+## Ingestion gets a client ✅ (`D10-32` — the aggregate root stops being a `curl` exercise)
+
+`/[locale]/contracts` could list contracts that nothing in a browser could create.
+`POST /contracts` and `POST /contracts/document` — the two routes that mint the row every other
+screen takes by id, and the only place `Contract.storage_path` is ever written — had only ever
+been reached by `curl` and `TestClient`, so on a fresh deployment the first contract still
+arrived as a hand-written request. The listing now carries the form. This is the same argument
+`D10-29` made about parked notifications and `D10-31` about accounts: a route whose only caller
+is a test is a route whose failure modes nobody has met.
+
+| Change | Detail |
+| --- | --- |
+| `frontend/src/lib/api.ts` | `RequestOptions.upload?: { blob, contentType }` as a **sibling** of `body` (`api.ts:145-158`), `request()` resolving one `payload`/`contentType` pair up front (`api.ts:191-223`), the `ContractIngestRequest` and `ContractSummary` wire types, and `contracts.ingest` / `contracts.ingestDocument` (`api.ts:752-806`). |
+| `frontend/src/app/[locale]/contracts/page.tsx` | The form (**589** lines, +226/−10): one mutation that picks the route from whether a file is staged, `canIngest` hiding it from a `viewer`, `describeIngestFailure` keying on status, empty dates omitted rather than sent empty, and a file input remounted from a counter because a file input's value cannot be cleared. |
+| `frontend/src/i18n/messages/en.json`, `bn.json` | **20** `contracts.ingest*` keys per locale, and all 20 are reached by the page. |
+| `DECISIONS.md` | `D10-32`, plus a pointer in `D10-28`, whose "no create action" bullet this slice supersedes. |
+| No backend change | No route, no migration (`alembic` head stays `0006`), no new dependency. |
+
+### The defect the form could not be written around
+
+`request()` had exactly one body kind: it `JSON.stringify`'d whatever it was given and announced
+`application/json`. `POST /contracts/document` declares
+`DOCUMENT_MEDIA_TYPE = "application/octet-stream"` (`contracts.py:120`), takes
+`payload: Annotated[bytes, Body(media_type=DOCUMENT_MEDIA_TYPE)]` (`contracts.py:464`) and
+carries `customer_ref`, `start_date`, `end_date` and `timezone` as **query parameters**
+(`contracts.py:463-467`) — not multipart, not JSON. No arrangement of that helper's arguments
+could send a document: a PDF would have reached FastAPI as a JSON decode error. `upload` is a
+sibling of `body` rather than a flag on it because the two are not interchangeable, and
+`contentType === undefined` is what "no body at all" means, which is why the header spreads on
+that rather than on `payload`.
+
+### Verification actually run (`D10-32`)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Key parity + reachability | `python` over both catalogues: flatten, then intersect with the keys the page reaches | **402 / 402** leaf keys; **20 / 20** `contracts.ingest*` in both files and all 20 referenced; `en`-only `[]`, `bn`-only `[]`, 0 placeholder drift |
+| Document route contract | read `backend/app/api/v1/contracts.py:456-536` | `require_roles(ADMIN, OPERATOR)`; metadata in `Query`, bytes in `Body`; **409** on a duplicate hash, **413** `DOCUMENT_TOO_LARGE` with `{size, limit}`, **422** on a bad zone or an inverted term, **503** from `document_store_or_503` |
+| Metadata route contract | read `backend/app/api/v1/contracts.py:381-453` | the same roles; **409** on a duplicate fingerprint; `source` is stamped server-side (`api` here, `pdf` on the document route) |
+| Diff shape | `git diff --numstat` | 5 files, **+456/−18** — `page.tsx` +226/−10, `api.ts` +132/−8, `DECISIONS.md` +58, both catalogues +20 each |
+
+**What is not proven here.** This repo has no frontend test runner, so nothing tests this form
+and none was written that would run. Nothing in this session rendered it in a browser or
+uploaded a file from one: the page has passed a compiler and a linter and nothing more. The key
+counts are a script's output over both catalogues, not a reading of them.
+
+### What this does not do — stated, not buried
+
+- **Gap 12 is half closed, not closed.** The bytes are sealed, addressed and named by a
+  committed row, but nothing parses them: `app/cli.py` still documents that `extract` takes a
+  `--text-file` because there is no upload-to-text path. An uploaded PDF reaches extraction only
+  after a shell step, and `contracts.ingestedNote` says so on screen rather than implying the
+  contents were read.
+- **No source picker.** The server stamps `pdf` on the document route and defaults to `api` on
+  the metadata one, so a picker would let the client assert a provenance only the server can
+  establish — whether bytes actually arrived.
+- **No client-side validation of the term.** `_clean_timezone`, `_check_date_order` and
+  pydantic's date parsing already refuse a bad zone, an inverted term and a malformed date for
+  both routes, in one place. A browser copy would be the copy that goes stale — the same
+  reasoning that kept `MIN_PASSWORD_LENGTH` a hint in `D10-31`.
+- **No expiry countdown on the new rows.** Unchanged from `D10-28`: "expires in N days" still
+  needs a product definition and a filter the route does not offer, and ingestion does not
+  create one.
+- **Gap 5 is untouched.** The `contract.ingested` consumer is still unwritten: ingestion now
+  produces that event from a browser as well as from `curl`, and still nothing consumes it.
 
 ## Next permitted step
 
