@@ -458,6 +458,24 @@ export interface EscalationQueue {
   overdue: number;
   /** The tenant's configured SLA, echoed so the UI never hard-codes "48". */
   sla_hours: number;
+  /**
+   * Echo of the filter: the contract these rows belong to, or `null` for the
+   * whole queue. Without it a page cannot tell "this contract has none" from
+   * "the queue is empty", and would have to trust its own query string.
+   */
+  contract_id: number | null;
+}
+
+/**
+ * What narrows a queue read.
+ *
+ * `contractId` is the filter a contract's own page asks with — it returns that
+ * contract's *resolved* rows as well, because the question there is "what
+ * happened here" rather than "what is late".
+ */
+export interface EscalationQuery {
+  statuses?: EscalationStatus[];
+  contractId?: number;
 }
 
 /**
@@ -502,14 +520,21 @@ export interface RecordedResponse {
  * the contract `escalated`, because nobody has heard from them.
  */
 export const escalations = {
-  /** The queue, most urgent first. Omitted filters return resolved rows too. */
-  queue: (accessToken: string, statuses?: EscalationStatus[]) =>
-    request<EscalationQueue>(
-      statuses === undefined || statuses.length === 0
-        ? "/escalations"
-        : `/escalations?${statuses.map((value) => `status=${value}`).join("&")}`,
+  /**
+   * The queue, most urgent first. Omitted filters return resolved rows too.
+   *
+   * `contractId` narrows the same read rather than adding a second one, so a
+   * contract's page and the queue screen cannot disagree about a row's status:
+   * they parse the same response type from the same route.
+   */
+  queue: (accessToken: string, query: EscalationQuery = {}) => {
+    const params = (query.statuses ?? []).map((value) => `status=${value}`);
+    if (query.contractId !== undefined) params.push(`contract_id=${query.contractId}`);
+    return request<EscalationQueue>(
+      params.length === 0 ? "/escalations" : `/escalations?${params.join("&")}`,
       { accessToken },
-    ),
+    );
+  },
 
   update: (accessToken: string, escalationId: number, update: EscalationUpdate) =>
     request<Escalation>(`/escalations/${escalationId}`, {

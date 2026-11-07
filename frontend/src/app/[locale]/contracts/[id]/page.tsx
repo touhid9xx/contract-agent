@@ -8,15 +8,18 @@ import { useParams } from "next/navigation";
 import { useAuth } from "@/components/auth-provider";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { ApiError, contracts } from "@/lib/api";
+import { ApiError, agent, contracts, escalations, notifications } from "@/lib/api";
 import type {
+  AgentDecisionList,
   ContactChannel,
   ContractField,
   ContractListItem,
   ContractSource,
   ContractStatus,
+  EscalationQueue,
   FieldName,
   FieldStatus,
+  NotificationList,
   RiskLevel,
 } from "@/lib/api";
 import { authorized } from "@/lib/session";
@@ -123,6 +126,10 @@ const STATUS_TONES = {
  * * **It does not compute "expires in N days".** That number is measured on the
  *   *contract's* clock, which is why the row carries a time zone; deriving it here
  *   would use the reader's zone and could be a day out.
+ * * **It does not filter the other screens.** The related-reads card asks each of
+ *   those routes with this contract's id, but the links open those screens
+ *   unfiltered: a query string they ignore would look like a filter and quietly
+ *   show every contract.
  */
 export default function ContractDetailPage() {
   const t = useTranslations();
@@ -152,6 +159,36 @@ export default function ContractDetailPage() {
   const fields = useQuery({
     queryKey: ["contracts", "detail", contractId, "fields"],
     queryFn: () => authorized((accessToken) => contracts.fields(accessToken, contractId)),
+    enabled: isAuthenticated && validId,
+    retry: false,
+  });
+
+  /**
+   * The three per-contract reads that existed before this page did.
+   *
+   * Each one passes the id this page was opened with to the route the screen
+   * already calls, so the card and the screen below it parse the same response
+   * type and cannot disagree. They are separate queries rather than one combined
+   * call because they fail independently: a viewer may read all three, but a
+   * single 403 from any of them must not blank the other two.
+   */
+  const decisions = useQuery({
+    queryKey: ["contracts", "detail", contractId, "decisions"],
+    queryFn: () => authorized((accessToken) => agent.decisions(accessToken, contractId)),
+    enabled: isAuthenticated && validId,
+    retry: false,
+  });
+
+  const reminders = useQuery({
+    queryKey: ["contracts", "detail", contractId, "notifications"],
+    queryFn: () => authorized((accessToken) => notifications.list(accessToken, { contractId })),
+    enabled: isAuthenticated && validId,
+    retry: false,
+  });
+
+  const escalationsHere = useQuery({
+    queryKey: ["contracts", "detail", contractId, "escalations"],
+    queryFn: () => authorized((accessToken) => escalations.queue(accessToken, { contractId })),
     enabled: isAuthenticated && validId,
     retry: false,
   });
@@ -270,21 +307,12 @@ export default function ContractDetailPage() {
                 }}
               />
 
-              <Card>
-                <CardHeader>
-                  <CardTitle>{t("contracts.detailRelatedHeading")}</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  {/*
-                    No deep links: the agent, notification and escalation screens do
-                    not read a contract id out of their address, so a query string
-                    here would look like a filter and silently show everything.
-                  */}
-                  <p className="text-xs text-muted-foreground">
-                    {t("contracts.detailRelatedNote")}
-                  </p>
-                </CardContent>
-              </Card>
+              <RelatedReads
+                decisions={decisions}
+                reminders={reminders}
+                escalationsHere={escalationsHere}
+                describeFailure={describeFailure}
+              />
             </>
           )}
         </>
@@ -496,5 +524,189 @@ function FieldRow({ field }: { field: ContractField }) {
         )}
       </dl>
     </li>
+  );
+}
+
+/**
+ * Only the parts of a query this card reads, so it cannot reach for the query
+ * object itself and cannot refetch something the page owns.
+ */
+type RelatedQuery<T> = {
+  isPending: boolean;
+  isError: boolean;
+  error: unknown;
+  data: T | undefined;
+  /** Void-returning on purpose: the card starts the refetch and never awaits it. */
+  refetch: () => void;
+};
+
+interface RelatedReadsProps {
+  decisions: RelatedQuery<AgentDecisionList>;
+  reminders: RelatedQuery<NotificationList>;
+  escalationsHere: RelatedQuery<EscalationQueue>;
+  describeFailure: (cause: unknown) => string;
+}
+
+/**
+ * What the rest of the system has recorded about this contract.
+ *
+ * The card states a count, not a list: the queue screens are where a row is
+ * worked on, and a second read-only rendering of their rows here would be a
+ * second place for the wording of a status to drift. The counts come from the
+ * responses' own `count`, so nothing is summed up on the client.
+ */
+function RelatedReads({
+  decisions,
+  reminders,
+  escalationsHere,
+  describeFailure,
+}: RelatedReadsProps) {
+  const t = useTranslations();
+  const locale = useLocale();
+
+  const latestDecision = decisions.data?.items[0];
+  const latestReminder = reminders.data?.items[0];
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{t("contracts.detailRelatedHeading")}</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {/*
+          This card used to say none of these reads took a contract at all. They all
+          do now, so it says what it does instead. The links stay unfiltered on
+          purpose: the screens do not read a contract out of their address, and a
+          query string they ignore would look like a filter while showing everything.
+        */}
+        <p className="text-xs text-muted-foreground">{t("contracts.detailRelatedNote")}</p>
+
+        <RelatedRead
+          href={`/${locale}/agent`}
+          label={t("contracts.detailDecisionsLabel")}
+          linkLabel={t("contracts.detailOpen")}
+          state={decisions}
+          describeFailure={describeFailure}
+          onRetry={() => {
+            void decisions.refetch();
+          }}
+          stat={
+            decisions.data === undefined
+              ? null
+              : t("contracts.detailDecisionsCount", { count: decisions.data.count })
+          }
+          detail={
+            latestDecision === undefined
+              ? null
+              : t("contracts.detailLatestDecision", {
+                  channel: t(`contracts.${CHANNEL_KEYS[latestDecision.channel]}`),
+                })
+          }
+        />
+
+        <RelatedRead
+          href={`/${locale}/notifications`}
+          label={t("contracts.detailNotificationsLabel")}
+          linkLabel={t("contracts.detailOpen")}
+          state={reminders}
+          describeFailure={describeFailure}
+          onRetry={() => {
+            void reminders.refetch();
+          }}
+          stat={
+            reminders.data === undefined
+              ? null
+              : t("contracts.detailNotificationsCount", { count: reminders.data.count })
+          }
+          /* The slot is a calendar date on the contract's clock, so it is printed
+             as the server sent it rather than through a local formatter. */
+          detail={
+            latestReminder === undefined
+              ? null
+              : t("contracts.detailLatestReminder", { date: latestReminder.scheduled_date })
+          }
+        />
+
+        <RelatedRead
+          href={`/${locale}/escalations`}
+          label={t("contracts.detailEscalationsLabel")}
+          linkLabel={t("contracts.detailOpen")}
+          state={escalationsHere}
+          describeFailure={describeFailure}
+          onRetry={() => {
+            void escalationsHere.refetch();
+          }}
+          stat={
+            escalationsHere.data === undefined
+              ? null
+              : t("contracts.detailEscalationsCount", { count: escalationsHere.data.count })
+          }
+          /* `overdue` is the server's answer, counted across the rows it returned;
+             recomputing it from `sla_deadline` here would drift from the queue. */
+          detail={
+            escalationsHere.data === undefined
+              ? null
+              : t("contracts.detailEscalationOverdue", {
+                  count: escalationsHere.data.overdue,
+                  hours: escalationsHere.data.sla_hours,
+                })
+          }
+        />
+      </CardContent>
+    </Card>
+  );
+}
+
+interface RelatedReadProps {
+  href: string;
+  label: string;
+  linkLabel: string;
+  state: { isPending: boolean; isError: boolean; error: unknown };
+  describeFailure: (cause: unknown) => string;
+  onRetry: () => void;
+  /** The headline answer, or `null` while there is none to state. */
+  stat: string | null;
+  /** A second line the answer allows, when the route returns one. */
+  detail: string | null;
+}
+
+/** One read: what it answered, or why it could not be asked. */
+function RelatedRead({
+  href,
+  label,
+  linkLabel,
+  state,
+  describeFailure,
+  onRetry,
+  stat,
+  detail,
+}: RelatedReadProps) {
+  const t = useTranslations();
+
+  return (
+    <div className="space-y-1 border-t border-border pt-2 text-xs">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <span className="font-medium">{label}</span>
+        <Link className="text-primary underline-offset-4 hover:underline" href={href}>
+          {linkLabel}
+        </Link>
+      </div>
+
+      {state.isPending && <p className="text-muted-foreground">{t("contracts.loading")}</p>}
+
+      {state.isError && (
+        <div className="space-y-2">
+          <p className="text-danger" role="alert">
+            {describeFailure(state.error)}
+          </p>
+          <Button size="sm" variant="outline" onClick={onRetry}>
+            {t("contracts.retry")}
+          </Button>
+        </div>
+      )}
+
+      {!state.isPending && !state.isError && stat !== null && <p>{stat}</p>}
+      {detail !== null && <p className="text-muted-foreground">{detail}</p>}
+    </div>
   );
 }

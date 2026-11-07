@@ -83,7 +83,9 @@ export default function EscalationsPage() {
     queryKey: queueKey,
     queryFn: () =>
       authorized((accessToken) =>
-        escalations.queue(accessToken, showResolved ? undefined : WORKING_STATUSES),
+        escalations.queue(accessToken, {
+          statuses: showResolved ? undefined : WORKING_STATUSES,
+        }),
       ),
   });
 
