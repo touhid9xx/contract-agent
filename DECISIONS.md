@@ -2934,3 +2934,15 @@ reproducible only on the machine that ran them — the same caveat `D10-28` reco
 - **Gap 25 is now closer, not further.** A default stack runs `EVENT_TRANSPORT=none`, parks
   every event, and `doctor` exits `EXIT_ATTENTION`. This screen makes the *notification*
   half of that state legible and correctable; it does nothing for the outbox half.
+
+**Commit gate, recorded after the fact.** The slice landed as `bcfce75`. Nineteen hooks are
+defined in `.pre-commit-config.yaml`; `gitleaks` carries `stages: [manual]` and never joins a
+commit, so the gate is eighteen hooks — of which **seventeen reported Passed** and
+`forbid-submodules` reported `(no files to check) Skipped`. Saying "the 17-hook gate" without
+that sentence would round a skipped hook into a passed one; the earlier slices' shorthand is
+correct in the count of *passes* but was not specific about the remainder. The figures above
+were measured before the commit and no `frontend/` source file changed in between, which is
+the only reason they are a statement about `bcfce75` rather than about a working tree that
+resembled it. The hash and the gate rows in this entry's `STATUS.md` counterpart were added
+by the follow-up `docs(status)` commit rather than back-dated into the slice — the same
+convention `D10-26`…`D10-28` used.

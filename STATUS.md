@@ -3036,15 +3036,27 @@ flagged decision. Both sentences now match the code that raises them.
 | --- | --- | --- |
 | Key parity + reachability + placeholders | `python .agent-cache/notifications_i18n_audit.py` (a **local, gitignored, deleted-before-commit** script — not in the tree, so reproducible only on the machine that ran it) | **337 keys per locale**; **66** under `notifications`; 0 one-sided, 0 unused, 0 referenced-but-absent, 0 placeholder drift, **0 bare map keys passed to `t()`** |
 | Refusal vocabulary | read `app/workers/dispatch.py` and `app/api/v1/notifications.py` | **14** dispatch codes + **5** route codes. The screen maps all 14 plus the 2 its buttons can provoke (`NOT_FAILED`, `CONCURRENT_UPDATE`). `NOTIFICATION_EXISTS`/`NO_DECISION`/`DECISION_MISMATCH` come only from `POST /notifications`, which has no button here; `TENANT_MISMATCH` only reaches `last_error`. |
-| Types (frontend) | commit gate: `tsc --noEmit` | **Passed** — see the commit row |
-| Lint (frontend) | commit gate: `eslint` | **Passed** — see the commit row |
-| Commit gate | `git commit` (all 17 hooks) | recorded in the follow-up `docs(status)` commit that names the hash, the same convention `D10-26`…`D10-28` used |
+| Types (frontend) | commit gate: `tsc --noEmit` | **Passed** on `bcfce75` — the root `frontend typecheck` hook, not a `(no files to check)` skip |
+| Demo types | commit gate: `tsc --noEmit` (`demo/frontend`) | **Passed** — no demo file changed, and the hook still ran its own check |
+| Lint (frontend) | commit gate: `eslint` | **Passed** on `bcfce75` — the root `frontend eslint` hook |
+| Commit gate | `git commit` | **`bcfce75`**. Nineteen hooks are defined; `gitleaks` is `stages: [manual]` and never joins a commit, so **18** ran: **17 reported Passed**, `forbid-submodules` reported `(no files to check) Skipped`. No other hook skipped. |
 
 **What is not proven here.** This repo has no frontend test runner, so no test covers this
 screen and none was written that would run. Nothing in this session rendered it in a browser
 or called the API from one: the page is `next-intl` + TanStack Query code that has passed a
 compiler and a linter and nothing more. The type and lint rows are gate results, not evidence
 the screen works.
+
+The slice landed as **`bcfce75`**. That hash and the rows above were added by the follow-up
+`docs(status)` commit that names it, not back-dated into the slice — the convention
+`D10-26`…`D10-28` used. One number deserved the precision rather than the shorthand the
+earlier slices wrote: the config defines **19** hooks, `gitleaks` is `stages: [manual]` and
+never joins a commit, and `forbid-submodules` reports `(no files to check) Skipped` on every
+run. So "the gate was green" here means **17 hooks reported Passed**, and the one that did
+not is named instead of rounded into the total. No `frontend/` source file changed between
+the audit above and the commit, which is the only reason the key counts still describe
+`bcfce75` rather than a snapshot of the working tree. The audit script was deleted before
+staging, as `D10-29` promised; it was gitignored, so its absence is not a tree change.
 
 ### What this does not do — stated, not buried
 
