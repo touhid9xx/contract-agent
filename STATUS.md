@@ -290,7 +290,8 @@ migration (`0006`), no new dependency. With this, **no v1 router is `TestClient`
 what still holds is that no browser has run any screen, because there is no frontend test
 runner.
 
-**Then the "pre-existing flaky test" turns out to be the harness** (`D10-30`, `chore(tests)`):
+**Then the "pre-existing flaky test" turns out to be the harness** (`D10-30`,
+`test(harness)` — `6fe7c36`):
 `test_escalation_scanner::test_run_forever_stops_when_the_event_is_set` had been recorded as
 failing about once in five full runs for five slices, each time labelled *pre-existing* and
 left visible. That label named the owner and not the cause. The cause is in `conftest.py`:
@@ -3116,6 +3117,17 @@ the database, so this was **one site, not a pattern**.
 | --- | --- | --- |
 | Repaired test, repeated | `.agent-cache/repeat_test.py` (in-process, 30 rounds) | **30/30 passed, 0 failed** |
 | Full suite | `python -m pytest` from `backend/` | **840 collected — 825 passed, 15 skipped, 0 failed**, exit **0** (JUnit: `tests=840 failures=0 errors=0 skipped=15`) |
+| Commit gate | `git commit` | **`6fe7c36`**. Eighteen of the nineteen defined hooks ran: **17 Passed**, `forbid-submodules` `(no files to check) Skipped`; `gitleaks` is `stages: [manual]` and never joins a commit (D1-03). The three frontend hooks (`frontend typecheck`, `frontend eslint`, `demo frontend typecheck`) reported **Passed**, not a skip. |
+
+The first attempt at that commit was **rejected by `commitlint`, not by the hooks**, and the
+cause is worth recording because it will recur: `subject-case` (`commitlint.config.mjs:7`)
+allows only sentence-, lower- or start-case, and the subject
+`test(harness): stop racing the shared SQLite connection` matched none of them — the capital
+inside the proper noun `SQLite` is enough to break every candidate case, since each lowercases
+the words after the first. The subject is now
+`test(harness): stop racing the shared in-memory connection`, which trades the product name for
+a description; the body keeps `SQLite` and `StaticPool` in full. Scope was never the problem:
+no `scope-enum` is configured, and `scope-case` only requires lower-case.
 
 The count is **identical to the pre-fix baseline**, and that identity is the evidence: the test
 was never legitimately failing, so removing a fault from it changes no number. A predicted
