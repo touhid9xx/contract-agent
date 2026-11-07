@@ -347,6 +347,27 @@ parses it, so an uploaded PDF still reaches extraction only after a shell step. 
 `contracts.ingest*` keys per locale against **402** leaf keys, zero one-sided, zero
 placeholder drift, all 20 reached by the page. No backend file changed, no migration (`0006`).
 
+**Then consent gets an editor** (`D10-33`, `feat(web)` `81d3de5`):
+`PUT /contracts/{id}/consent` had been version-checked, audited, shared with
+`consent-import` through one pair of repository functions and tested in two suites since F9 —
+and no browser had ever called it. Because the four flags and `do_not_contact` default to
+`false`, every contract on a fresh deployment was un-contactable by policy, and `NO_CONSENT`
+was the only answer the decision worker could give. Each contract card on
+`/[locale]/contracts` now carries the editor for that one contract. It sends the whole state
+and the `version` it was displayed against, so the route's 422 is out of reach of a form with
+no free-text input; `do_not_contact` is drawn apart from the three channel flags because it
+outranks them rather than joining them; and `may_contact`/`consent_channels` are **read from
+the model** rather than rebuilt from four booleans, which would be a second contact policy free
+to disagree with the one the decision worker enforces. A write that changes nothing answers the
+version it was given — equal reads "already recorded", higher reads "recorded", so a
+re-submission is not made to look like silence — and a **409** refetches the list and lets the
+editor remount against stored truth (`key={row.version}`) instead of painting the response's
+`details.current` into the draft. **14** `contracts.consent*` keys per locale at matching
+offsets against **416** leaf keys, all 14 reached by the page. Gap 18 is **narrowed, not
+closed**: one contract at a time, a fresh database still consents nothing, and the bulk
+backfill stays with `consent-import` and its sheet. No backend file changed, no migration
+(`0006`).
+
 ## Phase history
 
 | Phase | State |
@@ -1732,6 +1753,10 @@ test was written for this slice, and nothing in it is MySQL-specific.
 
 - **The consent screen is still unbuilt**, so gap 18 is **narrowed, not closed**. Consent
   still cannot be granted from the UI, and somebody still has to produce and own the sheet.
+  **Amended, not deleted (`D10-33`, section below):** the per-contract editor now exists on
+  `/[locale]/contracts`, so consent *can* be granted from the UI one contract at a time. What
+  survives from this bullet is the second clause — somebody still has to produce and own the
+  sheet for a bulk backfill, because the editor is deliberately not a bulk tool.
 - **No import-provenance record.** The audit rows are per-contract, so "which sheet
   authorised this change" is answered only by the shared correlation id — there is no
   first-class `import` row.
@@ -2075,7 +2100,9 @@ family-revocation path, and the symptom would look like a backend bug.
   different front door (nginx, a load balancer) has to reproduce both rules, or the
   connectivity line reads "down" on a healthy API.
 - **The consent screen (gap 18) is not here.** It remains an owner decision, and folding
-  it in would have made this slice two.
+  it in would have made this slice two. **Amended, not deleted (`D10-33`):** it is here now
+  — the owner decision was taken, and the per-contract consent editor lives on
+  `/[locale]/contracts` rather than on a screen of its own.
 
 ## A reply and an SLA clock exist now ✅ (gap 15, `D10-20`)
 
@@ -2609,6 +2636,12 @@ a hook finally ran and passed.
     consent screen**, so consent cannot be granted from the UI, and somebody still has to
     produce and own the sheet. The gap is narrowed, not closed. Consent and opt-out
     are enforced in code at both plan time and send time.
+    **Amended, not deleted (`D10-33`, section below):** the striking-out above was right
+    when it was written and is not any more — each contract card on `/[locale]/contracts`
+    now carries a consent editor over `PUT /contracts/{id}/consent`, so consent *can* be
+    granted from the UI. The sheet is no longer the only path, but it is still the only
+    *bulk* path: the editor writes one contract at a time, from the row it was displayed
+    against. Consent and opt-out remain enforced in code at both plan time and send time.
     ~~Quiet hours are enforced nowhere~~ — **retired
     by F10.** `Contract.timezone` is read at last, `zoneinfo` + `tzdata` resolve it,
     and the window (`[20:00, 08:00)` by default) is checked immediately before the
@@ -3346,6 +3379,82 @@ counts are a script's output over both catalogues, not a reading of them.
 - **Gap 5 is untouched.** The `contract.ingested` consumer is still unwritten: ingestion now
   produces that event from a browser as well as from `curl`, and still nothing consumes it.
 
+## Consent gets an editor ✅ (`D10-33` — the fail-closed default stops being permanent)
+
+`PUT /contracts/{id}/consent` has existed since F9: version-checked, audited, shared with
+`python -m app.cli consent-import` through one pair of repository functions, and tested in two
+suites. Nothing in a browser had ever called it. The four flags and `do_not_contact` all default
+to `false`, so on a fresh deployment **every contract is un-contactable by policy** — the correct
+fail-closed default, and the reason the decision worker's `NO_CONSENT` was the only answer an
+operator could provoke. Each contract card now carries the editor for that one contract. This is
+the owner decision `D10-19` deferred; it is taken, and `D10-33` records why.
+
+| Change | Detail |
+| --- | --- |
+| `frontend/src/lib/api.ts` | `RequestOptions.method` gained `"PUT"` — the union did not carry it, and the compiler said so on the first write rather than the route. `ConsentState` mirrors `ConsentView` including the two derived fields; `ConsentUpdateRequest` keeps all four flags **required** beside `version`; `contracts.updateConsent` wraps the route (`api.ts:851-875`). |
+| `frontend/src/app/[locale]/contracts/page.tsx` | The editor (**872** lines, +284/−2): `CONSENT_FLAGS` (three, not four), `CONSENT_LABELS`, `ConsentRowState` as the per-row projection of one page-level mutation, `canRecordConsent`, `describeConsentFailure` keying on status, and `consentStateFor` distinguishing a **no-op** from a recorded change. `ContractCard` gained `consent`/`onConsentSave`; `ConsentEditor` is keyed on `row.version` so a refetch resets the draft. |
+| `frontend/src/i18n/messages/en.json`, `bn.json` | **14** `contracts.consent*` keys per locale, at the same offsets in both files (`:297-310`), and all 14 are reached by the page. |
+| `DECISIONS.md` | `D10-33`, plus two amend-not-delete pointers: the `consent-import` trade-off (~`:1632`) and `D10-19`'s "consent screen is a separate owner decision" (`:2066`). |
+| No backend change | No route, no migration (`alembic` head stays `0006`), no new dependency. |
+
+### The three things the screen must not decide for itself
+
+**Whether a customer may be contacted.** `may_contact` and `consent_channels` are properties of
+`Contract`, and they are exactly what the decision policy enforces. Rebuilding either from four
+booleans in the browser would be a second contact policy, free to disagree with the first — and
+the disagreement would surface as a reminder sent to somebody who had not agreed to it. The
+editor sends flags; the read-only line beside it states the derived answer the server computed.
+
+**What "nothing happened" means.** The route writes nothing and answers the **same `version`**
+when the submitted flags already match what is stored — no version bump, no audit row, because a
+re-submission is not a second consent decision. The screen compares that version against the one
+it sent: equal reads "already recorded", higher reads "consent recorded". Collapsing the two
+would make an unchanged save indistinguishable from a swallowed click.
+
+**What the state is after a conflict.** A 409 means another operator's consent is now the stored
+one. The page invalidates the list rather than painting the response's `details.current` into the
+draft: the editor remounts against the refetched row (`key={row.version}`) and the operator
+re-reads stored truth. Patching the draft from a conflict response would be the browser deciding
+what the new state should be, which is the server's answer to give.
+
+### Verification actually run (`D10-33`)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Route contract | read `backend/app/api/v1/contracts.py:685-830` | `PUT`, `require_roles(ADMIN, OPERATOR)` → **403** for a viewer; **404** outside the caller's tenant (not 403 — that would confirm the row exists); **409** `VERSION_CONFLICT` with `details.current`, and a second **409** from `StaleDataError` for the race the version check cannot close; a no-op returns the same `version` having written nothing. |
+| Key parity | `git diff --numstat` over both catalogues, then the 14 keys located in each file | **+14 / −0** in `en.json` and `bn.json`; both carry the same 14 `contracts.consent*` names at `:297-310`; **416** leaf keys per locale (402 measured at `e067516`, plus these 14). |
+| Reachability | grep for each of the 14 names in `page.tsx` | all 14 reached — `consentHeading:808`, `consentEmail/Sms/VoiceLabel` via `CONSENT_LABELS:97-101` and `:821`, `consentOptOutLabel:834`, `consentNote:838`, `consentAction`/`consentSaving:848`, `consentSaved`/`consentUnchanged:854-855`, `consentViewerNote:731`, `consentConflict:298`, `consentForbidden:299`, `consentNotFound:300`. |
+| Draft reset | read `page.tsx:715-728` | `ConsentEditor` is keyed on `row.version`, so a recorded change remounts it from server truth. |
+| Diff shape | `git diff --numstat` | `page.tsx` **+284/−2**, `api.ts` **+71/−1**, `en.json` +14, `bn.json` +14, plus the `D10-33` rows. |
+| Commit gate | `git commit` | **`81d3de5`** — 5 files, **+453/−3**. Nineteen hooks are defined; `gitleaks` is `stages: [manual]` and never joins a commit (D1-03), so **18** ran: **17 reported Passed** and `forbid-submodules` reported `(no files to check) Skipped`. `check json` ran because this slice edits both catalogues, and `ruff`, `ruff format`, `mypy (strict)` and `bandit` reported Passed rather than skipped even though no backend file changed. |
+
+The slice landed as **`81d3de5`**. That hash and the commit-gate row above were added by the
+`docs(status)` follow-up that names them, not back-dated into the slice — the convention
+`D10-26`…`D10-32` used, and the trap `D10-30` recorded after writing a commit *type* before there
+was a commit. The message was checked with `npx commitlint --edit` (EXIT 0) before the commit ran,
+so the subject carries no capitalised proper noun and no route path. No `frontend/` source file and
+neither catalogue changed between the measurements above and that commit.
+
+**What is not proven here.** No frontend test runner exists in this repo, so nothing tests this
+editor and none was written that would run. No browser rendered it and no consent was saved from
+one: a compiler and a linter, nothing more. The key counts are a diff and a grep, not a reading of
+two translated files by someone who reads Bengali.
+
+### What this does not do — stated, not buried
+
+- **Gap 18 is narrowed, not closed.** Consent is changeable from the product one contract at a
+  time, and a fresh database still consents nothing by default. The bulk backfill stays with
+  `consent-import` and its sheet (`D10-14`), which has a dry run, all-or-nothing validation and a
+  closed cell vocabulary; a screen that ticked boxes per row would be the same write without any
+  of them.
+- **No bulk action, no "consent all filtered rows".** Same reason: the sensitive write is the one
+  that happens without a person reading each contract.
+- **`do_not_contact` is not offered as a channel.** It outranks all three grants and is drawn
+  apart from them; putting it in the channel list would suggest a half-opt-out that the model
+  does not have.
+- **Gap 5 is untouched.** The `contract.ingested` consumer is still unwritten and still blocked
+  on an owner decision.
+
 ## Next permitted step
 
 **F10 (step 6) is committed (`b344c17`), three gap-closing slices have landed since
@@ -3367,6 +3476,10 @@ missing feature and not a hardening pass either, but the consent screen's owner
 decision (gap 18), which does not change whether the flow runs. The other half of
 gap 15 is closed too: a reply is now recorded and an SLA clock is now opened
 (`feat(escalations)`, D10-20).
+**Amended, not deleted (`D10-33`):** the consent screen's owner decision has been taken
+and the editor now ships on `/[locale]/contracts`, so the sentence above no longer names
+outstanding work. What is left is what `D10-33` lists instead — no bulk editor, no
+frontend test runner, and no channel consented by default on a fresh database.
 
 - `app/db/models/` — every table in the flow now has a writer: `Contract`
   (`POST /contracts`), `ExtractedField` (`python -m app.cli extract`,
@@ -3523,7 +3636,10 @@ predates `0002` is un-contactable** until someone sets consent ~~one row at a ti
 (gap 18)~~ — **amended by `D10-14`, not deleted:** a consent sheet can now be imported
 across contracts in one audited run (`python -m app.cli consent-import`), so the
 one-row-at-a-time limit is gone. What still stands is that **no consent screen exists**,
-so consent cannot be granted from the UI at all. And ~~an `AgentDecision` still **cannot be overridden or flagged** — the
+so consent cannot be granted from the UI at all. **Amended, not deleted (`D10-33`):** a
+consent editor now sits on each contract card at `/[locale]/contracts`, so consent can be
+granted from the UI — for one contract at a time. The sheet remains the bulk path; the
+editor is not. And ~~an `AgentDecision` still **cannot be overridden or flagged** — the
 `version` column that blocked those routes now exists (`0f5da36`), but the routes
 themselves still do not (gap 19)~~. **The struck clause is amended, not deleted:**
 the `feat(g19)` slice added both routes on top of migration `0004`, so an
@@ -3735,6 +3851,10 @@ sign-off, not footnotes:**
    have to be consented one `PUT` at a time — but **no consent screen exists**, so the
    clause as signed still holds in the part it was written about. Nothing here was a
    defect; it was missing work, and half of it has now been done.
+   **And the other half is done too (`D10-33`):** the consent editor ships on
+   `/[locale]/contracts`, so "granted one `PUT` at a time" is now a UI gesture rather than
+   a `curl` invocation. The clause is closed as far as the product is concerned; what no
+   screen does is a *bulk* backfill, which stays with the `consent-import` sheet.
 8. **`FOR UPDATE` is a no-op on SQLite.** The concurrency guarantees are
    MySQL-only evidence by construction; the offline suite can never be the proof.
 9. ~~**Missing pieces by design, not by defect:** `CustomerResponse` and `Escalation`
