@@ -241,8 +241,8 @@ so this closes the **input** half of gap 12 and nothing at all about gap 5. It w
 while the harness's shell could start no process at all, so it was recorded ungated and
 uncommitted; restarting the IDE cleared the fault, the suite was re-run green
 (**827 / 0 failed / 15 skipped**, exit 0), and the 17-hook gate ran green over the commit.
-**Then the contract aggregate gets the read side it never had** (`D10-27`,
-`feat(contracts)`): `GET /api/v1/contracts` lists the caller's contracts, newest
+**Then the contract aggregate gets the read side it never had** (`67bf8f6`,
+`D10-27`, `feat(contracts)`): `GET /api/v1/contracts` lists the caller's contracts, newest
 first, one keyset page at a time. Until it existed the aggregate root was
 write-only — a contract could be ingested and its id echoed once, and every other
 per-contract route in v1 (consent, fields, decisions, notifications) took that id
@@ -2842,6 +2842,7 @@ resolved it as another.
 | Contract tests alone | counted per case from `--junit-xml` | `tests/test_contracts.py` collects **33**, of which **13 are new** — ten new test functions, two parameterised (four `limit`/`cursor` bounds, one status filter) — against 20 before |
 | Types | `python -m mypy app/api/v1/contracts.py app/db/repositories/contracts.py` | **Success: no issues found in 2 source files** |
 | Lint | `ruff check` | all checks passed |
+| Commit gate | `git commit` (all 17 hooks) on `67bf8f6` | **all green** — `ruff`, `ruff format`, `mypy --strict`, `bandit`, and the root **and** demo `tsc --noEmit` + `eslint` hooks each reported **Passed**, not `(no files to check)` |
 
 The counts above were read per test case out of `--junit-xml`, not inferred from
 the totals, because the first pass got them wrong in a way that did not show:
@@ -2849,6 +2850,13 @@ the new cases were counted as *ten* while the pre-existing ones were counted as
 *twenty-three*, and the two errors cancelled into the file's correct total of 33.
 The real split is 20 + 13. A wrong number that sums correctly is the kind that
 survives review, so the figure was re-derived rather than re-asserted.
+
+The slice landed as **`67bf8f6`**, and the commit ran the full 17-hook gate green
+over it — so, as with `D10-26`, written, tested, gated and committed agree here
+rather than being four separate claims. This paragraph and the commit-gate row
+above were added by the follow-up `docs(status)` commit that named the hash; no
+`backend/` file changed between the run recorded here and the commit, which is
+what makes the figures above still the figures the commit carries.
 
 ### What this does not do — stated, not buried
 

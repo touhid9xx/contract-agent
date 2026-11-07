@@ -2755,3 +2755,12 @@ newest-first, and no `end_date` filter, so "which contracts expire soon" — the
 question the product exists to answer — is still not answerable from this route.
 **Gap 5 remains open**: the `contract.ingested` consumer is unwritten and still
 blocked on an owner decision, and this listing is only its prerequisite.
+
+  The slice landed as `67bf8f6`, and `git commit` ran the full 17-hook gate green
+  over it — `ruff`, `ruff format`, `mypy --strict`, `bandit`, and the root and demo
+  `tsc --noEmit` and `eslint` hooks each reported **Passed**, not "(no files to
+  check)". The figures above were measured before that commit and no `backend/`
+  file changed in between, which is the only reason they are still a statement
+  about the commit and not merely about a snapshot of the working tree. The gate
+  row in this entry's `STATUS.md` counterpart, and the hash itself, were added by
+  the follow-up `docs(status)` commit rather than back-dated into the slice.
