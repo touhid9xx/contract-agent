@@ -184,6 +184,24 @@ field for what the customer said. Messages are at exact parity again (**165** fl
 keys each, 58 under `escalations`), measured rather than eyeballed. No `backend/` file
 changed, so the suite stays **805** — and this slice adds no test count of its own,
 because `frontend/` still has no test runner.
+**The next slice gives the channel decisions a screen** (`<HASH>`, `feat(agent)`): the
+third of the four `TestClient`-only families to get one, and the family every
+notification is scheduled from, so re-running the policy had no caller outside a test.
+`/[locale]/agent` lists the tenant's recent decisions or one contract's history, re-runs
+through `POST /agent/decisions` — which always **appends** — and corrects the newest row
+through `/override` and `/flag-review`. Corrections are addressed by *contract* id
+because the server resolves "the current recommendation" itself, and a superseded
+row's `version` is refused with `409`; the screen therefore offers no correction on an
+older row (D10-24).
+The override offers all three channels and lets the refusal's `details.permitted` name
+what the policy allows, rather than keeping a second copy of `permitted_channels` in the
+browser — which is why `ApiError` now carries `details` as `unknown`. Messages are at
+parity again (**224** flattened keys each, 58 under `agent`), counted rather than
+eyeballed. As written, this slice is **uncommitted and ungated**: project-wide typecheck
+and lint had not run, because the shell could not start any process in that session, so
+the verification table says "not run" rather than "passed". No `backend/` file changed, so
+the suite stays **805** — and this slice adds no test count of its own, because
+`frontend/` still has no test runner.
 
 ## Phase history
 
@@ -2080,9 +2098,9 @@ suite stays at **805**; this slice is frontend only.
 - **A reload still signs the user out**, so a reviewer loses both their session and their
   revealed values on refresh. Both are deliberate (memory-only session, D10-19) and both
   are still rough.
-- **Two route families remain `TestClient`-only** — `agent` and `notification`. This was
-  three when the review screen shipped; `D10-23` below gives `escalation` a screen, so the
-  item is narrowed again, not closed. Still no browser has run any of them.
+- **One route family remains `TestClient`-only** — `notification`. This was three when the
+  review screen shipped; `D10-23` below gave `escalation` a screen and `D10-24` gave `agent`
+  one, so the item is narrowed again, not closed. Still no browser has run any of them.
 
 ## The escalation queue now has a screen ✅ (gap 15, `D10-23`)
 
@@ -2147,8 +2165,78 @@ tree is clean.
   gating is a role comparison plus the route's `403`, which the screen translates.
 - **`sla_breached` still has no writer.** The badge is computed from the deadline; no row
   in any database holds that status, and no alert fires when a queue item goes late.
-- **Two route families remain `TestClient`-only** — `agent` and `notification`. Carried
-  item 5 is narrowed again, not closed.
+- **One route family remains `TestClient`-only** — `notification`. Carried item 5 is
+  narrowed again by `D10-24`, not closed: `agent` now has a screen.
+
+## The channel decisions now have a screen ✅ (F9's human half, `D10-24`)
+
+GATE 2 carried item 5 has said since the sign-off that the `review`, `agent` and
+`notification` routes "have only ever been called by `TestClient`, because no screen talks
+to them yet". `D10-22` gave `review` a screen and `D10-23` gave `escalation` one; `agent` is
+the family that mattered most for a reason the other two do not share — `POST
+/agent/decisions` is what *creates* the recommendation every notification is scheduled
+from, so until now the only way to ask the policy a question was a `TestClient`.
+`frontend/src/app/[locale]/agent/page.tsx` is that screen: a recent-or-filtered decision
+list, a re-run, an override with a reason, and a flag-for-review. No `backend/` file
+changed, so the suite stays at **805**; this slice is frontend only and adds no test count.
+
+| Area | Detail |
+| --- | --- |
+| Reading needs no reveal step | A decision carries no customer value: its `reasoning` is a fixed sentence built from channel names, which is why the queue can be read by any authenticated role while the field behind it needs an audited `reveal`. The screen renders exactly what `AgentDecisionView` sends and nothing it derives. |
+| A re-run appends, a correction edits | `POST /agent/decisions` always inserts; the override and flag routes edit the **newest** row in place. That is `D9-06`'s asymmetry and the API has it for the same reason: "a person disagrees with *this* recommendation" is a fact about that row, so correcting it must not destroy the history it corrects. A screen that treated both as the same verb would eventually be asked to "just update the decision", which is how the history would go. |
+| Corrections are addressed by contract, not by decision | The routes take `/agent/decisions/{contract_id}/override` and `/flag-review` because the server resolves "the current recommendation" itself — a client holding an older row cannot smuggle a stale choice in. The screen therefore offers the override and flag controls **only on the newest row per contract** (`latestIds`), with `agent.olderRowNote` explaining why an older row has none: a correction sent from a superseded row is a `409` by construction, not by race. |
+| Every channel offered, policy answers | The override offers `email`, `sms` and `voice` and lets the server refuse, rather than hiding the two the consent flags currently forbid. Re-deriving `permitted_channels` in the browser would be a **second copy** of the contact policy — the one thing `decision.py` exists to be the single source of — and the two copies would drift silently, in the direction of offering a channel the backend refuses. The refusal carries `details.permitted`, so the screen can name what *was* allowed. |
+| `details` is typed, not guessed | `ApiError` now carries the envelope's `details` as `unknown` (`api.ts:96`), narrowed only at the call site that knows which route it called. The route sends `permitted` (`app/api/v1/agent.py:483`, asserted in `test_agent_decisions.py:1185`), so the screen narrows exactly there. A union of every route's `details` in one type would make one route's shape look like all of them. |
+| Seven refusals, seven sentences | Five policy codes come from `app/workers/decision.py:114-127` — `PIPELINE_BLOCKED`, `NO_CONSENT`, `CONTACT_REFUSED`, `CONTRACT_CLOSED`, `NO_CONTACT_VALUE` — and two from the route (`agent.py:338/357`): `NO_DECISION` and `VERSION_CONFLICT`. They are different problems ("nobody has run the policy for this contract" is not "the contract is closed"), so each gets its own string instead of one "could not decide". |
+| One error per card | The mutations carry their variables, so a refusal is attributed by comparing `variables` with the card's contract id. A page-level banner would blame every visible contract for one refusal — the same rule as `D10-22`. |
+| Role gating is shown *and* enforced | `viewer` sees the list and `agent.viewerNote`, with no re-run, override or flag controls. The real boundary is the route's `403`, which the screen translates through `agent.forbidden` rather than assuming impossible. |
+| Enum drift is a compile error | `CHANNEL_KEYS` is `as const satisfies Record<ContactChannel, string>` and `ContactChannel`/`AgentDecision` mirror `app.db.enums` and `AgentDecisionView`, so a new channel fails the build instead of rendering `agent.channel.undefined`. As with the other two screens, nothing else would catch it: there is no frontend test runner. |
+| Messages at parity, measured | **224** flattened keys on both sides, 0 one-sided, 58 under `agent`. Counted by reading `en.json` and `bn.json` key by key (they are the same shape line for line); every one of the 58 is reachable from the page — 50 literal `t("agent.…")` calls, three channel labels through `CHANNEL_KEYS`, five refusal sentences through `REFUSAL_KEYS`. |
+| The link is in the UI | `/[locale]` links three working screens now — `review`, `agent`, `escalations` — signed-out included: each asks for a session itself, and hiding the entry point leaves a visitor no way to learn it exists. |
+
+### Verification actually run (agent screen)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Types | TypeScript language service, per edited file: `[locale]/agent/page.tsx`, `lib/api.ts`, `i18n/messages.ts`, `[locale]/page.tsx` | **No errors, no warnings.** Narrower than a project compile: it proves each file is internally consistent and that every imported symbol resolves, not that the whole project builds. |
+| Types (project-wide) | `npm run typecheck` (`frontend typecheck` pre-commit hook) | **Not run.** The shell could not start a process at all in the session that wrote this (see below), and no commit happened, so the hook never fired either. |
+| Lint | `eslint` (`frontend-eslint` pre-commit hook) | **Not run**, for the same reason. |
+| Message parity | flattened-key count of `en.json` vs `bn.json`, plus a reachability check of every `agent.*` literal against both files | 224/224 keys, 0 missing, 0 extra; 58 under `agent`; no one-sided key and no unreachable one. Counted by reading both files end to end rather than by script: app 2, nav 6, home 14, auth 13, review 65, escalations 58, agent 58, common 8 — which is why the same files measured 165 in the slice above, the difference being `agent`'s 58 plus `nav.agent`. The 58 `agent` keys divide exactly into 50 reached by literal `t("agent.…")`, 3 through `CHANNEL_KEYS` and 5 through `REFUSAL_KEYS`. |
+| Tests | not run and not applicable | There is still no frontend test runner (no vitest, no jest, no Playwright), so this slice adds none — and adds no test count. |
+| Backend | `pytest backend/tests` **not** re-run | No `backend/` file changed. The last measured green — **805** collected, 804 passed, 1 skipped at `6fe6158` — still describes the tree. |
+| Schema | `alembic current` **not** re-run | No migration, no model change; the head is still `0006`. |
+
+**The shell failed again, differently, and this time it is not the pager.** Every command
+returned only its own **first character** and exit code 1 — `git --version` → `g`, `echo hi`
+→ `e`, `"echo"` → `"`. A bare `printf 'abcdefghij\n'` coming back as `p` is what pins the
+mechanism: the command's first byte is echoed instead of executed, so no process starts at
+all and `git`, `pytest`, `npm` and the 17 hooks are equally out of reach. That is not a
+pager blocking on stdin (the previous session's cause, and `--no-pager` is already used
+here). It reproduced identically in the session that then re-checked this slice's parity
+figures by reading both message files end to end. Nothing was committed: the six files this
+slice touches are in the working tree only, and the `<HASH>` in the phase history below is
+a placeholder until a session can run git again. The rows above say "not run" because "not
+run" is what happened.
+
+### What this does not do — state it, do not bury it
+
+- **No browser has run it.** Typechecked per file and its wire shapes were read out of
+  `backend/app/api/v1/agent.py` rather than guessed — but nothing has clicked a button, and
+  the project-wide typecheck and lint have not run at all. "It works" here means "it agrees
+  with the route's contract", which is weaker evidence than any test in `backend/tests`.
+- **The concurrency path has never been raced.** The `VERSION_CONFLICT` branch is written
+  and translated, but two operators have never corrected the same contract at once, and no
+  one has tried to correct a superseded row.
+- **The refusal paths have never been seen from a real contract.** The five policy codes
+  are translated, but no unconsented or pipeline-blocked contract has been loaded in a
+  browser to see which one actually comes back.
+- **The read-only `viewer` path has never been seen** with a real viewer session — the
+  gating is a role comparison plus the route's `403`, which the screen translates.
+- **Nothing creates decisions on its own.** The screen's re-run is an operator pressing a
+  button; no consumer reacts to `contract.ingested` (gap 5), so a contract that nobody
+  re-runs has no recommendation at all.
+- **One route family remains `TestClient`-only** — `notification`. Carried item 5 is
+  narrowed once more, not closed.
 
 ## Known gaps / issues
 
@@ -2490,7 +2578,10 @@ gap 15 is closed too: a reply is now recorded and an SLA clock is now opened
   the notification path it is ahead of it. The first screens now do call it:
   `/[locale]/login` and the account card reach `/auth/*` (`feat(web)`, D10-19).
   Nothing else does — the contract, review, agent and notification routes have still
-  only ever been called by `TestClient`. **Corrected while editing this paragraph:**
+  only ever been called by `TestClient`. **Amended since this was written:** `review`
+  (`da82111`), `agent` (`<HASH>`) and `escalation` (`00e9b54`) now have screens that call
+  them; `contract` and `notification` are still `TestClient`-only.
+  **Corrected while editing this paragraph:**
   it previously said "`frontend/src/app/*` still calls the mocked demo backend", which
   was never true — the mock is `demo/backend`, and it is consumed by
   `demo/frontend/src/lib/api.ts`. The real app had no API caller at all, which is what
@@ -2588,6 +2679,9 @@ rows and exits non-zero; what is still absent is anything that *runs* it, so a h
 still has to look; no live
 Ollama has answered anything; and the `review`, `agent` and `notification` routes
 have only ever been called by `TestClient`, because no screen talks to them yet.
+**Amended after this record was signed, not deleted:** `review` has a screen
+(`da82111`), `agent` has one (`<HASH>`) and `escalation` — which this sentence did not
+name — has one (`00e9b54`); only `notification` is still `TestClient`-only.
 **Nothing has ever been sent to a real customer** (gap 15): the shipped default
 transport still refuses, and the SMTP path has only ever spoken to a loopback relay
 this suite started and certified itself — so `sent: true` over HTTP is proven against

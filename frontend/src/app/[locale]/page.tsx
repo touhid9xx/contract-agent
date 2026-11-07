@@ -122,7 +122,7 @@ export default function HomePage() {
           <p className="text-sm text-muted-foreground">{t("home.body")}</p>
 
           {/*
-            The two screens that do work rather than report it are linked from
+            The three screens that do work rather than report it are linked from
             here instead of being reachable only by URL. Shown whether or not
             there is a session: each asks for one itself, and hiding the links
             would leave a signed-out visitor no way to learn they exist.
@@ -131,6 +131,11 @@ export default function HomePage() {
             <Link href={`/${locale}/review`}>
               <Button size="sm" variant="secondary">
                 {t("nav.review")}
+              </Button>
+            </Link>
+            <Link href={`/${locale}/agent`}>
+              <Button size="sm" variant="secondary">
+                {t("nav.agent")}
               </Button>
             </Link>
             <Link href={`/${locale}/escalations`}>

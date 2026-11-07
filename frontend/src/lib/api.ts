@@ -66,6 +66,17 @@ interface ErrorEnvelope {
     code?: string;
     message?: string;
     request_id?: string | null;
+    /**
+     * Structured extra context, when the route chose to send some.
+     *
+     * `app.main.http_exception_handler` passes a raised `{code, message,
+     * details}` dict straight through, which is how a policy refusal can carry
+     * the channels it *would* have allowed and a lost `version` race can carry
+     * the row that won. Typed as `unknown` on purpose: only the caller that
+     * knows which route it called can narrow it, and narrowing here would make
+     * one route's shape look like every route's shape.
+     */
+    details?: unknown;
   };
 }
 
@@ -81,13 +92,22 @@ export class ApiError extends Error {
   readonly code: string;
   /** Correlation id from the envelope, if the server sent one. */
   readonly requestId: string | null;
+  /** The envelope's `details`, untouched. Narrow it where the route is known. */
+  readonly details: unknown;
 
-  constructor(status: number, code: string, message: string, requestId: string | null = null) {
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    requestId: string | null = null,
+    details: unknown = null,
+  ) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
     this.requestId = requestId;
+    this.details = details;
   }
 
   /** The credential was not accepted, or is no longer valid. */
@@ -141,6 +161,7 @@ async function failure(response: Response): Promise<ApiError> {
   let code = "request_failed";
   let message = `The server answered with status ${response.status}.`;
   let requestId: string | null = null;
+  let details: unknown = null;
 
   try {
     const body = (await response.json()) as ErrorEnvelope;
@@ -148,12 +169,13 @@ async function failure(response: Response): Promise<ApiError> {
       code = body.error.code ?? code;
       message = body.error.message ?? message;
       requestId = body.error.request_id ?? null;
+      details = body.error.details ?? null;
     }
   } catch {
     // Keep the status-derived message: the response was not our envelope.
   }
 
-  return new ApiError(response.status, code, message, requestId);
+  return new ApiError(response.status, code, message, requestId, details);
 }
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
@@ -471,6 +493,107 @@ export const escalations = {
     request<RecordedResponse>(`/contracts/${contractId}/response`, {
       method: "POST",
       body: { channel },
+      accessToken,
+    }),
+};
+
+/**
+ * One stored channel recommendation (`app.api.v1.agent.AgentDecisionView`).
+ *
+ * Nothing here is a customer value — the reasoning is a fixed sentence built from
+ * channel names — which is why reading a decision needs no reveal step while
+ * reading the field it rests on does. `original_channel` is filled in once, on the
+ * first human override, and never rewritten: a row overridden twice still reports
+ * what the *policy* said rather than the previous operator's choice.
+ */
+export interface AgentDecision {
+  id: number;
+  contract_id: number;
+  channel: ContactChannel;
+  confidence: number;
+  reasoning: string;
+  /** Read by `dispatch`, which refuses to send a flagged decision. */
+  needs_review: boolean;
+  /** Which policy produced this row, so an old decision can be told apart. */
+  prompt_version: string;
+  /** `deterministic` in this slice: no model was consulted (D9-02). */
+  llm_model: string;
+  correlation_id: string;
+  created_at: string;
+  /** Echo this back with a correction; the server refuses a stale one with 409. */
+  version: number;
+  /** The policy's answer, once a person has replaced it. `null` = nobody has. */
+  original_channel: ContactChannel | null;
+  overridden_by: string | null;
+  /** How many recommendations already existed when this one was appended. */
+  rerun_count: number;
+}
+
+/** A bounded page of decisions, newest first. */
+export interface AgentDecisionList {
+  items: AgentDecision[];
+  count: number;
+  /** Echo of the filter; `null` means this is the tenant's recent decisions. */
+  contract_id: number | null;
+}
+
+/** A correction, built from the `version` the operator was looking at. */
+export interface DecisionOverrideRequest {
+  channel: ContactChannel;
+  version: number;
+  reason?: string;
+}
+
+/** A flag, built from the `version` the operator was looking at. */
+export interface FlagReviewRequest {
+  version: number;
+  reason?: string;
+}
+
+/**
+ * The agent-decision surface (F9's human half, gap 19).
+ *
+ * Reading needs any authenticated role — a decision carries no customer value —
+ * while deciding, overriding and flagging are `OPERATOR`/`ADMIN` only.
+ *
+ * `decide` **appends** and the two corrections **edit the newest row in place**:
+ * "a person disagrees with this recommendation" is a fact about *that*
+ * recommendation, so it must not destroy the history it corrects. That asymmetry
+ * is also why the corrections are addressed by contract id rather than decision
+ * id — the server resolves "the current recommendation" itself, and a caller
+ * holding an older row's version is refused with `409`.
+ */
+export const agent = {
+  /** The tenant's recent decisions, or one contract's history. */
+  decisions: (accessToken: string, contractId?: number) =>
+    request<AgentDecisionList>(
+      contractId === undefined
+        ? "/agent/decisions"
+        : `/agent/decisions?contract_id=${contractId}`,
+      { accessToken },
+    ),
+
+  /** Run the policy for one contract. Always appends; never an update. */
+  decide: (accessToken: string, contractId: number) =>
+    request<AgentDecision>("/agent/decisions", {
+      method: "POST",
+      body: { contract_id: contractId },
+      accessToken,
+    }),
+
+  /** Replace the channel, choosing only among those the policy still permits. */
+  override: (accessToken: string, contractId: number, payload: DecisionOverrideRequest) =>
+    request<AgentDecision>(`/agent/decisions/${contractId}/override`, {
+      method: "POST",
+      body: payload,
+      accessToken,
+    }),
+
+  /** Take the current recommendation out of the send path without deleting it. */
+  flagReview: (accessToken: string, contractId: number, payload: FlagReviewRequest) =>
+    request<AgentDecision>(`/agent/decisions/${contractId}/flag-review`, {
+      method: "POST",
+      body: payload,
       accessToken,
     }),
 };

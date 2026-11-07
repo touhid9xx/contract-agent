@@ -2352,3 +2352,80 @@ are about which distinctions the screen refuses to collapse.
   scanner that raises the rows this screen lists (no compose service, systemd unit or
   cron entry), so in a real deployment the queue fills only if an operator runs the
   worker by hand.
+
+### D10-24 — The decision screen offers the choice and lets the policy refuse
+
+`frontend/src/app/[locale]/agent/page.tsx` closes the third route family that had only
+ever been reached by `TestClient`. It is the one with the shortest distance to a
+customer: `POST /notifications` schedules from a **stored** decision, so until this
+screen existed a recommendation nobody could inspect was a recommendation that decided
+by default.
+
+- **The client never re-derives the permitted channels.** It offers all three and lets
+  `permitted_channels` answer, then reports what the answer was: `CHANNEL_NOT_PERMITTED`
+  carries `details.permitted` (`agent.py:483`), and `permittedChannelsFrom` narrows that
+  from `unknown` and filters it. The alternative — recomputing the permitted set here
+  from the consent flags — would put a second copy of the contact policy in the browser,
+  where it would drift from the copy that actually refuses. A refusal therefore has to
+  be able to name the channels that *would* work, which is why the screen reads `details`
+  at all: it is the only place the client learns consent's answer.
+- **A re-run appends; a correction edits.** "The policy changed its mind" is a new fact
+  and gets a new row (`POST /agent/decisions` → 201). "A person disagrees with *this*
+  row" is a fact about that row, so the override and flag routes edit it in place with
+  `original_channel` preserved. Collapsing the two into one button would destroy the
+  history F9 exists to leave behind, so the appending action is styled apart from the
+  correcting ones and the screen shows `rerun_count` to make repeated re-rolls visible.
+- **Corrections appear only on the current recommendation.** The override and flag
+  routes resolve "the latest decision for this contract" server-side, so offering them
+  on a superseded row would send a version the server has already moved past — every
+  click would be a `409`. `latestIds` restates that rule locally over an already
+  newest-first page: the first row seen for a contract *is* its latest, because every
+  newer one would have sorted above it. Superseded rows get a sentence explaining why no
+  buttons are offered rather than silently looking broken.
+- **A refusal is reported on the row that was acted on, and only that row.** TanStack
+  hands the failing call's `variables` back with the error, so the obvious filter is
+  `variables.contractId === row.contract_id` — and it is wrong: a contract with three
+  decisions on the page would print one operator's refusal under all three, blaming two
+  rows nobody touched. The predicate is therefore `isLatest && …`, which is what the
+  buttons already require, so the card that offered the action is the card that explains
+  it. Progress (`busy`, `correcting`) is narrowed the same way for the same reason.
+- **A refusal code is translated individually, not collapsed into "failed".**
+  `app.workers.decision` gives each refusal its own machine-readable code on purpose, so
+  `REFUSAL_KEYS` maps the five policy codes to five sentences: "the customer consented to
+  nothing" and "a field is still waiting for a person" call for different next actions.
+  An unlisted code still yields a generic sentence, so a new refusal degrades to vague
+  rather than to blank.
+- **A `409` refetches; it never splices.** Third time, same rule (D10-22, D10-23). The
+  `onError` path invalidates on `409` *and* `404`, because a contract that moved out of a
+  decidable state returns as a refusal rather than as a missing row.
+- **The channel label map is a type, not a concatenation.** `CHANNEL_KEYS` is
+  `as const satisfies Record<ContactChannel, string>`, so a new `Channel` member is a
+  compile error. This is the same guard D10-23 introduced, applied here because this
+  screen builds labels for both `channel` and `original_channel`.
+- **`ApiError.details` is `unknown`, narrowed only where the route is known.** The
+  envelope's `details` shape differs per route (`{"permitted": [...]}` here,
+  `{"current": {...}}` for a lost `version` race, `{"blocking": n, "fields": [...]}` for
+  a blocked pipeline), so a union of every route's shape would be a lie the compiler
+  could not check. Each caller narrows what it actually reads.
+- **The message files mirror each other key for key.** `agent` carries 58 keys in
+  `en.json` and 58 in `bn.json`, and all 58 are reachable from this page: 50 literal
+  `t("agent.…")` calls, three channel labels via `CHANNEL_KEYS`, and five refusal
+  sentences via `REFUSAL_KEYS`. Nothing was added to either file that no code path can
+  render — the unused-key check that caught `statusLabel` in D10-23 was applied here
+  before writing the Bengali block rather than after.
+- **What this proves and what it does not.** Proven: every wire shape
+  (`AgentDecisionView`'s fourteen fields, `AgentDecisionListResponse`'s `items`/`count`/
+  `contract_id`, `DecisionOverrideRequest`, `FlagReviewRequest`, the `/decisions`,
+  `/decisions/{contract_id}/override` and `/decisions/{contract_id}/flag-review` paths,
+  the `?contract_id=` filter) was read out of `app/api/v1/agent.py`, not guessed; the
+  five policy refusal codes and the two route-level codes were read out of
+  `app/workers/decision.py` and `agent.py`; and the TypeScript language service reports
+  no error in any edited file. Not proven: **no browser has run it**, **the project-wide
+  typecheck and `eslint` have not been run at all** — the shell could not start a process
+  in the session that wrote this, so nothing was gated and nothing was committed, and the
+  per-file language-service check quoted above is the only type evidence — and there is
+  still no frontend test runner, so this slice adds no test count; the gate is typecheck
+  plus lint, which is weaker than any test in `backend/tests`. No two operators have raced a
+  `409` here, no `viewer` session has loaded the list, and the override path has never
+  been exercised against a customer whose consent was withdrawn between page load and
+  click.
