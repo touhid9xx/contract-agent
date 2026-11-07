@@ -2650,11 +2650,22 @@ thing to build was therefore not the consumer but the input it would consume.
   per-tenant quota, no garbage collection for the unreferenced blobs the
   write-before-commit order can leave behind, and no re-wrapping of already sealed
   blobs during a rotation (they stay readable through `ENCRYPTION_KEY_PREVIOUS`
-  until re-uploaded). Finally, the harness's shell died partway through writing
-  this entry — the same fault `D10-24` recorded — so the counts above are from a
-  run earlier in the same session, and **no `backend/` file changed between that
-  run and these edits**, which is what keeps them accurate. What has **not**
-  happened, for the same reason: **the commit.** Nothing could start a process,
-  so the hook gate that would re-run `ruff` and `mypy` over this change has not
-  run either, and that is recorded as "not run" rather than "passed" — the same
-  distinction `D10-24` had to make.
+  until re-uploaded). Finally, two corrections to what this entry first
+  recorded, kept visible rather than smoothed over. The harness's shell was dead
+  while most of it was written — the same fault `D10-24` recorded — so the counts
+  above came from an earlier run in the same session and the commit was left
+  undone. Restarting the IDE cleared it: the suite was re-run from `backend/` and
+  **exited 0 with 827 tests, 0 failures, 0 errors, 15 skipped**, matching the
+  figures above (read from `--junit-xml`, because this shell drops pytest's final
+  summary line under redirection). The slice landed as `a5b0f88`, and `git
+  commit` ran the full 17-hook gate green — `ruff`, `ruff format`,
+  `mypy --strict`, `bandit`, and the root and demo `tsc --noEmit` and `eslint`
+  hooks all reported **Passed**, not "(no files to check)". So "not run" became
+  "passed", which is the only way that record was allowed to change.
+
+  One thing observed and deliberately not fixed: `test_escalation_scanner::
+  test_run_forever_stops_when_the_event_is_set` failed **once in five full runs**
+  with a SQLAlchemy `OperationalError`, and passed both in isolation and on every
+  rerun. It is pre-existing, untouched by this slice, and recorded here rather
+  than quietly re-run until green — a test that fails one time in five is a fact
+  about the suite, not noise to be pressed out of the transcript.

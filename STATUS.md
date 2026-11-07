@@ -218,7 +218,7 @@ surfaced a defect that had been live since `F2`: the backend image's `HEALTHCHEC
 probes `http://127.0.0.1:8000/health`, which only the API answers, so `relay` had been
 reporting `unhealthy` for its entire life while doing its job correctly. No `backend/`
 file changed, so the suite stays **805**.
-**Then the ingestion starts keeping the document** (`D10-26`, `feat(contracts)`):
+**Then the ingestion starts keeping the document** (`a5b0f88`, `D10-26`, `feat(contracts)`):
 `Contract.storage_path` has been in `0001` since the first migration with **no writer
 and no reader**, which is the whole of gap 12 and the reason the gap-5 consumer has no
 work — `extract_contract` needs text, and the metadata route has never held any.
@@ -237,7 +237,10 @@ request body the moment `Depends()` looked at its signature. The suite moved fro
 to **827** (812 passed, 15 skipped: 13 MySQL-unreachable, 1 Kafka opt-in, 1 Windows
 symlink). No migration: `storage_path` and `sha256` already exist, so the head stays
 `0006`. **What is still true:** `storage_path` now has a writer and still has no reader,
-so this closes the **input** half of gap 12 and nothing at all about gap 5.
+so this closes the **input** half of gap 12 and nothing at all about gap 5. It was written
+while the harness's shell could start no process at all, so it was recorded ungated and
+uncommitted; restarting the IDE cleared the fault, the suite was re-run green
+(**827 / 0 failed / 15 skipped**, exit 0), and the 17-hook gate ran green over the commit.
 
 ## Phase history
 
@@ -2725,16 +2728,23 @@ Both were live before it and neither was visible by reading the file it lived in
 | Rotation reads still work | `test_a_document_sealed_before_a_rotation_is_still_readable` | readable through `ENCRYPTION_KEY_PREVIOUS` |
 | The route is exercised, not assumed | `TestClient` through the real ASGI app | 201, 409 duplicate, 413 oversize, 422 blank `customer_ref`, role refusal, two-tenant blob sharing, and the no-key 503 |
 | Compose carries the volume | `docker compose config --format json` | `documents` volume + the absolute path on `api` and all three workers, with `read_only` still `true` |
+| Commit gate | `git commit` (all 17 hooks) on `a5b0f88` | **all green** — `ruff`, `ruff format`, `mypy --strict`, `bandit`, and the root **and** demo `tsc --noEmit` + `eslint` hooks each reported **Passed**, not `(no files to check)` |
 
-The counts above come from a run **earlier in the same session**: the harness's shell then
-died — the same fault `D10-24` recorded, and it was still dead while this section was
-written, including every retry (`cmd /c echo` hangs, so it is the runner and not git). No
-`backend/` file changed between that run and these edits, which is what keeps the counts
-accurate. What has **not** happened: **the commit**, and therefore the 17-hook gate that
-would re-run `ruff`, `mypy` and the frontend typecheck over it — recorded as "not run"
-rather than "passed", exactly as `D10-24` had to. The working tree therefore holds the
-whole slice uncommitted. When the commit lands, a follow-up docs commit names the hash, as
-every other slice's did.
+The counts above were first measured earlier in the same session, because the harness's
+shell had died — the same fault `D10-24` recorded — and it was still dead while this section
+was written, every retry included (`cmd /c echo` hung, so it was the runner and not git).
+Restarting the IDE cleared it. The suite was then re-run from `backend/` and **exited 0:
+827 tests, 0 failures, 0 errors, 15 skipped** — the same figures, read from `--junit-xml`
+because this shell drops pytest's final summary line under redirection, not because
+anything was assumed. The slice landed as **`a5b0f88`** and the full 17-hook gate ran green
+over it, so the two facts `D10-24` had to keep apart agree here: written, tested, gated and
+committed.
+
+One honest blemish, and it is not this slice's: `test_escalation_scanner::
+test_run_forever_stops_when_the_event_is_set` failed **once across five full runs** with a
+SQLAlchemy `OperationalError`, then passed in isolation and on every rerun. It is
+pre-existing and untouched here, and is left visible rather than re-run until it looked
+green.
 
 ### What this does not do — stated, not buried
 
