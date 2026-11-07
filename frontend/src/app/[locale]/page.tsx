@@ -122,16 +122,20 @@ export default function HomePage() {
           <p className="text-sm text-muted-foreground">{t("home.body")}</p>
 
           {/*
-            The review queue is the one screen that does work rather than report
-            it, so it is linked from here instead of being reachable only by URL.
-            Shown whether or not there is a session: the queue itself asks for one,
-            and hiding the link would leave a signed-out visitor no way to learn
-            the screen exists.
+            The two screens that do work rather than report it are linked from
+            here instead of being reachable only by URL. Shown whether or not
+            there is a session: each asks for one itself, and hiding the links
+            would leave a signed-out visitor no way to learn they exist.
           */}
           <div className="flex flex-wrap items-center gap-2">
             <Link href={`/${locale}/review`}>
               <Button size="sm" variant="secondary">
                 {t("nav.review")}
+              </Button>
+            </Link>
+            <Link href={`/${locale}/escalations`}>
+              <Button size="sm" variant="secondary">
+                {t("nav.escalations")}
               </Button>
             </Link>
           </div>

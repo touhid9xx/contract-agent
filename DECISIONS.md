@@ -2286,3 +2286,69 @@ ones about how it talks to `app/api/v1/review.py`.
   and the read-only `viewer` path has never been seen with a real viewer session. The
   residue this closes is one held item, not the whole of gap 15's "no screen" bullet:
   `agent`, `notification` and `escalation` are still `TestClient`-only.
+
+### D10-23 — The escalation screen separates "someone worked it" from "the customer answered"
+
+`frontend/src/app/[locale]/escalations/page.tsx` is the second screen that can complete
+work, and it is the one that makes the previous two slices usable: `6fe6158` taught the
+system to *notice* a silent contract on its own, so a queue nobody can work is a strictly
+worse state than no queue at all. The interesting decisions are not about styling; they
+are about which distinctions the screen refuses to collapse.
+
+- **Resolving is not responding.** `PATCH /escalations/{id}` closes a *queue item*; the
+  contract keeps `escalated` because nobody has heard from the customer. Only
+  `POST /contracts/{id}/response` moves it to `responded`, and it closes the open
+  escalation as a side effect in the same transaction. The screen therefore shows two
+  visually distinct actions with different vocabulary — "Close the queue item" and
+  "Customer replied on …" — because a single "done" button would let an operator report
+  a customer answer they never received. The reply's outcome is reported at page level,
+  not on the card, precisely because recording it usually deletes that card: a message
+  rendered inside a row would vanish with the row.
+- **Late is read, not recomputed.** `overdue` comes from the server, which decided it
+  against the same clock that wrote `sla_deadline`; a client computing it from the
+  deadline would disagree with the row it is displaying for anyone whose clock is off.
+  For the same reason `sla_breached` is neither a filter nor a settable status: it is
+  derived, and `_require_a_change`/`refusal_to_transition` refuse it. The working queue
+  filters to `open` + `in_progress`, and lateness is a badge.
+- **A reply has no body.** There is no field on this screen for what the customer said,
+  because the request model has no field for it: `customer_responses` records *that* they
+  answered, on which channel and when. A textarea here would put the largest PII surface
+  in the app into a table that every other decision since gap 20 went out of its way to
+  keep free of plaintext.
+- **Channel labels come from a record, not from string surgery.** `CHANNEL_KEYS` is
+  `as const satisfies Record<ContactChannel, string>`, so `Channel` gaining a member is a
+  compile error here. `t("…channel" + value)` would have resolved to a missing key on a
+  screen with no test runner to catch it.
+- **A `409` refetches; it never splices.** Same rule and same reason as D10-22: a
+  resolved row leaves the working queue, so the loaded page is no longer what the server
+  would answer. The `onError` path invalidates on `409` and `404` as well, and the two
+  409 codes are translated separately — `ESCALATION_CLOSED` ("someone closed this under
+  you") and `INVALID_TRANSITION` ("that is not a move this queue allows") are different
+  facts, and one shared "conflict" sentence would erase the difference.
+- **A row's error belongs to that row.** Attribution again uses the mutation's
+  `variables` (`update.variables?.id`), and one mutation serves claim and resolve so the
+  busy state is `update.variables?.id` rather than a per-card flag that can outlive its
+  request.
+- **One `Intl.DateTimeFormat`, used for both timestamps.** `resolved_at` was initially
+  rendered as a raw ISO string while `sla_deadline` was localised — a plausible-looking
+  inconsistency, and the kind that only shows up in a locale nobody tests.
+- **The message files are at parity, measured not assumed.** `en.json` and `bn.json` are
+  165 flattened keys each with zero one-sided keys, 58 of them under `escalations`; the
+  flattened-key comparison was run rather than eyeballed, and it caught an unused
+  `statusLabel` that was then deleted from both files instead of shipped as dead weight.
+  The home page links this screen with the same reasoning as the review link (D10-22):
+  shown signed-out, because hiding it leaves a visitor no way to learn it exists.
+- **What this proves and what it does not.** Proven: the TypeScript language service
+  reports no error in any edited file, and every wire shape (`EscalationView`,
+  `EscalationListResponse`, `EscalationUpdateRequest`, `RecordResponseResponse`, the
+  repeated `?status=` query, the `overdue`/`sla_hours` echoes) was read out of
+  `app/api/v1/escalations.py` rather than guessed. Not proven: **`npm run typecheck` and
+  `eslint` have not been run on it** — the shell was unavailable for the whole of the
+  session that wrote the screen, so no process could start, and "the language service is
+  quiet per file" is a weaker statement than "the project compiles and lints". Also not
+  proven: **no browser has run it** — there is still no frontend test
+  runner, so this slice adds no test count at all; no two operators have collided on a
+  `409`; no `viewer` session has loaded the queue; and nothing in the repo starts the
+  scanner that raises the rows this screen lists (no compose service, systemd unit or
+  cron entry), so in a real deployment the queue fills only if an operator runs the
+  worker by hand.

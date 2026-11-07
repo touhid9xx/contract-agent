@@ -363,6 +363,118 @@ export const review = {
     request<FieldValue>(`/review/${fieldId}/reveal`, { method: "POST", accessToken }),
 };
 
+/** Wire values of `app.db.enums.EscalationStatus`. */
+export type EscalationStatus = "open" | "in_progress" | "resolved" | "sla_breached";
+
+/** Wire values of `app.db.enums.ResponseType`. */
+export type ResponseType = "reply" | "click" | "call_answered" | "manual";
+
+/** The channels a customer can reply on (`app.db.enums.Channel`). */
+export type ContactChannel = "email" | "sms" | "voice";
+
+/**
+ * One queue item (`app.api.v1.escalations.EscalationView`).
+ *
+ * `overdue` is a *server* answer, computed from `sla_deadline` and the clock when
+ * the queue was read rather than read from a column — `sla_breached` is derived,
+ * and the update route refuses an operator who tries to set it by hand. A client
+ * that recomputed it from `sla_deadline` would drift from the row it displays.
+ */
+export interface Escalation {
+  id: number;
+  contract_id: number;
+  status: EscalationStatus;
+  assigned_to: string | null;
+  /** When this row becomes late. UTC, so the browser can localise it. */
+  sla_deadline: string;
+  resolved_at: string | null;
+  resolution_note: string | null;
+  overdue: boolean;
+  /** Echo this back with an update; the server refuses a stale one with 409. */
+  version: number;
+}
+
+/** The queue: the rows, and the two numbers its header reports. */
+export interface EscalationQueue {
+  items: Escalation[];
+  /** How many rows this response carries, not how many the tenant has. */
+  count: number;
+  /** How many of `items` have passed their deadline. */
+  overdue: number;
+  /** The tenant's configured SLA, echoed so the UI never hard-codes "48". */
+  sla_hours: number;
+}
+
+/**
+ * The two changes an operator makes, and the `version` they were looking at.
+ *
+ * `resolution_note` is only legal alongside `status: "resolved"` — the server
+ * rejects it otherwise rather than ignoring it, because a note attached to an
+ * open row is a note nothing reads.
+ */
+export interface EscalationUpdate {
+  assigned_to?: string | null;
+  status?: EscalationStatus;
+  resolution_note?: string;
+  version: number;
+}
+
+/** That a customer answered, plus the two side effects it caused. */
+export interface RecordedResponse {
+  response: {
+    id: number;
+    contract_id: number;
+    channel: ContactChannel;
+    response_type: ResponseType;
+    received_at: string;
+  };
+  contract_id: number;
+  /** Unchanged when the contract had already closed: a late reply is still a reply. */
+  contract_status: ContractStatus;
+  /** Set when this reply closed the contract's open escalation. */
+  resolved_escalation_id: number | null;
+}
+
+/**
+ * The escalation surface (gap 15).
+ *
+ * Reading needs any authenticated role — knowing what is late is not a write —
+ * while claiming, resolving and recording a reply are `OPERATOR`/`ADMIN` only.
+ *
+ * Two actions that look alike are kept apart on purpose: `update` closes a
+ * *queue item*, and `recordResponse` records that the *customer answered*. Only
+ * the second moves a contract to `responded`; a hand-resolved escalation leaves
+ * the contract `escalated`, because nobody has heard from them.
+ */
+export const escalations = {
+  /** The queue, most urgent first. Omitted filters return resolved rows too. */
+  queue: (accessToken: string, statuses?: EscalationStatus[]) =>
+    request<EscalationQueue>(
+      statuses === undefined || statuses.length === 0
+        ? "/escalations"
+        : `/escalations?${statuses.map((value) => `status=${value}`).join("&")}`,
+      { accessToken },
+    ),
+
+  update: (accessToken: string, escalationId: number, update: EscalationUpdate) =>
+    request<Escalation>(`/escalations/${escalationId}`, {
+      method: "PATCH",
+      body: update,
+      accessToken,
+    }),
+
+  /**
+   * Record that the customer replied. The reply body is never sent: this route
+   * stores *that* they answered, on which channel and when — nothing more.
+   */
+  recordResponse: (accessToken: string, contractId: number, channel: ContactChannel) =>
+    request<RecordedResponse>(`/contracts/${contractId}/response`, {
+      method: "POST",
+      body: { channel },
+      accessToken,
+    }),
+};
+
 /**
  * Liveness probe.
  *
