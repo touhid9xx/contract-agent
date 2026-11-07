@@ -526,28 +526,49 @@ def test_an_idle_pass_reports_no_work(session_factory: sessionmaker[Session]) ->
 
 
 def test_run_forever_stops_when_the_event_is_set(
-    session_factory: sessionmaker[Session], tenant: Tenant
+    session_factory: sessionmaker[Session],
+    tenant: Tenant,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The loop is stoppable, and it does the work before it is asked to stop."""
+    """The loop is stoppable, and it does the work before it is asked to stop.
+
+    This thread does not touch the database until the loop has been joined, and
+    that is the point rather than an accident of ordering. The suite's in-memory
+    SQLite uses ``StaticPool``, so every session in a test — in every thread — is
+    handed the *same* DBAPI connection. A ``SELECT`` from here while the loop
+    commits there is two threads driving one ``sqlite3`` connection, which raises
+    ``OperationalError`` (or ``SystemError`` out of ``commit``) rarely enough to
+    read as noise: this test used to fail about once in five full runs, always
+    here and never in isolation. So the first pass is observed through an event the
+    worker sets from its own thread — the test still fails on the behaviour rather
+    than on a slow machine — and the effect is read after the join.
+    """
     contract = make_contract(session_factory, tenant)
     add_contact(session_factory, contract, days_ago=NO_RESPONSE_DAYS + 1)
 
     worker = scanner(session_factory)
+    opened = threading.Event()
+    original = worker.run_once
+
+    def _tick_then_report() -> ScanResult:
+        result = original()
+        if result.opened:
+            opened.set()
+        return result
+
+    monkeypatch.setattr(worker, "run_once", _tick_then_report)
+
     stop = threading.Event()
     thread = threading.Thread(target=worker.run_forever, args=(stop,), daemon=True)
     thread.start()
     try:
-        # Wait for the first pass rather than sleeping a fixed time, so the test
-        # fails on the behaviour and not on a slow machine.
-        deadline = _naive_now() + timedelta(seconds=10)
-        while not escalations_for(session_factory, contract.id) and _naive_now() < deadline:
-            thread.join(0.02)
-        assert escalations_for(session_factory, contract.id), "the scanner never opened one"
+        assert opened.wait(timeout=10), "the scanner never opened one"
     finally:
         stop.set()
         thread.join(timeout=5)
 
     assert not thread.is_alive()
+    assert len(escalations_for(session_factory, contract.id)) == 1
 
 
 def test_a_refusal_does_not_abort_the_rest_of_the_batch(

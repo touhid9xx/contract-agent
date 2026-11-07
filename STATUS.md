@@ -290,6 +290,22 @@ migration (`0006`), no new dependency. With this, **no v1 router is `TestClient`
 what still holds is that no browser has run any screen, because there is no frontend test
 runner.
 
+**Then the "pre-existing flaky test" turns out to be the harness** (`D10-30`, `chore(tests)`):
+`test_escalation_scanner::test_run_forever_stops_when_the_event_is_set` had been recorded as
+failing about once in five full runs for five slices, each time labelled *pre-existing* and
+left visible. That label named the owner and not the cause. The cause is in `conftest.py`:
+`db_engine` uses `StaticPool`, which is what makes `:memory:` reachable from a second Session
+and also what hands every Session in a test — in every thread — the **same**
+`sqlite3.Connection`. The old test polled the database from the main thread while the worker
+thread committed, and two threads driving one `sqlite3` connection raises
+`OperationalError`/`SystemError` at roughly one statement in a thousand, which is exactly the
+rate that reads as noise. **No production file changed**: `run_forever` already honours
+`stop.wait()`. The test now observes the first pass through an event the worker sets from its
+own thread and reads the rows after `join()`, and the `db_engine` docstring states the
+single-connection constraint so the next threaded test meets the rule rather than the fault.
+The suite is **840 collected, 825 passed, 15 skipped, 0 failed** — identical to before the
+fix, because the test was never legitimately failing.
+
 ## Phase history
 
 | Phase | State |
@@ -2811,7 +2827,8 @@ One honest blemish, and it is not this slice's: `test_escalation_scanner::
 test_run_forever_stops_when_the_event_is_set` failed **once across five full runs** with a
 SQLAlchemy `OperationalError`, then passed in isolation and on every rerun. It is
 pre-existing and untouched here, and is left visible rather than re-run until it looked
-green.
+green. *(Diagnosed later, in `D10-30`: the fault was the suite's shared `StaticPool`
+connection, not the scanner. The test is fixed and the record here is left as written.)*
 
 ### What this does not do — stated, not buried
 
@@ -3072,6 +3089,47 @@ staging, as `D10-29` promised; it was gitignored, so its absence is not a tree c
   shortcut.
 - **Gap 5 is untouched.** The `contract.ingested` consumer is still unwritten and still
   blocked on an owner decision.
+
+### Slice — the flaky scanner test was a harness fault (`D10-30`)
+
+A test-only slice. Five earlier sections recorded `test_escalation_scanner::
+test_run_forever_stops_when_the_event_is_set` failing roughly once in five full runs with a
+SQLAlchemy `OperationalError` and called it *pre-existing*. That was true and did no work: it
+named the owner, not the cause. **No production file changed.**
+
+| File | Change |
+| --- | --- |
+| `backend/tests/test_escalation_scanner.py` | The shutdown test observes the first pass through a `threading.Event` the worker sets **from its own thread**, then reads rows after `join()`, instead of polling the DB from the main thread while the worker commits. |
+| `backend/tests/conftest.py` | `db_engine` docstring states the single-connection constraint (`StaticPool` ⇒ one DBAPI connection per test, in every thread) and names the one test that starts a thread. |
+
+**The mechanism.** `db_engine` builds `sqlite+pysqlite:///:memory:` with `poolclass=StaticPool`
+— required, because without it a second Session sees a different empty database. The cost is
+that every Session in a test, in every thread, is handed the **same** `sqlite3.Connection`.
+Driving one connection from two threads raises `SystemError`/`OperationalError` at about one
+statement in a thousand, which is exactly the rate that reads as noise. A probe established
+both halves of that before anything was edited: identical connection object ids from two
+threads, then the fault under contention. The only other threaded test
+(`test_outbox_relay::test_run_forever_processes_rows_then_stops`) polls an in-memory list, not
+the database, so this was **one site, not a pattern**.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Repaired test, repeated | `.agent-cache/repeat_test.py` (in-process, 30 rounds) | **30/30 passed, 0 failed** |
+| Full suite | `python -m pytest` from `backend/` | **840 collected — 825 passed, 15 skipped, 0 failed**, exit **0** (JUnit: `tests=840 failures=0 errors=0 skipped=15`) |
+
+The count is **identical to the pre-fix baseline**, and that identity is the evidence: the test
+was never legitimately failing, so removing a fault from it changes no number. A predicted
+**826** passes stated earlier in this session was my arithmetic error — 840 − 15 = 825, and
+there was no skipped test to revive.
+
+**What is not proven.** The A/B control — the *old* body run under the same repeat driver to
+measure its failure rate directly — was written as `tests/test_zz_flake_probe.py` and deleted
+**unrun**, because an untracked module inside the `tests` package is collected by the suite.
+So "about one statement in a thousand" rests on the contention probe, not on a measured per-run
+rate for that specific test. The structural argument does not need it: the probe showed the
+shared connection and the fault, and the old body demonstrably did the unsafe thing. The probe
+and repeat-driver scripts live in `.agent-cache/`, which is gitignored — reproducible on the
+machine that ran them, not from the repo.
 
 ## Next permitted step
 

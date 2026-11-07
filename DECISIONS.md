@@ -2669,6 +2669,9 @@ thing to build was therefore not the consumer but the input it would consume.
   rerun. It is pre-existing, untouched by this slice, and recorded here rather
   than quietly re-run until green — a test that fails one time in five is a fact
   about the suite, not noise to be pressed out of the transcript.
+  *(Diagnosed later, in `D10-30`: the fault was the suite's shared `StaticPool`
+  connection, not the scanner. The test is fixed; this record is left as written,
+  because "pre-existing" was true and merely incomplete.)*
 
 ### D10-27 — The contract aggregate gets a read side, and the cursor is its id
 
@@ -2946,3 +2949,66 @@ the only reason they are a statement about `bcfce75` rather than about a working
 resembled it. The hash and the gate rows in this entry's `STATUS.md` counterpart were added
 by the follow-up `docs(status)` commit rather than back-dated into the slice — the same
 convention `D10-26`…`D10-28` used.
+
+### D10-30 — The scanner "flake" was a harness fault, and `run_forever` was never wrong
+
+Five slices recorded the same line and nobody diagnosed it: `test_escalation_scanner::
+test_run_forever_stops_when_the_event_is_set` failed about **once in five full runs** with a
+SQLAlchemy `OperationalError`, then passed in isolation and on every rerun. Each record called
+it *pre-existing* and *left visible*. That was honest about who owned it and silent about what
+it was — a placeholder for a diagnosis not yet made. It is now diagnosed, and the diagnosis
+exonerates the code under test.
+
+**The mechanism, measured rather than inferred.** `db_engine` builds
+`sqlite+pysqlite:///:memory:` with `poolclass=StaticPool`. `StaticPool` is deliberate: without
+it a second Session gets a *different* empty database, and the suite's multi-session tests
+could not work at all. The cost is that every Session in a test — in **every thread** — is
+handed the **same** `sqlite3.Connection`. `.agent-cache/probe_staticpool_threads.py` printed
+identical connection object ids from two threads, then drove one connection from two threads
+concurrently until it faulted: `SystemError: <built-in method commit of sqlite3.Connection …
+returned NULL`, at roughly **one statement in a thousand**. That rate is exactly why it looked
+like noise: a test that runs a few statements has a small chance of tripping it, and a full
+suite has enough chances to trip it once in five runs.
+
+**The old test was the trigger.** It started `run_forever` in a daemon thread and, from the
+**main** thread, polled `escalations_for(...)` in a loop while the worker committed — two
+threads on one connection, precisely the pattern the probe showed to be unsafe. The failure was
+the harness's, not the scanner's: `run_forever` already honours `stop.wait()` and already backs
+off between passes, and **no production file changed** in this slice.
+
+**It was one site, not a pattern.** The only other test that starts a thread is
+`test_outbox_relay::test_run_forever_processes_rows_then_stops`, and it polls
+`publisher.published` — an in-memory list the publishing thread appends to — so it never races
+the database. Checking that before changing anything is what kept this from becoming a
+suite-wide refactor of a non-problem.
+
+**The fix is in the observation, not the subject.** The test now wraps `run_once` via
+`monkeypatch` so the **worker's own thread** sets a `threading.Event` when a pass opens an
+escalation, waits on that event from the main thread, and reads the escalation rows **after**
+`join()`. It still fails if the loop does not do the work — the assertion is on behaviour with a
+10-second ceiling, not on elapsed time — but the main thread no longer touches the database
+while the worker does. `conftest.py`'s `db_engine` docstring now states the single-connection
+constraint outright and names the one test that starts a thread, so the next person adding a
+threaded test meets the rule before the fault rather than after it.
+
+**Verified by running.** The repaired test passed **30/30 rounds** under an in-process repeat
+driver (`.agent-cache/repeat_test.py`), which amortises interpreter and plugin startup so thirty
+repetitions cost one suite's worth of time. The full suite then ran from `backend/` and exited
+**0: 840 tests, 0 failures, 0 errors, 15 skipped — 825 passed** (JUnit XML, because this shell
+drops pytest's summary line under redirection). That is **identical to the pre-fix baseline**,
+and the identity is the point: the test was never legitimately failing, so removing a fault from
+it changes no count. A predicted 826 passes, stated earlier in this session, was an arithmetic
+error on my part — 840 collected minus 15 skipped is 825, and there was no skipped test to
+revive.
+
+**Two limits, stated rather than smoothed over.** First, the A/B control — the *old* body run
+under the same repeat driver to measure its per-run failure rate directly — was written as
+`tests/test_zz_flake_probe.py`, and it was **deleted unrun** before any commit, because it was
+an untracked module inside the `tests` package and would have been collected by the suite. So
+the "~1 in 1000 statements" figure rests on the probe's contention experiment, not on a measured
+failure rate for that specific test across runs. The structural argument does not depend on it:
+the probe demonstrated the shared connection and the fault, and the old test demonstrably did
+the unsafe thing. Second, this slice touched **two test files and no documentation outside this
+entry and its `STATUS.md` counterpart**; the backend suite was re-run here because test code
+changed, and the commit gate result for it is recorded in the follow-up `docs(status)` commit,
+not back-dated into this one.

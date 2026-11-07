@@ -124,7 +124,16 @@ def client(settings: Settings, session_factory: sessionmaker[Session]) -> Iterat
 
 @pytest.fixture
 def db_engine() -> Iterator[Engine]:
-    """A fresh in-memory database per test, with foreign keys enforced."""
+    """A fresh in-memory database per test, with foreign keys enforced.
+
+    ``StaticPool`` is what makes ``:memory:`` reachable from more than one session
+    per test — and also what makes every session hand out the *same* DBAPI
+    connection. So a test may use the database from a worker thread, or from the
+    test thread, but not from both at once: concurrent use of one ``sqlite3``
+    connection raises ``OperationalError``/``SystemError`` at a rate low enough to
+    look like flakiness. ``test_escalation_scanner`` is the one test that starts a
+    worker thread, and it waits on an event and reads the rows only after joining.
+    """
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",
         connect_args={"check_same_thread": False},
