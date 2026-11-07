@@ -13,6 +13,7 @@ help:
 	@echo "fmt        ruff format + prettier"
 	@echo "up         docker compose up --build"
 	@echo "down       docker compose down"
+	@echo "logs       follow every service; make logs S=api for one"
 	@echo "demo       run the Phase 0 mocked demo"
 
 bootstrap:
@@ -40,8 +41,10 @@ up:
 down:
 	docker compose down
 
+# Every service by default. While this followed only `api`, a crash-looping
+# worker was invisible from the command an operator reaches for first.
 logs:
-	docker compose logs -f api
+	docker compose logs -f $(S)
 
 demo:
 	npm run demo

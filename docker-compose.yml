@@ -1,16 +1,58 @@
 # Local stack.
-#   mysql  — the real database (F2)
-#   api    — FastAPI behind uvicorn
-#   relay  — outbox relay worker (F2); a separate process on purpose, because the
-#            API must never publish synchronously and the relay must survive API
-#            restarts.
+#   mysql     — the real database (F2)
+#   api       — FastAPI behind uvicorn
+#   relay     — outbox relay worker (F2); a separate process on purpose, because
+#               the API must never publish synchronously and the relay must
+#               survive API restarts.
+#   scheduler — notification scheduler worker (gap 22): claims a due row and sends
+#               it, so a reminder goes out because the clock said so, not because
+#               somebody pressed a button.
+#   scanner   — escalation scanner worker (gap 15): opens an escalation when a
+#               contract has gone quiet, so `escalated` is reachable without an
+#               operator noticing by hand.
 # Kafka: the transport landed in F4 (EVENT_TRANSPORT=kafka, read from .env by
-#        both services), but no broker is defined here yet, so the relay defaults
+#        every worker), but no broker is defined here yet, so the relay defaults
 #        to EVENT_TRANSPORT=none and parks events instead of dropping them.
 #        F5 added /health/ready, which probes MySQL and — when a broker is
 #        configured — Kafka. No Redis/Ollama service is defined yet because no
 #        code talks to either; they arrive with the milestones that use them.
 name: contract-agent
+
+# One image, five processes: each worker is the API image with a different
+# `command`, so worker code is never a second copy of the application. The shared
+# half is anchored rather than repeated — three near-identical service blocks are
+# exactly where a `read_only` or a `no-new-privileges` line goes missing in one of
+# them, and then one worker is quietly less contained than the other two.
+x-worker: &worker
+  build:
+    context: .
+    dockerfile: Dockerfile.backend
+  image: contract-agent-api:dev
+  env_file:
+    - .env
+  environment:
+    APP_ENV: ${APP_ENV:-development}
+    LOG_JSON: ${LOG_JSON:-false}
+    # Overrides whatever host-side URL .env holds: inside the network the
+    # database is reachable as `mysql`, never as 127.0.0.1.
+    DATABASE_URL: mysql+pymysql://${MYSQL_USER:-contract_agent}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE:-contract_agent}?charset=utf8mb4
+  depends_on:
+    mysql:
+      condition: service_healthy
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp
+  security_opt:
+    - no-new-privileges:true
+  # The image's HEALTHCHECK asks http://127.0.0.1:8000/health, which only the API
+  # answers. Inherited unchanged, every worker would report `unhealthy` for its
+  # whole life while working perfectly — a probe that can only ever be wrong, and
+  # the kind of noise that teaches an operator to ignore the column. Switched off
+  # here rather than left to assert a port nothing listens on; the worker's own
+  # liveness signal is its log line per tick.
+  healthcheck:
+    disable: true
 
 services:
   mysql:
@@ -79,30 +121,30 @@ services:
       - no-new-privileges:true
 
   relay:
-    build:
-      context: .
-      dockerfile: Dockerfile.backend
-    image: contract-agent-api:dev
+    <<: *worker
     # The relay is the same image as the API with a different entry point.
     command:
       - python
       - -m
       - app.workers.outbox_relay
-    env_file:
-      - .env
-    environment:
-      APP_ENV: ${APP_ENV:-development}
-      LOG_JSON: ${LOG_JSON:-false}
-      DATABASE_URL: mysql+pymysql://${MYSQL_USER:-contract_agent}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE:-contract_agent}?charset=utf8mb4
-    depends_on:
-      mysql:
-        condition: service_healthy
-    restart: unless-stopped
-    read_only: true
-    tmpfs:
-      - /tmp
-    security_opt:
-      - no-new-privileges:true
+
+  scheduler:
+    <<: *worker
+    # Gap 22. Without it, `scheduled_at` was a column nothing read: a reminder was
+    # only ever sent by hand.
+    command:
+      - python
+      - -m
+      - app.workers.notification_scheduler
+
+  scanner:
+    <<: *worker
+    # Gap 15's trigger. Without it, a contract could sit unanswered for a year
+    # with nothing in the codebase noticing.
+    command:
+      - python
+      - -m
+      - app.workers.escalation_scanner
 
 volumes:
   mysql-data:

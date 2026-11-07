@@ -2220,12 +2220,19 @@ column it reads or writes already existed.
   19-test `-m integration` leg passes 19/19. Not proven: **the locking is argued, not
   demonstrated** — the SQLite leg runs the same claim query with no row locks at all,
   so `SKIP LOCKED` on this query is exercised only by the MySQL leg, and even there
-  two concurrent scanners are never actually raced; **nothing runs the scanner** — no
+  two concurrent scanners are never actually raced; ~~**nothing runs the scanner** — no
   compose service, unit or cron invokes `python -m app.workers.escalation_scanner`, so
   the trigger now exists but has no daemon, which is the same residue the outbox relay
-  and the notification scheduler still carry; `sla_breached` stays unreachable as a
-  stored status; there is still no screen for the queue; and `reminder_sent` remains an
-  enum member with no writer.
+  and the notification scheduler still carry~~ (amended by `D10-25`, and it was also
+  wrong about the relay: the relay has had a compose service since F2, which is the whole
+  reason publishing worked while escalating did not. Two workers lacked a daemon, not
+  three. `docker-compose.yml` now defines `scanner` and `scheduler` services, so the
+  local stack starts both; what survives is narrower — no unit, no cron, no orchestrator,
+  `restart: unless-stopped` alone, and a running scanner still finds nothing to escalate
+  until a contract has actually been contacted, which is gap 5);
+  `sla_breached` stays unreachable as a stored status; ~~there is still no screen for the
+  queue~~ (closed by `D10-23`: `/[locale]/escalations` reads the queue and works it);
+  and `reminder_sent` remains an enum member with no writer.
 
 ### D10-22 — The review screen mirrors the route's shape, and a conflict reloads instead of patching
 
@@ -2350,9 +2357,13 @@ are about which distinctions the screen refuses to collapse.
   the whole project and passed. Still not proven: **no browser has run it** — there is
   still no frontend test runner, so this slice adds no test count at all; no two
   operators have collided on a `409`; no `viewer` session has loaded the queue; and
-  nothing in the repo starts the scanner that raises the rows this screen lists (no
+  ~~nothing in the repo starts the scanner that raises the rows this screen lists (no
   compose service, systemd unit or cron entry), so in a real deployment the queue fills
-  only if an operator runs the worker by hand.
+  only if an operator runs the worker by hand~~ — amended by `D10-25`, which adds a
+  `scanner` service to `docker-compose.yml`: on that stack the queue now fills on its own.
+  What survives: no unit, cron entry or orchestrator definition exists outside compose,
+  and a scanner that is up still raises nothing until a contract has actually been
+  contacted (gap 5), so a freshly seeded database still shows an empty queue.
 
 ### D10-24 — The decision screen offers the choice and lets the policy refuse
 
@@ -2432,3 +2443,79 @@ by default.
   test in `backend/tests`. No two operators have raced a `409` here, no `viewer` session has
   loaded the list, and the override path has never been exercised against a customer whose
   consent was withdrawn between page load and click.
+
+### D10-25 — Every poller is a compose service, and a worker stops reporting a port it does not serve
+
+Three modules in `app/workers/` are written to run forever: `outbox_relay`,
+`notification_scheduler`, `escalation_scanner`. All three already end identically — a
+`main() -> int`, an `if __name__ == "__main__"` guard, `SIGINT` and `SIGTERM` bound to a
+`threading.Event` that the loop tests instead of `sleep`, and `engine.dispose()` in a
+`finally` — so the code for an unattended deployment was written, and the tests drive
+`tick()` directly, which is why a suite of 805 tests never noticed that nobody started
+two of them. The gap was in `docker-compose.yml`: it defined `api` and `relay`, and that
+is all. The notification scheduler (gap 22) and the escalation scanner (gap 15) had no
+service anywhere, so a reminder went out on schedule only if a person ran the module by
+hand, and `escalated` was reachable without an operator only in tests. A worker that is
+never started is indistinguishable from a worker that is broken; both are silent.
+
+- **The daemon is a `command`, not a second image and not a second copy.** Each worker is
+  the API image with a different `command` — `python -m app.workers.<name>` — so worker
+  code cannot drift from the application code that the API serves. Five services share
+  one `Dockerfile.backend`; the differences between them are the entry points.
+- **The shared half is one `x-worker` anchor, and the relay moved onto it.** Three
+  near-identical service blocks are exactly where a `read_only: true` or a
+  `no-new-privileges:true` line goes missing in one of them, and the failure is invisible:
+  one worker is quietly less contained than the other two and nothing reports it. YAML
+  anchors make the shared half exist once. The relay was rewritten onto the anchor in the
+  same commit rather than left as the fourth hand-copied block, because the value of the
+  anchor is that *no* worker is the exception.
+- **A worker's healthcheck is switched off, not repointed.** This is the defect the slice
+  found, and it was live since F2. `Dockerfile.backend` declares a `HEALTHCHECK` that
+  fetches `http://127.0.0.1:8000/health`, which only uvicorn answers. Every worker
+  inherits it from the image, so `relay` has reported **unhealthy for its entire life
+  while working correctly**, and any `depends_on: {condition: service_healthy}` pointed at
+  a worker would have waited forever. Two wrong answers were available: a second
+  healthcheck that asserts nothing (a probe of a worker's own loop from inside the same
+  process proves the process is scheduled, which `PID 1` already implies), or a real
+  endpoint on every worker. Both add a listening surface to a process that has no reason
+  to have one, so the correct answer is `healthcheck: {disable: true}` — the probe is
+  removed rather than made to lie. The API keeps its liveness probe, and the note above it
+  explaining why it is `/health` and not `/health/ready` still stands.
+- **`make logs` followed `api` only, and was missing from `make help`.** With two services
+  that hid little; with five it hides a crash-looping worker from the first command an
+  operator reaches for. It now follows every service, and `make logs S=api` narrows it to
+  one, which is the same shape as `docker compose logs -f`.
+- **`D10-21` was wrong about which workers lacked a daemon, and is corrected rather than
+  quietly left.** It said "nothing runs the scanner … the same residue the outbox relay
+  and the notification scheduler still carry". Two carry it, not three: the relay has had
+  a compose service since F2, which is exactly why publishing works and escalating did
+  not. The error is worth recording because it is the failure mode of a residue written
+  from memory — a caveat copied forward stops being checked and starts being a claim. The
+  escape hatch is that the record now names the commit that fixed it.
+- **Both new services are default-on.** `docker compose up` now starts an escalation
+  scanner and a notification scheduler against whatever `DATABASE_URL` `.env` names. For
+  this project that is the intent — the stack should behave like the product — but it is a
+  behaviour change for an `.env` that predates the slice, and it means the local stack can
+  now write `Escalation` rows without anyone asking for one.
+- **What this proves and what it does not.** Proven, by running it:
+  `docker compose config --services` lists `mysql api relay scanner scheduler`; the JSON
+  render confirms each worker's `command` ends at the right module, `healthcheck.disable`
+  is `true` on all three workers and unset on `api`, and the anchor really merges
+  `read_only: true`, `restart: unless-stopped` and `no-new-privileges:true` into every one
+  of them. `env_file: .env` means the render fails on a tree with no `.env`, as this one
+  has none, so a temporary gitignored `.env` with placeholder passwords was used for the
+  checks and removed after each run. Not proven: **no container was built or started**, so
+  "the workers have a daemon" means compose *will* start them, not that they ran; the only
+  evidence about the running system is still `tick()`, called by tests. `restart:
+  unless-stopped` is the whole supervision story — no unit, no cron, no orchestrator, no
+  alert on a crash loop — and compose's 10-second stop grace is untuned, so a pass that
+  outlives it takes `SIGKILL` and rolls back without the graceful path finishing (an
+  exposure the relay already carried). Two scanner replicas are safe by argument, not by
+  test: the claim uses `SKIP LOCKED`, and no test races two scanners. And a daemon with
+  nothing to do still does nothing — the scheduler idles until something other than a
+  person creates a `Notification`, which is gap 5, and the scanner finds nothing to
+  escalate until a contract has actually been contacted. No `backend/` file changed, so
+  the suite stays at **805 collected — 804 passed, 1 skipped** and the migration head at
+  `0006`; this slice adds no test count of its own, which is the same limit `D10-22`,
+  `D10-23` and `D10-24` recorded and the reason the verification above is a table of
+  commands rather than a count.

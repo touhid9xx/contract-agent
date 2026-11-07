@@ -205,6 +205,19 @@ cleared the fault, `git commit` then ran the full 17-hook gate green — `tsc --
 rather than being rewritten to look like one. No `backend/` file changed, so the suite
 stays **805** — and this slice adds no test count of its own, because `frontend/` still
 has no test runner.
+**The next slice gives the workers a daemon** (`D10-25`): every module that polls — the
+outbox relay, the notification scheduler, the escalation scanner — was written as
+`python -m app.workers.<name>`, complete with a `SIGTERM` handler and a graceful loop
+exit, and only one of the three was ever *started* by anything. `docker-compose.yml`
+defined `api` and `relay`; the scheduler (gap 22) and the scanner (gap 15) had no
+service, no unit and no cron entry, so the two workers whose whole job is to notice
+something between requests ran only when a person typed their name. They are services
+now, sharing one `x-worker` anchor with the relay so that a missing `read_only` or
+`no-new-privileges` line cannot happen in one of them and not in the others. Doing that
+surfaced a defect that had been live since `F2`: the backend image's `HEALTHCHECK`
+probes `http://127.0.0.1:8000/health`, which only the API answers, so `relay` had been
+reporting `unhealthy` for its entire life while doing its job correctly. No `backend/`
+file changed, so the suite stays **805**.
 
 ## Phase history
 
@@ -1978,8 +1991,14 @@ fills already existed and was unused by any other path, so the migration head st
   Phase-0 demo shows is still an operator pressing a button; nothing scans for
   silence.~~ **Closed, not deleted, by `D10-21`:** `EscalationScanner` scans for silence
   and raises the escalation itself. What survives is narrower and worth keeping in
-  view — **nothing runs the scanner**: no compose service, unit or cron invokes it, so
-  a deployment that does not start the process still escalates only when a person asks.
+  view — ~~**nothing runs the scanner**: no compose service, unit or cron invokes it,
+  so a deployment that does not start the process still escalates only when a person
+  asks.~~ **Amended by `D10-25`, not deleted:** `docker-compose.yml` now defines a
+  `scanner` service, so the local stack runs it. The narrower residue it leaves: there
+  is still no systemd unit, cron entry or orchestrator definition, `restart:
+  unless-stopped` is the only supervision, a deployment that does not use this compose
+  file still starts it by hand — and a running scanner finds nothing to escalate until
+  contracts have actually been contacted, which needs gap 5.
 - ~~**No screen calls any of these five routes.** They are exercised by `TestClient` only,
   the same limit the review, agent and notification routes carry.~~ **Closed by
   `D10-23`, not deleted:** `/[locale]/escalations` reads `GET /escalations`, works a row
@@ -2034,10 +2053,17 @@ unscoped repository query.
 
 ### What this does not do — state it, do not bury it
 
-- **Nothing runs the scanner.** No compose service, systemd unit, cron entry or
+- ~~**Nothing runs the scanner.** No compose service, systemd unit, cron entry or
   `Makefile` target invokes `python -m app.workers.escalation_scanner`. The trigger
   exists and is proven; the daemon does not, which is the same residue the outbox relay
-  and the notification scheduler still carry. A deployment must start it by hand.
+  and the notification scheduler still carry. A deployment must start it by hand.~~
+  **Amended by `D10-25`, not deleted:** `docker-compose.yml` now has a `scanner`
+  service, and the notification scheduler — which carried the same residue — got one at
+  the same time. Both start with the stack. What is still true: nothing outside that
+  compose file starts either process (no unit, no cron, no orchestrator), supervision
+  is `restart: unless-stopped` alone, and the daemon being up is not the same as it
+  having work to do — a scheduler idles on an empty queue until something other than a
+  person creates a `Notification`, which is gap 5.
 - **The locking is argued, not demonstrated.** The offline leg runs the same claim query
   with no row locks at all, and even the MySQL leg never races two scanners. The
   evidence for `SKIP LOCKED` here is the shape of the statement plus the outbox tests
@@ -2156,9 +2182,14 @@ tree is clean.
 
 ### What this does not do — state it, do not bury it
 
-- **Nothing starts the scanner.** This screen lists what `EscalationScanner` raises, and
+- ~~**Nothing starts the scanner.** This screen lists what `EscalationScanner` raises, and
   no compose service, systemd unit, cron entry or `make` target runs that worker. In a
-  real deployment the queue stays empty until an operator starts it by hand.
+  real deployment the queue stays empty until an operator starts it by hand.~~
+  **Amended by `D10-25`, not deleted:** `docker-compose.yml` now defines a `scanner`
+  service, so on that stack the queue fills without an operator. What survives: no unit,
+  cron entry or orchestrator definition exists outside the compose file, and a scanner
+  that is up still raises nothing until a contract has actually been contacted (gap 5), so
+  a freshly seeded database still shows this screen empty.
 - **No browser has run it.** Typechecked, linted, and its wire shapes were read out of
   `backend/app/api/v1/escalations.py` — but nothing has clicked a button. "It works" here
   means "it agrees with the route's contract".
@@ -2540,6 +2571,59 @@ a hook finally ran and passed.
     still true:** no test here has verified a public-CA certificate over a real network,
     so provider hostname and chain behaviour remains unobserved.
 
+## The workers have a daemon ✅ (`D10-25`)
+
+Three modules poll, and all three end the same way — `main()`, an `if __name__ ==
+"__main__"` guard, a `threading.Event` that `SIGINT`/`SIGTERM` set, and
+`engine.dispose()` in a `finally` — so the gap was never in the code, and it was never
+in the tests either, which drive `tick()` directly. It was in the stack.
+`docker-compose.yml` started `api` and `relay`; the notification scheduler (gap 22) and
+the escalation scanner (gap 15) had **no service anywhere**, so the two workers whose
+whole purpose is to notice something *between* requests existed only as a module name
+somebody could type. `STATUS.md` recorded that in three places and `D10-21` in one; this
+slice makes those sentences narrower instead of deleting them.
+
+| Area | What changed, and why |
+| --- | --- |
+| `scheduler` and `scanner` services | `python -m app.workers.notification_scheduler` and `…escalation_scanner`, on the same image as `api` — one `Dockerfile.backend`, five processes, differing only in `command`. |
+| One `x-worker` anchor | Three near-identical service blocks are exactly where a `read_only: true` or a `no-new-privileges` line goes missing in one of them. `relay` was moved onto the anchor too, so all three worker processes are now defined by the same block. |
+| `healthcheck: disable: true` | **The defect this slice found.** `Dockerfile.backend`'s `HEALTHCHECK` probes `http://127.0.0.1:8000/health`, which only uvicorn answers. Every worker inherits it from the image, so `relay` has reported **unhealthy** for its entire life while working correctly — and any `depends_on: condition: service_healthy` pointing at it would have deadlocked. The API keeps its liveness probe; the workers switch theirs off explicitly rather than health-checking a port nothing listens on. |
+| `make logs` | It followed `api` only, and was missing from `make help` besides. With five services that hides a crash-looping worker from the first command an operator reaches for. It now follows everything; `make logs S=api` narrows it. |
+| Nothing else | No Python, no schema, no route: `alembic` head stays `0006` and the suite is untouched at **805**. |
+
+### Verification actually run (`D10-25`)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Config renders | `docker compose config --services` | `mysql api relay scanner scheduler` — five, not three |
+| Worker commands | `docker compose config --format json` | `relay` = `…outbox_relay`, `scheduler` = `…notification_scheduler`, `scanner` = `…escalation_scanner` |
+| Workers stop reporting a port they do not serve | same | `healthcheck.disable = true` on all three; unset on `api` |
+| The anchor really merges | same | `read_only = true`, `restart = unless-stopped`, `security_opt = no-new-privileges:true` on all three |
+| Interpolation still resolves | `docker compose config` with a placeholder `MYSQL_PASSWORD` | rendered; no `env_file`/`${…}` failure |
+
+`env_file: .env` makes the render fail on a tree with no `.env`, as this one has none, so
+a temporary gitignored `.env` holding placeholder passwords was used for these checks and
+removed after each run. The file's own sourcing path is unchanged.
+
+### What this does not do — stated, not buried
+
+- **No container was built or started.** `docker compose config` proves the file is
+  valid and merges the way it reads; it proves nothing about a running process. "The
+  workers have a daemon" therefore means *compose will start them*, not that they ran.
+- **`restart: unless-stopped` is the entire supervision story.** No systemd unit, no
+  cron entry, no orchestrator definition, no alerting on a crash loop.
+- **Compose's 10-second stop grace is not tuned.** A pass that outlives it gets
+  `SIGKILL`; the transaction rolls back, but the graceful `SIGTERM` path never
+  completes. The relay carries the same exposure and it is not new.
+- **A daemon with nothing to do still does nothing.** The scheduler idles on an empty
+  queue, because nothing but a person creates a `Notification` — that is gap 5, still
+  open — and the scanner escalates nothing until a contract has actually been contacted.
+- **Both new services are default-on.** `docker compose up` now runs an escalation
+  scanner against whatever `DATABASE_URL` in `.env` points at. That is the intent, but it
+  is a behaviour change for an `.env` that predates this slice.
+- **Two scanner replicas are safe by argument, not by test.** The claim uses
+  `SKIP LOCKED`; no test races two *scanners*, only the outbox and dispatch equivalents.
+
 ## Next permitted step
 
 **F10 (step 6) is committed (`b344c17`), three gap-closing slices have landed since
@@ -2576,9 +2660,15 @@ gap 15 is closed too: a reply is now recorded and an SLA clock is now opened
   raises an escalation by itself, so "two weeks with no reply" remains an operator's
   judgement.~~ **That residue is closed too, by `D10-21`:** `EscalationScanner` claims
   contracts whose last accepted contact is older than `escalation_no_response_days` and
-  opens the escalation itself, so `escalated` is now reachable without a human. What is
+  opens the escalation itself, so `escalated` is now reachable without a human. ~~What is
   still missing is a *daemon*: nothing schedules the worker, so the trigger is code a
-  deployment has to start rather than a service that runs.
+  deployment has to start rather than a service that runs.~~ **That residue is amended,
+  not deleted, by `D10-25`:** `docker-compose.yml` defines a `scanner` service, and the
+  notification scheduler — which carried the same gap — got one at the same time, so on
+  that stack both the trigger and the reminder clock are services rather than commands.
+  What survives: no unit, cron entry or orchestrator definition exists outside the compose
+  file, and a scanner that is up still raises nothing until a contract has actually been
+  contacted (gap 5).
 - `app/api/v1/` — `auth`, `health`, `contracts`, `agent`, `review` and now
   `notifications`. The backend is no longer *behind* the UI contract by a route; on
   the notification path it is ahead of it. The first screens now do call it:
@@ -2912,8 +3002,13 @@ sign-off, not footnotes:**
    is closed by `D10-21`:** `EscalationScanner` scans for silence and raises the
    escalation without a human. Two residues are carried here instead of a green tick —
    the clock is *read* when the queue is requested and nothing flips an overdue row into
-   `sla_breached`, and **nothing runs the scanner on a schedule**, so the trigger is
-   code a deployment must start rather than a service that runs by itself.
+   `sla_breached`, and ~~**nothing runs the scanner on a schedule**, so the trigger is
+   code a deployment must start rather than a service that runs by itself.~~ **Amended
+   by `D10-25`, not deleted:** `docker-compose.yml` defines a `scanner` service that
+   runs it, so on that stack the trigger is now a service rather than a command. What
+   survives is narrower: no systemd unit, cron entry or orchestrator definition exists,
+   `restart: unless-stopped` is the whole supervision story, and a scanner that is up
+   still finds nothing until a contract has actually been contacted (gap 5).
 
 None of 1–9 is a green check described as complete. Each is visible in the code and
 in this file, which is the standard this project has held gates to: a caveat stated
