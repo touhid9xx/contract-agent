@@ -121,6 +121,21 @@ export default function HomePage() {
         <CardContent className="space-y-4">
           <p className="text-sm text-muted-foreground">{t("home.body")}</p>
 
+          {/*
+            The review queue is the one screen that does work rather than report
+            it, so it is linked from here instead of being reachable only by URL.
+            Shown whether or not there is a session: the queue itself asks for one,
+            and hiding the link would leave a signed-out visitor no way to learn
+            the screen exists.
+          */}
+          <div className="flex flex-wrap items-center gap-2">
+            <Link href={`/${locale}/review`}>
+              <Button size="sm" variant="secondary">
+                {t("nav.review")}
+              </Button>
+            </Link>
+          </div>
+
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-xs font-medium text-muted-foreground">
               {t("common.language")}

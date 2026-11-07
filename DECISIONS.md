@@ -2226,3 +2226,63 @@ column it reads or writes already existed.
   and the notification scheduler still carry; `sla_breached` stays unreachable as a
   stored status; there is still no screen for the queue; and `reminder_sent` remains an
   enum member with no writer.
+
+### D10-22 — The review screen mirrors the route's shape, and a conflict reloads instead of patching
+
+Every slice since gap 7 that produced a *route* left a matching residue in `STATUS.md`:
+"the `review`, `agent`, `notification` and now `escalation` routes have still only ever
+been reached by `TestClient`". That is not a cosmetic complaint. F8 is the gate the
+non-negotiables rest on — no field below the confidence threshold may reach a customer
+until a person decides about it — and a gate that only a test can operate is a gate the
+product does not have. `frontend/src/app/[locale]/review/page.tsx` is the first screen
+that can *complete* work rather than report it, so the decisions worth recording are the
+ones about how it talks to `app/api/v1/review.py`.
+
+- **The client type is the route's shape, not a convenience around it.** `ReviewItem`
+  in `frontend/src/lib/api.ts` has no `value` field and no field to add one to, because
+  the queue route has none: a value comes from `POST /review/{id}/reveal`, which writes
+  an audit row. Adding one "for display" would put PII into whichever screen reused the
+  type and would make the audited reveal look optional. The same rule covers
+  `FieldName`/`FieldStatus`/`ContractStatus`, which are copied from `app.db.enums` and
+  are the reason a new enum member is a compile error here rather than a raw string on
+  screen.
+- **A `409` invalidates the queue; it never patches it.** A decision carries the
+  `version` the reviewer saw. On success the decided row leaves the queue, so the page
+  the reviewer was reading is no longer the page the server would answer — and a spliced
+  list would keep answering with the *old* `next_cursor` for the rest of the visit,
+  skipping or repeating rows on the next page. So both the success path and the stale-
+  write path call `invalidateQueries`. The reviewer loses their scroll position; the
+  alternative is a paging bug that only appears under concurrency, which is exactly when
+  nobody is reading the diff.
+- **Reveal is a per-row action, and the revealed value is not cached.** It lives in a
+  `Record<fieldId, string>` in component state, dies with the visit, and is never
+  written to `sessionStorage` or the query cache. Caching it would mean a re-render, a
+  back-navigation or a window restore re-displays a value whose reveal was audited once
+  — the audit row would then describe one read while the screen performed several.
+- **Every card carries its own error.** One shared banner cannot say *which* decision
+  failed, and a reviewer deciding three rows would have to guess. The error is attributed
+  by comparing the mutation's `variables` with the card's `field_id`, which is also why
+  the mutation takes an object rather than a bare id: the variables *are* the
+  attribution.
+- **The refusal vocabulary is translated, not assumed away.** `viewer` sees the queue and
+  cannot decide; the screen hides the buttons, but the boundary is the route's `403`, so
+  `isForbidden`, `isConflict`, `isOffline` and `422` are each named in the reviewer's
+  language and everything else falls back to one sentence. A UI that treats a refusal as
+  impossible turns a permission bug into a spinner that never stops.
+- **The `bn as Messages` cast in `frontend/src/i18n/messages.ts` is deleted.** It was
+  the mechanism by which a namespace added to `en.json` and forgotten in `bn.json` stayed
+  a runtime gap — a raw key path on a Bengali screen. Uncast, `Record<Locale, Messages>`
+  makes the omission a compile error. The two message files are at exact parity (107 keys
+  each, 65 of them under `review`) as of this commit, which is the state that keeps the
+  check meaningful rather than noise.
+- **The link on the home page is shown whether or not there is a session.** Hiding it
+  would leave a signed-out visitor no way to learn the screen exists; the queue itself
+  asks for a session and offers the sign-in link, so the worst case is one extra click.
+- **What this proves and what it does not.** Proven: `tsc --noEmit` and `eslint` accept
+  it, and the shapes it types were read out of the routes rather than guessed. Not
+  proven: **no browser has run it** — there is no frontend test runner and no e2e suite,
+  so "the buttons work" is an argument from the API contract, not an observation; the
+  optimistic-concurrency path is written but has never been raced by two real reviewers;
+  and the read-only `viewer` path has never been seen with a real viewer session. The
+  residue this closes is one held item, not the whole of gap 15's "no screen" bullet:
+  `agent`, `notification` and `escalation` are still `TestClient`-only.

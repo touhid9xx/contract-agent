@@ -104,6 +104,22 @@ export class ApiError extends Error {
   get isRateLimited(): boolean {
     return this.status === 429;
   }
+
+  /** The account is authenticated but not allowed to do this. */
+  get isForbidden(): boolean {
+    return this.status === 403;
+  }
+
+  /**
+   * Someone else wrote the row first.
+   *
+   * The review routes answer this when the `version` a reviewer loaded is no
+   * longer the stored one, so the UI must reload rather than retry: applying both
+   * decisions would let two reviewers silently overwrite each other.
+   */
+  get isConflict(): boolean {
+    return this.status === 409;
+  }
 }
 
 interface RequestOptions {
@@ -214,6 +230,137 @@ export const auth = {
     request<void>("/auth/logout-all", { method: "POST", accessToken }),
 
   me: (accessToken: string) => request<UserSummary>("/auth/me", { accessToken }),
+};
+
+/** Wire values of `app.db.enums.FieldName`. */
+export type FieldName =
+  | "email"
+  | "phone"
+  | "address"
+  | "dob"
+  | "start_date"
+  | "end_date"
+  | "contract_value";
+
+/** Wire values of `app.db.enums.FieldStatus`. */
+export type FieldStatus =
+  | "auto_accepted"
+  | "pending_review"
+  | "approved"
+  | "rejected"
+  | "unreadable";
+
+/** Wire values of `app.db.enums.ContractStatus`. */
+export type ContractStatus =
+  | "active"
+  | "reminder_sent"
+  | "responded"
+  | "renewed"
+  | "expired"
+  | "escalated";
+
+/**
+ * One field awaiting a person (`app.api.v1.review.ReviewItem`).
+ *
+ * There is no `value` here and there is no field to add one to: the queue route
+ * withholds every extracted value, and `review.reveal` is the audited call that
+ * shows exactly one. A client that invents a looser shape would leak PII through
+ * whichever screen reused it.
+ */
+export interface ReviewItem {
+  field_id: number;
+  contract_id: number;
+  customer_ref: string;
+  contract_status: ContractStatus;
+  /** `YYYY-MM-DD`, or `null` when the contract carries no end date. */
+  end_date: string | null;
+  /** Negative once the contract has already expired — that is information, not an error. */
+  days_to_expiry: number | null;
+  age_minutes: number;
+  /** The threshold this field fell below, so a reviewer sees *why* it is here. */
+  threshold: number;
+  field_name: FieldName;
+  status: FieldStatus;
+  confidence: number;
+  /** Echo this back with a decision; the server refuses a stale one with 409. */
+  version: number;
+  source_page: number | null;
+  source_line: number | null;
+  reviewed_at: string | null;
+  review_reason: string | null;
+  blocks_pipeline: boolean;
+}
+
+/** One page of the review queue, lowest confidence first. */
+export interface ReviewQueue {
+  items: ReviewItem[];
+  /** How many items this page carries, not how many the queue holds. */
+  count: number;
+  /** Age of the oldest item *on this page*. */
+  oldest_minutes: number;
+  threshold: number;
+  /** Opaque: pass back as `cursor`. `null` means this was the last page. */
+  next_cursor: string | null;
+}
+
+/** The four decisions `PATCH /review/{field_id}` accepts. */
+export type ReviewAction = "accept" | "reject" | "mark_unreadable" | "edit";
+
+/**
+ * One reviewer decision.
+ *
+ * `value` is only legal with `edit` — the server rejects it with any other action
+ * rather than ignoring it, because a caller that sends it believes it is being
+ * stored.
+ */
+export interface ReviewDecision {
+  action: ReviewAction;
+  version: number;
+  value?: string;
+  reason?: string;
+}
+
+/** The decided field, plus how many fields still block its contract. */
+export interface ReviewDecisionResponse {
+  item: ReviewItem;
+  /** Zero means the contract's pipeline may proceed. */
+  blocking: number;
+}
+
+/** One revealed value — returned by `review.reveal` and nowhere else. */
+export interface FieldValue {
+  field_id: number;
+  field_name: FieldName;
+  value: string;
+  version: number;
+}
+
+/**
+ * The human-review surface (F8).
+ *
+ * Reading the queue needs any authenticated role; deciding and revealing are
+ * `OPERATOR`/`ADMIN` only, so a viewer gets a 403 from the two write calls rather
+ * than from the queue. `reveal` is a `POST` because it writes an audit row — a
+ * reveal that leaves no trace is unauditable.
+ */
+export const review = {
+  queue: (accessToken: string, cursor?: string) =>
+    request<ReviewQueue>(
+      cursor === undefined
+        ? "/review/queue"
+        : `/review/queue?cursor=${encodeURIComponent(cursor)}`,
+      { accessToken },
+    ),
+
+  decide: (accessToken: string, fieldId: number, decision: ReviewDecision) =>
+    request<ReviewDecisionResponse>(`/review/${fieldId}`, {
+      method: "PATCH",
+      body: decision,
+      accessToken,
+    }),
+
+  reveal: (accessToken: string, fieldId: number) =>
+    request<FieldValue>(`/review/${fieldId}/reveal`, { method: "POST", accessToken }),
 };
 
 /**
