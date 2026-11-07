@@ -146,6 +146,18 @@ sorts by a 48-hour deadline derived on the server from `escalation_sla_hours`, a
 it (D10-20). The reply body is deliberately not stored: the row records that contact
 happened, not what was said. No migration — every column it writes already existed. The
 suite went **731 → 780**.
+**The slice on top of that is the trigger that paragraph left open** (`6fe6158`,
+`feat(escalations)`): it ended "what is still missing is a *trigger*, not a writer", and
+that was literally true — a contract could sit unanswered for a year and no query in the
+codebase would notice. `EscalationScanner`
+(`python -m app.workers.escalation_scanner`) now claims the silent contracts
+`FOR UPDATE SKIP LOCKED` and opens an escalation for each, one transaction per batch.
+Silence is measured from `notifications.sent_at` and never from contract status, because
+`reminder_sent` has no writer; the 14-day window and the 48-hour SLA stay two clocks,
+and the deadline is derived once per pass (D10-21). Contracts already `escalated`,
+`responded`, `renewed` or `expired` are excluded, so the worker cannot undo the
+hand-resolve D10-20 defines. No migration; the audit rows it writes carry a third actor
+type, `worker`. The suite went **780 → 805**.
 
 ## Phase history
 
@@ -1915,8 +1927,12 @@ fills already existed and was unused by any other path, so the migration head st
   status; the queue reports an `overdue` count computed at read time, so the SLA only
   means something when somebody looks. Making it move needs a poller — gap 5/17
   territory, not this slice — and no alert is attached to the count.
-- **Escalation is a human decision.** The "two weeks of no response" trigger the Phase-0
-  demo shows is still an operator pressing a button; nothing scans for silence.
+- ~~**Escalation is a human decision.** The "two weeks of no response" trigger the
+  Phase-0 demo shows is still an operator pressing a button; nothing scans for
+  silence.~~ **Closed, not deleted, by `D10-21`:** `EscalationScanner` scans for silence
+  and raises the escalation itself. What survives is narrower and worth keeping in
+  view — **nothing runs the scanner**: no compose service, unit or cron invokes it, so
+  a deployment that does not start the process still escalates only when a person asks.
 - **No screen calls any of these five routes.** They are exercised by `TestClient` only,
   the same limit the review, agent and notification routes carry.
 - **A response has no deduplication.** Two identical replies are two rows. That is
@@ -1926,6 +1942,65 @@ fills already existed and was unused by any other path, so the migration head st
 - **The MySQL leg proves repository behaviour, not concurrency.** These paths take no
   row lock, so there is no `FOR UPDATE` guarantee here to prove or to rely on: two
   operators resolving the same escalation race on the `version` check and one gets a 409.
+
+## Nothing had to notice a quiet contract — now a worker does ✅ (gap 15, `D10-21`)
+
+Gap 15 gave the escalation queue a writer and closed with "what is still missing is a
+*trigger*, not a writer". That was literally true: a contract could sit unanswered for a
+year and no query in the codebase would notice. It is the same shape gap 22 closed for
+notifications — a table with a writer and nobody reading the clock — which is why
+`ContractStatus.ESCALATED` still needed a person to press a button. `EscalationScanner`
+is the trigger. It adds **no schema** (head stays `0006`) — one worker module and one
+unscoped repository query.
+
+| Area | Detail |
+| --- | --- |
+| Silence is a notification, not a status | `ContractStatus.REMINDER_SENT` exists and **nothing writes it**: `dispatch_notification` sends the message without moving the contract. A scanner waiting for that status would wait forever, and one that *set* it would assert a second fact from inside a loop about a third. So "we contacted them at T" is read from `notifications.sent_at` — the column dispatch actually writes — over the four statuses a transport accepted (`sent`, `delivered`, `answered`, `machine`). |
+| Two clocks, deliberately | `escalation_no_response_days` (default `14`, bounded `1..90`) decides *whether*; `escalation_sla_hours` (`48`, `1..720`, D10-20) starts only *after* one is raised. Conflating them escalates on day two in one direction and hands the operator a deadline that predates them being told in the other. The deadline is computed **once per pass** from the scan instant, so contracts raised in one tick are due together. |
+| One transaction, one batch | `claim_silent_contracts` takes the candidates `FOR UPDATE SKIP LOCKED` and every write happens before the single commit, so two scanners cannot both raise for one contract — the second skips the locked rows instead of blocking. `escalation_scan_batch_size` (default `50`, `1..1000`) is therefore a bound on **how long locks are held**, not a throughput knob. |
+| The tenant comes from the row | This is the third deliberately unscoped query, beside `claim_next_due` and `claim_due`, and for the same structural reason: one process serves every tenant, so it cannot name a tenant before picking a row. Each follow-up write is scoped by the claimed row's `tenant_id`, exactly as `NotificationScheduler._dispatch_locked` does. |
+| The worker cannot undo a human | `SCANNABLE_CONTRACT_STATUSES` is `active` and `reminder_sent` only. `escalated` is excluded because D10-20 leaves the contract in that state when an operator resolves by hand — a scanner reading it as "still silent" would re-open the operator's decision every poll interval. `responded` is excluded because the customer answered; `renewed`/`expired` because the file is closed. |
+| Both contact clauses are `EXISTS` | Two `EXISTS` subqueries (contacted before the cutoff, not contacted since) rather than one `MAX(sent_at)` column, and both built by a single shared helper so they cannot drift apart about which statuses count. The shape is chosen for `FOR UPDATE`: it keeps the lock on the contract rows being mutated. |
+| A refusal is logged, never raised | The claim already excludes everything `refusal_to_raise` refuses, so a refusal means the query and the policy disagree. The policy wins, that contract is skipped, the batch continues, and `ScanResult.refused` carries the codes so the drift is visible. Raising would roll back every good escalation beside it — a refusal writes nothing, so there is no half-work for the transaction to protect. |
+| A third actor type | `ACTOR_WORKER = "worker"` beside `user` and `system`. Reusing `system` would have cost nothing today and destroyed the one question the audit log exists to answer — *did a human open this?* — while there are still only two writers of `escalation.opened` to keep consistent. |
+| `sla_breached` is still never written | Unchanged from D10-20: overdue stays a derived reading of `sla_deadline` via `is_overdue`. A stored flag can disagree with its own deadline, and the copy the queue displays would be the stale one. The scanner, the obvious candidate to flip it, deliberately does not. |
+| Tests | `test_escalation_scanner.py` (25): the trigger itself, the two clocks, the audit row's actor and snapshots, and every case that must be **left alone** — recent contact, a newer contact restarting the window, a recorded reply, an escalation already in flight, a hand-resolved escalation (the D10-20 regression), closed contracts, and notifications that never reached anybody. |
+
+### Verification actually run (escalation scanner)
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Tests | `pytest backend/tests`, root, `MYSQL_TEST_URL` **set** (`127.0.0.1:3307`) | **805 collected — 804 passed, 1 skipped, 0 failed** (JUnit: `tests=805 failures=0 errors=0 skipped=1`), exit 0. Was 780 at `1f88ea2`; all 25 are the new `test_escalation_scanner.py`. The one skip is `KAFKA_LIVE`. |
+| Tests (MySQL unset) | same command with `MYSQL_TEST_URL` **cleared** | **805 collected — 791 passed, 14 skipped, 0 failed**, exit 0 — 13 `integration` tests plus `KAFKA_LIVE`. |
+| Tests (MySQL) | `pytest backend/tests -m integration` | **19 passed, 0 skipped**, exit 0. This slice adds no schema, but its claim query is `FOR UPDATE SKIP LOCKED`, and SQLite cannot lock a row. |
+| Migration | `alembic heads` / `current` / `check`, from `backend/`, `DATABASE_URL` on `:3307` | `0006 (head)` / `0006 (head)` / "No new upgrade operations detected." No migration was added. |
+| Lint | `ruff check .`, root | All checks passed |
+| Format | `ruff format --check .`, root | **102 files already formatted** (two new modules is the difference) |
+| Types | `mypy app`, strict, from `backend/` | Success, **no issues in 57 source files** |
+| Security | `bandit -q -r backend/app`, root | **0 issues**, exit 0 (the `nosec` advisory on `config.py:50` is unchanged) |
+
+### What this does not do — state it, do not bury it
+
+- **Nothing runs the scanner.** No compose service, systemd unit, cron entry or
+  `Makefile` target invokes `python -m app.workers.escalation_scanner`. The trigger
+  exists and is proven; the daemon does not, which is the same residue the outbox relay
+  and the notification scheduler still carry. A deployment must start it by hand.
+- **The locking is argued, not demonstrated.** The offline leg runs the same claim query
+  with no row locks at all, and even the MySQL leg never races two scanners. The
+  evidence for `SKIP LOCKED` here is the shape of the statement plus the outbox tests
+  that do exercise it — not this slice's own test run.
+- **`reminder_sent` still has no writer.** The status is an enum member dispatch never
+  sets, which is why silence is measured from notifications instead. Making dispatch
+  advance a business state is a different decision with a different blast radius, and it
+  is not taken here; `contract status` and `what we sent` remain two separate records.
+- **`sla_breached` is still unreachable as a stored status.** The scanner opens
+  escalations; nothing flips an overdue row, and no alert is attached to the count.
+- **There is still no screen.** `GET /escalations` and `PATCH /escalations/{id}` remain
+  `TestClient`-only.
+- **A refused contract is skipped, not retried with a different rule.** If the claim
+  query and the policy ever disagree, the log line and `ScanResult.refused` are the only
+  signal; nothing pages anyone, and the same contract is re-claimed and re-refused every
+  poll interval until someone reads the log.
 
 ## Known gaps / issues
 
@@ -2254,9 +2329,14 @@ gap 15 is closed too: a reply is now recorded and an SLA clock is now opened
   `Escalation` remain writer-less (gap 15), which is why nothing records a reply or
   opens an SLA clock.~~ **That clause is closed, not deleted, by `feat(escalations)` /
   `D10-20`:** five routes write both tables, so the two `ContractStatus` members that
-  had no producer — `responded` and `escalated` — are now reachable over HTTP. What is
-  still missing is a *trigger*, not a writer: nothing scans for silence and raises an
-  escalation by itself, so "two weeks with no reply" remains an operator's judgement.
+  had no producer — `responded` and `escalated` — are now reachable over HTTP.
+  ~~What is still missing is a *trigger*, not a writer: nothing scans for silence and
+  raises an escalation by itself, so "two weeks with no reply" remains an operator's
+  judgement.~~ **That residue is closed too, by `D10-21`:** `EscalationScanner` claims
+  contracts whose last accepted contact is older than `escalation_no_response_days` and
+  opens the escalation itself, so `escalated` is now reachable without a human. What is
+  still missing is a *daemon*: nothing schedules the worker, so the trigger is code a
+  deployment has to start rather than a service that runs.
 - `app/api/v1/` — `auth`, `health`, `contracts`, `agent`, `review` and now
   `notifications`. The backend is no longer *behind* the UI contract by a route; on
   the notification path it is ahead of it. The first screens now do call it:
@@ -2462,6 +2542,17 @@ $env:MYSQL_TEST_URL = "mysql+pymysql://${u}:${p}@127.0.0.1:${port}/contract_agen
 venv\Scripts\python.exe -m pytest backend\tests
 ```
 
+**The driver in that URL is load-bearing, and a wrong one looks exactly like "no MySQL
+here".** `mysql+pymysql` is not decoration. This venv has `pymysql` installed and **no
+`mysqlclient`**, and a URL written as bare `mysql://` or `mysql+mysqldb://` resolves to
+the `mysqldb` DBAPI — which the integration module treats the way it treats an
+unreachable server: it **skips**. Measured at the escalation-scanner head: with a
+`mysqldb` URL in `MYSQL_TEST_URL` the run reported a clean `14 skipped` with
+`ModuleNotFoundError` on all 13 live integration tests; with `mysql+pymysql` the same
+tree reported `805 collected — 804 passed, 1 skipped, 0 failed`. The module's own
+`DEFAULT_URL` already carries `pymysql`, so the trap only appears when the environment
+variable is set by hand — check the **skip count**, not the absence of failures.
+
 The scratch database must already exist — the app user **lacks** `CREATE DATABASE`
 (measured: `ERROR 1044` for `contract_agent`), so `ca_alembic_check` was created as
 root and dropped afterwards. Inside the container, pass the password as `MYSQL_PWD`
@@ -2558,10 +2649,12 @@ sign-off, not footnotes:**
 9. ~~**Missing pieces by design, not by defect:** `CustomerResponse` and `Escalation`
    remain writer-less (gap 15) — nothing records a reply or opens an SLA clock.~~
    **Closed after the sign-off, not deleted from it, by `D10-20`:** five routes write
-   both tables, so a reply is recorded and an SLA clock is opened. Two residues are
-   carried here instead of a green tick — the clock is *read* when the queue is
-   requested and nothing flips an overdue row into `sla_breached`, and no trigger scans
-   for silence, so raising an escalation is still a person pressing a button.
+   both tables, so a reply is recorded and an SLA clock is opened. **And the trigger half
+   is closed by `D10-21`:** `EscalationScanner` scans for silence and raises the
+   escalation without a human. Two residues are carried here instead of a green tick —
+   the clock is *read* when the queue is requested and nothing flips an overdue row into
+   `sla_breached`, and **nothing runs the scanner on a schedule**, so the trigger is
+   code a deployment must start rather than a service that runs by itself.
 
 None of 1–9 is a green check described as complete. Each is visible in the code and
 in this file, which is the standard this project has held gates to: a caveat stated
