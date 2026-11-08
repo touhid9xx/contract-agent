@@ -758,10 +758,15 @@ could see it, because `tsc --noEmit` and a jsdom test do not render an RSC pass.
 changed **no application source, no dependency, no lockfile line, no migration** (`0006`); the build
 fix did change frontend source — one new file, `src/i18n/request.ts`, and two edits, `next.config.ts`
 and `tsconfig.json` — still with no dependency, no lockfile line, no backend file and no migration.
-The honest limit is the one that matters: **the workflow has not been run.**
+~~The honest limit is the one that matters: **the workflow has not been run.**
 There is no runner on this machine, so its correctness is *read*, not *observed* — the YAML parses, the
 workflow-expression sites survived the write, and every command was copied from a file in this
-repository rather than recalled. Three consequences follow, and are not waved away: the backend suite
+repository rather than recalled.~~ **Amended by `D10-49`, and only halfway.** The workflow *as a
+workflow* still has not been run — there is no runner on this machine, so its assembly is still *read*,
+not *observed*: the YAML parses and the workflow-expression sites survived the write. But the commands
+themselves have now been **executed**, one per line with an exit code behind it, and the first thing
+that found was a defect in the workflow rather than in the tree — the paragraph below on `D10-49`.
+Three consequences follow, and are not waved away: the backend suite
 has never been gated, so the first run may legitimately be red — that would be the finding, not a
 regression; `--no-verify` still works until required status checks are enabled in repository settings,
 which is not a file this repository can commit, so the gate is now *elsewhere* rather than yet
@@ -831,6 +836,35 @@ handful of refusals, no Kafka, no SMTP, no MySQL, no browser, so it says the ser
 and not that every branch is correct; **`mypy` does not cover it**, because `[tool.mypy]`'s `files` is
 `backend/app`, so the script is linted and executed but not type-checked; and **a loopback socket is not
 a deployment** — no TLS, no proxy, no container.
+
+**Then the workflow's commands are executed instead of compared, and the first thing they break is the
+workflow** (`D10-49`, one commit: `ci(workflows)`). The `hygiene` job ran eleven hook ids in a single
+`pre-commit run --all-files …` invocation, and `pre-commit run` takes **one** hook-id positional, so the
+list is an `argparse` error — reproduced here rather than reasoned about: `unrecognized arguments:
+check-toml check-json`, **exit 2**, raised before a single hook ran. On a runner that is a red
+`hygiene` job, and because `gate` lists it in `needs` with `if: always()`, a red *pipeline* on the first
+push, for a reason unrelated to the pushed commit — exactly what `D10-46`'s own third design rule warns
+against. **No gate in this repository could see it**: `.husky/pre-commit` passes no hook id at all
+(so the local command is valid), `yaml` parses, and `check-yaml` validates syntax rather than
+`argparse`. It is the same shape as `D10-47` — a file that is syntactically correct and semantically
+unrunnable, found only by running it. Fixed to one hook per invocation inside a `for` loop over the
+same eleven ids in the same order, with `bash -e` stopping at the first failure and a comment saying why
+the loop must not be "simplified" back into a list. **Verified by executing the loop in real bash**:
+eleven hooks, `LOOP_EXIT=0` — which also settled a question the list form had hidden, that
+`forbid-submodules` reports `Skipped` on a tree with no submodules and still exits 0, so a skip does not
+fail the job. The other six commands now have exit codes too, run verbatim as the workflow writes them:
+`ruff check backend`, `ruff format --check backend` (108 files), `python -m mypy` (62 source files),
+`bandit -c pyproject.toml -r backend/app -q` (exit 0, three `B104` `nosec` warnings), and `npm ci` in
+**both** node trees — `frontend/` (273 packages) and `demo/frontend/` (54) — both in sync, which
+mattered because `D10-43` added eight dev dependencies and a drifted lockfile was the second candidate
+for a first-push red. **No dependency, no lockfile line, no application source, no test, no migration**
+(`0006` stays head). The honest limits: **still never run on a runner**, so the first real result is
+unknown and `ubuntu-latest` differs in shell, paths and line endings; **four of the seven jobs were not
+executed even here** — `mysql-integration` needs a MySQL service container, `gitleaks` needs Docker, and
+`gate` needs `jq` plus real `needs` results; `npm ci` was run with `--ignore-scripts`, so plain `npm ci`
+is inference from both `package.json` files rather than an executed run; and **runnable is not green** —
+it proves the commands can execute, not that the pipeline passes. The branch stands **121 commits ahead
+of `origin/main`** at this `docs(status)` commit, re-counted rather than carried forward.
 
 ## Phase history
 

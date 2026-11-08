@@ -4455,3 +4455,61 @@ proxy, no container, and `127.0.0.1` on a laptop is the whole network topology i
 lockfile line, no application source, no migration (`0006` stays head). `STATUS.md`'s *the server
 behind these mocks is a mock* residue is narrowed by the follow-up `docs(status)` commit, the
 convention `D10-40` through `D10-47` all used.
+
+### D10-49 — The workflow's first defect was in the workflow, and only running it could find it
+
+`D10-46` wrote six jobs and copied every command out of a file in this repository, and `D10-48` added
+a seventh *step* with the same rule. Both entries said the same thing about the result: read, never
+observed. This entry is what happened when the commands were finally **executed** instead of compared.
+Every one of them now has an exit code behind it, and the first red job CI would have produced was
+`hygiene` — for a reason that has nothing to do with any file in the tree.
+
+- **The defect.** The `hygiene` job ran
+  `pre-commit run --all-files check-yaml check-toml check-json …` — eleven hook ids in one
+  invocation. `pre-commit run` takes a **single** hook-id positional (`nargs="?"`, *"A single
+  hook-id to run"*), so everything after the first is an unrecognized argument. Reproduced before it
+  was fixed: `pre-commit: error: unrecognized arguments: check-toml check-json`, **exit 2**, raised
+  by `argparse` before a single hook ran. On a runner that is a red `hygiene` job, and because
+  `gate` lists `hygiene` in `needs` and runs `if: always()`, it is a red **pipeline** — on the first
+  push, for a reason unrelated to the commit being pushed. Which is precisely the failure `D10-46`'s
+  own third design rule warns about: *a pipeline that is red on its first run teaches people to
+  ignore it.*
+- **Why reading could not have found it.** The line looks like the command the local gate runs, and
+  the local gate is `pre-commit run --all-files` — valid, because it names *no* hooks. The bug lives
+  only in the difference between *run all* and *run these*, and that difference is invisible to every
+  gate in this repository: `.husky/pre-commit` never passes a hook id, `yaml` parses fine, and
+  `check-yaml` (which does run) validates syntax, not `argparse`. It is the same shape as `D10-47`:
+  a file that is *syntactically* correct and *semantically* unrunnable, found only by executing it.
+- **The fix is the fix a shell gives you.** One hook per invocation, in a `for` loop, over the same
+  eleven ids in the same order. `bash -e` is the default shell for a `run:` block, so the loop stops
+  at the first hook that fails instead of reporting the rest. The comment above it now says why the
+  loop exists, in the same place a future reader would otherwise "simplify" it back into a list.
+- **Verified by executing the loop in real bash**, not by reading it: all eleven hooks passed,
+  `LOOP_EXIT=0`. That run also settled a question the list form had hidden — `forbid-submodules`
+  reports `(no files to check)Skipped` on a tree with no submodules, and **still exits 0**, so a
+  skipped hook is not a failed job. Under `-e` that mattered; a non-zero skip would have failed
+  `hygiene` on a correct repository.
+- **The other six commands now have exit codes too**, run verbatim as the workflow writes them:
+  `ruff check backend` (all checks passed), `ruff format --check backend` (108 files already
+  formatted), `python -m mypy` (62 source files, no issues), `bandit -c pyproject.toml -r
+  backend/app -q` (exit 0, three `B104` `nosec` warnings at `core/config.py:50`), and `npm ci` in
+  **both** node trees — `frontend/` (273 packages, in sync) and `demo/frontend/` (54 packages, in
+  sync). The two `npm ci` runs are the ones worth naming: `npm ci` fails on a lockfile that has
+  drifted from `package.json`, and `D10-43` added eight dev dependencies, so an out-of-sync lockfile
+  was the second candidate for a first-push red. It is not out of sync.
+
+**Honest limits.** (1) **Still never run on a runner.** These are the same commands on Windows; the
+first runner execution remains unobserved, and `ubuntu-latest` differs in shell, paths and line
+endings. (2) **Four of the seven jobs were not executed end to end.** `mysql-integration` needs a
+MySQL 8.4 service container, which does not exist here; `gitleaks` needs Docker; `gate` needs `jq`
+and real `needs` results. (3) **`npm ci` was run with `--ignore-scripts`** locally to keep the
+verification to lockfile resolution — reading both `package.json` files confirmed neither defines a
+`prepare` script, so plain `npm ci` adds no lifecycle step, but that equality is inference from the
+files rather than an executed run. (4) **This proves the commands are runnable, not that the pipeline
+is green**: a runner may still fail for a reason no local execution can reach, and the honest
+statement about CI remains that its first real result is unknown.
+
+**Landed as** `ci(workflows)` `93fdd56` — one job's `run:` block replaced by a loop plus its
+rationale comment, and no other file. No dependency, no lockfile line, no application source, no test,
+no migration (`0006` stays head). The `STATUS.md` claims that CI's every command is *read, not observed*
+are amended by the follow-up `docs(status)` commit, the convention `D10-40` through `D10-48` all used.
