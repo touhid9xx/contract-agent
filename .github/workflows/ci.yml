@@ -1,0 +1,309 @@
+# Continuous integration.
+#
+# Why this file exists: until D10-46 every gate in this repository ran from a
+# developer's machine. `.husky/pre-commit` calls `pre-commit run --all-files`, so
+# the gate was real but *optional* — a `--no-verify` commit, a second clone, or a
+# fork all bypassed it, and nothing ever ran the backend test suite at all
+# (pytest is not a pre-commit hook). CI is here to make the existing gate
+# mandatory and to add the two checks the hook cannot express: the pytest suite
+# and the MySQL-only integration tests.
+#
+# Design rules, in the order they decided the shape below:
+#
+#   1. Mirror, do not invent. Each job runs the *same command* the corresponding
+#      hook already runs (`ruff check`, `mypy`, `bandit -c pyproject.toml`,
+#      `npm run typecheck|lint|test`), so a green pipeline and a green hook mean
+#      the same thing. Where CI differs it is only by dropping the hooks'
+#      `--fix` flags, because a runner must report a defect, never repair it and
+#      then pass.
+#   2. Separate jobs, not one script. A single job would be one round trip to
+#      find out that a failure was in `ruff` rather than `mypy`. Each job also
+#      fails independently, so four of six green is readable at a glance.
+#   3. No `next build`, deliberately. It is the one check that would catch a
+#      server/client-boundary error `tsc` cannot see, but it is also unverified
+#      on a clean machine: it needs the whole Next toolchain and any environment
+#      it reads at build time. A pipeline that is red on its first run teaches
+#      people to ignore it — the same argument `docker-compose.yml` makes about
+#      healthchecks. Recorded as a candidate in DECISIONS.md D10-46 instead.
+#
+# Versions: Node 22 and Python 3.13 are both pinned by other files in this
+# repository rather than chosen here. `engines.node` says ">=20" and
+# `@types/node` is `^22`, so 22 is the version the frontend is typed against.
+# Python 3.13 is what `Dockerfile.backend` ships; `pyproject.toml` targets 3.12
+# for ruff/mypy, which is a *floor*, not a different interpreter.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only by default. No job here publishes, tags or comments, so nothing
+# needs more than this, and a compromised action cannot push with a token it
+# never should have been given.
+permissions:
+  contents: read
+
+# One run per branch: a second push supersedes the first, so the queue does not
+# fill with runs describing code that no longer exists.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # --------------------------------------------------------------- python lint
+  # The three static gates, in the same order and with the same arguments as
+  # the `ruff`, `ruff-format`, `mypy` and `bandit` hooks in
+  # `.pre-commit-config.yaml`.
+  python-static:
+    name: python static (ruff, mypy strict, bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements-dev.txt
+
+      # No `--fix`: the hook repairs and fails, CI must only fail.
+      - name: ruff check
+        run: ruff check backend
+
+      # Equivalent of the `ruff-format` hook, which fails when it rewrote a file.
+      - name: ruff format (check only)
+        run: ruff format --check backend
+
+      - name: mypy (strict)
+        run: python -m mypy
+
+      - name: bandit
+        run: bandit -c pyproject.toml -r backend/app -q
+
+  # ------------------------------------------------------------- backend tests
+  # Not a pre-commit hook, so before this job existed the ~470-test suite only
+  # ever ran when somebody remembered to run it. This is the single largest
+  # coverage gain in the file. `mypy` above is the type gate; this is behaviour.
+  backend-tests:
+    name: backend tests (pytest, sqlite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements-dev.txt
+
+      # `-m "not integration"` is explicit rather than relying on the marker
+      # being skipped: the MySQL job below is the only place those run, and a
+      # silent skip here would hide the day they start being collected.
+      - name: pytest
+        run: python -m pytest -m "not integration"
+
+  # ------------------------------------------------------ mysql integration
+  # The six guarantees `backend/tests/test_mysql_integration.py` lists in its
+  # docstring — SKIP LOCKED claiming, real ENUMs, the dispatch lock, NUMERIC
+  # scale, refresh-token row locks, cascading FKs — are unobservable on SQLite.
+  # Locally they skip silently when no MySQL answers, which is why they had only
+  # ever been run by hand. A service container makes them mandatory.
+  mysql-integration:
+    name: backend integration tests (mysql 8.4)
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        # Same tag as `docker-compose.yml`, so CI proves the version that ships.
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: contract_agent_test
+        ports:
+          - 3306:3306
+        # Without this the first test races the server's first-boot init and
+        # fails with "cannot connect" rather than a real assertion.
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+          --health-start-period=30s
+
+    env:
+      # Root, not the application user: these tests drop and recreate the schema
+      # and some need CREATE. The database is a throwaway container on a
+      # loopback port, and `test_mysql_integration.py` documents this variable as
+      # the way to point at a disposable server. It is never a real one.
+      MYSQL_TEST_URL: mysql+pymysql://root:root@127.0.0.1:3306/contract_agent_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements-dev.txt
+
+      # `--strict-markers` from pyproject is already on; `-m integration` selects
+      # exactly the module above.
+      #
+      # The suite *skips* rather than fails when it cannot reach a server, so a
+      # service-container run that skipped would be green while proving nothing.
+      # `pipefail` keeps pytest's own exit status through `tee`, and the grep
+      # turns a skip into a failure. `-rs` is what puts the reason in the log, so
+      # a red run explains itself instead of just saying "1 skipped".
+      - name: pytest (integration only, skips are failures)
+        run: |
+          set -o pipefail
+          python -m pytest -m integration backend/tests -q -rs | tee /tmp/integration.log
+          if grep -qi skipped /tmp/integration.log; then
+            echo "::error::integration tests skipped instead of running - the suite proved nothing"
+            exit 1
+          fi
+
+  # ------------------------------------------------------------------ frontend
+  # The three hooks that drive `scripts/run-frontend-check.mjs`, invoked
+  # directly. `npm ci` (not `npm install`) so the committed lockfile is what is
+  # tested — a floating resolution would make CI prove a different tree than the
+  # developer's.
+  frontend:
+    name: frontend (typecheck, eslint, vitest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: typecheck
+        run: npm run typecheck
+
+      - name: eslint
+        run: npm run lint
+
+      - name: vitest
+        run: npm test
+
+  # ------------------------------------------------------------- demo frontend
+  # A separate app with its own lockfile. The `demo-frontend-typecheck` hook was
+  # added because nothing checked this tree at all until its fixtures had already
+  # drifted from the real wire shape; the same drift is possible on a fork.
+  demo-frontend:
+    name: demo frontend (typecheck)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: demo/frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: demo/frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: typecheck
+        run: npm run typecheck
+
+  # ------------------------------------------------------------------ hygiene
+  # The cheap file-shape hooks, plus `gitleaks` — which is bound to the `manual`
+  # stage locally (D1-03) and therefore never ran automatically anywhere. The
+  # hook is ordered to require Docker, which `ubuntu-latest` provides, so CI is
+  # the one place the documented `pre-commit run gitleaks --all-files` can be
+  # made mandatory. Runs with no npm/pip installs beyond pre-commit itself: each
+  # hook brings its own isolated environment from its pinned rev.
+  hygiene:
+    name: hygiene + secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        # gitleaks scans history, so it needs more than the one commit it would
+        # otherwise get; this is what makes the scan equivalent to a local run
+        # against a full clone.
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install pre-commit
+        run: python -m pip install pre-commit==4.7.0
+
+      # Named explicitly so the Python/Node hooks are not run twice: `ruff`,
+      # `mypy`, `bandit` and the three frontend hooks are their own jobs above,
+      # and `--all-files` here would need a full venv plus two `npm ci`s to
+      # repeat them. Hook ids are the ones in `.pre-commit-config.yaml`.
+      - name: file hygiene
+        run: |
+          pre-commit run --all-files \
+            check-yaml check-toml check-json check-merge-conflict \
+            check-added-large-files check-case-conflict detect-private-key \
+            forbid-submodules end-of-file-fixer trailing-whitespace \
+            mixed-line-ending
+
+      # Manual-stage hook, run by name. This is the command in the hook's own
+      # comment, so CI and an operator run the same thing.
+      - name: gitleaks
+        run: pre-commit run gitleaks --all-files
+
+  # --------------------------------------------------------------------- gate
+  # One required status check for branch protection, instead of six that have to
+  # be re-listed whenever a job is added. `if: always()` is what makes it run
+  # when an upstream job failed — otherwise the gate would be skipped, and a
+  # skipped required check is a green light.
+  gate:
+    name: CI gate
+    if: always()
+    needs:
+      - python-static
+      - backend-tests
+      - mysql-integration
+      - frontend
+      - demo-frontend
+      - hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every required job must have succeeded
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS"
+          failed=$(echo "$RESULTS" | jq -r 'to_entries[] | select(.value.result != "success") | .key')
+          if [ -n "$failed" ]; then
+            echo "::error::failed or skipped jobs: $(echo $failed)"
+            exit 1
+          fi
+          echo "all required jobs succeeded"
