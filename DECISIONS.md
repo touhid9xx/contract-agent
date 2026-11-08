@@ -4131,3 +4131,82 @@ it would still pass.
 lockfile entry, no config change, no source change. `STATUS.md`'s surviving "no screen" regions were
 amended by the follow-up `docs(status)` commit rather than back-dated into the slice, the convention
 `D10-40` through `D10-43` all used.
+
+---
+
+### D10-45 — The review queue: the first screen that can *finish* work, and the first test to run TanStack Query
+
+`frontend/src/app/[locale]/review/page.test.tsx`, **16 cases, 550 lines, one new file**. No source
+change, no dependency, no lockfile entry, no backend file, no schema change. A one-line summary of
+the whole slice: the harness `D10-44` paid for is spent, not re-bought.
+
+**Why this screen, when eight were still open.** `D10-44` left a precise residue — one screen of nine
+tested, eight not — and the obvious temptation is to test the cheapest next one. The review queue was
+chosen for the opposite reason: it is the **only** frontend path by which a field leaves `pending` and
+becomes `approved`, and therefore the only one that *completes* work rather than inspects it. If any
+screen deserved the harness's second outing it is the one whose job is to finish the pipeline.
+
+**The harness. No new dependency, and this is the point.** `D10-43` bought `jsdom` and
+`@testing-library/*`; `D10-44` proved they reach a page. What this screen needed beyond the login form
+was **state**, and that is where a harness usually starts cheating. Instead: a **real**
+`QueryClientProvider` with a **fresh client per test**, so no cache survives between cases; the real
+`AuthProvider` over the real session store, so the viewer gate is exercised through `useAuth` rather
+than stubbed; the real `NextIntlClientProvider` and the real catalogue, so each assertion is about a
+sentence a user reads. Only three functions are replaced — `review.queue`, `review.decide`,
+`review.reveal` — and each through `importOriginal`, so the genuine `ApiError` class survives and
+`instanceof` still means something.
+
+**One deviation from the app's own provider, recorded rather than buried: `retry: false`.** The
+shipped client retries once. That is right for a user on a flaky link and wrong for a test whose
+subject is *how many times the screen asked*, because a retry turns every "it asked once" assertion
+into one that is either false or unfalsifiable. The deviation is confined to the test's client and
+the test says so where it is constructed; nothing about production behaviour is asserted by it.
+
+**What the sixteen cases pin**, all rules the source states in prose and nothing had checked: the
+decided **version is echoed** from the row rather than assumed; an error is scoped to **the row that
+failed** and not shared across the queue; a **`409` on one row refetches the queue** so the stale
+version is replaced; the **viewer role is read-only** — the controls are absent, not merely inert; a
+correction is **trimmed** before it is sent; and `isPending` gates a second submission.
+
+**Teeth, re-measured on this tree — and the earlier pair of numbers was wrong.** I had recorded
+"3 of 16, then 2 of 16". Both were under-measured, because I had **batched** mutants:
+
+- **Pass A** — drop the viewer gate, drop the `trim()`, scope the failure to the mutation instead of
+  the row: **3 of 16**, exactly the three cases that name those rules and nothing else.
+- **Pass B1** — `version: item.version` becomes `version: 0`: **3 of 16**.
+- **Pass B2** — delete the conflict refetch: **1 of 16**.
+
+The old "2 of 16" was **B1 and B2 in one pass**, so it was really 3 and 1 added together — and the
+version mutant alone moves three cases, which is worth knowing and was invisible while they were
+batched. **A second correction, on method:** my first per-row-error mutant was badly chosen.
+`describeFailure(decide.error)` with `undefined` returns the generic sentence and paints an alert on
+*every* row, so it failed **5 of 16** and tested "always-on" rather than "shared". Re-run as
+`decide.variables ? ...`, it isolates the rule. A mutant that fails too many tests is not a stronger
+signal; it is a different question. All five mutants were reverted and `git diff` on the page is empty.
+
+**A defect the commit gate caught that I had shipped into my own draft.** `noUncheckedIndexedAccess`
+makes a page element possibly `undefined`, so `frontend typecheck` failed and the commit was refused.
+Fixed properly in the answer-builder by seeding the first answer as a parameter — the nullish
+fallback beside it is unreachable, and the comment says so — rather than by casting the index away.
+Worth recording for its own sake: the harness that reports "No errors reported" is not the same as
+a clean tree, because a type error only `tsc` can see is not an error any editor had shown.
+
+**Verified.** On the tree this slice produced, from `frontend/`: `npm test` gives **6 files, 97 tests,
+0 failed** (19 `contract-scope`, 18 `session`, 21 `api`, 12 `auth-provider`, 11 `login`, 16 `review`).
+`alembic` head stays `0006`; no backend file, no dependency, no lockfile line changed.
+
+**Honest limits, four.** (1) **Two screens of nine, and both wired rather than working.** `jsdom` is a
+DOM, not a browser: no Next runtime, no layout, no real navigation, no `fetch`. The queries and
+mutations are real TanStack Query, but **the server behind them is a mock**, so nothing here proves
+that client and server agree on the *shape* of a `409` — only that the screen handles the shape it
+expects. (2) **This retires `D10-44` limit (3), and cannot retire its successor.** React Query is no
+longer unexercised: refetch, invalidation and `isPending` gating now run. What is still unproven is
+that the *keys* are right — that the invalidation a screen relies on is the key another screen reads.
+(3) **The harness did not need what the remaining screens need.** This page needs no `useSearchParams`
+and no `Suspense` boundary; the escalation and agent screens need both, so porting is three harnesses
+rather than one loop. (4) **The viewer gate is the client's opinion.** The role is read through the
+real `useAuth`, but the *server's* authorization is a different suite; nothing proves the two agree.
+
+**Landed as** `test(web)` `3b16d9a` — one new file and nothing else. `STATUS.md`'s surviving
+"one screen" and "no screen's behaviour is proven" regions were amended by the follow-up
+`docs(status)` commit, the convention `D10-40` through `D10-44` all used.

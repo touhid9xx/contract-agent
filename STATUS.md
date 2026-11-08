@@ -686,6 +686,37 @@ queue, the escalation queue and the detail page are three different harnesses ra
 Query is still unexercised; and only the two static locales are covered, so a locale added later with
 a missing key would fail at render rather than here.
 
+**Then the first screen that can *finish* work gets a test** (`D10-45`, one commit: `test(web)`
+`3b16d9a`): `D10-44` left one screen of nine tested and eight open, and the cheapest next one is not
+the same as the most valuable. The review queue was picked for the opposite reason to cheapness — it is
+the **only** screen by which a field leaves `pending` for `approved`, so it is the only one that
+*completes* the pipeline rather than inspecting it. **No new dependency**: the harness `D10-43` paid for
+is spent, and what this screen needed beyond the login form was **state**, which is where a harness
+usually starts cheating. Instead the test builds a **real** `QueryClientProvider` with a **fresh client
+per case** so no cache survives between tests, the real `AuthProvider` over the real session store so
+the viewer gate runs through `useAuth`, and the real catalogue so each assertion is about a sentence a
+user reads — replacing only `review.queue`, `review.decide` and `review.reveal`, each through
+`importOriginal`, so the genuine `ApiError` survives. **One deviation is recorded rather than buried:**
+the test's client sets `retry: false` where the shipped client retries once, because a retry makes every
+"it asked once" assertion either false or unfalsifiable. Sixteen cases pin rules the source states in
+prose and nothing had checked: the row's **version is echoed** on decide; an error is scoped to **the
+row that failed** and not shared; a `409` on one row **refetches the queue**; the **viewer is
+read-only** rather than merely inert; a correction is **trimmed**; and `isPending` blocks a second
+submit. Teeth were re-measured, and the earlier pair of numbers **corrected**: batched mutants had
+produced "3 then 2", whereas measured separately they are **3 of 16, 3 of 16 and 1 of 16** — the version
+echo alone moves three cases, which batching had hidden — and the first per-row-error mutant was
+discarded as badly chosen, because failing 5 of 16 tested "always-on" rather than "shared". The commit
+gate also caught a real defect shipped into the draft: `noUncheckedIndexedAccess` made a page element
+possibly `undefined`, `frontend typecheck` refused the commit, and it was fixed by seeding the first
+answer as a parameter rather than by casting the index away. **No backend file, no migration (`0006`),
+no dependency and no lockfile change.** The honest limits: **two screens of nine, and both wired rather
+than working** — the queries are real TanStack Query but **the server behind them is a mock**, so
+nothing proves client and server agree on the shape of a `409`; this retires `D10-44` limit (3) and
+leaves a harder question in its place — that the **cache keys** an invalidation targets are the keys
+another screen reads — unproven; the escalation and agent screens need `useSearchParams` and `Suspense`,
+which this page did not, so porting is three harnesses rather than a loop; and the viewer gate is the
+client's opinion of a role the server decides in another suite.
+
 ## Phase history
 
 | Phase | State |
@@ -4208,7 +4239,14 @@ touches no production behaviour, which is why it is `test(web)` and not `feat(we
   `notifications` and `escalations` need "React, a router, a query client and a browser" still holds,
   and the proof is the login page itself: it needed React, a router and `jsdom`, and the one thing it
   did *not* need was the query client, which is exactly why it could be tested first and why these
-  three cannot follow for free. *`jsdom` still cannot tell you that a screen behaves* stands unchanged.
+  three cannot follow for free.
+  **Amended a third time by `D10-45`, not deleted, and this shrinks the "cannot follow for free"
+  clause:** the review queue (`review/page.test.tsx`, 16 cases) is one of the *others* — it needs the
+  query client this bullet says these three need — and it cost **no** dependency, so *the one thing it
+  did not need was the query client* has stopped being a reason the rest cannot follow. It has not
+  stopped being a reason they are work: `agent` and `escalations` also need `useSearchParams` and a
+  `Suspense` boundary, which nothing has exercised yet. **The three screens named in this bullet
+  remain untouched**, and *`jsdom` still cannot tell you that a screen behaves* stands unchanged.
 - **The key parity and the Bengali strings.** Still a script's output, still unread by anyone who
   reads Bengali.
 - **The advisories.** `npm install` printed **7 moderate severity** advisories for the frontend tree.
@@ -4497,6 +4535,10 @@ tell the shared-promise design from the bug it exists to prevent.
   in the same way: `jsdom` *is* added, and a component test no longer needs a decision. What is left
   is the part that was never about dependencies — `jsdom` is a DOM and not a browser, so no screen's
   *behaviour* is proven, only that it is wired.
+  **Amended a third time by `D10-45`, not deleted, and it is a second instance rather than a new kind:**
+  `review/page.test.tsx` (16 cases) runs too, and it is the first to bring a real `QueryClientProvider`,
+  so "wired" now covers queries, mutations and cache invalidation. The sentence survives word for word —
+  a screen that is wired is not a screen that behaves, and the server behind these two is still a mock.
 - **The config file is not typechecked.** `tsc --noEmit` includes `**/*.ts` and `**/*.tsx`, which does
   not match `.mts`. For a config that is mostly comment, that is the trade taken, and it is why it holds
   no logic. It is not unexercised, though: the gate runs `pre-commit run --all-files`, so
@@ -4573,6 +4615,16 @@ is the one that needs the least — no query client, no route params, no list to
 that remain are exactly the ones that need more, so "a screen is tested" is a narrower claim here than
 it reads. Nothing about *behaviour* moved either: `jsdom` is still a DOM, the router is still a double,
 and `router.replace` being called is still not Next acting on it.
+**Amended a fifth time, by `D10-45`, not deleted — and the qualifier moves again, by a smaller step
+than the fourth.** A second page renders under a test: `review/page.test.tsx`, 16 cases. So ~~one
+screen of nine has one, and eight do not~~ becomes **two have one, and seven do not.** The distinction
+this paragraph exists to keep is kept, and one of the fourth amendment's own sentences is **superseded
+by evidence rather than by preference**: it said *the screen tested is the one that needs the least —
+no query client, no route params, no list to page*, and the review queue is exactly a query client and
+a list to page, and it still cost no dependency. So *"the eight that remain are exactly the ones that
+need more"* narrows honestly — the query client is now proven buildable — while the part that mattered
+does not move at all: `jsdom` is still a DOM, the server behind the mock is still a mock, and a screen
+that is wired is not a screen that behaves.
 **Amended, not deleted (`D10-39`, `2572f53`):** the paragraph this one keeps narrowing ends
 by saying what is left is *not a missing feature and not a hardening pass* — still true, and
 one of the things left has stopped being nothing. The `doctor` check that counts invisible
