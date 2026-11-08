@@ -947,19 +947,18 @@ could have caught it**: the hook is manual, so no commit ever ran it, and `D10-4
 eleven-id loop in the same job — verified this separate step by *comparing* it to the hook's own
 comment, which carried the same omission. Two documents agreeing is not evidence that either is
 right; here the agreement was the artefact that made the defect look verified. It is `D10-49`'s shape
-one layer down: a command that
-reads perfectly and cannot execute. Fixed in the step and in the hook's instruction to the operator,
-with the reason written beside both. **No dependency, no lockfile line, no backend source, no test, no
-migration** (`0006` stays head). The honest limits: **`gitleaks` has still never scanned anything** —
-run #1 refused before pulling the image, so a red run #2 is a finding and not a failed fix; **the step
-logs are unreadable from here** (`403` for job logs to an unauthenticated client, and `gh` is not
-installed), so the diagnosis rests on a local reproduction of the identical command plus the timestamp
-argument rather than the runner's own words; **required status checks are still not enabled on
-`main`**, so a red `gate` has been *observed failing* and never *observed gating* a merge; and **the
-action versions are untouched** — `checkout@v4`, `setup-python@v5`, `setup-node@v4` all ran with Node
-20 deprecation warnings, cosmetic, and worth their own green run rather than a rider on this one. The
-branch stands **124 commits ahead of `origin/main`** at this `docs(status)` commit, re-counted rather
-than carried forward.
+one layer down: a command that reads perfectly and cannot execute. Fixed in the step and in the hook's
+instruction to the operator, with the reason written beside both. **No dependency, no lockfile line, no
+backend source, no test, no migration** (`0006` stays head). The honest limits: **`gitleaks` has still
+never scanned anything** — run #1 refused before pulling the image, so a red run #2 is a finding and
+not a failed fix; **the step logs are unreadable from here** (`403` for job logs to an unauthenticated
+client, and `gh` is not installed), so the diagnosis rests on a local reproduction of the identical
+command plus the timestamp argument rather than the runner's own words; **required status checks are
+still not enabled on `main`**, so a red `gate` has been *observed failing* and never *observed gating*
+a merge; and **the action versions are untouched** — `checkout@v4`, `setup-python@v5`, `setup-node@v4`
+all ran with Node 20 deprecation warnings, cosmetic, and worth their own green run rather than a rider
+on this one. The branch stands **124 commits ahead of `origin/main`** at this `docs(status)` commit,
+re-counted rather than carried forward.
 
 ## Phase history
 
