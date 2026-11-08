@@ -749,6 +749,17 @@ been **started rather than finished**, and what remains is not only what the pre
 escalations and notifications, so the screens that still need **this** harness are the agent
 screen and notifications, not the detail page, which doubles route params instead — a related
 but different double. *Both wired rather than working* still covers all three tested screens.
+**Amended a third time by `D10-52`, not deleted:** ~~three of nine~~ becomes **four of nine**, and the
+prediction has now been spent rather than merely started — ~~the screens that still need **this**
+harness are the agent screen and notifications~~ becomes **notifications alone**, because
+`agent/page.test.tsx` is the second address-and-`Suspense` harness: 23 cases, no new dependency and no
+provider `D10-50` did not already pay for. The prediction's *three harnesses rather than a loop* is
+therefore **half-finished and now cheap**, and the four screens still without a test are a different
+shape rather than a harder one. What the count change does **not** say: the agent screen was not a copy
+of the escalation screen, because it is the first screen where **two actions look interchangeable and
+are not** — a re-run appends a row while a correction rewrites one — so the spec spent its cases on
+that distinction rather than on the address. *Both wired rather than working* now covers four tested
+screens, not three.
 
 **Then the gate gets somewhere to run that is not one person's machine** (`D10-46`, one commit: `ci`).
 Every check in this project had run from a developer's machine, and two had never run automatically
@@ -959,6 +970,42 @@ a merge; and **the action versions are untouched** — `checkout@v4`, `setup-pyt
 all ran with Node 20 deprecation warnings, cosmetic, and worth their own green run rather than a rider
 on this one. The branch stands **124 commits ahead of `origin/main`** at this `docs(status)` commit,
 re-counted rather than carried forward.
+
+**Then the fourth screen test, and it is the first where two actions look interchangeable and are not**
+(`D10-52`, one commit: `test(web)` `585dcd7`). The agent decision screen was the second address-and-
+`Suspense` harness and the first screen the notification slice depends on: `POST /notifications`
+schedules from a **stored** decision, so a recommendation nobody can inspect is a recommendation that
+decides by default. `D10-45` predicted *three harnesses rather than a loop* and named the escalation
+and agent screens; the prediction was right about the shape and **understated what the agent screen
+would test**. The harness is `D10-50`'s, reused rather than rebuilt — a fresh `QueryClient` per case
+with `retry: false`, the real catalogue, the real `AuthProvider` over the real session store, and only
+the four `agent` methods replaced through `importOriginal` so the genuine `ApiError` survives the
+`instanceof` branches. **No new dependency, no new provider.** The 23 cases spend themselves on what
+made this screen different: **a re-run appends while a correction rewrites**, so the two actions hit
+different routes and report separately; **corrections must be offered on a contract's newest row only**
+because the server resolves *the latest decision* itself, so acting on a superseded row sends a
+`version` it has already moved past; and `CHANNEL_NOT_PERMITTED` **names the permitted channels without
+the client ever computing them**, because a second copy of the contact policy in the browser would
+drift from the one that refuses. Also pinned: an impossible address (`contract=012`) performs **no read
+at all**; the scope sentence quotes the server's echo rather than the address; an override **echoes the
+version and omits an empty reason**; and *the API is down* never looks like *nothing has been decided*.
+**Three mutation passes, each applied and reverted:** `enabled: !scopeIsInvalid` → `enabled: true` fails
+**1** case; removing `latestIds`' dedup fails **9**; replacing the omit-when-empty spread with a plain
+`reason` field fails **1** — the case literally named for it. That third pass is recorded for a reason
+beyond its count: **it was still applied live when the previous turn ended**, so the tree carried a
+mutation overnight and `git status` carried it. Reverted before commit, and `page.tsx` is byte-identical
+to `184575e`. The argument it settles is procedural: a mutant must be **run and reverted inside the
+same turn**, because a note claiming the file is clean is not a check. **No dependency, no lockfile
+line, no backend source, no source change at all, no migration** (`0006` stays head). The honest
+limits: the rules are proven against a **doubled API and a doubled address** — `jsdom`, no browser, no
+real router, no server; the `409` envelopes including `details.permitted` are **fixtures pinned from
+the screen's side** and not verified against `backend/app/api/v1/agent.py`; *wired is not behaving*
+still holds; and **five of nine screens still have no component test**, with notifications now the only
+remaining `page.tsx` importing `useSearchParams`. Verification: the spec **23/23**, the full frontend
+suite **145 passed in 8 files** (was 122 in 7, so the new file accounts for every added case and
+nothing that existed changed), `npm run typecheck` clean, all nineteen pre-commit gates green and
+commitlint passed. The branch stands **125 commits ahead of `origin/main`** after this `docs(status)`
+commit, re-counted rather than carried forward.
 
 ## Phase history
 
@@ -4896,6 +4943,17 @@ move, and is the whole point of the chain: `jsdom` is still a DOM, the router is
 holding a mutable address**, and a screen that is wired is not a screen that behaves — the escalation
 page asserts the URL it asked for and then writes that URL itself, because `router.replace` being
 called is not Next acting on it.
+**Amended an eighth time, by `D10-52`, not deleted — and the count returns a fourth time.** A fourth
+page renders under a test: `agent/page.test.tsx`, 23 cases. So ~~three have one, and six do not~~
+becomes **four have one, and five do not.** This amendment keeps the paragraph's distinction and adds
+one the chain had not needed before: the agent screen is **not a copy of the escalation screen**, even
+though it is the same harness. It is the first screen where a **re-run appends** while a **correction
+rewrites**, and where corrections must be offered on a contract's **newest row only** because the
+server resolves "the latest decision" itself — so a superseded row would send a `version` it has
+already moved past. Those are the cases the spec spends itself on. What still does not move: `jsdom`
+is still a DOM, `next/navigation` is still a **double holding a mutable address**, and the `409`
+envelopes the screen translates are **fixtures pinned from the screen's side**, asserted here and not
+verified against the route that emits them.
 **Amended, not deleted (`D10-39`, `2572f53`):** the paragraph this one keeps narrowing ends
 by saying what is left is *not a missing feature and not a hardening pass* — still true, and
 one of the things left has stopped being nothing. The `doctor` check that counts invisible

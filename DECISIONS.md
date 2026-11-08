@@ -4669,3 +4669,79 @@ green run rather than a rider on this one.
 
 **Landed as** `ci(workflows)` `0eb80d5` — two files, and neither is application code. No dependency, no
 lockfile line, no backend source, no test, no migration (`0006` stays head).
+
+### D10-52 — The fourth screen test, and the two actions it must not confuse
+
+The **agent decision screen** is the one the notification slice reads from: `POST /notifications`
+schedules from a *stored* decision, so a recommendation nobody can inspect is a recommendation that
+decides by default. Until now that route family had only ever been reached by `TestClient` — which can
+prove the routes refuse the right things, and cannot prove the screen asks for the right things.
+
+**What this screen carries that no other screen could reach.** `D10-45` predicted *three harnesses
+rather than a loop* and named the escalation and agent screens; the count was right and the shape of
+the work was not identical. The agent screen is the second whose state is the address, but it is the
+first where **two different actions look interchangeable and are not**:
+
+* **a re-run appends; a correction edits.** "The policy changed its mind" is a new fact and gets a new
+  row; "a person disagrees with *this* row" is a fact about that row, so the row is rewritten in place
+  with `original_channel` preserved. The two hit different routes, and the screen reports their
+  progress and their refusals separately — matching on `contract_id` alone would light up every
+  historical row of the same contract.
+* **the correction routes are addressed by contract, not by decision.** The server resolves "the latest
+  decision for this contract" itself, so acting on a superseded row would send a `version` it has
+  already moved past — every click a `409`. The page restates the server's `latest_for_contract` rule
+  over a list it already holds ordered newest-first, which is what lets it hide corrections the server
+  would refuse.
+* **a refusal may carry `details.permitted`, and the client must not compute it.** Re-deriving the
+  permitted set from consent flags in the browser would put a second copy of the contact policy where
+  it could drift from the one that actually refuses. The screen offers all three channels, lets the
+  policy answer, and then reports what the policy said.
+
+**The harness is reused, not rebuilt** — the one `escalations/page.test.tsx` established: a real
+`QueryClientProvider` with a fresh client per case and `retry: false` (these tests ask *what the screen
+asked and how often*, and a retry policy would answer that in the screen's place), the real
+`NextIntlClientProvider` with the real catalogue, the real `AuthProvider` over the real session store
+so role gating is read rather than passed in. Only `agent.decisions` / `decide` / `override` /
+`flagReview` are replaced, each through `importOriginal`, so the genuine `ApiError` survives — the
+screen branches on `instanceof` and on `cause.code`, so a re-exported class would silently make every
+refusal generic. `next/navigation` is the second double, and the *point* of the spec: there is no Next
+runtime here, so `useSearchParams` reads a mutable address the test writes, which is how the suite can
+see that every request the screen makes is derived from the address alone. **No new dependency and no
+provider the previous harness did not already pay for.**
+
+**23 cases**, pinning: a signed-out visitor is asked to sign in and the API is asked nothing; a viewer
+reads decisions and is offered no way to change one; the unscoped read sends no contract filter and a
+scoped address narrows that same read; an address naming something that cannot be a contract performs
+**no read at all**, rather than falling through to the tenant-wide history under a filter that never
+ran; the scope sentence quotes the server's echo rather than the address; the filter navigates with
+`replace` and a trimmed id, and an id that cannot be a contract is never navigated; a re-run calls the
+appending route and reloads the list, and reloads even when it is refused, because the list has gone
+stale; an override echoes the `version` it was shown and **omits** a reason that says nothing;
+`CHANNEL_NOT_PERMITTED` names the permitted channels in the reader's language and degrades to a generic
+sentence when the envelope carries no usable list; corrections appear on a contract's newest row only,
+and an older row says so; a row states what was overridden, by whom, and how many re-runs preceded it;
+and *the API is down* never looks like *nothing has been decided*.
+
+**Mutation evidence, three passes, each applied to `page.tsx` and reverted.** `enabled:
+!scopeIsInvalid` → `enabled: true` fails **1** case; removing `latestIds`' dedup fails **9**; replacing
+the override's omit-when-empty spread with a plain `reason` field fails **1** — the case named *"echoes
+the version it was shown and omits an empty reason"*. The third is worth recording for a reason beyond
+its count: it was the pass that **caught the harness rather than the harness catching it**, because it
+was still applied live when the previous turn ended. The tree carried it overnight and `git status`
+carried it, which is the argument for running the mutant *and* reverting it inside the same turn rather
+than trusting a note that says the file is clean.
+
+**Honest limits, five.** (1) The screen's rules are proven against a **doubled API and a doubled
+address**: `jsdom`, no browser, no real router, no server. (2) The `409` envelopes, including
+`CHANNEL_NOT_PERMITTED`'s `details.permitted`, are **fixtures pinned from the screen's side**; the
+route's shape is asserted here and not verified against `backend/app/api/v1/agent.py`. (3) *Wired is
+not behaving* still holds — `router.replace` being called is not Next acting on it. (4) **Five of nine
+screens still have no component test**; notifications is now the only remaining `page.tsx` importing
+`useSearchParams`, so the next port is a copy of a proven shape, and the four left are a different
+shape rather than a harder one. (5) The viewer gate remains the client's opinion of a role the server
+decides in another suite.
+
+**Landed as** `test(web)` `585dcd7` — one new file, 665 insertions, **no source change**: the screen
+already behaved this way and the spec exists to keep it that way. No dependency, no lockfile line, no
+backend source, no migration (`0006` stays head). `STATUS.md`'s *three of nine* claims are amended in
+place by the follow-up `docs(status)` commit, the convention `D10-40` through `D10-51` all used.
