@@ -4055,3 +4055,79 @@ failed** (19 in `contract-scope.test.ts`, 18 in `session.test.ts`, 21 in `api.te
 entries, the runner config and the one-word `include` change, and nothing else. `STATUS.md`'s stale
 "no component test" regions were amended by the follow-up `docs(status)` commit rather than
 back-dated into the slice, the convention `D10-40`, `D10-41` and `D10-42` all used.
+
+### D10-44 — The first screen test: what a paid-for harness buys, and what a DOM cannot prove
+
+`D10-43` limit (1) was precise: *one component is tested, of nine screens plus a shell* — and the one
+component tested was the provider, not a page. This slice tests the first page. The choice of page was
+not arbitrary: `login/page.tsx` is the only screen where the client names a tenant, and it is the door
+every other screen sits behind, so a defect there is both the most expensive to hit and the hardest to
+notice, because it presents as "the app is broken" rather than "the form is wrong".
+
+- **No new dependency, and that is the point.** `D10-43` paid for `jsdom` and Testing Library; this
+  slice spends that purchase rather than repeating it. `package.json`, the lockfile, `tsconfig.json`
+  and `vitest.config.mts` are all untouched. `jest-dom` was considered and declined: it exists to add
+  matchers such as `toBeDisabled`, and the disabled state is read off the element in one line. A
+  fourth dependency for one assertion is the kind of cost that is invisible at install time and
+  permanent afterwards.
+- **The real message catalogue, not a stub.** The wrapper is `NextIntlClientProvider` with the real
+  `getMessages(locale)` output, and the cases assert against `getMessages("en").auth.*`. That makes
+  each assertion a statement about the sentence a user reads. A hand-written catalogue would have
+  passed against a page that rendered the wrong key, which is exactly the failure the screen has.
+- **The real `AuthProvider` and the real session store; only `auth.login` is replaced.** Replaced
+  through `importOriginal`, the seam `D10-41` and `D10-43` both used and for the same reason: the
+  screen branches on `instanceof ApiError` and on the `isRateLimited` / `isOffline` / `isUnauthorized`
+  getters, so a hand-rolled double could satisfy neither honestly. The test therefore exercises the
+  screen, the provider, the store's subscription and `ApiError` together — the actual chain.
+- **The router is a double; `next/link` is not.** There is no Next runtime under `jsdom`, so
+  `useRouter` has to be replaced. `next/link` is left real, because replacing it would hide a broken
+  `href` — the back link is part of the screen's correctness and nothing else checks it.
+- **Eleven cases, each a rule the source states in prose and nothing had checked.** The slug and the
+  email are trimmed while the password is sent verbatim — whitespace is part of a password and
+  trimming it locks people out. Success navigates with `replace`, so the credentials form is not one
+  Back press from the area just entered. The destination is the locale segment, not a hardcoded
+  `/en`; the `bn` case exists to catch exactly that regression. 429, unreachable and 401 stay
+  distinguishable, mapped by status rather than by matching the server's English sentence. The
+  refusal message for a rejected password names no field (`expect(text).not.toMatch(/tenant|email|password/i)`),
+  because the API deliberately does not say which one was wrong and naming one would convert an
+  intentional opacity into a hint. A failed attempt navigates nowhere. The form is disabled *and* the
+  handler returns early, since a programmatic submit goes straight past the `disabled` attribute —
+  the test calls `submit` a second time to prove the guard rather than the attribute. A stale error
+  is cleared on retry, because "it says wrong password but it logged me in" is what that bug looks
+  like from the outside.
+
+**Teeth, re-measured in this session rather than copied from the slice's own notes.** Four mutants,
+reverted afterwards, with `git diff` on the page empty at the end. (1) `router.replace` →
+`router.push`: **5 of 11 failed** — every case that asserts where the user lands, plus the ones that
+assert where they do not. (2) In one pass, `password` → `password.trim()`, deleting the
+`if (submitting) return` guard, and deleting `setError(null)`: **exactly 3 of 11 failed, and exactly
+the three that name those rules** — *trims the slug and the email but sends the password exactly as
+typed*, *disables the form and ignores a second submit*, *clears the previous error when the user
+tries again*. The second result is the more informative one: a mutant batch that fails precisely the
+cases that claim to cover it, and no others, is evidence that the cases are not merely green but
+independent.
+
+**Verified.** On the tree this slice produced, from `frontend/`: `npm test` → **5 files, 81 tests, 0
+failed** (19 in `contract-scope.test.ts`, 18 in `session.test.ts`, 21 in `api.test.ts`, 12 in
+`auth-provider.test.tsx`, 11 in `login/page.test.tsx`). No backend file and no schema change:
+`alembic` head stays `0006`.
+
+**Honest limits, five.** (1) **One screen of nine, and it is wired rather than working.** `jsdom` is a
+DOM implementation, not a browser: no layout, no CSS, no real navigation and no `fetch`. What is
+proven is that the page calls `router.replace` with the right path; that Next then navigates is not
+proven, and could not be here. (2) **The eight remaining screens need a harness this slice did not
+build.** Every one of them imports `useSearchParams` or route params and TanStack Query, so each needs
+a `QueryClientProvider` and often a `Suspense` boundary; the review queue, the escalation queue and the
+contract detail page are three different harnesses, not one. Naming them here is deliberate — the next
+screen test is a slice, not a copy of this file. (3) **React Query is still unexercised.** `D10-42`
+limit (4) stands untouched: nothing yet proves a mutation invalidates the key a screen depends on, and
+this page performs no query at all. (4) **Only the two static locales are covered.** `en` and `bn` are
+both read from the catalogue, but a locale added later with a missing key fails at render, not here.
+(5) **The router double narrows what "navigation" means.** The test asserts the call and its argument;
+it cannot assert the resulting route, so a page that computed the right path and a router that ignored
+it would still pass.
+
+**Landed as** `test(web)` `ef2aebd` — one new file, 353 lines, and nothing else: no dependency, no
+lockfile entry, no config change, no source change. `STATUS.md`'s surviving "no screen" regions were
+amended by the follow-up `docs(status)` commit rather than back-dated into the slice, the convention
+`D10-40` through `D10-43` all used.

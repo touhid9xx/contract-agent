@@ -479,7 +479,10 @@ hook, because a suite nothing runs is a suite that rots. Teeth were checked by b
 **Amended by `D10-43`, not deleted:** the component half of that sentence has stopped being true —
 `auth-provider.test.tsx` is the first component test and runs under `jsdom` — while the browser and
 integration halves have not, and *the three scoped screens remain unrendered* is exactly as true now
-as it was when written.
+as it was when written. **Amended again by `D10-44`, not deleted:** one screen does render under a
+test now (`login/page.tsx`, 11 cases), but it is not one of *the three scoped screens* — those are
+`agent`, `notifications` and `escalations`, and all three need a `QueryClientProvider` the login page
+never touches. So the clause is narrowed by a screen and unchanged for the three it names.
 
 **Then the stored bytes get a reader** (`D10-38`, one commit: `feat(backend)` `f3a1bb1`): `D10-26`
 gave `Contract.storage_path` a writer and `D10-27` gave it an *existence* reader, but nothing read
@@ -613,6 +616,10 @@ the **screens** are still hand-tested; there is still **no component, browser or
 exercised at all. **Amended by `D10-43`, not deleted:** a component test now exists, so that clause
 has stopped being true in one of its three words — but *the screens are still hand-tested* is
 untouched by it, because the component tested is the auth provider and not a page.
+**Amended again by `D10-44`, not deleted:** one screen stopped being hand-tested only — the sign-in
+page, 11 cases — so *the screens are still hand-tested* is now true of eight of the nine rather than
+all nine. What survives word for word is *React Query is not exercised at all*: the login page issues
+no query, so the limit this paragraph states most sharply is the one this slice did not touch.
 
 **Then the first component gets a test** (`D10-43`, one commit: `test(web)` `16803d0`): two
 slices in a row had closed with the same sentence — *no component, browser or integration test* — and
@@ -646,6 +653,38 @@ is tested**, and it is the provider rather than a page; `jsdom` is a DOM impleme
 browser, so nothing here proves the client and the server agree; `useSyncExternalStore` is exercised
 through its behaviour, not its internals; and the `oxc` block is proven only by deletion, so a future
 Vitest upgrade could leave a comment asserting a requirement that no longer exists.
+
+**Then the first screen gets a test** (`D10-44`, one commit: `test(web)` `ef2aebd`): `D10-43` closed
+with a precise limit — *one component is tested, of nine screens plus a shell*, and the one tested was
+the provider rather than a page — so this slice spends the harness the last one paid for instead of
+buying another. The page chosen is `login/page.tsx`, the only screen where the client names a tenant
+and the door every other screen sits behind; a defect there reads as "the app is broken" rather than
+"the form is wrong". **No new dependency**: `package.json`, the lockfile, `tsconfig.json` and
+`vitest.config.mts` are all untouched, and `jest-dom` was declined rather than added for one matcher —
+the disabled state is read off the element. The harness uses the **real** `NextIntlClientProvider` with
+the real catalogue, so each assertion is about the sentence a user reads; the **real** `AuthProvider`
+and session store; and only `auth.login` replaced, through `importOriginal`, so `instanceof ApiError`
+and the status getters stay honest. Only the router is a double — there is no Next runtime under
+`jsdom` — while `next/link` is left real, because replacing it would hide a broken `href`. Eleven
+cases pin rules the source states in prose and nothing had checked: slug and email trimmed but the
+password sent verbatim (whitespace is part of a password); `replace` rather than `push`, so the
+credentials form is not one Back press from the area just entered; the locale segment rather than a
+hardcoded `/en`; 429, unreachable and 401 kept apart by status rather than by matching English text;
+a refused password naming no field, since the API deliberately does not say which one was wrong; a
+failed attempt navigating nowhere; the form disabled **and** the handler returning early, proven by
+submitting a second time because a programmatic submit goes past the attribute; and a stale error
+cleared on retry. Teeth were re-measured rather than copied: `replace` → `push` failed **5 of 11**,
+and in one pass `password` → `password.trim()`, deleting the `if (submitting) return` guard and
+deleting `setError(null)` failed **exactly 3 of 11 — the three that name those rules and nothing
+else**. All four mutants were reverted and `git diff` on the page is empty. The gate ran green on this
+tree, `frontend tests (vitest run)` among its hooks. **No backend file, no migration (`0006`).** The
+honest limits: **one screen of nine, and wired rather than working** — `jsdom` is a DOM, not a browser,
+so no layout, no real navigation and no `fetch`, and the test proves `router.replace` was *called*,
+not that Next acted on it; the **eight remaining screens each need a harness this slice did not
+build**, because they import `useSearchParams` or route params and TanStack Query, so the review
+queue, the escalation queue and the detail page are three different harnesses rather than one; React
+Query is still unexercised; and only the two static locales are covered, so a locale added later with
+a missing key would fail at render rather than here.
 
 ## Phase history
 
@@ -4163,6 +4202,13 @@ touches no production behaviour, which is why it is `test(web)` and not `feat(we
   bullet predicted — that one component *mounts* and reads the store — which is why the sentence that
   still stands is the one above it: **the three screens named here are untouched**, and
   `jsdom` still cannot tell you that a screen behaves.
+  **Amended again by `D10-44`, not deleted, and the bullet's own prediction is the reason the amendment
+  is narrow:** a *screen* test now exists too (`login/page.tsx`, 11 cases), which is more than this
+  bullet anticipated — but not for **the three screens named here**. The prediction that `agent`,
+  `notifications` and `escalations` need "React, a router, a query client and a browser" still holds,
+  and the proof is the login page itself: it needed React, a router and `jsdom`, and the one thing it
+  did *not* need was the query client, which is exactly why it could be tested first and why these
+  three cannot follow for free. *`jsdom` still cannot tell you that a screen behaves* stands unchanged.
 - **The key parity and the Bengali strings.** Still a script's output, still unread by anyone who
   reads Bengali.
 - **The advisories.** `npm install` printed **7 moderate severity** advisories for the frontend tree.
@@ -4445,6 +4491,12 @@ tell the shared-promise design from the bug it exists to prevent.
   test now runs — `auth-provider.test.tsx`, 12 cases, under a per-file `jsdom` environment. The
   sentence is kept because "a decision, not a line of config" is precisely what it turned out to be:
   three dependencies and +526 lockfile lines, which is why the two prior slices deferred it.
+  **Amended again by `D10-44`, not deleted:** the first **screen** test now runs as well —
+  `login/page.test.tsx`, 11 cases, same per-file environment — and it cost **no** dependency, because
+  it spends the three this bullet records as paid. Both halves of the original sentence are now false
+  in the same way: `jsdom` *is* added, and a component test no longer needs a decision. What is left
+  is the part that was never about dependencies — `jsdom` is a DOM and not a browser, so no screen's
+  *behaviour* is proven, only that it is wired.
 - **The config file is not typechecked.** `tsc --noEmit` includes `**/*.ts` and `**/*.tsx`, which does
   not match `.mts`. For a config that is mostly comment, that is the trade taken, and it is why it holds
   no logic. It is not unexercised, though: the gate runs `pre-commit run --all-files`, so
@@ -4511,6 +4563,16 @@ screen*, and that is the one qualifier that did not move: the component tested i
 no page renders under it, and so **not one of the screens has a component test even now.** The
 narrowing is real and the sentence is still true, which is the distinction the three earlier
 amendments were each careful to keep.
+**Amended a fourth time, by `D10-44`, not deleted — and this is the amendment that finally moves the
+qualifier.** A page does render under a test now: `login/page.test.tsx`, 11 cases, wrapping the real
+`AuthProvider` and the real catalogue around `login/page.tsx`. So ~~not one of the screens has a
+component test even now~~ becomes **one screen of nine has one, and eight do not.** The distinction
+this paragraph exists to keep is kept rather than abandoned: *for any screen* has stopped being true
+in the way it was written and has **not** stopped being true in the way it mattered. The screen tested
+is the one that needs the least — no query client, no route params, no list to page — and the eight
+that remain are exactly the ones that need more, so "a screen is tested" is a narrower claim here than
+it reads. Nothing about *behaviour* moved either: `jsdom` is still a DOM, the router is still a double,
+and `router.replace` being called is still not Next acting on it.
 **Amended, not deleted (`D10-39`, `2572f53`):** the paragraph this one keeps narrowing ends
 by saying what is left is *not a missing feature and not a hardening pass* — still true, and
 one of the things left has stopped being nothing. The `doctor` check that counts invisible
