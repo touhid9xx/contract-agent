@@ -213,6 +213,20 @@ class Settings(BaseSettings):
     #: row deferred to 08:00 customer time would otherwise wait for an arbitrary
     #: sweep interval to be noticed.
     notification_poll_interval_seconds: float = Field(default=5.0, gt=0, le=300)
+    #: Seconds between attention checks (`python -m app.workers.attention_watch`).
+    #: Five minutes, not five seconds: every tick reads three tables and the states
+    #: it reports — a parked event, a suppressed notification, a plaintext field
+    #: value — do not become more urgent between ticks. The ceiling is an hour
+    #: because a longer interval makes the log line arrive after the operator who
+    #: needed it has gone home.
+    attention_poll_interval_seconds: float = Field(default=300.0, gt=0, le=3600)
+    #: Extracted-field rows one attention check scans for unsealed values. The same
+    #: bound ``doctor --limit`` takes, and the same stated consequence: a full page
+    #: makes the reported count a floor rather than the table's total, which the
+    #: report records as ``field_scan_truncated`` instead of rounding away. The
+    #: default matches ``DEFAULT_RESEAL_LIMIT`` so the scheduled check and a hand
+    #: run of ``doctor`` agree on what they looked at.
+    attention_field_scan_limit: int = Field(default=500, gt=0, le=100_000)
 
     # --- escalation (gap 15) ---------------------------------------------
     #: Hours between an escalation being raised and its deadline. ``Q2`` in

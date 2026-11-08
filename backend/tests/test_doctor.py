@@ -22,6 +22,13 @@ pinning are not "it prints something":
   truncation flag is asserted directly rather than trusted.
 * **Read-only.** An inspection command that seals, retries or resolves anything on
   its own initiative is a repair script wearing the wrong name.
+* **A park under a switched-off bus is counted and not failed.** The judgement
+  ``D10-39`` adds, and the one worth arguing about: ``EVENT_TRANSPORT=none`` is the
+  default, and with it the relay parks *every* event it claims, so failing on a
+  park makes this command fail on every run of a default installation until the
+  operator learns to ignore it. The count stays visible; the exit code is not
+  spent. Both halves are asserted, and so is the narrowness of it: an explained
+  park must not mask a real finding sitting next to it.
 """
 
 from __future__ import annotations
@@ -32,8 +39,9 @@ import pytest
 from cryptography.fernet import Fernet
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.cli import EXIT_ATTENTION, EXIT_OK, _attention_report, build_parser
+from app.cli import EXIT_ATTENTION, EXIT_OK, build_parser
 from app.cli import main as cli_main
+from app.core.attention import attention_report
 from app.core.config import Settings
 from app.core.crypto import FieldCipher, is_sealed
 from app.db.base import utc_now
@@ -161,10 +169,18 @@ def add_notification(
 def report(
     session_factory: sessionmaker[Session],
     *,
+    settings: Settings,
     limit: int = 500,
 ) -> dict[str, object]:
+    """One reading, as the flat shape both callers emit.
+
+    ``settings`` is required rather than defaulted because the reading now depends
+    on it: whether a parked event counts as a fault is decided by the transport the
+    check was run under. A default would let a test assert the old verdict by
+    accident.
+    """
     with session_scope(session_factory) as session:
-        return _attention_report(session, limit=limit)
+        return attention_report(session, limit=limit, settings=settings).as_dict()
 
 
 def run(
@@ -189,16 +205,28 @@ def test_an_empty_database_needs_no_attention(
 
 
 def test_a_clean_report_counts_nothing_at_all(
-    session_factory: sessionmaker[Session],
+    session_factory: sessionmaker[Session], settings: Settings
 ) -> None:
-    assert report(session_factory) == {
+    """The whole shape, asserted exactly rather than key by key.
+
+    An exact comparison is deliberate: a field added to the report and forgotten by
+    a caller is the defect the record type exists to prevent, and this is the one
+    place that notices it. ``bus_disabled`` is ``True`` here because ``test``
+    settings carry the default ``EVENT_TRANSPORT=none`` — the reading now records
+    the transport it was taken under, so the clean case has to say so too.
+    """
+    assert report(session_factory, settings=settings) == {
         "outbox_parked": 0,
+        "outbox_parked_explained": 0,
         "notifications_failed": 0,
         "notifications_suppressed": 0,
         "unsealed_field_values": 0,
         "unsealed_field_ids": [],
         "fields_scanned": 0,
         "field_scan_truncated": False,
+        "event_transport": "none",
+        "bus_disabled": True,
+        "needs_attention": False,
     }
 
 
@@ -210,7 +238,7 @@ def test_a_plaintext_field_value_is_reported(
 ) -> None:
     field_id = add_field(session_factory, contract)
 
-    assert report(session_factory)["unsealed_field_ids"] == [field_id]
+    assert report(session_factory, settings=settings)["unsealed_field_ids"] == [field_id]
     assert run(session_factory, settings) == EXIT_ATTENTION
 
 
@@ -219,7 +247,7 @@ def test_a_sealed_field_value_is_not_reported(
 ) -> None:
     add_field(session_factory, contract, seal_raw=True, seal_normalized=True)
 
-    assert report(session_factory)["unsealed_field_values"] == 0
+    assert report(session_factory, settings=settings)["unsealed_field_values"] == 0
     assert run(session_factory, settings) == EXIT_OK
 
 
@@ -233,12 +261,12 @@ def test_the_row_the_old_writer_left_behind_is_reported(
     """
     field_id = add_field(session_factory, contract, seal_raw=True, seal_normalized=False)
 
-    assert report(session_factory)["unsealed_field_ids"] == [field_id]
+    assert report(session_factory, settings=settings)["unsealed_field_ids"] == [field_id]
     assert run(session_factory, settings) == EXIT_ATTENTION
 
 
 def test_every_unsealed_row_is_counted_not_just_the_first(
-    session_factory: sessionmaker[Session], contract: Contract
+    session_factory: sessionmaker[Session], settings: Settings, contract: Contract
 ) -> None:
     first = add_field(session_factory, contract, field_name=FieldName.EMAIL)
     second = add_field(
@@ -258,7 +286,7 @@ def test_every_unsealed_row_is_counted_not_just_the_first(
         seal_normalized=True,
     )
 
-    assert report(session_factory)["unsealed_field_ids"] == [first, second]
+    assert report(session_factory, settings=settings)["unsealed_field_ids"] == [first, second]
 
 
 def test_a_row_with_no_values_at_all_is_not_unsealed(
@@ -278,7 +306,7 @@ def test_a_row_with_no_values_at_all_is_not_unsealed(
             )
         )
 
-    assert report(session_factory)["unsealed_field_values"] == 0
+    assert report(session_factory, settings=settings)["unsealed_field_values"] == 0
     assert run(session_factory, settings) == EXIT_OK
 
 
@@ -286,7 +314,7 @@ def test_a_row_with_no_values_at_all_is_not_unsealed(
 
 
 def test_a_full_page_is_reported_as_truncated(
-    session_factory: sessionmaker[Session], contract: Contract
+    session_factory: sessionmaker[Session], settings: Settings, contract: Contract
 ) -> None:
     """One row scanned at ``--limit 1`` fills the page.
 
@@ -295,11 +323,11 @@ def test_a_full_page_is_reported_as_truncated(
     """
     add_field(session_factory, contract, seal_raw=True, seal_normalized=True)
 
-    assert report(session_factory, limit=1)["field_scan_truncated"] is True
+    assert report(session_factory, limit=1, settings=settings)["field_scan_truncated"] is True
 
 
 def test_the_scan_limit_can_hide_a_plaintext_row_beyond_it(
-    session_factory: sessionmaker[Session], contract: Contract
+    session_factory: sessionmaker[Session], settings: Settings, contract: Contract
 ) -> None:
     """The acknowledged weakness, asserted rather than glossed.
 
@@ -310,20 +338,84 @@ def test_the_scan_limit_can_hide_a_plaintext_row_beyond_it(
     add_field(session_factory, contract, seal_raw=True, seal_normalized=True)
     add_field(session_factory, contract, field_name=FieldName.PHONE)
 
-    assert report(session_factory, limit=1)["unsealed_field_values"] == 0
-    assert report(session_factory, limit=2)["unsealed_field_values"] == 1
+    assert report(session_factory, limit=1, settings=settings)["unsealed_field_values"] == 0
+    assert report(session_factory, limit=2, settings=settings)["unsealed_field_values"] == 1
 
 
-# --- parked outbox rows (gap 22's residue) --------------------------------
+# --- parked outbox rows: a fault, or a configured refusal ----------------
+#
+# The two halves are the same row and different verdicts, and both have to be
+# asserted: with EVENT_TRANSPORT=none (the default, and what `settings` carries)
+# the relay parks everything it claims, so a park is the designed shape of a fresh
+# installation. With a transport configured, the same park means the relay tried
+# and could not deliver, and that is a person's problem.
 
 
-def test_a_parked_event_is_counted(
+def test_a_parked_event_under_a_configured_transport_needs_attention(
     session_factory: sessionmaker[Session], settings: Settings, tenant: Tenant
 ) -> None:
     add_outbox_event(session_factory, tenant)
     add_outbox_event(session_factory, tenant)
+    # Built rather than copied from the `settings` fixture: the transport is the
+    # only thing under test here, and a real `Settings` re-runs the cross-field
+    # validation that makes "kafka with no broker" an error at startup — which is
+    # the configuration this test is *not* describing.
+    configured = Settings(
+        app_env="test",
+        log_json=False,
+        event_transport="kafka",
+        kafka_bootstrap_servers="kafka:9092",
+    )
 
-    assert report(session_factory)["outbox_parked"] == 2
+    counts = report(session_factory, settings=configured)
+
+    assert counts["outbox_parked"] == 2
+    assert counts["outbox_parked_explained"] == 0
+    assert counts["needs_attention"] is True
+    assert run(session_factory, configured) == EXIT_ATTENTION
+
+
+def test_a_park_under_a_switched_off_bus_is_counted_and_not_a_fault(
+    session_factory: sessionmaker[Session], settings: Settings, tenant: Tenant
+) -> None:
+    """The default install parks everything, and must not be told it is broken.
+
+    The count stays — an operator can still see the queue is not draining, and the
+    line says why — but no exit code is spent on it. A command that failed on every
+    default installation is one nobody schedules, which is how the one failure it
+    *can* report stops being read (``D10-39``).
+    """
+    add_outbox_event(session_factory, tenant)
+    add_outbox_event(session_factory, tenant)
+
+    counts = report(session_factory, settings=settings)
+
+    assert counts["outbox_parked"] == 2
+    assert counts["outbox_parked_explained"] == 2
+    assert counts["bus_disabled"] is True
+    assert counts["needs_attention"] is False
+    assert run(session_factory, settings) == EXIT_OK
+
+
+def test_an_explained_park_does_not_mask_a_real_finding_beside_it(
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+    tenant: Tenant,
+    contract: Contract,
+) -> None:
+    """The narrowness of the suppression, asserted.
+
+    Only the park is explained; everything else in the same reading still decides
+    the verdict. Without this, "explained" could grow into "this run says nothing".
+    """
+    add_outbox_event(session_factory, tenant)
+    add_field(session_factory, contract)
+
+    counts = report(session_factory, settings=settings)
+
+    assert counts["outbox_parked_explained"] == 1
+    assert counts["unsealed_field_values"] == 1
+    assert counts["needs_attention"] is True
     assert run(session_factory, settings) == EXIT_ATTENTION
 
 
@@ -333,7 +425,7 @@ def test_a_pending_event_is_not_counted(
     """Pending is the normal state of every event between commit and relay."""
     add_outbox_event(session_factory, tenant, status=OutboxStatus.PENDING)
 
-    assert report(session_factory)["outbox_parked"] == 0
+    assert report(session_factory, settings=settings)["outbox_parked"] == 0
     assert run(session_factory, settings) == EXIT_OK
 
 
@@ -341,7 +433,7 @@ def test_a_pending_event_is_not_counted(
 
 
 def test_failed_and_suppressed_notifications_are_counted_separately(
-    session_factory: sessionmaker[Session], contract: Contract
+    session_factory: sessionmaker[Session], settings: Settings, contract: Contract
 ) -> None:
     """Two different operator responses: ``failed`` is retryable, ``suppressed``
     was a policy refusal and needs a human to change consent or the channel."""
@@ -354,7 +446,7 @@ def test_failed_and_suppressed_notifications_are_counted_separately(
         slot=date(2025, 1, 3),
     )
 
-    counts = report(session_factory)
+    counts = report(session_factory, settings=settings)
 
     assert counts["notifications_failed"] == 1
     assert counts["notifications_suppressed"] == 1
@@ -372,7 +464,7 @@ def test_a_sent_notification_is_not_counted(
         slot=date(2025, 1, 3),
     )
 
-    counts = report(session_factory)
+    counts = report(session_factory, settings=settings)
 
     assert counts["notifications_failed"] == 0
     assert counts["notifications_suppressed"] == 0
@@ -419,7 +511,7 @@ def test_a_sealed_value_under_a_rotated_key_is_not_reported_as_plaintext(
             )
         )
 
-    assert report(session_factory)["unsealed_field_values"] == 0
+    assert report(session_factory, settings=settings)["unsealed_field_values"] == 0
     assert run(session_factory, settings) == EXIT_OK
 
 
@@ -444,11 +536,11 @@ def test_running_it_changes_nothing(
 
 
 def test_the_report_carries_ids_and_never_values(
-    session_factory: sessionmaker[Session], contract: Contract
+    session_factory: sessionmaker[Session], settings: Settings, contract: Contract
 ) -> None:
     field_id = add_field(session_factory, contract)
 
-    rendered = repr(report(session_factory))
+    rendered = repr(report(session_factory, settings=settings))
 
     assert PLAINTEXT_EMAIL not in rendered
     assert str(field_id) in rendered

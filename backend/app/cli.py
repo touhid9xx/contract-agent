@@ -47,6 +47,7 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.orm.exc import StaleDataError
 
+from app.core.attention import PII_COLUMNS, attention_report
 from app.core.config import Settings, get_settings
 from app.core.crypto import (
     DecryptionError,
@@ -60,7 +61,7 @@ from app.core.documents import DocumentStoreError, build_document_store
 from app.core.logging import configure_logging
 from app.core.middleware import correlation_id_or_new
 from app.core.security import MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH, hash_password
-from app.db.enums import NotificationStatus, UserRole
+from app.db.enums import UserRole
 from app.db.models import Contract, Tenant
 from app.db.repositories.audit import (
     ACTION_CONSENT_UPDATED,
@@ -78,11 +79,9 @@ from app.db.repositories.contracts import (
     contract_for_operator,
 )
 from app.db.repositories.fields import DEFAULT_RESEAL_LIMIT, fields_for_reseal
-from app.db.repositories.notifications import undelivered_counts
 from app.db.repositories.outbox import (
     DEFAULT_REPLAY_LIMIT,
     DeadLetterReplay,
-    dead_letter_count,
     dead_lettered,
     replay_dead_lettered,
 )
@@ -115,10 +114,16 @@ EXIT_FAILED = 3
 #: a database stays half-migrated is the failure mode this command exists to end.
 EXIT_UNREADABLE = 4
 #: Something needs a human and nothing else was going to say so: an outbox row
-#: parked, a notification that failed or was suppressed, or a field value still
-#: stored in the clear. Non-zero so a cron entry or a CI step fails loudly on it —
-#: a zero exit code would make the one state that needs attention the one state
-#: that looks exactly like a clean database.
+#: parked while a transport was configured to deliver it, a notification that failed
+#: or was suppressed, or a field value still stored in the clear. Non-zero so a cron
+#: entry or a CI step fails loudly on it — a zero exit code would make the one state
+#: that needs attention the one state that looks exactly like a clean database.
+#:
+#: A parked row under ``EVENT_TRANSPORT=none`` is deliberately *not* one of these
+#: (``D10-39``): with the bus switched off the relay parks everything by design, and
+#: a command that failed on that would fail every run of a default installation
+#: until an operator learned to ignore it. Those parks are counted and named in the
+#: log, and no exit code is spent on them.
 EXIT_ATTENTION = 5
 #: The account ``create-admin`` was asked for already exists, and nothing was
 #: changed. Distinct from ``EXIT_FAILED`` because a provisioning script has to be
@@ -129,10 +134,10 @@ EXIT_ATTENTION = 5
 EXIT_EXISTS = 6
 
 #: The two columns on :class:`~app.db.models.ExtractedField` that hold PII, and so
-#: must be sealed. Named once, here, so "did we miss a column?" has one answer —
-#: ``reseal-fields`` seals this set and ``doctor`` checks it, and a column added to
-#: one without the other is the failure this constant exists to prevent.
-_PII_COLUMNS = ("raw_value", "normalized_value")
+#: must be sealed, are named once in :data:`app.core.attention.PII_COLUMNS` — not
+#: here. The set moved when the attention check gained a second caller
+#: (``AttentionWatch``); ``reseal-fields`` still seals it and ``doctor`` still
+#: verifies it, so "did we miss a column?" still has exactly one answer.
 
 #: The header a consent sheet must carry, in the order :data:`ConsentSheetRow`
 #: documents it.
@@ -799,7 +804,7 @@ def _reseal_fields(
         rows = fields_for_reseal(session, field_ids=field_ids, limit=limit)
         for field in rows:
             sealed_here = 0
-            for column in _PII_COLUMNS:
+            for column in PII_COLUMNS:
                 value: Any = getattr(field, column)
                 if value is None:
                     continue
@@ -864,47 +869,6 @@ def _reseal_fields(
     return EXIT_OK
 
 
-def _attention_report(session: Session, *, limit: int) -> dict[str, Any]:
-    """Count the states that need a human, on an open session.
-
-    Split out from :func:`_doctor` so the numbers can be asserted directly. The
-    command's value is entirely in *what* it counts; a test that could only see an
-    exit code would prove "something was found" while telling us nothing about
-    whether the right thing was found, or whether the count was exact.
-
-    ``unsealed_field_ids`` is deliberately the only row-level detail returned, and
-    there is no companion list of values: an id plus a column name is enough to run
-    ``reseal-fields --ids``, and nothing here should be able to put PII on a log
-    line even by accident.
-    """
-    parked_events = dead_letter_count(session)
-    undelivered = undelivered_counts(session)
-    fields = fields_for_reseal(session, limit=limit)
-
-    unsealed = [
-        field.id
-        for field in fields
-        if any(
-            getattr(field, column) is not None and not is_sealed(str(getattr(field, column)))
-            for column in _PII_COLUMNS
-        )
-    ]
-
-    return {
-        "outbox_parked": parked_events,
-        "notifications_failed": undelivered[NotificationStatus.FAILED],
-        "notifications_suppressed": undelivered[NotificationStatus.SUPPRESSED],
-        "unsealed_field_values": len(unsealed),
-        "unsealed_field_ids": unsealed,
-        "fields_scanned": len(fields),
-        # ``fields_for_reseal`` stops at the limit, so a full page means the
-        # unsealed count is a floor rather than the table's total. Recorded rather
-        # than rounded away: "0 unsealed" from a truncated scan is the one answer
-        # this command must never report confidently.
-        "field_scan_truncated": len(fields) == limit,
-    }
-
-
 def _doctor(
     args: argparse.Namespace,
     session_factory: sessionmaker[Session],
@@ -928,6 +892,14 @@ def _doctor(
     narrowed — the state is now observable and machine-checkable instead of
     requiring a hand-written query — not closed.
 
+    The counting moved to :func:`~app.core.attention.attention_report` when
+    :class:`~app.workers.attention_watch.AttentionWatch` became a second caller;
+    what is *this command's* and stays here is the part that needs an exit code.
+    Since ``D10-39`` the reading also distinguishes a bus that is switched off from
+    one that is broken: an explained park is logged and **not** failed, because on
+    ``EVENT_TRANSPORT=none`` every event parks by design and an alarm that fires on
+    a default install is one nobody reads for long.
+
     Read-only, and deliberately usable **without** an ``ENCRYPTION_KEY``:
     :func:`~app.core.crypto.is_sealed` recognises a token by its shape, so a run
     with the wrong key still reports a plaintext database as plaintext. A check
@@ -936,27 +908,35 @@ def _doctor(
     limit = int(args.limit)
 
     with session_scope(session_factory) as session:
-        report = _attention_report(session, limit=limit)
+        report = attention_report(session, limit=limit, settings=settings)
 
-    if report["field_scan_truncated"]:
+    if report.field_scan_truncated:
         log.warning(
             "doctor_field_scan_truncated",
-            scanned=report["fields_scanned"],
+            scanned=report.fields_scanned,
             limit=limit,
             hint="the unsealed count is a floor; raise --limit above the field-table size",
         )
 
-    needs_attention = (
-        report["outbox_parked"]
-        or report["notifications_failed"]
-        or report["notifications_suppressed"]
-        or report["unsealed_field_values"]
-    )
-    if needs_attention:
-        log.error("doctor_needs_attention", **report)
+    if report.parks_explained:
+        # Deliberately ``warning`` and not part of the exit code. With
+        # EVENT_TRANSPORT=none the relay parks every event it claims, so this is the
+        # designed shape of a default installation and not something to act on —
+        # but the count is real and refusing to drain is real, so it is said out
+        # loud rather than dropped. Whether these parks should exist at all is gap
+        # 25's open question, which is a decision and not a patch (D10-39).
+        log.warning(
+            "doctor_bus_is_switched_off",
+            event_transport=report.event_transport,
+            outbox_parked=report.outbox_parked,
+            effect="these events will not drain until a transport is configured",
+        )
+
+    if report.needs_attention:
+        log.error("doctor_needs_attention", **report.as_dict())
         return EXIT_ATTENTION
 
-    log.info("doctor_clean", **report)
+    log.info("doctor_clean", **report.as_dict())
     return EXIT_OK
 
 
