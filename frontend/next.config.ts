@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import createNextIntlPlugin from "next-intl/plugin";
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
@@ -22,4 +23,9 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default nextConfig;
+// Wires `src/i18n/request.ts` into the build. Without it the production build
+// fails every prerender with "Couldn't find next-intl config file" even though
+// the file exists: `NextIntlClientProvider` consults the request config while
+// rendering on the server, and the plugin is what tells next-intl where to load
+// it from (D10-47).
+export default createNextIntlPlugin()(nextConfig);

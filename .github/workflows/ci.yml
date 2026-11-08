@@ -182,11 +182,11 @@ jobs:
 
   # ------------------------------------------------------------------ frontend
   # The three hooks that drive `scripts/run-frontend-check.mjs`, invoked
-  # directly. `npm ci` (not `npm install`) so the committed lockfile is what is
-  # tested — a floating resolution would make CI prove a different tree than the
-  # developer's.
+  # directly, plus the production build. `npm ci` (not `npm install`) so the
+  # committed lockfile is what is tested — a floating resolution would make CI
+  # prove a different tree than the developer's.
   frontend:
-    name: frontend (typecheck, eslint, vitest)
+    name: frontend (typecheck, eslint, vitest, build)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -211,6 +211,18 @@ jobs:
 
       - name: vitest
         run: npm test
+
+      # The fourth check, and the only one that exercises the server rendering
+      # path: `tsc --noEmit` proves types and `vitest` proves components in
+      # jsdom, but neither renders a page in an RSC pass. This step is what
+      # caught the app having no production build at all (D10-47) — it had never
+      # been run, so a missing next-intl request config went unnoticed for
+      # months. `next build` needs no backend: the /api and /health rewrites are
+      # resolved per request, not at build time.
+      - name: production build
+        run: npm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
 
   # ------------------------------------------------------------- demo frontend
   # A separate app with its own lockfile. The `demo-frontend-typecheck` hook was
