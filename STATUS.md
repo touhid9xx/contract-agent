@@ -559,6 +559,27 @@ verdict is **process memory**, so a restart while a finding stands re-announces 
 a table (`0007`), declined until a restarting worker is observed to be noisy; and the blocked route is
 no less blocked, because this sidesteps the cross-tenant question rather than answering it.
 
+**Then the runner learns the alias** (`D10-41`, one commit: `test(web)` `8f65fbf`): `D10-37` closed
+the frontend's test gap with one spec, for the one pure module that happened to import relatively, and
+recorded the absence of a `vitest.config.ts` as a virtue — but a constraint that forbids the next test
+is not a constraint. `session.ts` is the second module in the app about which a unit test can mean
+something: framework-free by design, and the only place the single-use refresh token is redeemed. It
+reaches `@/lib/api`, so the alias is taught to the runner once — `@` → `./src`, `environment: "node"`,
+and `.mts` rather than `.ts` after Vite warned, word for word, that the latter loads as CommonJS
+carrying ESM syntax; the alternative, `"type": "module"` in `frontend/package.json`, would have
+changed how Next reads the package to silence a warning about a config. The 18 tests pin four rules
+rather than four methods: the server snapshot never claims a live session, `setSession` replaces
+wholesale and notifies each subscriber once, **two concurrent rotations share one redemption**, a
+refused rotation ends the session and tells subscribers, and `authorized` retries **exactly once**.
+Only `auth.refresh` is mocked, through `importOriginal`, so the real `ApiError` survives the module's
+own `instanceof ApiError` branch. The guard was checked by breaking it — deleting the in-flight branch
+failed the concurrency test 2-calls-vs-1, and the source was restored. The commit gate ran green on
+this tree, `frontend tests (vitest run)` among its hooks. **No dependency, no lockfile change, no
+backend file, no migration (`0006`).** The honest limits: still **no component, browser or integration
+test** (`jsdom` is a decision, not a line of config); the config is not typechecked, because
+`tsc --noEmit` includes `**/*.ts` and not `.mts`, though the gate's `pre-commit run --all-files` means
+vitest loads it on every commit; and `api.ts` is still proven by reading rather than by execution.
+
 ## Phase history
 
 | Phase | State |
@@ -3995,8 +4016,12 @@ commit gate; the paragraph stays because it is the reason the module was shaped 
 
 - **No frontend test runner.** The gap is older than this slice; this slice is the one that pays for
   it, because `contract-scope.ts` is the first pure module in the frontend with branching logic that
-  nothing calls in a test. **Amended (`D10-37`):** the runner arrived with exactly that one spec, and
-  the hook that runs it is part of the gate. There are still no component or browser tests.
+  ~~nothing calls in a test~~ **— true when written, false from `D10-37`:** the runner arrived with
+  exactly that one spec, and the hook that runs it is part of the gate. There are still no component
+  or browser tests.
+  **Amended again by `D10-41`, not deleted:** a second spec now runs — `session.test.ts`, 18 tests over
+  the in-memory session and its single-flight rotation — which is why "exactly that one spec" no
+  longer describes the suite. The sentence that still stands is the last one.
 - **Nothing on the escalation queue screen is tested either.** It now has a filter control and a
   resolved toggle in the address, and both are reached by hand only.
 - **The scope form is a text box, not a picker.** It takes an id because that is what the parameter
@@ -4036,8 +4061,11 @@ into a module that needs none — a runner that required a build config to read 
 have been more machinery than the thing it checks. The spec imports `describe`/`it`/`expect` from
 `"vitest"` rather than enabling `globals: true`, so **no ambient types are declared** and
 `tsconfig.json` is untouched; `tsc --noEmit` already includes `**/*.ts`, so the spec is typechecked
-by the same gate as the source it tests. The import is relative (`./contract-scope`) and therefore
-**no `vitest.config.ts` exists** — the `@/` alias never has to be taught to a second resolver.
+by the same gate as the source it tests. ~~The import is relative (`./contract-scope`) and therefore
+**no `vitest.config.ts` exists** — the `@/` alias never has to be taught to a second resolver.~~
+**Amended by `D10-41`, not deleted:** that held only while the single spec imported relatively. The
+second spec's subject reaches `@/lib/api`, so `frontend/vitest.config.mts` now exists and declares the
+same alias `tsconfig.json` already owns — which is the only thing it is allowed to declare.
 
 ### The table found a real asymmetry, and it was mine
 
@@ -4308,6 +4336,55 @@ were proven on SQLite only, again. `tests/test_attention_alerts.py` is **17**, `
 is **9** and `test_doctor.py` is **21**; 871 + 17 is the 888. The commit gate ran all five quality
 hooks plus `tsc` and `vitest` and passed; `forbid-submodules` was the only skip.
 
+## The runner learns the alias ✅ (`D10-41` — a second pure module, and the config that lets it exist)
+
+`D10-37` bought a frontend runner and one spec, and recorded why the suite stopped there: with no
+`vitest.config.ts`, only a module that imports relatively could be tested at all, and
+`contract-scope.ts` happened to be one. That is a property of the test, not of the code — so the next
+module worth pinning could not be reached. `frontend/src/lib/session.ts` is that module: framework-free
+on purpose, the only place a single-use refresh token is redeemed, and the holder of the rule `D10-17`
+makes a correctness requirement rather than an optimisation — **two concurrent rotations of one token
+are indistinguishable from theft, and the backend answers by revoking the whole family.**
+
+| Change | Detail |
+| --- | --- |
+| `frontend/vitest.config.mts` | **New.** Declares `@` → `./src` and `environment: "node"`, and nothing else. `.mts` because Vite warned, word for word, *ESM syntax in a file loaded as CommonJS (`vitest.config.ts`) — use a `.mjs` extension or set `"type": "module"` in the closest package.json*; `.mts` is the typed spelling of the first, and adding `"type": "module"` would have changed how Next reads the package in order to silence a warning about a config. |
+| `frontend/src/lib/session.test.ts` | **New, 18 tests.** The hydration snapshot, the store's notify-and-unsubscribe contract, single-flight rotation, a refusal ending the session, and `authorized`'s exactly-one-retry rule. Only `auth.refresh` is mocked, through `importOriginal`, so the real `ApiError` survives `instanceof`. |
+| `DECISIONS.md` | `D10-41`, plus an amend-not-delete pointer on `D10-37`'s "no `vitest.config.ts` exists". |
+| No dependency, no backend change, no schema change | `vitest` was already a `devDependency` from `D10-37`, so the lockfile is untouched; `alembic` head stays `0006`. |
+
+### The guard is what the test is about, and it was checked by removing it
+
+A green suite proves the code passes; it does not prove the test would catch the code failing. Deleting
+`if (inFlight) { return inFlight; }` from `session.ts` made
+`shares one redemption between concurrent callers` fail with *expected "vi.fn()" to be called 1 times,
+but got 2 times*; the source was restored and `git status` on it is empty, so only the spec and its
+config are in this slice. Without that deletion, the 18 tests would have been 18 assertions unable to
+tell the shared-promise design from the bug it exists to prevent.
+
+### What this does not do — stated, not buried
+
+- **Still no component, browser or integration test.** `jsdom` is not added: a component test needs it,
+  and that is a decision, not a line of config.
+- **The config file is not typechecked.** `tsc --noEmit` includes `**/*.ts` and `**/*.tsx`, which does
+  not match `.mts`. For a config that is mostly comment, that is the trade taken, and it is why it holds
+  no logic. It is not unexercised, though: the gate runs `pre-commit run --all-files`, so
+  `frontend-typecheck` and `frontend-test` run on every commit and vitest loads this config each time.
+  An earlier draft of this list said the opposite — that a config-only commit would wake no hook,
+  reasoning from the `^frontend/.*\.(ts|tsx)$` key — and that was wrong, because the key filters files
+  rather than diffs. Corrected here rather than left standing.
+- **`api.ts` is still unproven.** `request()`'s envelope parsing, its status branches and its
+  `network_error` path are exercised by reading, not by execution.
+- **The screens are untouched.** `agent`, `notifications`, `escalations`, `review` and `users` are
+  reached by hand only.
+
+### Verified
+
+Measured on the tree committed as `8f65fbf`, from `frontend/`: `npx vitest run` → **2 files, 37
+tests, 0 failed** — 19 in `contract-scope.test.ts`, 18 in `session.test.ts` — with the Vite
+config-loader warning gone after the `.mts` rename. Nothing under `backend/` changed, no lockfile
+changed, and `alembic` head stays `0006`.
+
 ## Next permitted step
 
 **F10 (step 6) is committed (`b344c17`), three gap-closing slices have landed since
@@ -4335,8 +4412,10 @@ outstanding work. What is left is what `D10-33` lists instead — no bulk editor
 frontend test runner, and no channel consented by default on a fresh database.
 **Amended, not deleted (`D10-37`, `df81b8e`):** one of those three is now paid. `frontend/`
 has a runner — `vitest`, one `test` script, and a `frontend-test` hook in the commit gate —
-so the residue is narrower than the sentence reads but not gone: **one pure module is the
-whole of what runs**, and no component, browser or integration test exists for any screen.
+so the residue is narrower than the sentence reads but not gone: ~~**one pure module is the
+whole of what runs**~~ — **amended by `D10-41`, not deleted:** two pure modules now run under a test,
+the second being the session store, and the residue is narrower by exactly that one — and no component,
+browser or integration test exists for any screen.
 **Amended, not deleted (`D10-39`, `2572f53`):** the paragraph this one keeps narrowing ends
 by saying what is left is *not a missing feature and not a hardening pass* — still true, and
 one of the things left has stopped being nothing. The `doctor` check that counts invisible

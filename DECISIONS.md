@@ -3474,9 +3474,13 @@ frontend test *culture* in the same commit is not.
   entry changes. That matters because `tsc --noEmit` already includes `**/*.ts`: the spec is
   typechecked by the same gate as the source it tests, for free, and a mistake in the test is a
   compile error rather than a silently skipped file.
-- **No `vitest.config.ts` exists.** The spec imports `./contract-scope` relatively, so the `@/` alias
-  never has to be taught to a second resolver. A config file would be one more place for the module
-  graph to be described differently from what `tsc` and Next.js see.
+- ~~**No `vitest.config.ts` exists.** The spec imports `./contract-scope` relatively, so the `@/`
+  alias never has to be taught to a second resolver. A config file would be one more place for the
+  module graph to be described differently from what `tsc` and Next.js see.~~ — **amended by
+  `D10-41`, not deleted:** this was true only while the one spec happened to import relatively, and it
+  stopped being true the moment a module that reaches `@/lib/api` became worth a test. `D10-41` adds
+  `frontend/vitest.config.mts`, which declares the alias and nothing else, so the "second resolver"
+  worry survives as the limit on what that file is allowed to contain.
 - **The runner is in the gate, not just on disk.** A test runner nobody runs rots: the first failing
   expectation is then discovered by whoever finally types `npm test`, months later. A `frontend-test`
   hook joins the two frontend checks in `.pre-commit-config.yaml`, and `npm test` joins
@@ -3817,3 +3821,77 @@ The feature landed as `feat(backend)` `d9530b5`; this record is written from the
 measurements taken on that tree, and the `STATUS.md` regions it names were amended by the follow-up
 `docs(status)` commit rather than back-dated into the slice — the same convention `D10-39` used for
 `2572f53`.
+
+### D10-41 — The runner learns the alias: the session store is the second module with a test
+
+`D10-37` closed the frontend's test gap as narrowly as it could and said so: a runner, **one** spec,
+for the one pure module that happens to import relatively. That last clause was load-bearing and was
+recorded as a virtue — *no `vitest.config.ts` exists, so the `@/` alias never has to be taught to a
+second resolver* — which held exactly as long as the only test was a test of `contract-scope.ts`. The
+next module worth a test is `session.ts`, and it reaches `@/lib/api`; under that constraint it could
+not be tested at all. A constraint that forbids the test is not a constraint, so this slice pays for
+the config and keeps the residue honest about what is left.
+
+- **The alias, and nothing else.** `frontend/vitest.config.mts` declares `@` → `./src` and
+  `environment: "node"`. `tsconfig.json` already owns that mapping and Next already honours it; this
+  teaches the third resolver the same map rather than having the test import by a path the app never
+  uses. A config that grew a second purpose would be the thing `D10-37` was right to fear.
+- **`.mts`, because Vite says so and it is right.** Written as `vitest.config.ts` the file loads as
+  CommonJS carrying ESM syntax, and Vite prints a forward-compatibility warning naming `.mjs` or
+  `"type": "module"` as the fix. Renaming was the smaller of the two: adding `"type": "module"` to
+  `frontend/package.json` would change how Next reads the package in order to silence a warning about
+  a twenty-line config. **The cost, stated:** `tsc --noEmit` includes `**/*.ts`, which does not match
+  `.mts`, so the gate no longer typechecks this file. That is a trade for a file of literals, not an
+  oversight, and it is why the file holds no logic.
+- **`environment: "node"` is now explicit.** It was Vitest's default and is unchanged, but it is
+  written down because the next person to add a test will wonder — and because `jsdom` is precisely
+  the dependency this slice does **not** add. A component test needs it; that is a decision, not a
+  line of config.
+- **One seam mocked, and the real `ApiError` kept.** Only `auth.refresh` is replaced, through
+  `importOriginal`, so `ApiError` stays the class `api.ts` exports. That is not tidiness:
+  `authorized` branches on `instanceof ApiError` and on `error.isUnauthorized`, so a hand-rolled error
+  double would exercise a code path the app never takes and prove nothing about the one it does.
+- **What the 18 tests pin — four rules, not four methods.** The server snapshot never claims a live
+  session, because hydration compares it with the first client render; `setSession` replaces wholesale
+  and notifies each subscriber once, stopping on unsubscribe; **two concurrent `refreshSession()`
+  calls share one redemption**, so `auth.refresh` is called once; a refused rotation ends the session
+  and tells subscribers rather than leaving a dead one on screen; and `authorized` retries **exactly
+  once** — never for a non-401, once after a successful rotation, and not again when the retry is
+  itself refused.
+- **Teeth, checked by breaking the code.** A green suite is not evidence it would go red. Deleting
+  `if (inFlight) { return inFlight; }` from `session.ts` made the concurrency test fail with *expected
+  "vi.fn()" to be called 1 times, but got 2 times*; the source was then restored and `git status` on
+  it is empty, so only the spec and its config are in this slice.
+
+**Why this module, and not a screen.** `session.ts` is framework-free on purpose — the React binding
+subscribes to it with `useSyncExternalStore` instead of holding its own copy — so it is the second
+module in the app about which a unit test can mean something. The screens are untouched and still
+unproven: they need React, a router and a query client, and a jsdom renderer standing in for those
+would prove that components mount, not that screens behave. The single-use refresh token also makes
+this the frontend's sharpest correctness rule, and `D10-17` is why: a second redemption is
+indistinguishable from theft, and the backend answers by revoking the whole family.
+
+**Honest limits, four.** (1) The frontend still has **no component, browser or integration test**; the
+residue is narrower by one module, not closed. (2) **No dependency was added** — `vitest` has been a
+`devDependency` since `D10-37` — so the lockfile is unchanged and there is no new advisory surface to
+report. (3) The config file itself is not typechecked: `tsc --noEmit` includes `**/*.ts` and
+`**/*.tsx`, which does not match `.mts`. It is not unexercised, though — the gate runs
+`pre-commit run --all-files` (`.husky/pre-commit`), so `frontend-typecheck` and `frontend-test` run on
+every commit and vitest loads this config each time. An earlier draft of this entry claimed the
+opposite, reasoning from the hooks' `^frontend/.*\.(ts|tsx)$` key that a commit touching *only*
+`vitest.config.mts` would wake none of them. The key is real, but it filters files rather than diffs,
+which `--all-files` makes moot; the inference was false and is corrected here rather than left
+standing as a phantom limit. (4) Nothing here tests `api.ts`: `request()`'s envelope parsing, its
+status branches and its `network_error` path are still exercised by reading, not by execution.
+
+**Verified.** On the tree this slice produced, from `frontend/`: `npx vitest run` → **2 files, 37
+tests, 0 failed** (19 in `contract-scope.test.ts`, 18 in `session.test.ts`), with the Vite
+config-loader warning gone after the `.mts` rename. No backend file changed and no schema change:
+`alembic` head stays `0006`.
+
+**Landed as** `test(web)` `8f65fbf` — the two files above and nothing else. This record is written from
+the code and the measurements taken on that tree, and the `STATUS.md` regions it names were amended by
+the follow-up `docs(status)` commit rather than back-dated into the slice, the same convention `D10-40`
+used for `d9530b5`. One correction is carried by that commit rather than by the code: an earlier draft
+of limit (3) claimed a config-only commit would wake no hook, reasoning from the hooks' file filter,
+and the gate's `--all-files` invocation makes that false.
