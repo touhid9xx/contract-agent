@@ -636,8 +636,13 @@ throws rather than returning `null`. Only `auth` is replaced, through `importOri
 `ApiError` survives the `instanceof` branch in `authorized`. Three things had to be got right for a
 `.tsx` spec to run at all, and only one of them was obvious: **`oxc.jsx`, not `esbuild.jsx`** —
 Vitest 5 runs on Vite 8, which transforms with oxc, so an `esbuild` block is accepted by the schema and
-then silently ignored; `tsconfig.json`'s `"jsx": "preserve"` is right for Next and wrong here, where
-raw JSX reaches Node and dies parsing; and the DOM is asked for **per file**, with
+then silently ignored; ~~`tsconfig.json`'s `"jsx": "preserve"` is right for Next and wrong here, where
+raw JSX reaches Node and dies parsing~~ — **amended by `D10-47`, not deleted:** the second half stands
+and the first does not. `preserve` *was* wrong for Vitest, and removing the `oxc` block still fails
+the suite for exactly that reason; but `preserve` is not what this Next version wants either, because
+its own build rewrites the value to `"react-jsx"` on every run. That is why `tsconfig.json` now ships
+`react-jsx`, and why the `oxc.jsx` block stays load-bearing regardless: the runner reads
+`vitest.config.mts` and not `tsconfig.json`. And the DOM is asked for **per file**, with
 `// @vitest-environment jsdom` on line one, so the three pure specs keep running without one. Both
 load-bearing claims were checked by breaking them: converting `signOutEverywhere`'s `finally` to a
 `catch` failed **3 of 12** — it swallows the rejection as well as skipping the clear — and removing
@@ -731,18 +736,58 @@ is the tag `docker-compose.yml` ships; and **a skip in the MySQL job is made a f
 that skips when it cannot connect would otherwise be green while proving nothing. `gitleaks` is
 promoted from `manual` to mandatory — `ubuntu-latest` has the Docker image D1-03 assumed — which is the
 first thing to address gap 1's "it still gates nothing" residue other than a note. Node 22 is read off
-`@types/node` and Python 3.13 off `Dockerfile.backend` rather than chosen here; `next build` and a
+`@types/node` and Python 3.13 off `Dockerfile.backend` rather than chosen here; ~~`next build` and a
 coverage threshold were **declined and recorded**, not forgotten, because a pipeline that is red on its
-first run teaches people to ignore it. **No dependency, no lockfile line, no application source, no
-migration (`0006`).** The honest limit is the one that matters: **the workflow has not been run.**
+first run teaches people to ignore it~~ — **amended by `D10-47`, not deleted, and the reasoning was
+right while the conclusion was half wrong.** A coverage threshold still stays out. `next build` was
+added to this same job one slice later, and in the order the sentence above argues for: run it first
+(`20ccc7c`), make it green, *then* gate it. Running it first found that **the frontend had never had
+a production build at all** — every page failed with *Couldn't find next-intl config file*, and no gate
+could see it, because `tsc --noEmit` and a jsdom test do not render an RSC pass. The `ci` commit
+changed **no application source, no dependency, no lockfile line, no migration** (`0006`); the build
+fix did change frontend source — one new file, `src/i18n/request.ts`, and two edits, `next.config.ts`
+and `tsconfig.json` — still with no dependency, no lockfile line, no backend file and no migration.
+The honest limit is the one that matters: **the workflow has not been run.**
 There is no runner on this machine, so its correctness is *read*, not *observed* — the YAML parses, the
 workflow-expression sites survived the write, and every command was copied from a file in this
 repository rather than recalled. Three consequences follow, and are not waved away: the backend suite
 has never been gated, so the first run may legitimately be red — that would be the finding, not a
 regression; `--no-verify` still works until required status checks are enabled in repository settings,
 which is not a file this repository can commit, so the gate is now *elsewhere* rather than yet
-*unbypassable*; and the branch stands 113 commits ahead of `origin/main` with this slice adding two
-more, so the secret scan is evidence about the server's history and not yet about this tree.
+*unbypassable*; and the branch stands **117 commits ahead of `origin/main`** — re-counted at this
+`docs(status)` commit, because the 113 written above for `D10-46` had already drifted — so the secret
+scan is evidence about the server's history and not yet about this tree.
+
+**Then the check the pipeline had been told to wait for is run, and it had never worked** (`D10-47`,
+one commit: `fix(web)`). The omission was reasoned — *a pipeline that is red on its first run teaches
+people to ignore it* — so the order was inverted rather than argued with: run `npm run build` here
+first, make it green, then gate it. It failed on **every** page with *Couldn't find next-intl config
+file*. **No gate in this repository could have caught that**: the 19 hooks run `tsc --noEmit`, eslint
+and vitest, and none of the three renders a React Server Component pass, so the app as committed could
+not produce a production artifact and 19 green gates said nothing about it. **Two causes were both
+required.** `src/i18n/request.ts` is the server-side request config — `/[locale]/layout.tsx` passes
+`NextIntlClientProvider` an explicit locale and catalogue, so every screen already renders from props,
+but the provider still consults the request config during the server pass — and adding the file alone
+did **not** fix the build; `next.config.ts` also had to be wrapped in `createNextIntlPlugin()`. The
+request config falls back to `defaultLocale` instead of throwing, because locale selection is the route
+segment's job in this app and a request the layout would have handled must not become a 500.
+**`tsconfig.json` is now hand-edited**, because `next build` rewrites it on every run: re-measured on
+the committed tree, it expands every array and flips `"jsx": "preserve"` to `"react-jsx"`, so the
+committed value is the one the build writes and a two-line setting is no longer buried under a
+forty-line reformat on each build. This also **corrects** `D10-43`'s claim that `preserve` is right for
+Next; `vitest.config.mts`'s `oxc.jsx` block is a different file and stays load-bearing, because the
+runner reads that one and not `tsconfig.json`. CI's frontend job gains `npm run build` as its fourth
+check. **Verified** on the committed tree: typecheck 0, lint 0, `npm test` **97 passed in 6 files**,
+build exit 0 with **19 routes prerendered**, and a second build confirming `tsconfig.json` is no longer
+rewritten; the backend suite was run with the exact command `D10-46`'s `backend-tests` job uses before
+that job had executed anywhere — `pytest -m "not integration"`, **867 passed, 2 skipped, 19 deselected**.
+**No dependency, no lockfile line, no backend file, no migration** (`0006`). The honest limits: the
+build is verified on **Windows with Node 22 and not on `ubuntu-latest`**, so the CI step is still read
+rather than observed; **a build proves the app renders, not that it works** — one page per route, no
+backend, no auth, no data; **one of the twelve app routes produces no HTML at all**
+(`/[locale]/contracts/[id]`, which needs a path parameter), a fact re-counted from
+`.next/server/app` after this entry's first draft said *two*; and `npm audit` is unchanged at 7
+moderate on a pre-existing chain.
 
 ## Phase history
 
@@ -760,7 +805,7 @@ more, so the secret scan is evidence about the server's history and not yet abou
 | Python tooling | `pyproject.toml` — ruff (lint + format), `mypy --strict`, pytest + coverage, bandit |
 | Pre-commit | `.pre-commit-config.yaml` — hygiene, ruff, ruff-format, mypy, bandit, frontend typecheck, frontend eslint; gitleaks bound to `manual` (D1-03) |
 | Commit gate | husky `pre-commit` + `commit-msg`, commitlint (Conventional Commits), lint-staged — **written in F1 but not actually wired until `4a9e8e9`** (gap 13): the `prepare` hook never ran because root `node_modules` was absent |
-| CI | `.github/workflows/ci.yml` (**D10-46**, added long after F1 because the gap was invisible while the hook worked) — six jobs (python static, backend pytest, MySQL 8.4 integration, frontend typecheck/eslint/vitest, demo frontend typecheck, hygiene + `gitleaks`) plus one `gate` job as the single required check. **The first place anything in this repository ran automatically**, and the first time the backend suite and the `integration` suite were gated at all |
+| CI | `.github/workflows/ci.yml` (**D10-46**, added long after F1 because the gap was invisible while the hook worked) — six jobs (python static, backend pytest, MySQL 8.4 integration, frontend typecheck/eslint/vitest/**production build**, demo frontend typecheck, hygiene + `gitleaks`) plus one `gate` job as the single required check. The build step joined the frontend job in **`D10-47`** (`20ccc7c`), after it had been run locally and made green. **The first place anything in this repository ran automatically**, and the first time the backend suite and the `integration` suite were gated at all |
 | Backend | `app/core/config.py` fail-fast settings, `app/core/logging.py` structlog + PII redaction, `app/core/middleware.py` request/trace IDs, `app/main.py` factory + error envelope, `/api/v1/health` |
 | Frontend | Next.js 16 + Tailwind 4 + TanStack Query + Zustand + next-themes + next-intl (en, bn), ESLint flat config, Prettier, `[locale]` routing |
 | Scripts | `scripts/bootstrap.mjs` (one-command setup), `scripts/run-frontend-check.mjs` |
@@ -5042,7 +5087,14 @@ sign-off, not footnotes:**
    this line was not updated then — the two amendment chains above and here disagreed. With
    `/[locale]/notifications` (`D10-29`) calling list, retry and dispatch, **zero of the four
    routers are `TestClient`-only**. What remains true, unchanged and now the *only* residue:
-   no browser has run any of these screens.
+   no browser has run any of these screens. **Narrowed by `D10-47`, not deleted:** a production
+   build now renders **every** app route once per locale in a real Next.js Server Component pass, so
+   each screen has been *rendered* by the framework and not merely typechecked — eleven of twelve app
+   routes produce static HTML, the twelfth being `/contracts/[id]`, which needs a path parameter and
+   is therefore the one screen a build still cannot render. Two of the nine are additionally driven in
+   `jsdom` (`D10-44`, `D10-45`). Neither is a browser: nothing has been hydrated, clicked or
+   navigated, and no screen has rendered with data behind it, so the residue stands — smaller, and
+   now with an account of what it costs.
 6. ~~**`normalized_value` is still plaintext** (gap 20) — the one place a shipped
    column contradicts "no raw PII at rest", and it needs a decision (encrypt +
    compare on a blind index, or keep it and record the exception), not a patch.~~

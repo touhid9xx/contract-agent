@@ -3992,10 +3992,14 @@ comment in the source and, until now, a claim nothing checked.
 - **`oxc.jsx`, and specifically not `esbuild.jsx`.** Vitest 5 runs on Vite 8, which transforms with
   oxc. An `esbuild: { jsx }` block is accepted by the config schema and then ignored at runtime —
   Vite warns that oxc wins — so the obvious-looking fix does nothing at all and fails *silently*.
-  The other half is `tsconfig.json`'s `"jsx": "preserve"`, which is correct for Next (it compiles JSX
-  itself) and wrong for Vitest, where nothing downstream of the transformer does: a `.tsx` spec
+  The other half is `tsconfig.json`'s `"jsx": "preserve"`, ~~which is correct for Next (it compiles JSX
+  itself)~~ and wrong for Vitest, where nothing downstream of the transformer does: a `.tsx` spec
   reaches Node as raw JSX and dies parsing. Asking oxc for the automatic runtime (`react/jsx-runtime`,
-  already a `react` dependency) is what makes a `.tsx` file runnable here at all.
+  already a `react` dependency) is what makes a `.tsx` file runnable here at all. **The struck clause
+  is corrected by `D10-47`, not deleted:** this Next version does not keep `preserve` either — its own
+  build rewrites the value to `"react-jsx"` on every run, which is why the committed `tsconfig.json`
+  ships `react-jsx`. The rest of this bullet is unaffected and stays load-bearing, because the runner
+  reads `vitest.config.mts` and not `tsconfig.json`.
 - **Only `auth` is replaced, through `importOriginal`.** The same seam `D10-41` used and for the same
   reason: `authorized` branches on `instanceof ApiError`, so a hand-rolled double could not satisfy
   that honestly. The session module is the real one; the store, the single-flight rotation and the
@@ -4264,12 +4268,18 @@ person's memory. This slice adds `.github/workflows/ci.yml`.
   adding a seventh job later does not require touching the setting. `if: always()` is what makes it
   meaningful — a *skipped* required check is a green light, which is how a gate becomes advice.
 
-**Deliberately omitted, with the reason rather than an apology.** (1) **`next build`.** It is the one
+**Deliberately omitted, with the reason rather than an apology.** (1) ~~**`next build`.** It is the one
 check that would catch a server/client-boundary error `tsc` cannot see, and it is not here because it
 is unverified on a clean machine: it needs the whole Next toolchain plus whatever the build reads at
 build time, and a pipeline that is red on its first run teaches people to ignore it — the same
 argument `docker-compose.yml` makes about healthchecks pointing at readiness. It is the first
-candidate for the next slice. (2) **A coverage threshold.** `pytest-cov` is a dev dependency and
+candidate for the next slice.~~ **Amended by `D10-47`, not deleted, and in exactly the order this
+paragraph argues for:** the check was taken as the next slice, run locally until it was green
+(`20ccc7c`), and only then added to the frontend job — so the-pipeline-is-red-on-its-first-run was not
+paid as the price of adding it. Running it first found that the build had **never** worked at all,
+which is a stronger argument against this omission than the one written for it. Its own justification
+also turns out to be measured rather than reasoned: no hook in this repository renders an RSC pass, so
+19 green gates could not have seen the failure. (2) **A coverage threshold.** `pytest-cov` is a dev dependency and
 `[tool.coverage]` is configured, but a percentage gate on a suite whose frontend half is two screens
 would enshrine the wrong number. (3) **A migration drift check.** `alembic check` is available and the
 MySQL job is the right place for it; it is left out only because it is one more unverifiable step in
@@ -4295,7 +4305,72 @@ is the correct word and the first run is the test. And the `gate` job uses `jq`,
 ships — a runner image change would be a one-line fix, and is the sort of dependency a self-hosted
 runner would silently break.
 
-**Landed as** `ci: .github/workflows/ci.yml` — one new file, no dependency, no lockfile line, no
+**Landed as** `ci: .github/workflows/ci.yml` `2cc9cba` — one new file, no dependency, no lockfile line, no
 application source, no migration (`0006` stays head). `STATUS.md`'s "gitleaks still gates nothing"
 residue and the F1 table were amended by the follow-up `docs(status)` commit, the convention `D10-40`
 through `D10-45` all used.
+
+### D10-47 — The production build: a check that had never run, and the two lines of config it silently needed
+
+`npm run build` had never been run against `frontend/`. Not "seldom" — never, by anything, including
+the 19-hook commit gate: the gate runs `tsc --noEmit`, eslint and vitest, and none of the three
+renders a page in a React Server Component pass. The first run failed **every** page with `Couldn't
+find next-intl config file`, which means the app as committed could not produce a production artifact
+at all and no check in this repository could say so. That is the shape of the defect: `D10-46`
+deliberately omitted `next build` (unverified on a clean machine, and a pipeline that is red on its
+first run teaches people to ignore it); this slice supplies the evidence first and adds the step
+second — the reverse of the order `D10-46` was criticised for.
+
+- **Two causes, and both were required.** `src/i18n/request.ts` is the server-side request config:
+  `/[locale]/layout.tsx` hands `NextIntlClientProvider` an explicit locale and catalogue, so every
+  screen already renders from props — but the provider still consults the request config while
+  rendering on the server, and the app had no such file. Adding it alone did not fix the build;
+  `next.config.ts` also had to be wrapped in `createNextIntlPlugin()`, which is what tells next-intl
+  where to load it from. Recorded because shipping the first cause alone would have left the second to
+  fail in someone else's first build.
+- **`defaultLocale` rather than a throw.** This app has no next-intl middleware: locale selection is
+  the route segment's job (the client names a *tenant*, not a language), and the layout validates the
+  segment. The request config's locale is therefore a fallback rather than a decision, and making it
+  throw would turn a request the layout would have handled into a 500.
+- **`tsconfig.json` is hand-edited, because the build rewrites it.** `next build` reformats the file
+  and flips `"jsx": "preserve"` to `"react-jsx"` on every run — re-measured here, on the committed
+  tree: the diff it produced expanded every array and changed `jsx`. Letting the build mutate the file
+  it validates would have put a 40-line reformat in front of a two-line setting, so the committed value
+  is the one the build writes. `.next/dev/types/**/*.ts` joined `include` for the same reason: it is
+  where this Next version puts the generated route types.
+- **This corrects a claim, not only a file.** `D10-43`'s record says `tsconfig.json`'s
+  `"jsx": "preserve"` is *right for Next*; the build disagrees, and insists on `react-jsx`. The
+  `oxc.jsx` block in `vitest.config.mts` is untouched and still load-bearing, because it is Vitest that
+  reads that file and not `tsconfig.json`: the runner still has to be told how to transform JSX.
+- **CI grows the fourth frontend check.** The frontend job now runs `npm run build` with
+  `NEXT_TELEMETRY_DISABLED`, and needs no backend: the `/api` and `/health` rewrites are resolved per
+  request, not at build time. `D10-46`'s "deliberately omitted" note is amended rather than deleted —
+  it was right to wait for evidence and wrong to leave the check out afterwards.
+
+**Verified.** From `frontend/` on the committed tree: `npm run typecheck` 0 errors, `npm run lint` 0
+errors, `npm test` **97 passed across 6 files** (19 + 18 + 21 + 12 + 11 + 16), `npm run build` exit 0
+with **19 routes prerendered**, and a second consecutive build confirming `tsconfig.json` is no longer
+rewritten. The backend suite was run with the exact command `D10-46`'s `backend-tests` job uses —
+`pytest -m "not integration"` — before that job had executed anywhere: **867 passed, 2 skipped, 19
+deselected**. Both skips are legitimate (`symlinks-without-privileges`, a Windows-only probe, and the
+opt-in `KAFKA_LIVE` socket test) and will not skip on `ubuntu-latest`.
+
+**Honest limits, and the first one is the point of the entry.** (1) **The build is verified on Windows
+with Node 22, not on `ubuntu-latest`.** There is no runner here, so CI's build step is still *read*:
+the local green proves the step is correct, not that it passes where it will run. (2) **A build proves
+the app renders, not that it works.** It renders each page once — no backend, no auth, no data — so it
+proves the RSC boundary, the i18n wiring and the module graph, and nothing about what a signed-in user
+sees. **(3) One of the twelve app routes produces no HTML** — `/[locale]/contracts/[id]`, the only app
+path absent from the build's prerender set; the other eleven render **19 HTML files** across two
+locales. This limit was first written as *"two of the 19 routes are marked Dynamic (`/contracts/[id]`
+and the review queue)"* and was re-counted against `.next/server/app` and
+`app-path-routes-manifest.json` before this entry was committed, because the review queue is in fact
+prerendered inside its `Suspense` boundary. `/contracts/[id]` needs a path parameter, so being dynamic
+is expected — but it is *read off the build output* rather than chosen in a decision, and it is the one
+screen a production build still cannot render. (4) **`npm audit` is unchanged at 7 moderate** on the pre-existing
+`typescript-eslint` to `minimatch` chain, and no dependency or lockfile line changed in this slice.
+
+**Landed as** `fix(web)` `20ccc7c` — one new file, two edits and one CI step: no dependency, no
+lockfile line, no backend file, no migration (`0006` stays head). `STATUS.md`'s claims that the build
+was deliberately declined, and that `preserve` is right for Next, are amended by the follow-up
+`docs(status)` commit, the convention `D10-40` through `D10-46` all used.
