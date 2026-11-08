@@ -760,6 +760,16 @@ of the escalation screen, because it is the first screen where **two actions loo
 are not** — a re-run appends a row while a correction rewrites one — so the spec spent its cases on
 that distinction rather than on the address. *Both wired rather than working* now covers four tested
 screens, not three.
+**Amended a fourth time by `D10-53`, not deleted:** ~~four of nine~~ becomes **five of nine**, and the
+prediction is **spent rather than half-finished** — ~~notifications alone~~ becomes **none**, because
+`notifications/page.test.tsx` is the third address-and-`Suspense` harness: 27 cases, no new dependency
+and no provider `D10-50` did not already pay for. `useSearchParams` appeared in exactly three
+`page.tsx` files and all three now render under a test, so *three harnesses rather than a loop* has
+nothing left to predict. What the count change does **not** say: the four screens still without a
+test — contract list, contract detail, home, users — do **not** import `useSearchParams`, so they are
+**not this harness applied four more times**. The address-and-`Suspense` shape is finished, and what
+is left is a different shape rather than a fifth copy of a proven one. *Both wired rather than
+working* now covers five tested screens.
 
 **Then the gate gets somewhere to run that is not one person's machine** (`D10-46`, one commit: `ci`).
 Every check in this project had run from a developer's machine, and two had never run automatically
@@ -1000,12 +1010,52 @@ line, no backend source, no source change at all, no migration** (`0006` stays h
 limits: the rules are proven against a **doubled API and a doubled address** — `jsdom`, no browser, no
 real router, no server; the `409` envelopes including `details.permitted` are **fixtures pinned from
 the screen's side** and not verified against `backend/app/api/v1/agent.py`; *wired is not behaving*
-still holds; and **five of nine screens still have no component test**, with notifications now the only
-remaining `page.tsx` importing `useSearchParams`. Verification: the spec **23/23**, the full frontend
+still holds; and ~~five of nine screens still have no component test~~, ~~with notifications now the
+only remaining `page.tsx` importing `useSearchParams`~~ — both amended in place by the paragraph that
+follows, which tested notifications: **five of nine have one, and four do not**, and no `page.tsx`
+importing `useSearchParams` is left untested. Verification: the spec **23/23**, the full frontend
 suite **145 passed in 8 files** (was 122 in 7, so the new file accounts for every added case and
 nothing that existed changed), `npm run typecheck` clean, all nineteen pre-commit gates green and
 commitlint passed. The branch stands **125 commits ahead of `origin/main`** after this `docs(status)`
 commit, re-counted rather than carried forward.
+
+**Then the fifth screen test, and the last screen that needed the address harness** (`D10-53`, one
+commit: `test(web)` `5d9a5de`). The notification queue is where `D10-52`'s contract is cashed:
+`POST /notifications` schedules from a **stored** decision, so a scheduled reminder nobody can inspect
+is a reminder that leaves by default. It is also the **last `page.tsx` importing `useSearchParams`**
+(three exist — agent, escalations, notifications — checked, not recalled), which means the harness
+`D10-50` built and `D10-52` reused is **finished**, and `D10-45`'s *three harnesses rather than a loop*
+has nothing left to predict. The harness itself is unchanged: a fresh `QueryClient` per case with
+`retry: false`, the real catalogue, the real `AuthProvider` over the real session store, and only
+`notifications.list/dispatch/retry` replaced through `importOriginal` so the genuine `ApiError`
+survives the `instanceof` branches. **No new dependency, no new provider.** The 27 cases spend
+themselves on what this screen alone carries: a row is dispatchable **only from `pending`**, so the
+control disappears rather than failing on every other status; a refusal can park the row `failed`
+**before** answering, so a `409` and a `404` both mean *this list is stale* and both re-read it; and
+**quiet hours are the server's verdict, not a calculation** — the screen renders the deferral the
+policy decided in the customer's timezone. Also pinned: an unauthenticated visitor asks the API
+nothing; a viewer gets no dispatch or retry control; an absent `contract` is `undefined` rather than
+`null`; an impossible address performs **no read**; and *the API is down* never looks like *an empty
+queue*. **Three mutation passes, each applied and reverted:** `canSend` widened to `!== "failed"` fails
+**1**; moving the deferral check after `sent` fails **1**; dropping `409` from the stale-page reload
+fails **1**, at `page.test.tsx:663`. **One mutant, one guard** — and that is the difference from
+`D10-52`, where one mutant failed nine cases; a rule pinned once is a rule a single deleted test would
+silently free, which is worth recording beside the green. One process failure repeated and is recorded
+rather than smoothed: **the third mutant was live at the start of this turn**, one screen after
+`D10-52` argued it must never be. What caught it was `git status --porcelain` before any work began,
+not the previous paragraph — so the lesson has been moved out of prose and into the first command of
+the turn. **No dependency, no lockfile line, no backend source, no source change at all, no migration**
+(`0006` stays head). The honest limits: the rules are proven against a **doubled API and a doubled
+address** — `jsdom`, no browser, no real router, no server; `NotificationRow` and `DispatchOutcome` are
+**fixtures pinned from the screen's side** and not verified against
+`backend/app/api/v1/notifications.py`; *wired is not behaving* still holds; the deferral case proves
+the screen **believes the server**, not that the server is right about quiet hours; and **four of nine
+screens still have no component test** — contract list, contract detail, home, users — none of which
+imports `useSearchParams`, so what is left is a different shape rather than this one four more times.
+Verification: the spec **27/27**, the full frontend suite **172 passed in 9 files** (was 145 in 8, so
+the new file accounts for every added case and nothing that existed changed), all nineteen pre-commit
+gates green and commitlint passed. The branch stands **2 commits ahead of `origin/main`** after this
+`docs(status)` commit, re-counted rather than carried forward.
 
 ## Phase history
 
@@ -4954,6 +5004,17 @@ already moved past. Those are the cases the spec spends itself on. What still do
 is still a DOM, `next/navigation` is still a **double holding a mutable address**, and the `409`
 envelopes the screen translates are **fixtures pinned from the screen's side**, asserted here and not
 verified against the route that emits them.
+**Amended a ninth time, by `D10-53`, not deleted — and the count returns a fifth time.** A fifth page
+renders under a test: `notifications/page.test.tsx`, 27 cases. So ~~four have one, and five do not~~
+becomes **five have one, and four do not.** This amendment does something the previous eight did not:
+it **finishes** a reason rather than narrowing one. *Address-and-`Suspense` screens* were why the count
+moved slowly — three `page.tsx` files imported `useSearchParams`, and the queue was agent, escalations
+and notifications; all three now render under a test, which spends the *three harnesses rather than a
+loop* sentence entirely. And the four screens left are **not the same work four more times**: none of
+them imports `useSearchParams`, so what remains is a different shape. What five amendments have each
+kept, and this one keeps: `jsdom` is still a DOM, `next/navigation` is still a **double holding a
+mutable address**, and the `409`s the screen translates are **fixtures pinned from the screen's
+side** — asserted here and not verified against `backend/app/api/v1/notifications.py`.
 **Amended, not deleted (`D10-39`, `2572f53`):** the paragraph this one keeps narrowing ends
 by saying what is left is *not a missing feature and not a hardening pass* — still true, and
 one of the things left has stopped being nothing. The `doctor` check that counts invisible

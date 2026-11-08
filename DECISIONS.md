@@ -4745,3 +4745,56 @@ decides in another suite.
 already behaved this way and the spec exists to keep it that way. No dependency, no lockfile line, no
 backend source, no migration (`0006` stays head). `STATUS.md`'s *three of nine* claims are amended in
 place by the follow-up `docs(status)` commit, the convention `D10-40` through `D10-51` all used.
+
+### D10-53 — The fifth screen test, and the last screen that needed this harness
+
+The **notification queue** is where the contract in `D10-52` is cashed: `POST /notifications` schedules
+from a *stored* decision, and a scheduled reminder that nobody can inspect is a reminder that leaves
+by default. This is also the **last `page.tsx` importing `useSearchParams`** (checked, not recalled:
+agent, escalations, notifications — three, and this was the third), so the harness `D10-50` built and
+`D10-52` reused is now **finished rather than started**. The prediction in `D10-45` — *three harnesses
+rather than a loop* — is spent: every address-and-`Suspense` screen has a test.
+
+**What this screen carries that the other four could not reach.** It is the first screen with a
+**narrow, status-gated action**: a row may be dispatched only from `pending`, so the control must
+disappear rather than fail on every other status — the difference between a button that is absent and
+a button that is always wrong. It is also the first where **the same mutation has two failure
+meanings**: a refusal can park the row `failed` *before* answering, and that transition is committed,
+so a `409` and a `404` both mean *the page the operator is reading is no longer the page the server
+would answer*. And **quiet hours are the server's verdict, not a calculation**: the screen renders
+deferral the dispatch policy decided in the customer's timezone, because a second copy of that rule
+in the browser would drift from the one that actually defers.
+
+**Mutation evidence, three passes, each applied and reverted inside this turn, each caught by exactly
+one case.** `canSend = status === "pending"` → `!== "failed"` fails **1** — the status-permission case.
+Moving the deferral check *after* `sent` fails **1** — the quiet-hours case. Dropping `409` from the
+stale-page reload fails **1**, at `page.test.tsx:663`. **One mutant, one guard is the honest reading
+here, and it cuts both ways**: it says each rule is pinned, and it says each rule is pinned *once*
+— unlike `D10-52`'s `latestIds` mutant, which failed nine cases because the rule it broke was
+load-bearing in nine places. A rule with a single guard is a rule that a single deleted test would
+silently free.
+
+**The third mutant was live at the start of this turn, again.** `D10-52` recorded this exact
+procedural failure and argued the mutant must be run and reverted in the same turn; the same thing
+happened once more, in the next slice, one screen later. The note was written and not obeyed, which
+is the finding: **the argument needs to be a check in the workflow, not a lesson in a decision
+record.** What caught it was mechanical — `git status --porcelain` at the top of the turn reported
+`M .../notifications/page.tsx` before any work began. That command, not the previous paragraph, is
+what did the work.
+
+**Honest limits.** (1) As with all five: the rules are proven against a **doubled API and a doubled
+address** — `jsdom`, no browser, no real router, no server. (2) `NotificationRow` and
+`DispatchOutcome` are **fixtures pinned from the screen's side**, asserted here and not checked
+against `backend/app/api/v1/notifications.py`; the refusal codes the screen translates are the ones
+the fixtures declare. (3) *Wired is not behaving* still holds for every tested screen. (4) The
+deferral case proves the screen **believes the server**, which is the rule — it does not and cannot
+prove the server is right about quiet hours; that is `test_notifications.py`'s job. (5) **Four of
+nine screens still have no component test** — the contract list, the contract detail, the home page
+and users — and none of them needs `useSearchParams`, so the remaining work is a different shape
+rather than the same one applied four more times.
+
+**Landed as** `test(web)` `5d9a5de` — one new file, 787 insertions, **no source change**: the screen
+already behaved this way. No dependency, no lockfile line, no backend source, no migration (`0006`
+stays head). Full frontend suite **172 passed in 9 files**, from 145 in 8. `STATUS.md`'s *four of
+nine* claims are amended in place by the follow-up `docs(status)` commit, the convention `D10-40`
+through `D10-52` all used.
