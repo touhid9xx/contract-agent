@@ -67,6 +67,11 @@ repos:
           # Fernet calls type as `Any`, which strict mode reports as no-any-return
           # in the cipher rather than as the missing-import it really is.
           - cryptography==50.0.2
+          # Ships `py.typed`; imported lazily by app/core/document_text.py (gap
+          # 12). The hook env is isolated from the venv, so without it mypy
+          # strict reports the missing implementation rather than anything real
+          # about the parser.
+          - pypdf==7.0.0
 
       - id: bandit
         name: bandit (security lint)

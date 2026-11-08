@@ -49,3 +49,15 @@ tzdata==2026.6
 # would not be a substitute. Imported lazily, so EVENT_TRANSPORT=none never
 # needs it at runtime.
 kafka-python==2.2.15
+
+# --- Document text (gap 12) ---
+# pypdf turns a stored contract PDF back into text. It is the pure-Python
+# implementation (no compiled extension, so it installs on CPython 3.14 without a
+# wheel hunt) and it ships `py.typed`, which is why mypy strict can analyse the
+# call site in app/core/document_text.py instead of treating the parser as `Any`.
+# Imported lazily there: a deployment that never parses a PDF does not pay for the
+# import, and a process without this wheel refuses with a sentence naming the fix
+# rather than failing at start-up. Chosen over a PDF-to-image or a service-based
+# reader because the text layer is what the extractors need — rendering pages would
+# add a heavyweight dependency for a document that usually already carries text.
+pypdf==7.0.0

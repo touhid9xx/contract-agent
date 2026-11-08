@@ -50,15 +50,18 @@ from sqlalchemy.orm.exc import StaleDataError
 from app.core.config import Settings, get_settings
 from app.core.crypto import (
     DecryptionError,
+    FieldCipher,
     MissingEncryptionKeyError,
     build_cipher,
     is_sealed,
 )
+from app.core.document_text import DocumentTextError, extract_document_text
+from app.core.documents import DocumentStoreError, build_document_store
 from app.core.logging import configure_logging
 from app.core.middleware import correlation_id_or_new
 from app.core.security import MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH, hash_password
 from app.db.enums import NotificationStatus, UserRole
-from app.db.models import Tenant
+from app.db.models import Contract, Tenant
 from app.db.repositories.audit import (
     ACTION_CONSENT_UPDATED,
     ACTION_USER_CREATED,
@@ -366,12 +369,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     extract.add_argument(
         "--text-file",
-        required=True,
         metavar="PATH",
         help=(
-            "plain-text document to extract from (UTF-8). There is no upload or "
-            "text storage yet, so the operator supplies it, which is also why "
-            "the file may be a PDF's extracted text rather than a PDF"
+            "plain-text document to extract from (UTF-8). Omit it to read the "
+            "document the contract already has stored, which may be a PDF "
+            "(gap 12); the two are alternatives because a contract has one "
+            "authoritative document and a loose file is the operator overriding it"
         ),
     )
     extract.set_defaults(handler=_extract)
@@ -585,32 +588,69 @@ def _outbox_replay(
     return EXIT_OK
 
 
+def _text_file_contents(document: Path) -> str | None:
+    """The text in an operator-supplied file, or ``None`` once the reason is logged."""
+    try:
+        return document.read_text(encoding="utf-8")
+    except OSError as exc:
+        log.error("extract_document_unreadable", path=str(document), error=str(exc))
+        return None
+
+
+def _stored_document_text(
+    contract: Contract, settings: Settings, cipher: FieldCipher
+) -> str | None:
+    """The contract's own stored document, loaded and parsed (gap 12).
+
+    This is the content reader ``storage_path`` never had: until now the operator
+    had to extract a PDF's text by hand and pass it in, which meant the bytes the
+    system had carefully sealed were only ever read by ``has_document``.
+
+    Four refusals rather than one, because the fix differs: no document on the row
+    (nothing to parse), bytes the store does not hold (a volume or path problem),
+    bytes that will not decrypt (a key-ring problem — ``DecryptionError`` is the
+    cipher's, not the store's), and bytes this build cannot parse (a format
+    problem). Each is logged with the field *names* that identify it and no part of
+    the document, which is PII.
+    """
+    if contract.storage_path is None:
+        log.error("extract_no_document_stored", contract_id=contract.id)
+        return None
+    store = build_document_store(settings, cipher=cipher)
+    try:
+        payload = store.load(contract.storage_path)
+    except (DocumentStoreError, DecryptionError) as exc:
+        log.error(
+            "extract_stored_document_unreadable",
+            contract_id=contract.id,
+            error=str(exc),
+        )
+        return None
+    try:
+        extracted = extract_document_text(payload)
+    except DocumentTextError as exc:
+        log.error("extract_document_unsupported", contract_id=contract.id, error=str(exc))
+        return None
+    log.info(
+        "extract_document_parsed",
+        contract_id=contract.id,
+        kind=extracted.kind,
+        pages=extracted.pages,
+        characters=len(extracted.text),
+    )
+    return extracted.text
+
+
 def _extract(
     args: argparse.Namespace,
     session_factory: sessionmaker[Session],
     settings: Settings,
 ) -> int:
     contract_id = int(args.contract_id)
-    document = Path(str(args.text_file))
-
-    try:
-        text = document.read_text(encoding="utf-8")
-    except OSError as exc:
-        log.error("extract_document_unreadable", path=str(document), error=str(exc))
-        return EXIT_FAILED
-
-    if not text.strip():
-        log.error("extract_document_empty", path=str(document))
-        return EXIT_FAILED
-
-    # Refuse rather than truncate. A truncated document produces missing fields,
-    # and "missing" is indistinguishable from "the contract never stated it" — the
-    # exact ambiguity the review queue exists to resolve, so it must not be
-    # manufactured here.
-    limit = settings.extraction_max_document_chars
-    if len(text) > limit:
-        log.error("extract_document_too_long", characters=len(text), limit=limit)
-        return EXIT_FAILED
+    #: ``None`` means "use the document the contract already has stored". The two
+    #: sources are alternatives, not layers: a contract has one authoritative
+    #: document, and a loose file is the operator overriding it deliberately.
+    text_file = Path(str(args.text_file)) if args.text_file is not None else None
 
     try:
         cipher = build_cipher(settings)
@@ -628,6 +668,37 @@ def _extract(
 
         # The tenant comes from the contract row, never from an argument.
         tenant_id = contract.tenant_id
+
+        # One source, then one set of checks over it. The file path and the stored
+        # path differ only in where the bytes come from; what counts as an
+        # unreadable, empty or oversized document must not depend on that.
+        if text_file is None:
+            source = "stored document"
+            text = _stored_document_text(contract, settings, cipher)
+        else:
+            source = str(text_file)
+            text = _text_file_contents(text_file)
+        if text is None:
+            return EXIT_FAILED
+
+        if not text.strip():
+            log.error("extract_document_empty", contract_id=contract_id, source=source)
+            return EXIT_FAILED
+
+        # Refuse rather than truncate. A truncated document produces missing fields,
+        # and "missing" is indistinguishable from "the contract never stated it" — the
+        # exact ambiguity the review queue exists to resolve, so it must not be
+        # manufactured here.
+        limit = settings.extraction_max_document_chars
+        if len(text) > limit:
+            log.error(
+                "extract_document_too_long",
+                characters=len(text),
+                limit=limit,
+                source=source,
+            )
+            return EXIT_FAILED
+
         try:
             outcome = extract_contract(
                 session,
