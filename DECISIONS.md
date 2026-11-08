@@ -3881,8 +3881,10 @@ every commit and vitest loads this config each time. An earlier draft of this en
 opposite, reasoning from the hooks' `^frontend/.*\.(ts|tsx)$` key that a commit touching *only*
 `vitest.config.mts` would wake none of them. The key is real, but it filters files rather than diffs,
 which `--all-files` makes moot; the inference was false and is corrected here rather than left
-standing as a phantom limit. (4) Nothing here tests `api.ts`: `request()`'s envelope parsing, its
-status branches and its `network_error` path are still exercised by reading, not by execution.
+standing as a phantom limit. (4) ~~Nothing here tests `api.ts`: `request()`'s envelope parsing, its
+status branches and its `network_error` path are still exercised by reading, not by execution.~~
+**Amended by `D10-42`, not deleted:** true of this slice, and false of the tree after the next one. The
+third spec pins exactly those three properties, and it needed no change to `api.ts` to reach them.
 
 **Verified.** On the tree this slice produced, from `frontend/`: `npx vitest run` → **2 files, 37
 tests, 0 failed** (19 in `contract-scope.test.ts`, 18 in `session.test.ts`), with the Vite
@@ -3895,3 +3897,64 @@ the follow-up `docs(status)` commit rather than back-dated into the slice, the s
 used for `d9530b5`. One correction is carried by that commit rather than by the code: an earlier draft
 of limit (3) claimed a config-only commit would wake no hook, reasoning from the hooks' file filter,
 and the gate's `--all-files` invocation makes that false.
+
+### D10-42 — The HTTP client's own contract: the third test is about failure, not success
+
+`D10-41` closed its honest limits with the sentence that named this slice's subject — *nothing here
+tests `api.ts`* — and `api.ts` is the single seam between every screen and the wire. Every screen's
+failure handling is a branch on a status this module assigns or a code it reads out of the envelope,
+so a bug here is the hardest kind to see by hand: a misclassified outage renders as "wrong password",
+and a 200 with an unreadable body renders as a contract with no fields. It is also the cheapest module
+in the app to pin — one `fetch`, no React, no router, no query client — and the test needed **no change
+to the module at all**.
+
+- **`api.ts` is byte-identical.** After both mutation checks below,
+  `git diff --stat -- frontend/src/lib/api.ts` is empty. A module that has to be reshaped to be
+  testable is a design problem worth recording rather than paying for quietly; this one was already
+  the seam it claims to be.
+- **Through the exported surface, because `request` is private.** The 21 cases call `auth`,
+  `contracts`, `notifications`, `review` and `escalations`. That is deliberate rather than forced: the
+  subject is the join between a screen and the wire, so a test that reached past an endpoint would pin
+  a function no screen calls.
+- **Only `fetch` is replaced**, through `vi.stubGlobal`. The envelope parsing, the header decisions and
+  `ApiError` itself are the real code; a hand-rolled double of any of them would pin the double, which
+  is the mistake `D10-41` avoided by keeping the real `ApiError` behind `importOriginal`.
+- **Four kinds of decision, not 21 methods.** What a **refusal** is (the envelope's code, message,
+  request id and `details`, all preserved — `details` typed `unknown` and left untouched, because only
+  the calling route knows its shape, and a consent 409 carries the row that won the race); what a
+  **non-answer** is (status `0`, which is the module's stated reason for existing: "backend is down"
+  and "wrong password" must never share a message); what a **204** means (nothing to parse, not a
+  parse failure — `POST /auth/logout` succeeds whether or not the token existed); and what a **200
+  with an unreadable body** means (`invalid_response`, a refusal rather than an empty success).
+- **Three of the assertions are negative, which is why the teeth check below mattered.** No
+  `Authorization` on login, because there is no principal yet; no `Content-Type` on a bare `GET`,
+  because the header is spread on the body so that a request without one cannot lie to a proxy; and
+  `status`/`channel` dropped from the query when `contract_id` is set, because the route ignores them
+  and a query string describing a filter the answer ignored is worse than a shorter one.
+- **Teeth, checked by breaking the code twice.** Deleting `cache: "no-store"` failed *never lets an
+  intermediary answer from cache* with `expected undefined to be 'no-store'`; replacing the conditional
+  `Content-Type` spread with an unconditional header failed *sends no body and no content type on a
+  bare GET* with `expected { … } not to have property "Content-Type"`. Each broke exactly one test and
+  the source was then restored, so those two negative assertions are not vacuous.
+
+**The sharpest limit, stated plainly.** The cases assert against literals written from the backend
+route code, so this pins *this client's reading* of the envelope and not *the server's sending* of it.
+A route that renamed `request_id`, or answered 204 where this client expects a body, would leave all
+21 green and fail in a browser. Only an end-to-end or contract test closes that, and this app still
+has none — which is why the sentence above is not "the client is proven".
+
+**Honest limits, four.** (1) The **screens are still hand-tested**: nothing here proves a page maps a
+409 to the message it should, only that the status arrives as a 409. (2) **`jsdom` was not added**; the
+component, browser and integration gap is untouched and remains a decision rather than a config line.
+(3) `API_BASE` reads `process.env.NEXT_PUBLIC_API_BASE` at module load, so every case asserts the
+default `/api/v1`; varying it would mean re-importing the module per test, and that harshness is not
+worth paying for a value `next.config.ts` rewrites anyway. (4) **React Query is not exercised** — no
+test here proves a mutation invalidates the key a screen depends on.
+
+**Verified.** On the tree this slice produced, from `frontend/`: `npx vitest run` → **3 files, 58
+tests, 0 failed** (19 in `contract-scope.test.ts`, 18 in `session.test.ts`, 21 in `api.test.ts`). No
+dependency, no lockfile change, no backend file, no schema change: `alembic` head stays `0006`.
+
+**Landed as** `test(web)` `cb7b1b4` — the one new file and nothing else. The `STATUS.md` regions this
+entry amends were amended by the follow-up `docs(status)` commit rather than back-dated into the
+slice, the convention `D10-40` and `D10-41` both used.

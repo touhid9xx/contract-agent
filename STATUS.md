@@ -578,7 +578,31 @@ this tree, `frontend tests (vitest run)` among its hooks. **No dependency, no lo
 backend file, no migration (`0006`).** The honest limits: still **no component, browser or integration
 test** (`jsdom` is a decision, not a line of config); the config is not typechecked, because
 `tsc --noEmit` includes `**/*.ts` and not `.mts`, though the gate's `pre-commit run --all-files` means
-vitest loads it on every commit; and `api.ts` is still proven by reading rather than by execution.
+vitest loads it on every commit; and `api.ts` is still proven by reading rather than by execution —
+that last limit is the subject of the next paragraph.
+
+**Then the client gets a spec** (`D10-42`, one commit: `test(web)` `cb7b1b4`): `api.ts` is the
+app's only seam to the wire and the place every screen learns that a request failed, so its failure
+branches are where a mistake stays invisible in manual use — an outage classified as a 401 tells the
+operator their password is wrong, and a 200 with an unreadable body renders as a contract with no
+fields. Twenty-one cases drive the five endpoint groups the screens call (`auth`, `contracts`,
+`notifications`, `review`, `escalations`) with only `fetch` replaced, through `vi.stubGlobal`; the
+envelope parsing, the header decisions and `ApiError` are the real code, and **`api.ts` itself was not
+touched** — `git diff --stat -- frontend/src/lib/api.ts` is empty. Four kinds of decision are pinned
+rather than twenty-one methods: what a **refusal** is (code, message, request id and `details`
+preserved untouched, because only the calling route knows that shape); what a **non-answer** is (status
+`0`, so "backend is down" and "wrong password" cannot share a message); what a **204** means (nothing to
+parse, not a parse failure — logout succeeds whether or not the token existed); and what a **200 with an
+unreadable body** means (`invalid_response`, a refusal rather than an empty success). Three of the
+assertions are negative, and two rules were broken on purpose to prove they are not vacuous: deleting
+`cache: "no-store"` failed the cache test, and making the `Content-Type` header unconditional failed the
+bodyless-`GET` test — each broke exactly one test, and both mutations were reverted. The gate ran green
+on this tree, `frontend tests (vitest run)` among its hooks. **No dependency, no lockfile change, no
+backend file, no migration (`0006`).** The honest limits: it pins *the client's reading* of the envelope
+and not the server's *sending* of it, so a renamed field would stay green here and fail in a browser;
+the **screens** are still hand-tested; there is still **no component, browser or integration test**;
+`API_BASE` is read at module load, so every case asserts the default `/api/v1`; and React Query is not
+exercised at all.
 
 ## Phase history
 
@@ -4373,8 +4397,11 @@ tell the shared-promise design from the bug it exists to prevent.
   An earlier draft of this list said the opposite — that a config-only commit would wake no hook,
   reasoning from the `^frontend/.*\.(ts|tsx)$` key — and that was wrong, because the key filters files
   rather than diffs. Corrected here rather than left standing.
-- **`api.ts` is still unproven.** `request()`'s envelope parsing, its status branches and its
-  `network_error` path are exercised by reading, not by execution.
+- ~~**`api.ts` is still unproven.** `request()`'s envelope parsing, its status branches and its
+  `network_error` path are exercised by reading, not by execution.~~ **Amended by `D10-42`, not
+  deleted:** those three are exercised now, 21 cases against the real module with only `fetch`
+  replaced. What is still unproven is the other direction — that the backend sends the envelope this
+  client reads.
 - **The screens are untouched.** `agent`, `notifications`, `escalations`, `review` and `users` are
   reached by hand only.
 
@@ -4414,8 +4441,10 @@ frontend test runner, and no channel consented by default on a fresh database.
 has a runner — `vitest`, one `test` script, and a `frontend-test` hook in the commit gate —
 so the residue is narrower than the sentence reads but not gone: ~~**one pure module is the
 whole of what runs**~~ — **amended by `D10-41`, not deleted:** two pure modules now run under a test,
-the second being the session store, and the residue is narrower by exactly that one — and no component,
-browser or integration test exists for any screen.
+the second being the session store — **amended again by `D10-42`, not deleted:** three now run, the
+third being the HTTP client, which is not pure but is the app's single seam to the wire, so the residue
+is narrower by two rather than by one — and no component, browser or integration test exists for any
+screen.
 **Amended, not deleted (`D10-39`, `2572f53`):** the paragraph this one keeps narrowing ends
 by saying what is left is *not a missing feature and not a hardening pass* — still true, and
 one of the things left has stopped being nothing. The `doctor` check that counts invisible
