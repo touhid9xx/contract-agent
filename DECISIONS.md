@@ -4604,3 +4604,68 @@ screen already behaved this way and the spec exists to keep it that way. No depe
 line, no backend file, no migration (`0006` stays head). `STATUS.md`'s *two screens of nine* claims,
 and `D10-44`'s *React Query is still unexercised*, are amended by the follow-up `docs(status)`
 commit, the convention `D10-40` through `D10-49` all used.
+
+### D10-51 — The first run, and the secret scan that was never scanning
+
+`D10-46` through `D10-50` all carried the same limit, in their own words: **the workflow has never
+run**. At `20:03Z` on 2026-11-08 that was true and stated plainly; at `20:43Z` the same tree reached
+`origin/main` and run #1 executed all seven jobs. The limit is now closed, and what closed it is
+worth recording separately from the defect it exposed, because the two have different lessons.
+
+**What run #1 established.** Six of seven jobs green on `ubuntu-latest`: `python static` (ruff, `mypy
+--strict` over 62 files, bandit), `backend tests` (the SQLite suite, then the smoke journey on a real
+uvicorn socket — the one artifact `pytest` never collects and no suite would have noticed breaking),
+`backend integration tests (mysql 8.4)` against a live service container **with skips treated as
+failures**, so the guard proves the MySQL-only behaviour actually ran rather than skipping politely,
+`frontend` (typecheck, eslint, vitest, and `next build`), and `demo frontend`. For the first time this
+repository has evidence from the platform it claims to run on, in bash, on Linux paths and LF endings,
+rather than from Windows and PowerShell. `D10-49`'s eleven-hook `for` loop ran as the fix intended.
+And **`gate` went red for the reason it exists**: one job failed, so the single required check reported
+the failure. That is the first end-to-end demonstration of the gate doing its job, and it is worth as
+much as a green would have been.
+
+**The red step, and how it identifies itself.** `hygiene + secret scan` failed at `gitleaks` — with
+`started_at` and `completed_at` **the same second**, `20:43:24Z`. A scan that had pulled an image,
+walked the tree and found a secret cannot finish in zero seconds. Two independent signals then pinned
+it: the step's duration, and the command the step ran. Reproduced locally, first attempt, verbatim:
+
+```
+$ pre-commit run gitleaks --all-files
+No hook with id `gitleaks` in stage `pre-commit`
+exit 1
+```
+
+**`pre-commit run <id>` filters the named hook by stage too.** The hook is `stages: [manual]`
+(`D1-03`), so `--all-files` alone makes pre-commit look for it in the `pre-commit` stage, not find it,
+and refuse — exit 1, before the hook environment is built, before Docker is touched, before anything
+could have been scanned. The error message names the stage it searched, which is the entire diagnosis
+in one line. Adding `--hook-stage manual` makes the hook *found and attempted*: verified locally, it
+then fails on a different error entirely, because Docker Desktop is stopped on this machine and this
+hook is a `docker_image` hook. That difference — "no hook with that id" versus "cannot reach the
+Docker daemon" — is what distinguishes a refusal from a scan that ran.
+
+**Why nothing in this repository could see it.** The hook is manual, so no commit ever ran it. `D10-49`
+fixed the eleven-id loop in the same job and deliberately left this separate one-line step alone — but
+it verified that step by *comparing* it to the hook's own comment, and the comment carried the same
+omission: both said `pre-commit run gitleaks --all-files`. **Two documents agreeing is not evidence
+that either is correct**, and here the agreement was the artefact that made the defect look verified.
+It is the same shape as `D10-49` one layer down: a command that reads perfectly and cannot execute.
+
+**The fix is two lines and the reason is written next to both.** `--hook-stage manual` in the workflow
+step and in `.pre-commit-config.yaml`'s own instruction to the operator, with a comment recording that
+the flag is required rather than decoration and quoting the error a future reader will otherwise
+re-derive from scratch.
+
+**Honest limits, four.** (1) **`gitleaks` has still never scanned anything** — run #1 refused before
+pulling the image; run #2 is its first real execution, so if it goes red that is a finding, not a
+failed fix. (2) **The step logs are unreadable from here** — GitHub returns `403` for job logs to an
+unauthenticated client and `gh` is not installed, so the diagnosis rests on a local reproduction of
+the identical command plus the timestamp argument, not on the runner's own words. (3) **Required status
+checks are still not enabled on `main`**, so a red `gate` has never actually blocked a merge; the
+branch is pushed to directly and the gate has only been observed failing, never observed gating.
+(4) **The action versions are untouched** — `checkout@v4`, `setup-python@v5` and `setup-node@v4` all
+ran with Node 20 deprecation warnings; cosmetic, and bumping them is a change that deserves its own
+green run rather than a rider on this one.
+
+**Landed as** `ci(workflows)` `0eb80d5` — two files, and neither is application code. No dependency, no
+lockfile line, no backend source, no test, no migration (`0006` stays head).

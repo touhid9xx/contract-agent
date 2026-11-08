@@ -875,12 +875,14 @@ fail the job. The other six commands now have exit codes too, run verbatim as th
 **both** node trees — `frontend/` (273 packages) and `demo/frontend/` (54) — both in sync, which
 mattered because `D10-43` added eight dev dependencies and a drifted lockfile was the second candidate
 for a first-push red. **No dependency, no lockfile line, no application source, no test, no migration**
-(`0006` stays head). The honest limits: **still never run on a runner**, so the first real result is
-unknown and `ubuntu-latest` differs in shell, paths and line endings; **four of the seven jobs were not
-executed even here** — `mysql-integration` needs a MySQL service container, `gitleaks` needs Docker, and
-`gate` needs `jq` plus real `needs` results; `npm ci` was run with `--ignore-scripts`, so plain `npm ci`
-is inference from both `package.json` files rather than an executed run; and **runnable is not green** —
-it proves the commands can execute, not that the pipeline passes. The branch stands **121 commits ahead
+(`0006` stays head). The honest limits: ~~still never run on a runner~~, so the first real result is
+unknown and `ubuntu-latest` differs in shell, paths and line endings — **amended by `D10-51`, not
+deleted:** it ran under an hour later, every command above executed on `ubuntu-latest`, and the red
+came from elsewhere; **four of the seven jobs were not executed even here** — `mysql-integration` needs
+a MySQL service container, `gitleaks` needs Docker, and `gate` needs `jq` plus real `needs` results;
+`npm ci` was run with `--ignore-scripts`, so plain `npm ci` is inference from both `package.json` files
+rather than an executed run; and **runnable is not green** — it proves the commands can execute, not
+that the pipeline passes. The branch stands **121 commits ahead
 of `origin/main`** at this `docs(status)` commit, re-counted rather than carried forward.
 
 **Then the third screen test, and it is the first whose state is the address** (`D10-50`, one commit:
@@ -922,6 +924,41 @@ coverage figure, and the two screens that still need this harness are untouched:
 and notifications**, the only other `page.tsx` files importing `useSearchParams` (grep, not memory —
 the detail page doubles route params instead, which is a different double). The
 branch stands **123 commits ahead of `origin/main`** at this `docs(status)` commit, re-counted rather
+than carried forward.
+
+**Then the workflow runs for the first time, and the only thing it breaks is the one step no gate could
+run** (`D10-51`, one commit: `ci(workflows)` `0eb80d5`). Run #1, on `6c02f66`: **six of seven jobs
+green on `ubuntu-latest`** — `python static` (ruff, `mypy --strict` over 62 files, bandit), `backend
+tests` (the SQLite suite, then the smoke journey on a real uvicorn socket, the one artefact `pytest`
+never collects), `backend integration tests (mysql 8.4)` against a live service container **with skips
+treated as failures**, `frontend` (typecheck, eslint, vitest and `next build`), and `demo frontend`.
+`D10-49`'s eleven-hook `for` loop ran as its fix intended. **`gate` went red because a job went red**,
+which is the first end-to-end demonstration of the gate doing the job it exists for. The one red step
+was `gitleaks`, and it **started and completed in the same second** — `20:43:24Z` — which is the
+signature of a refusal rather than a finding: a scan that pulled an image, walked the tree and found a
+secret cannot finish in zero seconds. Reproduced locally, first attempt, verbatim: `pre-commit run
+gitleaks --all-files` **is refused in the same breath**, answering *no hook with id `gitleaks` in stage
+`pre-commit`* and exiting 1, because **`pre-commit run <id>` filters the named hook by stage too** and
+the hook is `stages: [manual]` (`D1-03`) — refused before the environment is built, before Docker is
+touched, before anything exists to scan. Adding `--hook-stage manual` makes the hook *found and
+attempted*, and it then fails on a different error entirely (this machine's Docker Desktop is stopped),
+which is exactly the difference between "no hook with that id" and "a scan that ran". **Nothing here
+could have caught it**: the hook is manual, so no commit ever ran it, and `D10-49` — which fixed the
+eleven-id loop in the same job — verified this separate step by *comparing* it to the hook's own
+comment, which carried the same omission. Two documents agreeing is not evidence that either is
+right; here the agreement was the artefact that made the defect look verified. It is `D10-49`'s shape
+one layer down: a command that
+reads perfectly and cannot execute. Fixed in the step and in the hook's instruction to the operator,
+with the reason written beside both. **No dependency, no lockfile line, no backend source, no test, no
+migration** (`0006` stays head). The honest limits: **`gitleaks` has still never scanned anything** —
+run #1 refused before pulling the image, so a red run #2 is a finding and not a failed fix; **the step
+logs are unreadable from here** (`403` for job logs to an unauthenticated client, and `gh` is not
+installed), so the diagnosis rests on a local reproduction of the identical command plus the timestamp
+argument rather than the runner's own words; **required status checks are still not enabled on
+`main`**, so a red `gate` has been *observed failing* and never *observed gating* a merge; and **the
+action versions are untouched** — `checkout@v4`, `setup-python@v5`, `setup-node@v4` all ran with Node
+20 deprecation warnings, cosmetic, and worth their own green run rather than a rider on this one. The
+branch stands **124 commits ahead of `origin/main`** at this `docs(status)` commit, re-counted rather
 than carried forward.
 
 ## Phase history
