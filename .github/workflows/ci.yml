@@ -19,12 +19,13 @@
 #   2. Separate jobs, not one script. A single job would be one round trip to
 #      find out that a failure was in `ruff` rather than `mypy`. Each job also
 #      fails independently, so four of six green is readable at a glance.
-#   3. No `next build`, deliberately. It is the one check that would catch a
-#      server/client-boundary error `tsc` cannot see, but it is also unverified
-#      on a clean machine: it needs the whole Next toolchain and any environment
-#      it reads at build time. A pipeline that is red on its first run teaches
-#      people to ignore it — the same argument `docker-compose.yml` makes about
-#      healthchecks. Recorded as a candidate in DECISIONS.md D10-46 instead.
+#   3. `next build` runs, but only because it was verified first. It is the one
+#      check that catches a server/client-boundary error `tsc` cannot see, and
+#      it needs the whole Next toolchain plus any environment it reads at build
+#      time — so it was run locally against `frontend/` *before* being wired in,
+#      rather than added and hoped for. A pipeline that is red on its first run
+#      teaches people to ignore it, which is why the order was inverted.
+#      DECISIONS.md D10-47 records what the first run found.
 #
 # Versions: Node 22 and Python 3.13 are both pinned by other files in this
 # repository rather than chosen here. `engines.node` says ">=20" and
@@ -113,6 +114,23 @@ jobs:
       # silent skip here would hide the day they start being collected.
       - name: pytest
         run: python -m pytest -m "not integration"
+
+      # The one thing pytest cannot prove. Every test above reaches the app
+      # through `TestClient`, which is an in-process ASGI call: no socket is
+      # opened, no uvicorn exists, and nothing between two processes can
+      # disagree. This step boots the app under a real uvicorn on a loopback
+      # port, against a file-backed SQLite database, and drives the journey over
+      # HTTP with httpx — so it is the only check that the error envelope the
+      # frontend parses is the one the *server* sends, and the only one that
+      # exercises the `create-admin` → login order an operator actually runs.
+      #
+      # No service container and no new dependency: httpx and uvicorn are both
+      # already installed above, and the script removes its temporary database
+      # and document store on success. It is not collected by pytest (the file
+      # is `smoke_journey.py`, not `test_*.py`) precisely so that it runs here
+      # once, as a journey, rather than as 108 separately-failing test cases.
+      - name: smoke journey (real uvicorn, real socket)
+        run: python backend/tests/smoke_journey.py
 
   # ------------------------------------------------------ mysql integration
   # The six guarantees `backend/tests/test_mysql_integration.py` lists in its
