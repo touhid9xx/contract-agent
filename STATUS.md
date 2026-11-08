@@ -476,6 +476,10 @@ hook, because a suite nothing runs is a suite that rots. Teeth were checked by b
 `contract-scope.ts` was restored byte-identical afterwards, which is why this is `test(web)` and not
 `feat(web)`. **No backend change, no schema change, no migration (`0006`)**; the frontend still has
 **no component, browser or integration test**, so the three scoped screens remain unrendered.
+**Amended by `D10-43`, not deleted:** the component half of that sentence has stopped being true —
+`auth-provider.test.tsx` is the first component test and runs under `jsdom` — while the browser and
+integration halves have not, and *the three scoped screens remain unrendered* is exactly as true now
+as it was when written.
 
 **Then the stored bytes get a reader** (`D10-38`, one commit: `feat(backend)` `f3a1bb1`): `D10-26`
 gave `Contract.storage_path` a writer and `D10-27` gave it an *existence* reader, but nothing read
@@ -579,7 +583,11 @@ backend file, no migration (`0006`).** The honest limits: still **no component, 
 test** (`jsdom` is a decision, not a line of config); the config is not typechecked, because
 `tsc --noEmit` includes `**/*.ts` and not `.mts`, though the gate's `pre-commit run --all-files` means
 vitest loads it on every commit; and `api.ts` is still proven by reading rather than by execution —
-that last limit is the subject of the next paragraph.
+that last limit is the subject of the next paragraph. **Both of the first two limits are closed, not
+narrowed, by `D10-43`:** `jsdom` is now a devDependency and the first component test runs under it,
+and `**/*.mts` was added to `tsconfig.json`'s `include` so `npm run typecheck` does look at the config
+file. What survives of them is *whose* failing this was — a decision deferred twice, and a file
+matched by no `include` pattern that is invisible to `tsc` without ever being reported as skipped.
 
 **Then the client gets a spec** (`D10-42`, one commit: `test(web)` `cb7b1b4`): `api.ts` is the
 app's only seam to the wire and the place every screen learns that a request failed, so its failure
@@ -602,7 +610,42 @@ backend file, no migration (`0006`).** The honest limits: it pins *the client's 
 and not the server's *sending* of it, so a renamed field would stay green here and fail in a browser;
 the **screens** are still hand-tested; there is still **no component, browser or integration test**;
 `API_BASE` is read at module load, so every case asserts the default `/api/v1`; and React Query is not
-exercised at all.
+exercised at all. **Amended by `D10-43`, not deleted:** a component test now exists, so that clause
+has stopped being true in one of its three words — but *the screens are still hand-tested* is
+untouched by it, because the component tested is the auth provider and not a page.
+
+**Then the first component gets a test** (`D10-43`, one commit: `test(web)` `16803d0`): two
+slices in a row had closed with the same sentence — *no component, browser or integration test* — and
+both deferred it for the same reason, that `jsdom` is a dependency rather than a line of config. This
+slice takes the decision and pays for it, because `auth-provider.tsx` is where the last two slices'
+correctness becomes visible: `session.test.ts` proves the store is correct, and nothing proved a
+component *sees* it. The provider is the only place React reads those tokens, through
+`useSyncExternalStore` rather than `useState`, and every rule it enforces was a comment with no check
+behind it. Twelve cases pin what a user sees: nothing is stored while the server is still deciding; a
+refused sign-in leaves a working session untouched instead of clearing it; a sign-out clears locally
+*before* the server answers; a refused revocation still leaves the user signed out rather than
+half-signed-in; a session replaced anywhere re-renders the tree; and `useAuth` outside the provider
+throws rather than returning `null`. Only `auth` is replaced, through `importOriginal`, so the real
+`ApiError` survives the `instanceof` branch in `authorized`. Three things had to be got right for a
+`.tsx` spec to run at all, and only one of them was obvious: **`oxc.jsx`, not `esbuild.jsx`** —
+Vitest 5 runs on Vite 8, which transforms with oxc, so an `esbuild` block is accepted by the schema and
+then silently ignored; `tsconfig.json`'s `"jsx": "preserve"` is right for Next and wrong here, where
+raw JSX reaches Node and dies parsing; and the DOM is asked for **per file**, with
+`// @vitest-environment jsdom` on line one, so the three pure specs keep running without one. Both
+load-bearing claims were checked by breaking them: converting `signOutEverywhere`'s `finally` to a
+`catch` failed **3 of 12** — it swallows the rejection as well as skipping the clear — and removing
+the `oxc` block failed the whole file (*58 passed, 1 file failed*) with `make sure to not set jsx to
+preserve`. Both were reverted; `git diff` on `auth-provider.tsx` is empty. The gate ran green on this
+tree, `frontend tests (vitest run)` and `frontend typecheck` among its hooks. **This is the slice that
+adds the dependency**: `jsdom`, `@testing-library/react` and `@testing-library/dom`, +526 lockfile
+lines, with `npm audit` left at **7 moderate** on the pre-existing `typescript-eslint` → `minimatch`
+chain. Also in this commit, and easy to miss: `**/*.mts` joined `tsconfig.json`'s `include`, so the
+runner's own config — the one file in the repo no compiler looked at — is now typechecked. **No
+backend file, no migration (`0006`).** The honest limits: **one component of nine screens plus a shell
+is tested**, and it is the provider rather than a page; `jsdom` is a DOM implementation and not a
+browser, so nothing here proves the client and the server agree; `useSyncExternalStore` is exercised
+through its behaviour, not its internals; and the `oxc` block is proven only by deletion, so a future
+Vitest upgrade could leave a comment asserting a requirement that no longer exists.
 
 ## Phase history
 
@@ -4046,6 +4089,10 @@ commit gate; the paragraph stays because it is the reason the module was shaped 
   **Amended again by `D10-41`, not deleted:** a second spec now runs — `session.test.ts`, 18 tests over
   the in-memory session and its single-flight rotation — which is why "exactly that one spec" no
   longer describes the suite. The sentence that still stands is the last one.
+  **Amended a third time by `D10-43`, not deleted:** *no component or browser tests* has lost its
+  component half — `auth-provider.test.tsx`, 12 tests under `jsdom`, is the first one — so what
+  survives of the last sentence is the **browser** half alone, and the provider it tests is not a
+  screen.
 - **Nothing on the escalation queue screen is tested either.** It now has a filter control and a
   resolved toggle in the address, and both are reached by hand only.
 - **The scope form is a text box, not a picker.** It takes an id because that is what the parameter
@@ -4112,6 +4159,10 @@ touches no production behaviour, which is why it is `test(web)` and not `feat(we
   React, a router, a query client and a browser. A jsdom renderer would prove the components *mount*,
   not that the screens behave, and claiming otherwise is the overclaim `D10-36` refused to make. The
   frontend still has **no component tests, no browser test and no integration test**.
+  **Amended by `D10-43`, not deleted:** a component test now exists, and it proves exactly what this
+  bullet predicted — that one component *mounts* and reads the store — which is why the sentence that
+  still stands is the one above it: **the three screens named here are untouched**, and
+  `jsdom` still cannot tell you that a screen behaves.
 - **The key parity and the Bengali strings.** Still a script's output, still unread by anyone who
   reads Bengali.
 - **The advisories.** `npm install` printed **7 moderate severity** advisories for the frontend tree.
@@ -4390,6 +4441,10 @@ tell the shared-promise design from the bug it exists to prevent.
 
 - **Still no component, browser or integration test.** `jsdom` is not added: a component test needs it,
   and that is a decision, not a line of config.
+  **Amended by `D10-43`, not deleted:** the decision was taken and paid for, so the first component
+  test now runs — `auth-provider.test.tsx`, 12 cases, under a per-file `jsdom` environment. The
+  sentence is kept because "a decision, not a line of config" is precisely what it turned out to be:
+  three dependencies and +526 lockfile lines, which is why the two prior slices deferred it.
 - **The config file is not typechecked.** `tsc --noEmit` includes `**/*.ts` and `**/*.tsx`, which does
   not match `.mts`. For a config that is mostly comment, that is the trade taken, and it is why it holds
   no logic. It is not unexercised, though: the gate runs `pre-commit run --all-files`, so
@@ -4397,6 +4452,10 @@ tell the shared-promise design from the bug it exists to prevent.
   An earlier draft of this list said the opposite — that a config-only commit would wake no hook,
   reasoning from the `^frontend/.*\.(ts|tsx)$` key — and that was wrong, because the key filters files
   rather than diffs. Corrected here rather than left standing.
+  **Amended by `D10-43`, not deleted:** `**/*.mts` joined `tsconfig.json`'s `include`, so the config
+  *is* typechecked now and the trade above no longer applies. What is worth keeping is the shape of the
+  bug: a file matched by no `include` pattern is invisible to `tsc` without ever being reported as
+  skipped, so nothing looked wrong for two slices.
 - ~~**`api.ts` is still unproven.** `request()`'s envelope parsing, its status branches and its
   `network_error` path are exercised by reading, not by execution.~~ **Amended by `D10-42`, not
   deleted:** those three are exercised now, 21 cases against the real module with only `fetch`
@@ -4445,6 +4504,13 @@ the second being the session store — **amended again by `D10-42`, not deleted:
 third being the HTTP client, which is not pure but is the app's single seam to the wire, so the residue
 is narrower by two rather than by one — and no component, browser or integration test exists for any
 screen.
+**Amended by `D10-43`, not deleted, and the sentence survives word for word:** a third module is now
+tested and a *fourth* kind of subject joins it — `auth-provider.tsx`, the first component — so the
+residue is narrower by three rather than by two. But the clause this paragraph ends on says *for any
+screen*, and that is the one qualifier that did not move: the component tested is the auth provider,
+no page renders under it, and so **not one of the screens has a component test even now.** The
+narrowing is real and the sentence is still true, which is the distinction the three earlier
+amendments were each careful to keep.
 **Amended, not deleted (`D10-39`, `2572f53`):** the paragraph this one keeps narrowing ends
 by saying what is left is *not a missing feature and not a hardening pass* — still true, and
 one of the things left has stopped being nothing. The `doctor` check that counts invisible

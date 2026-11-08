@@ -3871,11 +3871,18 @@ would prove that components mount, not that screens behave. The single-use refre
 this the frontend's sharpest correctness rule, and `D10-17` is why: a second redemption is
 indistinguishable from theft, and the backend answers by revoking the whole family.
 
-**Honest limits, four.** (1) The frontend still has **no component, browser or integration test**; the
-residue is narrower by one module, not closed. (2) **No dependency was added** — `vitest` has been a
+**Honest limits, four.** (1) ~~The frontend still has **no component, browser or integration test**;
+the residue is narrower by one module, not closed.~~ **Amended by `D10-43`, not deleted:** the residue
+was narrower by two after `D10-42` and by three after `D10-43`, which adds the first component test —
+so the *component* half of that sentence has stopped being true, while the browser and integration
+halves have not. (2) **No dependency was added** — `vitest` has been a
 `devDependency` since `D10-37` — so the lockfile is unchanged and there is no new advisory surface to
-report. (3) The config file itself is not typechecked: `tsc --noEmit` includes `**/*.ts` and
-`**/*.tsx`, which does not match `.mts`. It is not unexercised, though — the gate runs
+report. (3) ~~The config file itself is not typechecked: `tsc --noEmit` includes `**/*.ts` and
+`**/*.tsx`, which does not match `.mts`.~~ **Amended by `D10-43`, not deleted:** `include` now
+carries `**/*.mts`, so `npm run typecheck` covers this file and the limit is closed rather than
+narrowed. What survives of it is the reason nobody noticed for two slices: a config matched by no
+`include` pattern is invisible to `tsc` without ever being reported as skipped. It is not
+unexercised, though — the gate runs
 `pre-commit run --all-files` (`.husky/pre-commit`), so `frontend-typecheck` and `frontend-test` run on
 every commit and vitest loads this config each time. An earlier draft of this entry claimed the
 opposite, reasoning from the hooks' `^frontend/.*\.(ts|tsx)$` key that a commit touching *only*
@@ -3944,8 +3951,11 @@ A route that renamed `request_id`, or answered 204 where this client expects a b
 has none — which is why the sentence above is not "the client is proven".
 
 **Honest limits, four.** (1) The **screens are still hand-tested**: nothing here proves a page maps a
-409 to the message it should, only that the status arrives as a 409. (2) **`jsdom` was not added**; the
-component, browser and integration gap is untouched and remains a decision rather than a config line.
+409 to the message it should, only that the status arrives as a 409. (2) ~~**`jsdom` was not added**; the
+component, browser and integration gap is untouched and remains a decision rather than a config line.~~
+**Amended by `D10-43`, not deleted:** the decision was taken and paid for, so `jsdom` *is* added now —
+but only to the spec that needs it, through a per-file `// @vitest-environment jsdom` first line rather
+than a changed default, so the three pure specs above still run without a DOM.
 (3) `API_BASE` reads `process.env.NEXT_PUBLIC_API_BASE` at module load, so every case asserts the
 default `/api/v1`; varying it would mean re-importing the module per test, and that harshness is not
 worth paying for a value `next.config.ts` rewrites anyway. (4) **React Query is not exercised** — no
@@ -3958,3 +3968,90 @@ dependency, no lockfile change, no backend file, no schema change: `alembic` hea
 **Landed as** `test(web)` `cb7b1b4` — the one new file and nothing else. The `STATUS.md` regions this
 entry amends were amended by the follow-up `docs(status)` commit rather than back-dated into the
 slice, the convention `D10-40` and `D10-41` both used.
+
+### D10-43 — The first component test: paying for a DOM, and the transform that decides it
+
+`D10-41` limit (1) and `D10-42` limit (2) both named this subject in the same words — *no component,
+browser or integration test* — and both deferred it for the same reason: `jsdom` is a dependency, not
+a config line. This slice takes the decision and pays for it, because `auth-provider.tsx` is where
+the correctness work of the last two slices becomes visible. `session.test.ts` proves the store is
+right; nothing proved a component *sees* it. The provider is the only place React reads those
+tokens, and it does so through `useSyncExternalStore` rather than `useState` on purpose — one copy of
+the truth, readable by an in-flight request without waiting for a render. Every rule it enforces is a
+comment in the source and, until now, a claim nothing checked.
+
+- **Three devDependencies, and the lockfile change is the slice's bulk.** `jsdom`, `@testing-library/react`
+  and `@testing-library/dom` (+526 lines in `frontend/package-lock.json`). `npm audit` stays at **7
+  moderate**, one existing chain (`typescript-eslint` → `typescript-estree` → `minimatch`); the
+  install added no new advisory surface. This is the cost the two prior slices declined to pay
+  quietly, now recorded rather than absorbed.
+- **A per-file environment pragma, not a moved default.** The spec's first line is
+  `// @vitest-environment jsdom`; `vitest.config.mts` keeps `environment: "node"`. A DOM is right for
+  one file and wrong for three, and moving the default would charge every pure spec for a document
+  it never touches. This is the cheapest of the three ways to give one file what it needs.
+- **`oxc.jsx`, and specifically not `esbuild.jsx`.** Vitest 5 runs on Vite 8, which transforms with
+  oxc. An `esbuild: { jsx }` block is accepted by the config schema and then ignored at runtime —
+  Vite warns that oxc wins — so the obvious-looking fix does nothing at all and fails *silently*.
+  The other half is `tsconfig.json`'s `"jsx": "preserve"`, which is correct for Next (it compiles JSX
+  itself) and wrong for Vitest, where nothing downstream of the transformer does: a `.tsx` spec
+  reaches Node as raw JSX and dies parsing. Asking oxc for the automatic runtime (`react/jsx-runtime`,
+  already a `react` dependency) is what makes a `.tsx` file runnable here at all.
+- **Only `auth` is replaced, through `importOriginal`.** The same seam `D10-41` used and for the same
+  reason: `authorized` branches on `instanceof ApiError`, so a hand-rolled double could not satisfy
+  that honestly. The session module is the real one; the store, the single-flight rotation and the
+  retry are all the production code.
+- **Twelve cases that pin what a user sees, not what a function returns.** No session is stored while
+  the server is still deciding; a refused sign-in leaves a working session untouched rather than
+  clearing it; a sign-out clears locally *before* the server answers; a refused revocation still
+  leaves the user signed out rather than half-signed-in; a session replaced anywhere in the app
+  re-renders the tree; and `useAuth` outside the provider throws rather than handing back `null`.
+- **`**/*.mts` added to `tsconfig.json`'s `include`, closing `D10-41` limit (3) rather than narrowing
+  it.** `tsc --noEmit` matched `**/*.ts` and `**/*.tsx` only, so the runner's own config was the one
+  file in the repo no compiler looked at. What survives of that limit is why nobody noticed for two
+  slices: a file matched by no `include` pattern is invisible without ever being reported as skipped.
+
+**Teeth, checked by breaking the code twice.** Converting `signOutEverywhere`'s `finally` to a `catch`
+failed **three** tests, not one: *hands the access token to the server and ends the session*
+(`expected { access_token: 'access-1', … } to be null`), *ends the session even when the call fails*
+(`promise resolved "undefined" instead of rejecting`) and *refuses to call the server when nobody is
+signed in* (same). A `catch` swallows the rejection as well as skipping the clear, so it breaks
+strictly more than the block it replaces — worth stating, because an earlier draft of this record
+said "two" from memory and the run said three. Removing the `oxc` block failed the whole `.tsx` file
+(**58 passed, 1 file failed**) with `Failed to parse source for import analysis … make sure to not set
+jsx to preserve`, which is the paragraph above proven rather than asserted. Both mutants were
+reverted; `git diff` on `auth-provider.tsx` and on `vitest.config.mts` is empty of them.
+
+**The sharpest limit, stated plainly.** This proves the auth binding mounts, subscribes and clears —
+not that any screen renders. There is no router, no `QueryClientProvider` and no network: the wrapper
+is the provider alone. So the residue is narrower by one module and by one *kind* of test, and the
+word "component" has stopped being true in those two older sentences while "browser" and
+"integration" have not. A page that maps a 409 to the wrong message is still found by hand.
+
+**Honest limits, four.** (1) **One component is tested, of nine screens plus a shell** — and the one
+that is tested is the provider, not a page. `D10-43` narrows the gap; it does not touch the screens.
+(2) **No browser and no integration test.** `jsdom` is a DOM implementation, not a browser: no
+layout, no CSS, no real navigation, no `fetch`. Nothing here proves the client and the server agree.
+(3) **`useSyncExternalStore` is exercised through its behaviour, not its internals** — the tests
+assert that a re-render happens, not how React schedules it; a React upgrade could change when the
+tree re-renders without changing what these cases assert. (4) **The `oxc` block is proven only by
+deletion.** The config comment says the block is load-bearing and the removal run agrees, but no test
+pins it, so a future Vitest upgrade that removes the need would leave a comment asserting a
+requirement that no longer exists — the failure mode of every "this is load-bearing" claim.
+
+**A diagnostic that was already stale.** The work was briefly spent chasing a `TS2769` on
+`vitest.config.mts:36` — `No overload matches this call` — which read as a real structural mismatch,
+and an explanation was even constructed for it before the compiler was asked directly. The project's
+own settings reproduce clean and the editor then reported no errors: the diagnostic was simply
+stale. Two habits came out of it and are worth recording because both cost time before they paid:
+re-run the failing command rather than reading a cached warning, and prefer `npm test` over
+`npx vitest`, since `npx` resolved a *different* vitest out of its cache and reported results from a
+runner this project does not use.
+
+**Verified.** On the tree this slice produced, from `frontend/`: `npm test` → **4 files, 70 tests, 0
+failed** (19 in `contract-scope.test.ts`, 18 in `session.test.ts`, 21 in `api.test.ts`, 12 in
+`auth-provider.test.tsx`). No backend file changed and no schema change: `alembic` head stays `0006`.
+
+**Landed as** `test(web)` `16803d0` — the new spec, the three dependencies and their lockfile
+entries, the runner config and the one-word `include` change, and nothing else. `STATUS.md`'s stale
+"no component test" regions were amended by the follow-up `docs(status)` commit rather than
+back-dated into the slice, the convention `D10-40`, `D10-41` and `D10-42` all used.
