@@ -4798,3 +4798,85 @@ already behaved this way. No dependency, no lockfile line, no backend source, no
 stays head). Full frontend suite **172 passed in 9 files**, from 145 in 8. `STATUS.md`'s *four of
 nine* claims are amended in place by the follow-up `docs(status)` commit, the convention `D10-40`
 through `D10-52` all used.
+
+### D10-54 — The sixth screen test: a write onto the row being read
+
+The **contract list** is the sixth screen under test and the first that owns a **write onto a row it
+also lists** — a consent write lands on a row the same page drew, so the outcome belongs to that
+row rather than to a global toast. It is also the **second** screen spec in the set that **mocks no
+router at all** — `review/page.test.tsx` (`D10-45`) is the first — and the first draft of this record
+said otherwise: `useSearchParams` appears in exactly three `page.tsx` files and all three were
+finished by `D10-53`, but only **four** of the five specs before this one carry a
+`vi.mock("next/navigation")` (login, escalations, agent, notifications), because the review page reads
+no router hook and so its spec needs no double either. What is new here is not the absence of the
+double but its cause: this page reads nothing out of the address at all, so the harness is now the
+reusable part — a doubled API and two real providers — with nothing router-shaped left inside it.
+So the prediction from `D10-45` and `D10-50` — that the screens left are *a different shape rather
+than the same one applied again* — is tested here rather than asserted: the sixth is the first screen
+whose state is entirely its own.
+
+**What this screen carries that the five before it could not reach.** One form, **two routes**:
+`POST /contracts` and `POST /contracts/document` take the same four content fields and differ only
+in transport, so attaching a file is what switches routes — nothing on screen says *upload*. An
+**empty optional field is omitted rather than sent empty**, because `""` is not a date and the route
+answers it 422, which makes the payload's *shape* the thing to assert rather than its values. A
+consent write **carries the version the row was drawn with**, never a copy the draft kept, because
+the token means *the state I was looking at when I decided*. A **no-op save is a visible success** —
+an identical submission answers the version it was given rather than a higher one, and that
+difference is the only way to tell an operator their click changed nothing *because the flags
+already matched*. And **the page appends**: paging hands the opaque `next_cursor` straight back, so
+a scroll touches each contract once even while new rows arrive underneath.
+
+**Mutation evidence, five passes, each measured in this turn, each reverted with a byte-identity
+assertion.** Sending `metadata.start_date` unconditionally fails **2** cases; forcing the
+`consent.data.version` comparison to `false` fails **1**; widening `canRecordConsent` to
+`user !== null` so a viewer is offered the write fails **1**; returning no cursor from
+`getNextPageParam` fails **1**; and dropping the `409` reload fails **1**. The first is the only
+multi-case mutant, and the asymmetry is informative: the omitted-field rule is load-bearing in two
+places while the other four are pinned once, so four of these five rules are rules that a single
+deleted test would silently free — the same trade `D10-53` recorded, now the majority rather than
+the exception.
+
+**No mutant crossed a turn boundary this time, and the reason is procedural rather than
+diligence.** `D10-52` and `D10-53` both ended with a live mutation, and both wrote that it must not
+happen again. What changed here is that the *first* command of the turn was `git status
+--porcelain`, which is exactly what `D10-53` concluded — the argument belongs in the workflow, not
+in a record. It reported a clean tree, so there was nothing to revert. The check did the work; the
+resolution did not.
+
+**Two false greens were caught while gathering that evidence, and they are worth more than the
+counts.** (1) `git diff --exit-code` against a path that **does not exist** exits `0`, so a
+*page.tsx unchanged* check run from `frontend/` with a repo-relative path compared **nothing** and
+reported success. The trustworthy proof is `git diff --name-status b4e5cb1 HEAD`, which lists
+exactly one added file. A green check that checked nothing is indistinguishable from a green check
+that passed, which is why the count of gates is a weaker claim than the identity of what each gate
+read. (2) A verification script using text-mode `read_text`/`write_text` rewrote the source's
+**CRLF as LF**, so the "reverted" file was byte-different from the committed one; `git status
+--porcelain` reported it and the fix is byte-level read/write with an equality assertion after
+every restore. The `[locale]` bracket glob bit a third time as well — `-LiteralPath`,
+`--literal-pathspecs` and `git diff --name-status` are what make these checks mean anything. (3) This
+record's own first draft claimed the contract spec was **the first** in the set with no router double
+*and* that the five specs before it each carried one; counting the `vi.mock` calls showed **four** of
+five, with `review/page.test.tsx` carrying none because the review page reads no router hook. A claim
+about a set is worth exactly the count behind it, and that count had not been run when the sentence
+was first written — caught here before the commit rather than after, which is the only difference
+that matters.
+
+**Honest limits.** (1) The rules are proven against a **doubled API** — `jsdom`, no browser, no
+router, no server. (2) `ContractListItem` and `ConsentState` are **fixtures pinned from the screen's
+side** and were not checked against `backend/app/api/v1/contracts.py`; the refusal codes the screen
+translates are the ones the fixtures declare, and the *503* sentence is a fixture — that a keyless
+deployment answers 503 is the backend's claim, not this spec's. (3) Date formatting is asserted
+through the same `Intl` call the screen makes, so the join and the zone choice are pinned, not
+locale output. (4) *Wired is not behaving* still holds. (5) The viewer gate remains the client's
+opinion of a role the server decides in another suite. (6) **Three of nine screens still have no
+component test** — contract detail, home, users — and none of the three is this shape again: the
+detail screen reads `useParams`, the home page reads `usePathname`, and the users page reads nothing
+from the router at all.
+
+**Landed as** `test(web)` `72538e2` — one new file, 901 insertions, **no source change**:
+`frontend/src/app/[locale]/contracts/page.test.tsx` is the only path in
+`git diff --name-status b4e5cb1 HEAD`. No dependency, no lockfile line, no backend source, no
+migration (`0006` stays head). Full frontend suite **204 passed in 10 files**, from 172 in 9.
+`STATUS.md`'s *five of nine* claims are amended in place by the follow-up `docs(status)` commit, the
+convention `D10-40` through `D10-53` all used.

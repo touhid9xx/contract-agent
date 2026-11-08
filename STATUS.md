@@ -770,6 +770,18 @@ test — contract list, contract detail, home, users — do **not** import `useS
 **not this harness applied four more times**. The address-and-`Suspense` shape is finished, and what
 is left is a different shape rather than a fifth copy of a proven one. *Both wired rather than
 working* now covers five tested screens.
+**Amended a fifth time by `D10-54`, not deleted:** ~~five of nine~~ becomes **six of nine**, and this
+is the first amendment where the address harness is not the subject at all — ~~the four screens
+still without a test~~ becomes **three**, because `contracts/page.test.tsx` renders the contract
+list: 32 cases, 901 lines, no new dependency and no provider `D10-50` did not already pay for. It is
+also **the second screen spec in the set that mocks no router**, not the first —
+`review/page.test.tsx` (`D10-45`) has none either, and only four of the five specs before this one
+carry a `vi.mock("next/navigation")`; this page reads nothing out of the address, and
+`useSearchParams` was twice counted and twice finished, so nothing router-shaped is left under it. So
+the count change says something the previous four could not: what remains — contract detail, home,
+users — is not this shape either, and the three are shaped differently from each other rather than
+alike (`useParams`, `usePathname`, and no router at all). *Both wired rather than working* now covers
+six tested screens.
 
 **Then the gate gets somewhere to run that is not one person's machine** (`D10-46`, one commit: `ci`).
 Every check in this project had run from a developer's machine, and two had never run automatically
@@ -1049,13 +1061,55 @@ the turn. **No dependency, no lockfile line, no backend source, no source change
 address** — `jsdom`, no browser, no real router, no server; `NotificationRow` and `DispatchOutcome` are
 **fixtures pinned from the screen's side** and not verified against
 `backend/app/api/v1/notifications.py`; *wired is not behaving* still holds; the deferral case proves
-the screen **believes the server**, not that the server is right about quiet hours; and **four of nine
-screens still have no component test** — contract list, contract detail, home, users — none of which
-imports `useSearchParams`, so what is left is a different shape rather than this one four more times.
+the screen **believes the server**, not that the server is right about quiet hours; and ~~four of nine
+screens still have no component test~~ — ~~contract list, contract detail, home, users~~ — amended in
+place by the paragraph that follows, which tested the contract list: **three of nine have none** —
+contract detail, home, users — of which one reads `useParams` and another `usePathname` and the third
+reads no router at all, so what is left is a different shape rather than this one four more times.
 Verification: the spec **27/27**, the full frontend suite **172 passed in 9 files** (was 145 in 8, so
 the new file accounts for every added case and nothing that existed changed), all nineteen pre-commit
 gates green and commitlint passed. The branch stands **2 commits ahead of `origin/main`** after this
 `docs(status)` commit, re-counted rather than carried forward.
+
+**Then the sixth screen test, and the second one that mocks no router** (`D10-54`, one commit:
+`test(web)` `72538e2`). The contract list is the first screen that owns a **write onto a row it also
+lists**, so a consent outcome belongs to that row rather than to a global toast. It is also the
+**second** screen spec in the set with **no `next/navigation` double** — `review/page.test.tsx`
+(`D10-45`) is the first, and four of the five specs before this one do carry one — because the page
+reads nothing out of the address, so `D10-53`'s "every address screen is covered" leaves nothing
+under it, and the harness is now the reusable part rather than the router. What the 32 cases spend
+themselves on is what this screen alone carries: **one form, two routes** (`POST /contracts` and
+`POST /contracts/document` differ only in transport, so attaching a file is what switches routes); an
+**empty optional field is omitted rather than sent empty**, because `""` is not a date and the route
+answers it 422; a consent write **carries the version the row was drawn with** rather than a copy the
+draft kept; a **no-op save is a visible success**, since an identical submission answers the version it
+was given — the only way to say the click changed nothing *because the flags already matched*; and
+**the page appends**, handing the opaque `next_cursor` straight back. **Five mutation passes, each
+measured and reverted inside this turn with a byte-identity assertion:** unconditional
+`metadata.start_date` fails **2**; forcing the consent version comparison to `false` fails **1**;
+widening `canRecordConsent` so a viewer is offered the write fails **1**; no cursor from
+`getNextPageParam` fails **1**; dropping the `409` reload fails **1**. Four of the five rules are
+therefore pinned exactly once — the trade `D10-53` named, now the majority rather than the
+exception. **No mutant crossed a turn boundary this time**, and the reason is the check rather than
+the resolve: `git status --porcelain` was the first
+command of the turn, as `D10-53` said it must be, and it reported a clean tree. Two **false greens**
+were caught while gathering this, worth more than the counts: `git diff --exit-code` against a
+**nonexistent path exits 0**, so a *page.tsx unchanged* check run from the wrong cwd compared nothing
+and passed — `git diff --name-status b4e5cb1 HEAD` listing exactly one added file is the proof that
+means something; and a script using text-mode read/write rewrote the source's **CRLF as LF**, so the
+"reverted" file was byte-different until `git status` said so. **No dependency, no lockfile line, no
+backend source, no source change at all, no migration** (`0006` stays head). The honest limits: the
+rules are proven against a **doubled API** — `jsdom`, no browser, no router, no server;
+`ContractListItem` and `ConsentState` are **fixtures pinned from the screen's side** and not verified
+against `backend/app/api/v1/contracts.py`; the **503** sentence is a fixture, so *a keyless
+deployment answers 503* is the backend's claim; date formatting is asserted through the same `Intl`
+call the screen makes, pinning the join and the zone rather than locale output; *wired is not
+behaving* still holds; and **three of nine screens still have no component test** — contract detail,
+home, users — no two of which are shaped alike. Verification: the spec **32/32**, the full frontend
+suite **204 passed in 10 files** (was 172 in 9, so the new file accounts for every added case and
+nothing that existed changed), all nineteen pre-commit gates green and commitlint passed. The branch
+stands **2 commits ahead of `origin/main`** after this `docs(status)` commit, re-counted rather than
+carried forward.
 
 ## Phase history
 
@@ -5015,6 +5069,22 @@ them imports `useSearchParams`, so what remains is a different shape. What five 
 kept, and this one keeps: `jsdom` is still a DOM, `next/navigation` is still a **double holding a
 mutable address**, and the `409`s the screen translates are **fixtures pinned from the screen's
 side** — asserted here and not verified against `backend/app/api/v1/notifications.py`.
+**Amended a tenth time, by `D10-54`, not deleted — and the count returns a sixth time.** A sixth page
+renders under a test: `contracts/page.test.tsx`, 32 cases. So ~~five have one, and four do not~~
+becomes **six have one, and three do not.** This is the first amendment in ten that is **not about the
+address harness at all**: the three `useSearchParams` pages were finished by the ninth amendment, and
+the contract list reads nothing out of the address. It is **not** the first spec without a doubled
+router — `review/page.test.tsx` (`D10-45`) never had one, and this amendment's first draft claimed
+otherwise until `D10-54` counted the mocks and carried the correction — but it is the first where the
+absence is a property of the page: no router hook is read, so nothing router-shaped is left in the
+harness. What that does to the chain's claim is sharpen it rather than soften it: the doubled
+router was never the risk being tracked, and a screen with no router double still runs `jsdom`
+against a doubled API with no server behind it, so *wired is not behaving* survives the loss of a
+double intact. The three screens left are **shaped differently from each other**, not alike —
+contract detail reads `useParams`, home reads `usePathname`, users reads no router at all — so the
+remaining work is not one shape three times either. What ten amendments have each kept, and this one
+keeps: `jsdom` is still a DOM, and the `409`s the screen translates are **fixtures pinned from the
+screen's side** — asserted here and not verified against `backend/app/api/v1/contracts.py`.
 **Amended, not deleted (`D10-39`, `2572f53`):** the paragraph this one keeps narrowing ends
 by saying what is left is *not a missing feature and not a hardening pass* — still true, and
 one of the things left has stopped being nothing. The `doctor` check that counts invisible
