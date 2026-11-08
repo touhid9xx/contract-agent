@@ -296,13 +296,22 @@ jobs:
       # `mypy`, `bandit` and the three frontend hooks are their own jobs above,
       # and `--all-files` here would need a full venv plus two `npm ci`s to
       # repeat them. Hook ids are the ones in `.pre-commit-config.yaml`.
+      #
+      # One hook per invocation, in a loop — not one command with eleven hook
+      # ids. `pre-commit run` takes a *single* hook-id positional (`nargs="?"`,
+      # "A single hook-id to run"), so the list form is an argparse error:
+      # `unrecognized arguments: …`, exit 2, before any hook runs. Written that
+      # way first, then executed rather than assumed (D10-49). `bash -e` is the
+      # default shell here, so the loop stops at the first hook that fails.
       - name: file hygiene
         run: |
-          pre-commit run --all-files \
+          for hook in \
             check-yaml check-toml check-json check-merge-conflict \
             check-added-large-files check-case-conflict detect-private-key \
             forbid-submodules end-of-file-fixer trailing-whitespace \
-            mixed-line-ending
+            mixed-line-ending ; do
+            pre-commit run --all-files "$hook"
+          done
 
       # Manual-stage hook, run by name. This is the command in the hook's own
       # comment, so CI and an operator run the same thing.
