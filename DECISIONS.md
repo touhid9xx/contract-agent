@@ -3710,3 +3710,110 @@ The feature landed as `feat(backend)` `2572f53`; this record is written from the
 measurements taken on that tree, and the `STATUS.md` regions it names were amended by the follow-up
 `docs(status)` commit rather than back-dated into the slice — the same convention `D10-26`…`D10-28`
 and `D10-38` used.
+
+### D10-40 — The person who runs the deployment is a recipient, not a principal
+
+`D10-39` left one link open and named it: the attention verdict was a log line, and nothing in this
+stack reads the log. The recorded next step was an HTTP route serving the same report. On reading the
+three queries that feed it, that step is not unbuilt — it is **blocked**, and the block is a decision
+about who may ask the question rather than about how to render an answer.
+
+**Why the route cannot be written, stated precisely.** `dead_letter_count`, `undelivered_counts` and
+`fields_for_reseal` each say in their own docstring that tenant-scoping them would be *actively
+misleading*: parked events belong to every tenant and a relay problem is not a tenant's; a CLI operator
+has a database connection, not a principal, so there is no tenant to scope to. They are **operator**
+queries. A route authenticates a **tenant** principal. The mismatch is therefore not a scoping bug to
+work around — the route would be answering an operator's question with a customer's credentials.
+Scoping it contradicts three written decisions; serving it unscoped hands one tenant another tenant's
+counts and field primary keys. That stays an owner decision, and this record does not make it.
+
+**So the message goes to a person instead of a principal**, and the tenant question is never reached.
+The recipient is `ATTENTION_ALERT_TO` — deployment configuration, like `SMTP_HOST`, not customer data —
+so no principal is impersonated, no count has to be scoped, and the three cross-tenant queries are left
+exactly as they are. This *sidesteps* gap 22's obstacle rather than removing it, and the distinction is
+kept in the prose rather than smoothed over.
+
+**It alerts on a change of verdict, never on the verdict itself.** At the default five-minute interval a
+standing finding is 288 messages a day, which is a mailbox filter by Thursday — and an alarm nobody
+reads is the exact failure `D10-39` exists to prevent. The worker remembers the last verdict it
+successfully told the operator about and speaks only when the answer differs: once when a finding
+appears, once when the board is clear again, nothing while it stands.
+
+**The "cleared" message is not politeness.** Without it an operator cannot distinguish "fixed" from
+"the check never fired", and the first thing they do is go and look by hand — the behaviour the whole
+worker exists to remove. It is also the reason the protocol has two verbs rather than one: a single
+`send(report)` would have to re-derive the direction from state the caller already has.
+
+**A clean board on the very first tick sends nothing.** The remembered verdict starts **calm**, because
+nothing has ever been sent and "calm" is the only thing it is reasonable for the operator to believe. A
+deployment that boots *broken* therefore alerts on its first tick instead of staying silent until
+something changes. The asymmetry is deliberate and fails in the direction that matters.
+
+**State advances only after a send that returned normally.** A down relay therefore retries on the next
+tick rather than being recorded as delivered — the same rule the reminder path holds, where a normal
+return means the relay accepted the message and anything else is a `SenderError`. A failed send is
+logged and does not kill the tick: a watcher that dies when it cannot speak stops watching at exactly
+the moment it had something to say.
+
+**The subjects are constant, and carry no counts.** A mail rule has to match the tenth recurrence as
+well as the first, and a subject that changes with the numbers cannot be matched at all. The counts are
+in the body, where a human reads them.
+
+**No `Message-ID`, and this is the one place the alert differs from a reminder.** `SmtpSender` derives
+its id from the idempotency slot so that a re-send after a crash is recognisable as a duplicate. An
+alert has no slot and is never re-sent; deriving an id from the verdict would make the second finding
+of the week look like the first to any provider that de-duplicates on that header — the one way this
+message could be silently dropped.
+
+**The body is rendered from `AttentionReport.as_dict()`**, the same dictionary the log line carries, so
+mail and log cannot drift: a count added to the report appears in both places or in neither. It is also
+why nothing here selects from the database — the report holds ids and counts only, so the mail cannot
+leak a contract value even by accident.
+
+**One transport, reused rather than copied.** `SmtpSender.deliver` was split out of `send` so the alert
+gets the verifying TLS context, the login, the bounded socket and the address-scrubbed error text
+without a second copy of that block to forget one of them. There is still exactly one relay to
+configure, one set of credentials to rotate, and one socket path already covered by
+`test_smtp_socket.py`.
+
+**An address with nothing behind it is refused at boot, after the relay is checked.** Two ways to be
+wrong — not an address, or an address with `NOTIFICATION_TRANSPORT` set to something other than `smtp`
+— both fail at start-up rather than at the first finding, which is precisely when it would matter. The
+check sits *after* the SMTP block on purpose: a deployment with both mistakes is told "you have no
+relay" first, because that is the fix that also makes the address work.
+
+**Unset means log-only, which is what it was.** `build_attention_alerter` returns `None` rather than a
+refusing stand-in — the opposite of `build_sender` — because an unset address is a legitimate
+configuration, not a misconfiguration. The worker then has no alerting code path at all, and the
+default install behaves exactly as it did under `D10-39`.
+
+**Deliberately not a notification.** No consent lookup, no quiet hours, no per-tenant template. Those
+gates exist to protect a *data subject* the system decided to contact; this contacts the person who
+chose to run the system, at an address that person configured. Routing an operator alert through the
+customer-consent path would be a category error that also required choosing which tenant's consent to
+consult. Nor is it a pager: one address, no escalation ladder, no acknowledgement tracking — a
+deployment that wants a pager points this address at the pager's mail gateway.
+
+**Verified.** Measured on the tree committed as `d9530b5`, from the repository root: `ruff check .` →
+*All checks passed*; `ruff format --check .` → *107 files already formatted*; `mypy app` under
+`strict` → *no issues found in 62 source files*; `bandit -c pyproject.toml -r backend/app` → exit 0
+with only the three expected `nosec B104` notices in `config.py`; `pytest -q` → **888 tests, 0
+failures, 0 errors, 15 skipped**, counted from the JUnit XML rather than the progress dots. The
+fifteen skips are unchanged in kind — 13 MySQL unreachable at `127.0.0.1:3306`, 1 symlink privilege, 1
+Kafka opt-in — so the outbox and dispatch paths were proven on SQLite only, again.
+
+**Honest limits, three of them.** (1) The remembered verdict is **process memory**: it survives between
+ticks and not across a restart, so a worker that restarts while a finding stands re-announces it once.
+The repair is a small table (`0007`) holding the last notified verdict, and it is declined here for the
+same reason `D10-39` declined row-level park classification — it is not worth a schema change on the
+thinnest data this system has until a restarting worker is actually observed to be noisy. (2) The
+default install is unchanged and still log-only: the alert reaches a person only when the deployment
+sets the address, so gap 22 is narrowed for deployments that configure it and not at all for those that
+do not. (3) The blocked route is no less blocked. This addresses a person instead of a principal, which
+sidesteps the cross-tenant question rather than answering it. No schema change and no migration:
+`alembic` head stays `0006`.
+
+The feature landed as `feat(backend)` `d9530b5`; this record is written from the code and the
+measurements taken on that tree, and the `STATUS.md` regions it names were amended by the follow-up
+`docs(status)` commit rather than back-dated into the slice — the same convention `D10-39` used for
+`2572f53`.

@@ -74,8 +74,13 @@ as sealed rather than as plaintext), it writes nothing, and it exits
 watch it (D10-12). ~~**Nothing schedules it yet** — it is a check, not an alarm.~~
 **Amended by `D10-39`, not deleted:** something schedules it now —
 `app/workers/attention_watch.py` on a five-minute timer, shipped as a compose service
-(`2572f53`) — so it is an alarm in the sense that it is *raised*; nothing in this stack
-reads the log it raises, which is the part that is still missing.
+(`2572f53`) — so it is an alarm in the sense that it is *raised*; ~~nothing in this stack
+reads the log it raises, which is the part that is still missing.~~ **Amended by `D10-40`,
+not deleted:** a deployment that sets `ATTENTION_ALERT_TO` now mails the operator when the
+verdict *changes* — once when a finding appears, once when the board clears — so something
+in this stack does read it. The sentence is still exactly true of the shipped default,
+where the address is unset and the verdict stays a log line (gap 22 is therefore narrowed
+for configured deployments and not at all for default ones).
 **The fifth slice is tooling, not product code** (`16e8bb5`). A new `.gitattributes` pins
 `* text=auto eol=lf`, because `core.autocrlf` (a *checkout* setting, `true` on this
 host both locally and globally) and `mixed-line-ending --fix=lf` (a *post-checkout*
@@ -519,10 +524,40 @@ The full gate ran green on this tree from the repository root — `ruff check`, 
 skipped** (13 MySQL, 1 symlink, 1 Kafka) — after `ruff check` caught three real errors the gate would
 have caught later. **No schema change, no migration (`0006`)**; nothing was written by the slice.
 **Gap 22 is narrowed, not closed**: the check now has a process, but it reaches a person only if
-something reads the log and **nothing in this stack reads it**; the obvious next step, an HTTP route
-serving the same report, is **blocked rather than skipped** on who may see counts that
-`dead_letter_count`, `undelivered_counts` and `fields_for_reseal` deliberately read **across
-tenants**. Gap 25 and gap 5 are untouched.
+something reads the log and ~~**nothing in this stack reads it**~~ — **amended by `D10-40`, not
+deleted:** something does for a deployment that sets `ATTENTION_ALERT_TO`, and nothing does for the
+default install, which is why the gap is narrowed and not closed rather than closed and not
+credited; the obvious next step, an HTTP route serving the same report, is **blocked rather than
+skipped** on who may see counts that `dead_letter_count`, `undelivered_counts` and
+`fields_for_reseal` deliberately read **across tenants**. Gap 25 and gap 5 are untouched.
+
+**Then the verdict gets somewhere to go** (`D10-40`, one commit: `feat(backend)` `d9530b5`):
+`D10-39` named its own missing link, and the recorded next step — an HTTP route serving the same
+report — turned out on reading to be **blocked rather than merely unbuilt**. The three queries the
+report is built from say in their own docstrings that tenant-scoping them would be *actively
+misleading* (a relay problem is not a tenant's; an operator has a connection, not a principal), and a
+route answers a *tenant* principal — so the route would be answering an operator's question with a
+customer's credentials. Scoping it contradicts three written decisions; leaving it unscoped hands one
+tenant another tenant's counts and field primary keys. **So the message goes to a person instead of a
+principal:** `ATTENTION_ALERT_TO` is deployment configuration, and the tenant question is never
+reached. It alerts on a **change of verdict, never on the verdict** — at a five-minute interval a
+standing finding is 288 mails a day, which is a mailbox filter by Thursday, the exact failure
+`D10-39` exists to prevent — so the worker remembers the last verdict it successfully delivered and
+speaks once when a finding appears and once when the board clears. A clean board on the **first** tick
+sends nothing, because "calm" is the only baseline it is reasonable for the operator to believe, so a
+deployment that boots *broken* alerts immediately; state advances only after a send that returned
+normally, so a down relay is retried rather than recorded as delivered. The body is rendered from the
+same `AttentionReport.as_dict()` the log line carries, so mail and log cannot drift, and it holds ids
+and counts only, so no contract value can leak. `SmtpSender.deliver` was split out of `send` rather
+than copied, so there is still one relay, one credential set and one socket path already covered by
+`test_smtp_socket.py`; an address with no SMTP transport behind it is refused at start-up, *after* the
+SMTP block, so a deployment with both mistakes is told "you have no relay" first. Unset stays
+log-only. The gate ran green on this tree — `ruff check`, `ruff format --check` (107 files), `mypy app`
+strict (62 files), `bandit` exit 0, `pytest -q` **888 tests, 0 failures, 15 skipped** (13 MySQL, 1
+symlink, 1 Kafka). **No schema change, no migration (`0006`).** The honest limit: the remembered
+verdict is **process memory**, so a restart while a finding stands re-announces it once — repaired by
+a table (`0007`), declined until a restarting worker is observed to be noisy; and the blocked route is
+no less blocked, because this sidesteps the cross-tenant question rather than answering it.
 
 ## Phase history
 
@@ -2889,7 +2924,11 @@ a hook finally ran and passed.
     `failed`/`suppressed` notifications and exits `EXIT_ATTENTION` (5) on any of them
     (`D10-12`), so the state is machine-checkable instead of requiring a hand-written
     query. What is still missing is the thing that makes a check useful — a scheduler
-    running it and a route for the exit code to reach a person.
+    running it and a route for the exit code to reach a person. **Amended by `D10-39` and
+    `D10-40`, not deleted:** the scheduler exists (`2572f53`) and, for a deployment that sets
+    `ATTENTION_ALERT_TO`, the verdict now reaches a person by mail when it *changes*
+    (`d9530b5`). Neither is true of the default install, so the entry stays open rather than
+    struck.
 23. ~~**The double-send serialisation is proven by reasoning, not by a concurrent
     test.**~~ — **closed against MySQL (D10-08).** The gap was real and correctly
     stated: `0003` (`0f5da36`) makes the second dispatch block on
@@ -4165,7 +4204,10 @@ both files were restored and confirmed byte-identical by SHA-256.
 ### What this does not do — stated, not buried
 
 - **It does not deliver anything.** A log line reaches a person only if something reads the log, and
-  **nothing in this stack reads it.** Gap 22 is narrowed, not closed.
+  **nothing in this stack reads it.** Gap 22 is narrowed, not closed. **Amended by `D10-40`, not
+  deleted:** something now does read it — `app/workers/attention_alerts.py` mails the operator when the
+  verdict *changes* (`d9530b5`) — but only in a deployment that sets `ATTENTION_ALERT_TO`. The
+  sentence survives intact for the default install, and that is the install the claim was about.
 - **The obvious next step is blocked, not skipped.** An HTTP route serving this same report cannot be
   written without deciding who may see counts that `dead_letter_count`, `undelivered_counts` and
   `fields_for_reseal` deliberately read **across tenants** — each docstring says scoping them to one
@@ -4188,6 +4230,83 @@ three expected `nosec B104` notices in `config.py`; `pytest -q` → **871 tests,
 outbox and dispatch paths were proven on SQLite only again. `ruff check` caught three real errors
 before the gate did: `cli.py` still imported the names only the deleted `_attention_report` used, and
 an autouse fixture had a `yield` with no teardown.
+
+## The verdict reaches a person now ✅ (`D10-40` — the operator is a recipient, not a principal)
+
+`D10-39` named its own missing link and left it open on purpose: the attention verdict was a log line,
+nothing in this stack read the log, and the recorded next step was an HTTP route serving the same
+report. Reading the three queries that feed that report, the step is **blocked rather than unbuilt** —
+`dead_letter_count`, `undelivered_counts` and `fields_for_reseal` each say in their own docstring that
+tenant-scoping them would be *actively misleading*, because a relay problem is not a tenant's and a CLI
+operator has a connection rather than a principal, while a route answers a *tenant* principal. An
+operator's question cannot be asked with a customer's credentials. So this slice changes the
+**recipient** instead: a person on the operations side, at an address the deployment configures. No
+principal is impersonated, no count has to be scoped, and the three cross-tenant queries are left
+exactly as they are.
+
+| Change | Detail |
+| --- | --- |
+| `backend/app/workers/attention_alerts.py` | **New, 194 lines.** The `AttentionAlerter` protocol (`raised` / `cleared` — two verbs, because a single `send(report)` would re-derive the direction from state the caller already has), `SmtpAttentionAlerter`, `build_attention_alerter`, and two **constant** subjects. The body is rendered from the same `AttentionReport.as_dict()` the log line carries, so mail and log cannot drift apart; it holds ids and counts only, so the mail cannot leak a contract value even by accident. No `Message-ID` — deliberately the one place it differs from a reminder. |
+| `backend/app/workers/attention_watch.py` | **250 lines now** (was 179). The remembered verdict starts **calm** and advances only after a send that returned normally, so a down relay is retried on the next tick rather than recorded as delivered; a failed send is logged and does not kill the tick; `main()` builds the alerter outside the watch, so a half-configured pair cannot start ticking. |
+| `backend/app/core/config.py` | `attention_alert_to` (empty = log-only), refused at boot when it is not an address and when it is set with no SMTP transport behind it. The check sits **after** the SMTP block on purpose: a deployment with both mistakes is told "you have no relay" first, because that is the fix that also makes the address work. |
+| `backend/app/workers/senders.py` | `SmtpSender.deliver` **split out** of `send` rather than copied, so the alert reuses the verifying TLS context, the login, the bounded socket and the address-scrubbed error text. One relay, one credential set, one socket path already covered by `test_smtp_socket.py`. |
+| `.env.example`, `docker-compose.yml` | Documented beside the SMTP block; the `attention` service comment now names the address and keeps "unset = log-only, still the default". |
+| `backend/tests/test_attention_alerts.py` | **New, 17 tests** — alert once on a first-tick finding, silence on a clean first tick, no repeat while the finding stands, "cleared" announced exactly once, retry on the next tick after a failed send, a failure that does not escape the tick, no alert code path when no alerter is configured, the message's `To`/`From`, the counts matching the log line, no stored customer value in the body, no `Message-ID`, and both settings refusals. |
+| No schema change, no migration | `alembic` head stays `0006`. Nothing is written by this slice; the alert writes no row. |
+
+### An alert every tick is the alarm `D10-39` exists to prevent
+
+At the default five-minute interval a standing finding — one plaintext field nobody has sealed, say —
+is **288 messages a day**, which is a mailbox filter by Thursday. So the worker remembers the last
+verdict it successfully told the operator about and speaks only when the answer differs: once when a
+finding appears, once when the board is clear again, nothing in between however long the state stands.
+The "cleared" message is not politeness — without it an operator cannot tell "fixed" from "the check
+never fired", and the first thing they do is go and look by hand, which is the behaviour the whole
+worker exists to remove.
+
+**A clean board on the very first tick sends nothing.** "Calm" is the only thing it is reasonable for
+the operator to believe when nothing has ever been sent, so the remembered verdict starts calm. The
+consequence is the right one: a deployment that boots *broken* alerts on its first tick instead of
+staying quiet until something changes. The asymmetry is deliberate and fails in the direction that
+matters.
+
+### It is not a notification, and it does not touch the notification policy
+
+No consent lookup, no quiet hours, no per-tenant template. Those gates exist to protect a *data
+subject* the system decided to contact; this contacts the person who chose to run the system, at an
+address that person configured. Routing an operator alert through the customer-consent path would be a
+category error that also required choosing which tenant's consent to consult. Nor is it a pager: one
+address, no escalation ladder, no acknowledgement tracking — a deployment that wants a pager points
+this address at the pager's mail gateway, which is what mail gateways are for.
+
+### What this does not do — stated, not buried
+
+- **The remembered verdict is process memory.** It survives between ticks and not across a restart, so
+  a worker that restarts while a finding stands re-announces it once. The repair is a small table
+  (`0007`) holding the last notified verdict; it is declined here for the same reason `D10-39` declined
+  row-level park classification — not worth a schema change on the thinnest data this system has until
+  a restarting worker is actually observed to be noisy.
+- **The default install is unchanged.** `ATTENTION_ALERT_TO` unset means log-only, exactly as under
+  `D10-39`, and `build_attention_alerter` returns `None` rather than a refusing stand-in because an
+  unset address is a legitimate configuration and not a misconfiguration. Gap 22 is therefore narrowed
+  **for deployments that configure it** and not at all for those that do not.
+- **The blocked route is no less blocked.** This addresses a person instead of a principal, which
+  *sidesteps* the cross-tenant question rather than answering it. The owner decision it needs —
+  who may see counts read across tenants — is exactly where `D10-39` left it.
+- **Gap 25 is unchanged, and gap 5 is untouched.** A default stack still parks every event.
+- **No schema change.** `alembic` head stays `0006`.
+
+### Verified
+
+Measured on the tree committed as `d9530b5`, from the repository root: `ruff check .` → *All checks
+passed*; `ruff format --check .` → *107 files already formatted*; `mypy app` under `strict` → *no
+issues found in 62 source files*; `bandit -c pyproject.toml -r backend/app` → exit 0 with only the
+three expected `nosec B104` notices in `config.py`; `pytest -q` → **888 tests, 0 failures, 0 errors, 15
+skipped**, counted from the JUnit XML rather than the progress dots. The fifteen skips are unchanged in
+kind — **13 MySQL unreachable, 1 symlink privilege, 1 Kafka opt-in** — so the outbox and dispatch paths
+were proven on SQLite only, again. `tests/test_attention_alerts.py` is **17**, `test_attention_watch.py`
+is **9** and `test_doctor.py` is **21**; 871 + 17 is the 888. The commit gate ran all five quality
+hooks plus `tsc` and `vitest` and passed; `forbid-submodules` was the only skip.
 
 ## Next permitted step
 
@@ -4222,10 +4341,13 @@ whole of what runs**, and no component, browser or integration test exists for a
 by saying what is left is *not a missing feature and not a hardening pass* — still true, and
 one of the things left has stopped being nothing. The `doctor` check that counts invisible
 failures was a command with no schedule; it now has a worker of its own, logging one verdict
-per tick. What that does **not** change: nothing in this stack reads the log, so gap 22 is
-narrowed and not closed, and the obvious next step — an HTTP route serving the same report —
-is blocked on an owner decision about counts that three repository functions read **across
-tenants**, which the route cannot scope without contradicting them.
+per tick. What that does **not** change: ~~nothing in this stack reads the log~~ — **amended by
+`D10-40`, not deleted:** a deployment that sets `ATTENTION_ALERT_TO` is mailed when the verdict
+changes (`d9530b5`), so for that deployment something does read it; the default install still sends
+nothing anywhere — so gap 22 is narrowed and not closed, and the obvious next step — an HTTP route
+serving the same report — is blocked on an owner decision about counts that three repository
+functions read **across tenants**, which the route cannot scope without contradicting them. `D10-40`
+sidesteps that question by addressing an operator rather than a principal; it does not answer it.
 
 - `app/db/models/` — every table in the flow now has a writer: `Contract`
   (`POST /contracts`), `ExtractedField` (`python -m app.cli extract`,
@@ -4368,10 +4490,14 @@ this record was signed** by `python -m app.cli doctor` (`D10-12`), which counts 
 rows and exits non-zero; ~~what is still absent is anything that *runs* it, so a human
 still has to look~~ — **amended by `D10-39`, not deleted:** since `2572f53` a scheduled worker
 *does* run the check (`python -m app.workers.attention_watch`, five-minute default, one verdict
-per tick), so what is still absent moved one link down the chain: **nothing reads the log**, and
-a line on a timer is not an alert; a human still has to look; no live
-Ollama has answered anything; and the `review`, `agent` and `notification` routes
-have only ever been called by `TestClient`, because no screen talks to them yet.
+per tick), so what is still absent moved one link down the chain: ~~**nothing reads the log**~~ —
+**amended again by `D10-40`, not deleted:** a deployment that sets `ATTENTION_ALERT_TO` gets the
+verdict mailed to its operator when it *changes* (`d9530b5`), and one that leaves it unset — the
+shipped default — still reads nothing, so the link moved one further down rather than closing: what
+is absent is now **an install that sets the address**; a line on a timer is not an alert; a human
+still has to look; no live Ollama has answered anything; and the `review`, `agent` and
+`notification` routes have only ever been called by `TestClient`, because no screen talks to them
+yet.
 **Amended after this record was signed, not deleted:** `review` has a screen
 (`da82111`), `agent` has one (`25886aa`) and `escalation` — which this sentence did not
 name — has one (`00e9b54`); only `notification` is still `TestClient`-only.
@@ -4422,7 +4548,10 @@ the SQLite the offline suite runs, so that suite can never be the proof, and a s
 there is not a pass.
 
 One caveat carried forward rather than retired: the *number* of sends is now safe on
-MySQL, but a row that parks `failed` or `suppressed` still raises no alert (gap 22).
+MySQL, but ~~a row that parks `failed` or `suppressed` still raises no alert (gap 22)~~ —
+**amended by `D10-40`, not deleted:** it still raises no alert on a stock install, because
+the address the mail needs is unset by default; the two paragraphs below say how far that
+has moved and where it has not.
 Correctness under concurrency and visibility of failure are different problems, and
 only the first one moved. The second one has since moved a little: `doctor` (`D10-12`)
 makes the parked row **countable by a machine** and gives it an exit code, which is the
@@ -4432,9 +4561,15 @@ deleted:** since `2572f53` one of those two exists. `app/workers/attention_watch
 runs the same check every `ATTENTION_POLL_INTERVAL_SECONDS` (300 by default), logs one
 verdict per tick, and the `attention` compose service keeps that process up. The other
 one is not narrowed at all, and it is the one that decides whether anyone finds out:
-the verdict is a **log line**, and nothing in this stack reads the log — no shipper, no
+~~the verdict is a **log line**, and nothing in this stack reads the log — no shipper, no
 alert rule, no dashboard query. A parked row still raises no alert, so a human still
-has to look, and a line on a timer is not an alert.
+has to look, and a line on a timer is not an alert.~~ **Amended by `D10-40`, not deleted:**
+one of those three readers now exists. `app/workers/attention_alerts.py` (`d9530b5`) mails the
+verdict to `ATTENTION_ALERT_TO` when it **changes** — once when a finding appears, once when the
+board clears — through the same verified SMTP sender the reminders use, so there is now a mail and
+no longer *only* a log line. Still no shipper and still no dashboard query, and the address is
+unset by default, so for a stock install every word above remains true. A parked row raises an
+alert only where someone configured one to be raised.
 
 ## GATE 2 — signed
 
@@ -4542,10 +4677,20 @@ sign-off, not footnotes:**
    reaches a person.~~ **Amended again by `D10-39`, not deleted:** something *does* run it
    now — `app/workers/attention_watch.py` on a five-minute timer, as a fourth compose
    service (`2572f53`) — so the clause shrinks to its last link rather than standing whole:
-   **nothing reads the log**, so still no alert reaches a person, and the exit code is still
-   the only machine-readable form of the verdict. Note also that an *explained* park — a
+   ~~**nothing reads the log**, so still no alert reaches a person, and the exit code is still
+   the only machine-readable form of the verdict.~~ **Amended a third time by `D10-40`, not
+   deleted:** the last link is now a setting. `app/workers/attention_alerts.py` (`d9530b5`) mails
+   the operator when the verdict changes, so a deployment that sets `ATTENTION_ALERT_TO` **does**
+   get an alert when a row parks, and one that does not — the shipped default — gets exactly the
+   behaviour signed above. The clause therefore stands for the default install and no longer
+   stands unconditionally; the exit code is still the only machine-readable form of the verdict
+   either way, because a mail is written for a person. Note also that an *explained* park — a
    default install with `EVENT_TRANSPORT=none` — is now counted and no longer failed, so
-   `EXIT_ATTENTION` no longer fires on that state at all.
+   `EXIT_ATTENTION` no longer fires on that state at all, and `D10-40`'s alert follows the same
+   rule: an explained park is recounted each tick and never mailed **on its own**, because a
+   standing count that does not fail the check must not ring (the alert reads `needs_attention`,
+   which excludes explained parks — a mail still goes out for a mixed reading, and its reason is
+   then the unexplained part).
 3. **Nothing has ever been sent to a real customer.** The shipped default transport
    refuses; SMTP has only spoken to a loopback relay this suite started and
    certified itself, so no handshake has chained to a public CA over a real network
