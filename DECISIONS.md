@@ -3149,7 +3149,11 @@ caller and the document is sealed, addressed and kept — but nothing parses it.
 still documents that `extract` takes a `--text-file` because there is no upload-to-text path, so
 a PDF uploaded here reaches extraction only after a shell step. The form therefore promises that
 the *original* is kept, not that its contents are read; `contracts.ingestedNote` says extraction
-is a separate step.
+is a separate step. **Amended, not deleted (`D10-38`):** `extract` now takes the document's own
+stored bytes when `--text-file` is omitted, so "nothing parses it" and "there is no
+upload-to-text path" are no longer true. What survives is the narrower claim both sentences were
+really about: nothing *automatic* parses it — the step is still a command, not an upload hook,
+and `contracts.ingestedNote` still says extraction is separate.
 
 **No backend change and no migration.** Two typed methods in `api.ts`
 (`contracts.ingest/ingestDocument`), the `ContractSummary` and `ContractIngestRequest` wire
@@ -3293,7 +3297,10 @@ them new under `contracts.*` and every one of them reached. No bare map value is
 nothing tests this page, and **no browser has rendered it** — a compiler and a linter, nothing more.
 The key counts are a script's output, not a reading of two translated files by somebody who reads
 Bengali. Gap 12 stays narrowed rather than closed: an uploaded document now has a contract page, but
-nothing parses it — `extract` still takes `--text-file`.
+nothing parses it — `extract` still takes `--text-file`. **Amended, not deleted (`D10-38`):** the
+last two clauses are now false. `extract` takes the contract's own stored document when
+`--text-file` is omitted, so something does parse it; what survives is that nothing parses it
+*without being asked* — no upload triggers extraction.
 
 ### D10-35 — The detail page stops saying its neighbours' reads are unreachable
 
@@ -3517,3 +3524,93 @@ advisories predate the runner. **No `high`, no `critical`, nothing in the runtim
 one `devDependencies` entry. `npm audit` does report a fix available, which means bumping
 `typescript-eslint`; that is a slice of its own and not a side effect of adding a test runner.
 `alembic` head stays `0006`, and no backend file changed.
+
+### D10-38 — The bytes decide the format: `storage_path` gets its content reader
+
+`D10-26` gave `Contract.storage_path` a writer. `D10-27` gave it an *existence* reader — the
+listing reports `has_document` by testing the column for `None`. Neither gave it a **content**
+reader, and the consequence was structural rather than cosmetic: `extract_contract` has taken a
+`document_text` argument since `F7`, so somebody had to supply that text, and in practice that
+somebody extracted a PDF's text in a shell window and passed `--text-file`. The bytes the system
+had just gone to the trouble of sealing, addressing and keeping were read by nobody. This slice is
+`app/core/document_text.py` and the one flag change that lets it be reached: `extract` takes the
+contract's own stored document when `--text-file` is omitted.
+
+- **The bytes decide the format; the media type is not stored at all.** `POST /contracts/document`
+  accepts a content type and discards it, because a column recording what a client *claimed* is
+  worth less than the two magic bytes recording what the file *is*. Anything that is not a PDF is
+  read as UTF-8 — which is exactly what `--text-file` already did — so the pre-existing path keeps
+  working and there is no second rule to keep in sync with the first.
+- **`%PDF-` is searched in a 1024-byte window.** ISO 32000 permits the header anywhere in the first
+  kilobyte: a whole-file search would hand a *text* file that merely mentions `%PDF-` to the PDF
+  parser, and an offset-zero check would reject the producers that emit a small preamble first.
+- **A scanned page and an unreadable page must not look alike.** A PDF page with no text layer
+  yields `""`. The module returns that as text and reports `pages`, so a caller can say "4 pages, no
+  text" instead of "nothing found" — the difference between *the contract never stated an email
+  address* and *we never read the contract* is the entire reason the review queue exists. An empty
+  document is not a malformed one, and this is the module that refuses to conflate them.
+- **An encrypted PDF is refused, not guessed at.** There is no configured password, and attempting
+  the empty one would silently return partial text for a document whose owner expected it closed.
+  The refusal names the fix: decrypt it and store it again.
+- **The parser's exceptions are this module's refusals.** These bytes come from an upload, so they
+  are untrusted input; a PDF built to break a parser must produce a `DocumentTextUnavailableError`
+  this module owns, not a traceback. No refusal carries any part of the document into its message —
+  the bytes are PII by definition, which is why they were sealed.
+- **The store decrypts, this module parses.** `extract_document_text` takes plaintext, not a store
+  key, so neither side has to know the other's failure modes and a test can pass bytes directly.
+- **Two sources, one set of checks.** The empty and oversized checks sit *above* the branch in
+  `_extract`, so what counts as an unreadable, empty or oversized document cannot depend on where
+  the bytes came from. `--text-file` and the stored document are alternatives, not layers: a
+  contract has one authoritative document.
+- **Pages are joined with a single newline.** `FieldCandidate.source_line` means "a line of the
+  document", and the pattern extractor measures label windows in lines and characters. A blank-line
+  page break would inflate that unit by one per page for a reason no reader of the document would
+  recognise.
+- **`pypdf` is imported lazily, like `kafka-python`.** A deployment that never parses a PDF should
+  not pay the import, and a process without the wheel must fail with a sentence naming the fix
+  rather than an `ImportError` at start-up.
+- **The isolated hook env had to be told about it.** The `mypy` hook installs its own environment
+  from a pinned list rather than using the venv, and that list names every stub-shipping dependency
+  for exactly this reason (`PyJWT`, `argon2-cffi`, `cryptography`). `pypdf==7.0.0` joins it,
+  otherwise strict mode would fail on a missing implementation rather than on anything true about
+  the parser.
+
+**The bug on the first run was in the fixture, not the module.** Two tests failed because the
+hand-built PDF drew its text as raw bytes with no `BT`/`ET` and no `Tf`: `pypdf` then read
+`2026-01-31,` as a `NumberObject`, warned `invalid; use 0 instead`, and the page produced literal
+bytes instead of a text run — so no `END_DATE` candidate appeared. The fix was to emit a real
+text-showing operation (`BT /F1 12 Tf 72 720 Td (…) Tj ET`) and escape `(`, `)` and `\` in a
+`_pdf_string` helper. `app/core/document_text.py` was not modified to make a test pass, and that is
+the point of recording it: the module was right and the double was wrong, which is the opposite of
+the usual way a failing test gets "fixed".
+
+**What this deliberately does not do.** Nothing calls it automatically — there is no upload hook,
+so extraction remains a command an operator runs, and gap 5's `contract.ingested` consumer is still
+blocked on the same owner decision. **No real contract PDF has ever been parsed**: the fixture is
+one page carrying one text object, built by hand in the test, which proves the seam and not the
+world. A scanned PDF produces `""` and the command refuses it as empty, which is honest but is not
+OCR. No schema change and no new column: `alembic` head stays `0006`.
+
+**Verified, and the limit of that verification.** `tests/test_document_text.py` holds **11 tests** —
+nine for the reader (format decided by bytes not by a name, a PDF becoming the text its page draws,
+that text being what the extractor reads, UTF-8 passthrough, a page with no text layer, unsupported
+bytes, an empty document, a corrupt PDF, and no refusal carrying the document into its message) and
+two that drive `cli extract` with **no `--text-file`**, sealing a real PDF through
+`DocumentStore.save`, stamping `storage_path`, and asserting both the extracted `END_DATE`/`EMAIL`
+and the refusal of a contract with no document stored. That suite was run green (`pytest
+tests/test_document_text.py -q` → **11 passed**, exit 0) in the session that wrote it. **It is not
+the gate**, and the sentence that first stood here said the gate had not run at all: the shell in
+that session had wedged behind a `git diff` pager, every later command queued behind it, and no
+commit existed. **Amended, not deleted — the gate has since run against this exact tree**, from the
+repository root, with the results rather than the intention recorded: `ruff check .` → *All checks
+passed*; `ruff format --check .` → *106 files already formatted*; `mypy app` under `strict` (59
+source files) → *no issues found*; `bandit -c pyproject.toml -r backend/app` → exit 0 with the three
+expected `nosec B104` notices in `config.py`; `pytest -q` → **860 tests, 0 failures, 0 errors, 15
+skipped**, exit 0, the fifteen being 13 MySQL unreachable, 1 symlink privilege and 1 Kafka opt-in.
+`ruff format` was the one real break and it was mine: `document_text.py` and its test were
+unformatted, and the formatter — not a hand edit — fixed them. What that verification does *not*
+cover is unchanged by it: the fifteen skips mean the outbox and dispatch paths were proven on SQLite
+only this run.
+
+This entry carried a commit type and no hash for as long as the gate was unrun, which no other entry
+here does; the `docs(status)` commit that lands this text appends it — **`f3a1bb1`**, `feat(backend)`.

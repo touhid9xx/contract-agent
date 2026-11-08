@@ -236,8 +236,11 @@ been used as a FastAPI **dependency**, only called as a function from `review.py
 request body the moment `Depends()` looked at its signature. The suite moved from **805**
 to **827** (812 passed, 15 skipped: 13 MySQL-unreachable, 1 Kafka opt-in, 1 Windows
 symlink). No migration: `storage_path` and `sha256` already exist, so the head stays
-`0006`. **What is still true:** `storage_path` now has a writer and still has no reader,
-so this closes the **input** half of gap 12 and nothing at all about gap 5. It was written
+`0006`. ~~**What is still true:** `storage_path` now has a writer and still has no reader,
+so this closes the **input** half of gap 12 and nothing at all about gap 5.~~ **Amended, not
+deleted (`D10-38`):** it has a content reader now — `python -m app.cli extract --contract-id N`
+loads the contract's own stored document when `--text-file` is omitted. What survives is that the
+step is still a command rather than an upload hook. It was written
 while the harness's shell could start no process at all, so it was recorded ungated and
 uncommitted; restarting the IDE cleared the fault, the suite was re-run green
 (**827 / 0 failed / 15 skipped**, exit 0), and the 17-hook gate ran green over the commit.
@@ -256,8 +259,11 @@ second column and this does not. Two columns are deliberately withheld —
 for any viewer, and `created_by`, which would let a viewer enumerate accounts by
 scrolling — so `has_document: bool` answers the only question a caller actually
 has. That is the sense in which `storage_path` now has a **reader**: something
-tests whether it is `None`, and nothing yet turns the bytes into text, so gap 12
-stays half-closed and gap 5 stays blocked. The suite moved from **827** to **840**
+tests whether it is `None`, ~~and nothing yet turns the bytes into text, so gap 12
+stays half-closed and gap 5 stays blocked.~~ **Amended, not deleted (`D10-38`):** the bytes are
+turned into text now, by the one command that always needed them. It arrives too late to change
+this paragraph's own claim — at `67bf8f6` the clause was exactly true, and that is why it is kept —
+but gap 5 is still blocked, because nothing calls extraction on its own. The suite moved from **827** to **840**
 (825 passed, the same 15 environmental skips). No migration: the head stays `0006`.
 
 **Then the listing gets a face** (`D10-28`, `feat(web)`): `/[locale]/contracts` is the
@@ -342,8 +348,10 @@ all: `request()` had one body kind and `JSON.stringify`'d everything under
 arrangement of that helper's arguments could send a PDF. `RequestOptions` gained `upload` as a
 *sibling* of `body`. One form drives both routes, attaching a file being what chooses one, and
 refusals map on **status** (409/413/422/503) because neither route returns a machine code.
-Gap 12 is **half closed and says so**: the document is sealed, addressed and kept, but nothing
-parses it, so an uploaded PDF still reaches extraction only after a shell step. **20**
+Gap 12 is **half closed and says so**: the document is sealed, addressed and kept, ~~but nothing
+parses it, so an uploaded PDF still reaches extraction only after a shell step.~~ **Narrowed by
+`D10-38`, not closed:** the extraction step now reads the contract's own stored document, so the
+PDF is parsed by the product rather than by hand — but the step is still a command somebody runs. **20**
 `contracts.ingest*` keys per locale against **402** leaf keys, zero one-sided, zero
 placeholder drift, all 20 reached by the page. No backend file changed, no migration (`0006`).
 
@@ -384,8 +392,10 @@ route withholds every one and revealing one is the audited `POST /review/{id}/re
 table says so. It also refuses an "expires in N days" countdown, which would be measured on
 the reader's clock rather than the contract's `timezone`. **18** `contracts.*` detail keys
 per locale against **434** leaf keys, **68** message keys reached and all defined both ways.
-Gap 12 is **narrowed, not closed**: the page says whether a document is stored, but
-`extract` still requires `--text-file`, so a PDF reaches extraction only after a shell step.
+Gap 12 is **narrowed, not closed**: the page says whether a document is stored, ~~but
+`extract` still requires `--text-file`, so a PDF reaches extraction only after a shell step.~~
+**Amended, not deleted (`D10-38`):** `--text-file` is optional now and the contract's stored
+document is the default source, so the shell step survives only as a way to override it.
 No schema change, no migration (`0006`), no new repository method.
 
 **Then the detail page reads its neighbours** (`D10-35`, two commits: `feat(api)` `5421338`,
@@ -457,6 +467,29 @@ hook, because a suite nothing runs is a suite that rots. Teeth were checked by b
 `contract-scope.ts` was restored byte-identical afterwards, which is why this is `test(web)` and not
 `feat(web)`. **No backend change, no schema change, no migration (`0006`)**; the frontend still has
 **no component, browser or integration test**, so the three scoped screens remain unrendered.
+
+**Then the stored bytes get a reader** (`D10-38`, one commit: `feat(backend)` `f3a1bb1`): `D10-26`
+gave `Contract.storage_path` a writer and `D10-27` gave it an *existence* reader, but nothing read
+the document's *content* — `extract_contract` had taken a `document_text` argument since `F7`, and
+the text it needed was supplied by hand as `--text-file`, which meant the bytes the system had sealed
+and kept were read by nobody. `app/core/document_text.py` decides the format from **the bytes**
+(`%PDF-` searched in a 1024-byte window, never a filename or a stored media type), parses with a
+lazily imported `pypdf`, and returns `(text, kind, pages)`; it refuses bytes that are neither a PDF
+nor UTF-8, and refuses a recognised document whose text cannot be produced rather than guessing at
+an encrypted one. `extract` now takes the contract's **own stored document** when `--text-file` is
+omitted: the store decrypts, the module parses, and the empty and oversized checks sit above the
+branch so neither source is judged by a different rule. A page with no text layer yields `""` and
+still reports its page count, so *"4 pages, no text"* stays distinguishable from *"nothing found"* —
+the difference the review queue exists for. The first run failed on two tests and **the bug was in
+the fixture, not the module**: a hand-built PDF drew raw bytes with no `BT`/`ET` and no `Tf`, so
+`pypdf` read `2026-01-31,` as a `NumberObject`; the fix was a real text-showing operation plus a
+`_pdf_string` escaper, and `document_text.py` was never modified to make a test pass. The full gate
+ran green on this tree from the repository root — `ruff check`, `ruff format --check` (106 files),
+`mypy app` strict (59 files), `bandit` exit 0, `pytest -q` **860 tests, 0 failures, 15 skipped**
+(13 MySQL, 1 symlink, 1 Kafka). **No schema change, no migration (`0006`)**; **no real contract PDF
+has ever been parsed**, a scanned PDF still yields nothing (no OCR), and **nothing calls the reader
+on its own**, so gap 12 is narrowed in a third place rather than closed and gap 5 is still blocked
+on the owner decision.
 
 ## Phase history
 
@@ -2629,14 +2662,21 @@ a hook finally ran and passed.
     route is untouched, so an installation that ingests only JSON still dedupes on
     the fields the caller sent and can still be made to collide. What survives is a
     narrower claim than the one it replaces: *the digest is the file hash wherever a
-    file exists*. That is gap 12's **input** half. The other half is untouched — no
+    file exists*. That is gap 12's **input** half. ~~The other half is untouched — no
     code reads `storage_path` to turn a stored document into text, so gap 5 remains
-    exactly as blocked as it was, and nothing here has ever parsed a PDF. **`D10-27`
-    narrows that last clause rather than breaking it:** `GET /contracts` now reads the
-    column, but only to report whether it is `None` — `has_document: bool` — so the
-    column has an *existence* reader and still no *content* reader. It is also not sent
-    over the wire at all, which is deliberate: an absolute path inside the API container
-    has no use for a viewer and maps the deployment's filesystem for anyone who does.
+    exactly as blocked as it was, and nothing here has ever parsed a PDF.~~
+    **`D10-27` narrowed that last clause rather than breaking it:** `GET /contracts` now
+    reads the column, but only to report whether it is `None` — `has_document: bool` —
+    so the column had an *existence* reader and still no *content* reader.
+    **Amended, not deleted (`D10-38`):** the content reader exists now, and the clause
+    above is kept because it was exactly true when written. `app/core/document_text.py`
+    turns a stored document into text — PDF decided by **magic bytes**, never by a name
+    or content type — and `extract` reads the contract's own stored document when
+    `--text-file` is omitted. Gap 5 is **still blocked**, which is the surviving claim:
+    nothing calls extraction on its own, so the consumer still has no producer. It is
+    also not sent over the wire at all, which is deliberate: an absolute path inside the
+    API container has no use for a viewer and maps the deployment's filesystem for
+    anyone who does.
 13. ~~**The husky commit gate has never actually run.**~~ — **closed by
     `chore(hooks)` (`4a9e8e9`).** The cause was upstream of `core.hooksPath`: root
     `node_modules` did not exist on this host at all (bootstrap had been run with
@@ -3001,11 +3041,15 @@ connection, not the scanner. The test is fixed and the record here is left as wr
 
 - **No real PDF has ever been stored.** The payloads are plausible-sized byte strings with
   the document content type; "PDF" here means bytes and nothing has parsed one.
-- **`storage_path` has no *content* reader.** This closes the **input** half of gap 12.
+- ~~**`storage_path` has no *content* reader.** This closes the **input** half of gap 12.
   Gap 5 stays blocked: there is still no document-to-text step, so the
-  `contract.ingested` consumer still has no work it could correctly do. (`D10-27` later
+  `contract.ingested` consumer still has no work it could correctly do.~~ (`D10-27` later
   gave the column an *existence* reader in the contract listing — `has_document` — which
-  changes nothing about this: nothing turns the bytes into text.)
+  changed nothing about this: nothing turns the bytes into text.)
+  **Amended, not deleted (`D10-38`):** there is a document-to-text step now, and the
+  clause is kept because it was true at this commit. What survives is the half that
+  matters for gap 5 — the step is a command, not a hook, so the `contract.ingested`
+  consumer still has no producer and gap 5 stays blocked exactly as described.
 - **`DOCUMENT_MAX_BYTES` bounds what is stored, not what is read.** FastAPI has buffered
   the body before the store sees it, and the store holds the plaintext and the sealed copy
   in memory at once. The real defence against a memory-exhausting upload is a request-size
@@ -3093,10 +3137,15 @@ what makes the figures above still the figures the commit carries.
   still blocked on an owner decision. This listing is its prerequisite — an
   operator can now find a contract id without reading one out of an ingest
   response — but no work happens to an event that this route produces.
-- **`storage_path` gains an existence reader, not a content reader.**
+- ~~**`storage_path` gains an existence reader, not a content reader.**
   `has_document` tests `storage_path is not None`. Nothing turns the stored bytes
   into text, so the claim this slice can support is narrower than "the column is
-  read now": gap 12 stays half-closed and gap 5 stays blocked.
+  read now": gap 12 stays half-closed and gap 5 stays blocked.~~ **Amended, not
+  deleted (`D10-38`):** a content reader exists now (`app/core/document_text.py`, read by
+  `extract` when `--text-file` is omitted), so half of this was overtaken. The narrower
+  claim it was making about *this slice* still holds — `has_document` is still an
+  existence test and this route still sends no content — and gap 5 is still blocked,
+  because nothing calls the reader on its own.
 
 ## The contract list has a screen ✅ (`D10-28` — read-only, on purpose)
 
@@ -3466,11 +3515,14 @@ counts are a script's output over both catalogues, not a reading of them.
 
 ### What this does not do — stated, not buried
 
-- **Gap 12 is half closed, not closed.** The bytes are sealed, addressed and named by a
+- ~~**Gap 12 is half closed, not closed.** The bytes are sealed, addressed and named by a
   committed row, but nothing parses them: `app/cli.py` still documents that `extract` takes a
   `--text-file` because there is no upload-to-text path. An uploaded PDF reaches extraction only
   after a shell step, and `contracts.ingestedNote` says so on screen rather than implying the
-  contents were read.
+  contents were read.~~ **Amended, not deleted (`D10-38`):** `extract` now parses the contract's
+  own stored document, and `--text-file` is optional. Kept because it was true here; what
+  survives is the *shape* of the step — the screen still says the contents were read, and they
+  now are, but only when somebody runs the command.
 - **No source picker.** The server stamps `pdf` on the document route and defaults to `api` on
   the metadata one, so a picker would let the client assert a provenance only the server can
   establish — whether bytes actually arrived.
@@ -3649,10 +3701,14 @@ who reads Bengali.
   and a product definition of the window, and no route offers one.
 - **No consent edit here.** One screen owns `PUT /contracts/{id}/consent` — the listing's cards — so
   there is one place where a stale version can be submitted and one place to fix it.
-- **Gap 12 is narrowed, not closed.** An uploaded document now has a contract page that says whether
-  a document is stored, but **nothing parses it**: `extract` still requires `--text-file`
-  (`app/cli.py:351`), so a PDF reaches extraction only after a shell step. `DocumentStore.save`
-  owns the size cap and tamper detection; this page surfaces `has_document`, never the path.
+- ~~**Gap 12 is narrowed, not closed.** An uploaded document now has a contract page that says
+  whether a document is stored, but **nothing parses it**: `extract` still requires `--text-file`
+  (`app/cli.py:351`), so a PDF reaches extraction only after a shell step.~~ **Amended, not
+  deleted (`D10-38`):** `--text-file` is optional now and a stored document is the default
+  source, so the product parses it — the line reference in the clause is stale by exactly the
+  change that overtook it. Gap 12 is still *narrowed rather than closed*, because the step is
+  still a command. What this page does is unchanged and still true: `DocumentStore.save` owns
+  the size cap and tamper detection, and the page surfaces `has_document`, never the path.
 - **Gap 5 is untouched.** The `contract.ingested` consumer is still unwritten and still blocked on
   an owner decision.
 
@@ -3936,6 +3992,77 @@ touches no production behaviour, which is why it is `test(web)` and not `feat(we
   which is its own slice.
 - **Gap 5 is untouched.** The `contract.ingested` consumer is still blocked on an owner decision.
 
+## The bytes decide the format ✅ (`D10-38` — `storage_path` gets its content reader)
+
+`D10-26` gave `Contract.storage_path` a writer. `D10-27` gave it an *existence* reader — the listing
+reports `has_document` by testing the column for `None`. Neither read the bytes. The consequence was
+structural rather than cosmetic: `extract_contract` has taken a `document_text` argument since `F7`,
+so somebody had to supply that text, and in practice that somebody extracted a PDF's text in a shell
+window and passed `--text-file`. The bytes the system had just gone to the trouble of sealing,
+addressing and keeping were read by nobody. This slice is the content reader, and the one flag change
+that lets it be reached.
+
+| Change | Detail |
+| --- | --- |
+| `backend/app/core/document_text.py` | **New, 188 lines.** `document_kind`, `extract_document_text`, `ExtractedText(text, kind, pages)` and a two-member refusal family under `DocumentTextError` — `UnsupportedDocumentError` for bytes that are neither PDF nor UTF-8, and `DocumentTextUnavailableError` for a document recognised but unreadable, whose three causes (encrypted, corrupt, no parser installed) get three sentences because the fix differs. `pypdf` imported lazily, exactly as `kafka-python` is, so a deployment that never parses a PDF pays no import and a process without the wheel fails with a sentence naming the fix rather than an `ImportError` at start-up. |
+| `backend/app/cli.py` | `--text-file` is **optional**; omitting it reads the contract's own stored document. `_text_file_contents` and `_stored_document_text` hold the four distinct refusals for the stored path — no document on the row, bytes the store does not hold, bytes that will not decrypt, bytes this build cannot parse. The empty and oversized checks were hoisted **above** the branch so neither source is judged by a different rule. |
+| `backend/requirements.txt` | `pypdf==7.0.0` pinned, with the rationale beside it: pure Python, ships `py.typed`, imported lazily. |
+| `.pre-commit-config.yaml` | `pypdf==7.0.0` added to the `mypy` hook's **isolated** environment, which names every stub-shipping dependency for exactly this reason. Without it, `strict` mode would fail on a missing implementation rather than on anything true about the parser — a break that would have happened only in the gate. |
+| `backend/tests/test_document_text.py` | **New, 11 tests.** Nine for the reader, two driving `cli extract` with **no** `--text-file` — a real PDF sealed through `DocumentStore.save`, `storage_path` stamped, and both the extracted `END_DATE`/`EMAIL` and the refusal of a metadata-only contract asserted. |
+| `DECISIONS.md` | `D10-38`, plus amend-not-delete pointers on `D10-32`'s and `D10-34`'s "still no *content* reader" claims (both live there, not in this file). |
+| No schema change, no migration | `alembic` head stays `0006`; no column was added, because the bytes on disk were always enough. |
+
+### The format is decided by the bytes, and an unreadable page is not a missing one
+
+`POST /contracts/document` accepts a content type and **discards** it, because a column recording
+what a client *claimed* is worth less than the two magic bytes recording what the file *is*. `%PDF-`
+is searched in a **1024-byte window** — ISO 32000 permits the header anywhere in the first kilobyte,
+so a whole-file search would hand a text file that merely mentions `%PDF-` to the parser, and an
+offset-zero check would reject producers that emit a small preamble first. Anything else is read as
+UTF-8, which is what `--text-file` already did, so there is no second rule to keep in sync with the
+first. A PDF page with **no text layer yields `""` and reports its page count**, so a caller can say
+*"4 pages, no text"* instead of *"nothing found"*: the difference between *the contract never stated
+an email address* and *we never read the contract* is the entire reason the review queue exists. An
+encrypted PDF is **refused, not guessed at** — there is no configured password, and attempting the
+empty one would silently return partial text for a document its owner expected closed. The parser's
+exceptions become this module's refusals, because these bytes came from an upload and are untrusted
+input; no refusal carries any part of the document into its message, which matters because those
+bytes are PII by definition — which is why they were sealed.
+
+### The bug on the first run was in the fixture, not the module
+
+Two tests failed. The cause was the hand-built PDF in the test, not `document_text.py`: it drew its
+text as **raw bytes with no `BT`/`ET` and no `Tf`**, so `pypdf` read `2026-01-31,` as a
+`NumberObject`, warned `invalid; use 0 instead`, and the page produced literal bytes instead of a
+text run — hence no `END_DATE` candidate. The fix was to emit a real text-showing operation
+(`BT /F1 12 Tf 72 720 Td (…) Tj ET`) and escape `(`, `)` and `\` in a `_pdf_string` helper.
+`document_text.py` was **not** modified to make a test pass, which is the opposite of the usual way a
+failing test gets "fixed", and is why it is recorded here.
+
+### What this does not do — stated, not buried
+
+- **Nothing calls it automatically.** There is no upload hook, so extraction is still a command an
+  operator runs. Gap 12 is narrowed in a third place, **not closed.**
+- **Gap 5 is still blocked.** The `contract.ingested` consumer is where `D10-35` left it, and the
+  reason has moved rather than gone: the reader exists, so the block is now the owner decision rather
+  than absent code.
+- **No real contract PDF has ever been parsed.** The fixture is one page carrying one text object,
+  built by hand in the test. It proves the seam, not the world.
+- **A scanned PDF produces `""`** and the command refuses it as empty. That is honest, and it is not
+  OCR — no scanned contract can be read by this path.
+- **No schema change.** `alembic` head stays `0006`.
+
+### Verified, and the limit of that verification
+
+`backend/tests/test_document_text.py` → **11 passed**, exit 0. The full gate then ran against this
+exact tree from the repository root: `ruff check .` → *All checks passed*; `ruff format --check .` →
+*106 files already formatted*; `mypy app` under `strict` (59 source files) → *no issues found*;
+`bandit -c pyproject.toml -r backend/app` → exit 0 with the three expected `nosec B104` notices in
+`config.py`; `pytest -q` → **860 tests, 0 failures, 0 errors, 15 skipped**, exit 0. `ruff format` was
+the one real break and it was this slice's: `document_text.py` and its test were unformatted and the
+formatter, not a hand edit, fixed them. The fifteen skips are **13 MySQL unreachable, 1 symlink
+privilege, 1 Kafka opt-in**, so the outbox and dispatch paths were proven on SQLite only this run.
+
 ## Next permitted step
 
 **F10 (step 6) is committed (`b344c17`), three gap-closing slices have landed since
@@ -3992,8 +4119,11 @@ whole of what runs**, and no component, browser or integration test exists for a
   had no writer either, and `POST /contracts/document` is now one. ~~**Nothing reads
   it**, so gap 12 is half-closed and gap 5 is untouched.~~ **Narrowed by `D10-27`, not
   closed:** `GET /contracts` reports `has_document` by testing the column for `None`, so
-  it has an *existence* reader now — but still no *content* reader, so gap 12 stays
-  half-closed and gap 5 stays blocked exactly where `D10-26` left it.
+  it has an *existence* reader now. **Amended, not deleted (`D10-38`):** the *content*
+  reader exists too — `app/core/document_text.py`, called by `extract` when `--text-file`
+  is omitted — so the column now has both. Gap 5 is **still** blocked exactly where
+  `D10-26` left it, for a different reason than absence of code: nothing calls the reader
+  on its own, so the `contract.ingested` consumer still has no producer.
 - `app/api/v1/` — `auth`, `health`, `contracts`, `agent`, `review` and now
   `notifications`. The backend is no longer *behind* the UI contract by a route; on
   the notification path it is ahead of it. The first screens now do call it:
