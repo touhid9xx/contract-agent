@@ -721,6 +721,17 @@ leaves a harder question in its place — that the **cache keys** an invalidatio
 another screen reads — unproven; the escalation and agent screens need `useSearchParams` and `Suspense`,
 which this page did not, so porting is three harnesses rather than a loop; and the viewer gate is the
 client's opinion of a role the server decides in another suite.
+**Amended by `D10-48`, not deleted, and only the server's half of that phrase moved.** ~~nothing proves
+client and server agree on the shape of a `409`~~ — *nothing proves* is now too strong, and the claim it
+reads as is still not what happened. `backend/tests/smoke_journey.py` (`5f2b085`) opens a real socket
+to a real `uvicorn` and asserts the envelope `api.ts` parses on a **real 401 and a real 409**: both
+carry a non-empty `error.code` and `error.message` string. So the *server* is now known to speak the
+shape the client promised to read, over a process boundary rather than an in-process call. What has
+**not** moved is the sentence's subject: every screen test still replaces `api.ts` with a double, and
+`api.test.ts` still replaces `fetch`, so **no test puts a real screen in front of a real server** — the
+seam is proven from both ends and not across, which is a smaller claim than *client and server agree*.
+The cache-key question beside it is untouched, and so is the last clause: the viewer gate is still the
+client's opinion of a role another suite decides.
 
 **Then the gate gets somewhere to run that is not one person's machine** (`D10-46`, one commit: `ci`).
 Every check in this project had run from a developer's machine, and two had never run automatically
@@ -789,6 +800,38 @@ backend, no auth, no data; **one of the twelve app routes produces no HTML at al
 `.next/server/app` after this entry's first draft said *two*; and `npm audit` is unchanged at 7
 moderate on a pre-existing chain.
 
+**Then the server is reached over a socket for the first time** (`D10-48`, one commit: `test(smoke)`
+`5f2b085`). Every test in this repository calls the app in process through
+`fastapi.testclient.TestClient`, which is the right tool for asserting behaviour and is not evidence
+about the thing `docker compose up` starts: no socket opens, no `uvicorn` exists, and two processes have
+nothing to disagree about because there is only one. `backend/tests/smoke_journey.py` supplies the
+boundary — `create_app` under a real `uvicorn` on a loopback port, `httpx` over the wire, **17 steps and
+108 checks**, exit 0 — and it is aimed at the residue the frontend suites keep restating rather than at
+more branches. **What only a socket can show** is now shown: the error envelope `api.ts` parses on a
+real `401` and a real `409`; `create-admin` reading its password from stdin **against a server already
+accepting requests**, the order a deployment actually experiences and no test had exercised; and the
+pipeline once over HTTP — ingest, duplicate ingest, upload, `extract`, queue, reveal, stale-version
+`409`, accept, consent, decide, schedule, escalate, reply, refresh rotation, logout. **Teeth were
+measured by breaking the code, not assumed**: reverting `error` to `detail` in `main.py` failed the
+envelope step, and a `uuid4()` nonce in `_fingerprint` failed idempotency. The second pass taught
+something the entry would have been wrong to omit — **disabling the `by_sha256` pre-check did *not*
+break the journey**, because the duplicate's `409` comes from the unique constraint below it, so the
+pre-check is an optimisation and not the guarantee. Two constraints shaped the harness rather than the
+test: the database is **file-backed** because `conftest.py`'s `StaticPool` in-memory SQLite cannot be
+shared with `uvicorn`'s worker thread, and **both transports are off** so no step can reach a broker or
+a mail server. CI gained a `smoke journey` **step** after `pytest`; there is **no pre-commit hook**, and
+the reason is recorded rather than left as an omission — the gate runs `pre-commit run --all-files` and
+does not run `pytest` either, so gating the journey alone would boot a server on every commit while the
+867-test suite still ran only in CI. **No dependency, no lockfile line, no application source, no
+migration** (`0006` stays head); `ruff check`, `ruff format --check`, `mypy` (62 files) and `pytest -m
+"not integration"` (**867 passed, 2 skipped, 19 deselected**) were all re-run against the committed
+tree. The honest limits: **Windows and SQLite, never `ubuntu-latest`**, so the CI step is read and not
+observed, as with `D10-46` and `D10-47`; **it is not a substitute for the suite** — one happy path and a
+handful of refusals, no Kafka, no SMTP, no MySQL, no browser, so it says the served API works *as wired*
+and not that every branch is correct; **`mypy` does not cover it**, because `[tool.mypy]`'s `files` is
+`backend/app`, so the script is linted and executed but not type-checked; and **a loopback socket is not
+a deployment** — no TLS, no proxy, no container.
+
 ## Phase history
 
 | Phase | State |
@@ -805,7 +848,7 @@ moderate on a pre-existing chain.
 | Python tooling | `pyproject.toml` — ruff (lint + format), `mypy --strict`, pytest + coverage, bandit |
 | Pre-commit | `.pre-commit-config.yaml` — hygiene, ruff, ruff-format, mypy, bandit, frontend typecheck, frontend eslint; gitleaks bound to `manual` (D1-03) |
 | Commit gate | husky `pre-commit` + `commit-msg`, commitlint (Conventional Commits), lint-staged — **written in F1 but not actually wired until `4a9e8e9`** (gap 13): the `prepare` hook never ran because root `node_modules` was absent |
-| CI | `.github/workflows/ci.yml` (**D10-46**, added long after F1 because the gap was invisible while the hook worked) — six jobs (python static, backend pytest, MySQL 8.4 integration, frontend typecheck/eslint/vitest/**production build**, demo frontend typecheck, hygiene + `gitleaks`) plus one `gate` job as the single required check. The build step joined the frontend job in **`D10-47`** (`20ccc7c`), after it had been run locally and made green. **The first place anything in this repository ran automatically**, and the first time the backend suite and the `integration` suite were gated at all |
+| CI | `.github/workflows/ci.yml` (**D10-46**, added long after F1 because the gap was invisible while the hook worked) — six jobs (python static, backend pytest, MySQL 8.4 integration, frontend typecheck/eslint/vitest/**production build**, demo frontend typecheck, hygiene + `gitleaks`) plus one `gate` job as the single required check. The build step joined the frontend job in **`D10-47`** (`20ccc7c`), after it had been run locally and made green. **The first place anything in this repository ran automatically**, and the first time the backend suite and the `integration` suite were gated at all. **`D10-48`** (`5f2b085`) added a `smoke journey (real uvicorn, real socket)` **step** to the `backend-tests` job — the count stays six because it is a step and not a seventh job, and it is the only check in the pipeline that boots a real server rather than calling the ASGI app in process |
 | Backend | `app/core/config.py` fail-fast settings, `app/core/logging.py` structlog + PII redaction, `app/core/middleware.py` request/trace IDs, `app/main.py` factory + error envelope, `/api/v1/health` |
 | Frontend | Next.js 16 + Tailwind 4 + TanStack Query + Zustand + next-themes + next-intl (en, bn), ESLint flat config, Prettier, `[locale]` routing |
 | Scripts | `scripts/bootstrap.mjs` (one-command setup), `scripts/run-frontend-check.mjs` |
@@ -4703,6 +4746,13 @@ a list to page, and it still cost no dependency. So *"the eight that remain are 
 need more"* narrows honestly — the query client is now proven buildable — while the part that mattered
 does not move at all: `jsdom` is still a DOM, the server behind the mock is still a mock, and a screen
 that is wired is not a screen that behaves.
+**Amended a sixth time, by `D10-48`, not deleted — and it is the first amendment in this chain that is
+not about a screen at all.** ~~the server behind the mock is still a mock~~ still holds **of every
+screen test**, and stopped holding **of the repository**, which is the distinction being kept rather
+than collapsed: a real `uvicorn` now serves a real socket and `smoke_journey.py` walks ingest → extract
+→ review → decide → notify over HTTP. So the sentence is not withdrawn — `jsdom` is still a DOM and a
+wired screen is still not a behaving one — but *no server anywhere in this repository has been real* is
+no longer true, and the two halves must be quoted separately from here on.
 **Amended, not deleted (`D10-39`, `2572f53`):** the paragraph this one keeps narrowing ends
 by saying what is left is *not a missing feature and not a hardening pass* — still true, and
 one of the things left has stopped being nothing. The `doctor` check that counts invisible
@@ -4714,6 +4764,11 @@ nothing anywhere — so gap 22 is narrowed and not closed, and the obvious next 
 serving the same report — is blocked on an owner decision about counts that three repository
 functions read **across tenants**, which the route cannot scope without contradicting them. `D10-40`
 sidesteps that question by addressing an operator rather than a principal; it does not answer it.
+**`D10-48` does not touch this block, and the record should say so before anyone reads a green socket
+as progress on it.** The smoke journey proves the API as *wired* works across a process boundary; it
+does not rule on whether cross-tenant attention counts may be surfaced to an operator, so gap 22 and
+gap 25 stay exactly as blocked as the paragraph above says. The alternative that was taken instead was
+deliberately the one needing no ruling — a way to test the server, not a new route on it.
 
 - `app/db/models/` — every table in the flow now has a writer: `Contract`
   (`POST /contracts`), `ExtractedField` (`python -m app.cli extract`,

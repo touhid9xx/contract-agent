@@ -4374,3 +4374,84 @@ screen a production build still cannot render. (4) **`npm audit` is unchanged at
 lockfile line, no backend file, no migration (`0006` stays head). `STATUS.md`'s claims that the build
 was deliberately declined, and that `preserve` is right for Next, are amended by the follow-up
 `docs(status)` commit, the convention `D10-40` through `D10-46` all used.
+
+### D10-48 — One journey over a real socket, because every other check is an in-process call
+
+Every test in this repository reaches the application through
+`fastapi.testclient.TestClient`, which is an in-process ASGI call. That is the right tool for
+asserting behaviour and it is not evidence about the thing `docker compose up` starts: no socket is
+opened, no `uvicorn` exists, and nothing between two processes can disagree. The residue had been
+recorded for several slices — *the server behind these mocks is a mock* — and it is a residue no
+number of additional unit tests can shrink, because the missing piece is a process boundary rather
+than a branch. `backend/tests/smoke_journey.py` supplies that boundary: it boots `create_app` under a
+real `uvicorn` on a free loopback port and drives **17 steps / 108 checks** with `httpx`, which was
+already a dev dependency.
+
+- **What it asserts that nothing else can.** (1) The error envelope. `frontend/src/lib/api.ts` reads
+  `error.code` and `error.message` off every non-2xx body; a server answering 401 with a bare
+  `{"detail": ...}` passes most of the backend suite while breaking every screen, so `envelope()` is a
+  real assertion in both directions. (2) The operator's bootstrap order: `create-admin` reads its
+  password from stdin (never argv) and here runs against a server that is **already accepting
+  requests**, which is the order a deployment actually experiences and no test exercised. (3) The
+  whole pipeline once, over HTTP: ingest → duplicate ingest → upload → `extract` → queue → reveal →
+  stale-version 409 → accept → consent → decide → schedule → escalate → customer reply → refresh
+  rotation → logout. (4) That a `500` anywhere fails the walk-through, because an unhandled exception
+  escaping a route the UI calls is exactly what a happy path is best at finding.
+- **A file-backed database, and the reason is the harness.** `conftest.py`'s in-memory SQLite uses
+  `StaticPool`, which hands every session the same DBAPI connection so several sessions can share one
+  database — and which cannot be used from two threads at once. `uvicorn` runs sync routes in a worker
+  thread, so reusing that fixture would have made the *harness* the flaky component. The script
+  creates a real file, sets `check_same_thread=False`, and enables `PRAGMA foreign_keys=ON` for the
+  same reason `conftest.py` does.
+- **Both transports off, and not as a shortcut.** `EVENT_TRANSPORT=none` and
+  `NOTIFICATION_TRANSPORT=none` mean no step can reach a broker or a mail server, so the journey stays
+  a statement about the HTTP seam. `argon2_*` is lowered exactly as `conftest.py` lowers it: the code
+  path is identical and only the work is smaller.
+- **Not pytest-collected, deliberately.** The file is `smoke_journey.py`, not `test_*.py`, so the
+  suite does not import it and the journey runs once, as a journey, rather than as 108 separately
+  failing cases behind one broken step. It exits 0 on success; on failure it prints the failing step
+  and the response body, and **keeps** the temporary database so the rows behind the broken step can be
+  inspected. On success the database, document store and key are removed.
+- **CI only, and the omission is reasoned.** The job sits after `pytest` in the backend job. There is
+  **no pre-commit hook**, because the commit gate runs `pre-commit run --all-files` and does not run
+  `pytest` either: gating the journey alone would put a `uvicorn` boot on every commit while the
+  867-test suite still ran only in CI. Consistent, and stated rather than left as an omission.
+
+**The mutation passes, because a first-run green is when to distrust it.** Two deliberate breakages,
+each reverted with `git diff` confirmed empty before the commit that landed the script:
+
+1. `app/main.py`'s `return {"error": error}` → `{"detail": error}`. The journey failed at the envelope
+   step on the real 401. `envelope()` has teeth.
+2. `_fingerprint` in `api/v1/contracts.py` gained a `uuid4()` nonce. The journey failed with
+   *duplicate ingest returned 201*.
+
+**The second pass produced something the entry would be wrong to omit:** disabling the `by_sha256`
+pre-check did **not** break the journey — the duplicate's 409 comes from the unique constraint further
+down, so the pre-check is an optimisation and not the guarantee. Mutating the fingerprint is what
+actually tests idempotency. That distinction was invisible before the mutation was tried.
+
+**Two defects in the script itself, both caught by gates rather than by rereading.** A `# noqa: S105`
+was dead (`backend/tests/**` already ignores `S105`); and `SmokeFailure` violated ruff's `N818`
+(exception names must end `Error`) and became `SmokeJourneyError`, which keeps `AssertionError` as its
+base because that is what it is — a documented exception to nobody.
+
+**Verified.** Journey **108/108**, exit 0. `ruff check backend` — all checks passed; `ruff format
+--check backend` — 108 files already formatted; `mypy` — *Success: no issues found in 62 source
+files*; `pytest -m "not integration"` — **867 passed, 2 skipped, 19 deselected**. The journey's own
+output carries one `refresh_reuse_detected` warning line, which is the deliberate password-grant-style
+replay being logged, not noise from the harness.
+
+**Honest limits.** (1) **Verified on Windows with SQLite and never on `ubuntu-latest`** — the CI step
+is read, not observed, exactly like `D10-46` and `D10-47`. (2) **It is not a substitute for the
+suite**: one happy path and a handful of refusals, with no Kafka, no SMTP, no MySQL and no browser, so
+it says *the served API works as wired* and not *every branch is correct*. (3) **`mypy` does not cover
+it** — `[tool.mypy]`'s `files` is `backend/app`, so the script is linted and executed but not
+type-checked, exactly as the rest of `backend/tests` is; adding it would have meant a config change
+whose only customer is one file. (4) **A real socket is still not a real deployment**: no TLS, no
+proxy, no container, and `127.0.0.1` on a laptop is the whole network topology it has seen.
+
+**Landed as** `test(smoke)` `5f2b085` — one new file, one CI step and one corrected workflow comment
+(which still claimed `next build` was deliberately omitted, false since `20ccc7c`). No dependency, no
+lockfile line, no application source, no migration (`0006` stays head). `STATUS.md`'s *the server
+behind these mocks is a mock* residue is narrowed by the follow-up `docs(status)` commit, the
+convention `D10-40` through `D10-47` all used.
