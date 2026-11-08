@@ -110,11 +110,14 @@ repos:
         files: ^frontend/.*\.(ts|tsx|mjs)$
         pass_filenames: false
 
-      # The frontend had no test runner until D10-37, so the one module that is
-      # pure enough to test cheaply (src/lib/contract-scope.ts) was checked by
-      # the compiler alone. Gating the suite here is what stops a runner that
-      # nothing runs from rotting: `vitest run` over the current spec takes well
-      # under a second, and it runs only when frontend sources change.
+      # The frontend had no test runner until D10-37, so the one module that was
+      # cheap to test (src/lib/contract-scope.ts) was checked by the compiler
+      # alone; D10-41 added a second, src/lib/session.ts. Gating the suite here
+      # is what stops a runner that nothing runs from rotting. It is not a
+      # per-diff cost: the gate invokes `pre-commit run --all-files`, so the
+      # `files:` key above filters the list pre-commit considers, and under
+      # --all-files that list is the whole repo. Every commit runs it, in well
+      # under a second.
       - id: frontend-test
         name: frontend tests (vitest run)
         entry: node scripts/run-frontend-check.mjs test
