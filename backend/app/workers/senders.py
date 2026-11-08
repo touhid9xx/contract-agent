@@ -184,7 +184,24 @@ class SmtpSender:
             )
 
         message_id = self._message_id(message)
-        composed = self._compose(message, message_id)
+        self.deliver(self._compose(message, message_id))
+        return message_id
+
+    def deliver(self, composed: EmailMessage) -> None:
+        """Hand one already-composed message to the relay.
+
+        Public, and separate from :meth:`send`, because the attention watch has
+        something to say that this class would compose into the wrong message: an
+        operator alert has a different subject, no contract and no idempotency
+        slot. What it needs is everything *below* the envelope — the verifying TLS
+        context, the login, the bounded socket, and an error text scrubbed of
+        addresses — and a second copy of that block would be a second place for the
+        context to be forgotten.
+
+        Returning nothing is the same rule the reminder path holds: a normal return
+        means the relay accepted the message, and anything else is a
+        :class:`~app.workers.dispatch.SenderError`.
+        """
         try:
             with self._connect() as client:
                 if self._starttls:
@@ -197,7 +214,6 @@ class SmtpSender:
                 client.send_message(composed)
         except (smtplib.SMTPException, OSError) as exc:
             raise SenderError(_describe(exc)) from exc
-        return message_id
 
     def _compose(self, message: OutgoingMessage, message_id: str) -> EmailMessage:
         """Build the envelope around ``message``."""

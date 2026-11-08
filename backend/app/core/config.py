@@ -227,6 +227,25 @@ class Settings(BaseSettings):
     #: default matches ``DEFAULT_RESEAL_LIMIT`` so the scheduled check and a hand
     #: run of ``doctor`` agree on what they looked at.
     attention_field_scan_limit: int = Field(default=500, gt=0, le=100_000)
+    #: Where the attention watch mails its verdict when that verdict *changes*.
+    #:
+    #: Empty — the default — means "log only", which is exactly what the worker did
+    #: before this existed. An address here puts a person on the other end: one
+    #: message when a finding appears, one when the board is clear again, and
+    #: nothing in between however long the state stands.
+    #:
+    #: It is **deployment configuration, not tenant data**, and that is the whole
+    #: reason gap 22 was finished this way rather than with an HTTP route.
+    #: :func:`~app.core.attention.attention_report` reads parked events, undelivered
+    #: notifications and unsealed fields **across** tenants on purpose — each of
+    #: those queries says tenant-scoping it would be misleading — while a route
+    #: answers a *tenant* principal. This recipient is the person who runs the
+    #: deployment, so no principal is impersonated and no count has to be scoped.
+    #:
+    #: The transport is the one ``NOTIFICATION_TRANSPORT`` already names: one relay,
+    #: one set of credentials, one already-tested socket path. Setting this with no
+    #: SMTP transport is refused at start-up rather than at the first finding.
+    attention_alert_to: str = ""
 
     # --- escalation (gap 15) ---------------------------------------------
     #: Hours between an escalation being raised and its deadline. ``Q2`` in
@@ -426,6 +445,28 @@ class Settings(BaseSettings):
                         "SMTP_CA_BUNDLE must be a PEM file ssl can load; "
                         f"got {self.smtp_ca_bundle!r}: {exc}"
                     ) from exc
+
+        # An alert address with nothing to send it through would read as "the
+        # operator is being told" while the first finding went nowhere — and the
+        # first finding is precisely when it matters. Two ways to be wrong, both
+        # refused here: a value that is not an address, and an address with no
+        # transport behind it. Checked after the SMTP block above so a deployment
+        # with both mistakes is told about the transport first: "you have no relay"
+        # is the fix that also makes the address work.
+        if self.attention_alert_to:
+            if not _is_plausible_address(self.attention_alert_to):
+                raise ValueError(
+                    "ATTENTION_ALERT_TO must be an e-mail address when set; got "
+                    f"{self.attention_alert_to!r}. Leave it empty to keep the "
+                    "attention verdict in the log only."
+                )
+            if self.notification_transport != "smtp":
+                raise ValueError(
+                    "ATTENTION_ALERT_TO is set but NOTIFICATION_TRANSPORT is "
+                    f"{self.notification_transport!r}, so there is no transport to "
+                    "send the alert with. Set NOTIFICATION_TRANSPORT=smtp and "
+                    "configure the SMTP block, or unset ATTENTION_ALERT_TO."
+                )
 
         # A malformed key is worse than a missing one: it fails at the first
         # encrypt rather than at start-up, which is a write path, not a boot.

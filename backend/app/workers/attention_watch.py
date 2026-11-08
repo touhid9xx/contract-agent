@@ -9,7 +9,8 @@ had no process, and a deployment that forgot to add one looked identical to a
 deployment with nothing to report.
 
 This is that process. Each tick reads the three tables, logs exactly one verdict,
-and never writes.
+and never writes. If — and only if — ``ATTENTION_ALERT_TO`` names an address, a
+*change* of verdict also leaves the process as one mail to that operator.
 
 Three decisions, each of which could be made wrongly without failing a test:
 
@@ -35,12 +36,21 @@ not have to be read in isolation to make sense.
 worker that dies on a transient connection error stops watching exactly when
 something is wrong. Same shape as the relay and the scheduler.
 
-What this is **not**: delivery. A log line reaches a person only if something is
-reading the log, and nothing in this stack reads it. The remaining half of gap 22 —
-somewhere for the verdict to reach a person *by itself* — is still open, and
-deliberately so: the obvious answer (an HTTP route serving the same report) cannot
-be built without deciding who may see counts that are deliberately read **across**
-tenants. See ``D10-39``.
+**A change of verdict can leave the process.** A log line reaches a person only if
+something reads the log, and nothing in this stack reads it — so for a long time the
+end of this chain was "somebody looks". :mod:`app.workers.attention_alerts` closes
+that for a deployment that sets ``ATTENTION_ALERT_TO``: one mail when a finding
+appears, one when the board clears, silent while the answer stands. The recipient is
+the *operator*, not a tenant and not a customer, which is why this could be built at
+all — see the note below.
+
+What this is still **not**: an HTTP route serving the report. That remains blocked
+rather than unbuilt, and by a question rather than by effort: the counts are read
+**across** tenants on purpose, each of those queries saying that scoping one would be
+misleading, while a route authenticates a tenant principal. The alert did not solve
+that problem — it went around it by addressing a person instead of a principal. If
+the route is ever wanted, the tenant question is an owner's decision, not an
+implementation detail. See ``D10-39`` and ``D10-40``.
 """
 
 from __future__ import annotations
@@ -56,6 +66,7 @@ from app.core.attention import AttentionReport, attention_report
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.db.session import build_engine, build_session_factory, session_scope
+from app.workers.attention_alerts import AttentionAlerter, build_attention_alerter
 
 log = structlog.get_logger(__name__)
 
@@ -68,17 +79,24 @@ class AttentionWatch:
         session_factory: sessionmaker[Session],
         *,
         settings: Settings,
+        alerter: AttentionAlerter | None = None,
         limit: int | None = None,
         poll_interval_seconds: float | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._settings = settings
+        self._alerter = alerter
         self._limit = settings.attention_field_scan_limit if limit is None else limit
         self._poll_interval = (
             settings.attention_poll_interval_seconds
             if poll_interval_seconds is None
             else poll_interval_seconds
         )
+        #: The last verdict the operator was *successfully* told. Starts calm, not
+        #: unknown: nothing has been sent yet, and "everything is fine" is the only
+        #: baseline it is reasonable for them to hold. See :meth:`_alert` for why a
+        #: broken first tick therefore speaks and a clean one does not.
+        self._notified_needs_attention = False
 
     def run_once(self) -> AttentionReport:
         """One tick: read the three tables once and log one verdict.
@@ -90,6 +108,7 @@ class AttentionWatch:
         with session_scope(self._session_factory) as session:
             report = attention_report(session, limit=self._limit, settings=self._settings)
         self._record(report)
+        self._alert(report)
         return report
 
     def run_forever(self, stop: threading.Event) -> None:
@@ -99,6 +118,10 @@ class AttentionWatch:
             poll_interval_seconds=self._poll_interval,
             field_scan_limit=self._limit,
             event_transport=self._settings.event_transport,
+            # Said here so "nobody was told" is answerable from the log: an operator
+            # wondering why a finding never reached their inbox can read this line
+            # instead of reading a module.
+            alerts=self._alerter is not None,
         )
         if self._settings.event_transport == "none":
             # Said once here rather than on every tick: this is a configuration
@@ -146,6 +169,50 @@ class AttentionWatch:
             # the one line that matters gets filtered out.
             log.debug("attention_watch_clean", **report.as_dict())
 
+    def _alert(self, report: AttentionReport) -> None:
+        """Tell the operator, but only when the answer changed.
+
+        Three rules, each of which has a wrong version that no test would catch on
+        its own:
+
+        * **Change, not state.** A standing finding at a five-minute interval is 288
+          mails a day, and a mailbox rule by Thursday — the alarm
+          :mod:`app.workers.attention_alerts` exists to prevent. So the comparison is
+          against the last verdict the operator was *told*, and an unchanged answer
+          is silence however loud it is.
+        * **First tick is a change in the direction that matters.** ``False`` is the
+          starting baseline, so a deployment that boots broken alerts immediately,
+          while a deployment that boots clean says nothing. Erring the other way
+          would leave a broken install quiet until something moved.
+        * **Advanced on success only.** If the relay was down when a finding
+          appeared, nobody was informed, so the next tick tries again rather than
+          recording a delivery that did not happen. The cost is one connection
+          attempt per tick while the relay is unreachable — no mail, and the failure
+          is logged each time.
+
+        A sender failure stops at :class:`~app.workers.dispatch.SenderError` and is
+        logged, never raised: the reading already happened and its line already went
+        out, so dying here would stop the watch over a problem with the post.
+        """
+        if self._alerter is None:
+            return
+        if report.needs_attention == self._notified_needs_attention:
+            return
+
+        direction = "raised" if report.needs_attention else "cleared"
+        try:
+            if report.needs_attention:
+                self._alerter.raised(report)
+            else:
+                self._alerter.cleared(report)
+        except Exception:
+            # Broad on purpose: a mail problem must not be able to stop the watch.
+            log.exception("attention_alert_failed", direction=direction)
+            return
+
+        self._notified_needs_attention = report.needs_attention
+        log.info("attention_alert_sent", direction=direction)
+
 
 def main() -> int:
     """``python -m app.workers.attention_watch``."""
@@ -155,7 +222,10 @@ def main() -> int:
     engine = build_engine(settings)
     factory = build_session_factory(engine)
 
-    watch = AttentionWatch(factory, settings=settings)
+    # Built here rather than inside the watch so the worker cannot start with a
+    # half-configured alerter: settings validation has already refused an address
+    # with no transport, and this either returns a working pair or ``None``.
+    watch = AttentionWatch(factory, settings=settings, alerter=build_attention_alerter(settings))
     stop = threading.Event()
 
     def _request_stop(signum: int, _frame: FrameType | None) -> None:

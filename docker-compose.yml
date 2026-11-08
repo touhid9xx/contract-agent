@@ -163,10 +163,12 @@ services:
   attention:
     <<: *worker
     # Gap 22's residue. `doctor` was the machine-readable half, but a check nobody
-    # runs finds nothing: this is the process that runs it. It writes no rows and
-    # pages nobody — it puts the verdict in the log, where the other workers'
-    # verdicts already go. An explained park (EVENT_TRANSPORT=none) is reported and
-    # not alarmed on, which is why this can run on a default install.
+    # runs finds nothing: this is the process that runs it. It writes no rows. The
+    # verdict goes to the log, where the other workers' verdicts already go, and —
+    # only if ATTENTION_ALERT_TO names an operator address — a *change* of verdict
+    # also goes out as one mail through the shared SMTP settings. Unset, this is
+    # log-only, which is still the default. An explained park (EVENT_TRANSPORT=none)
+    # is reported and not alarmed on, which is why this can run on a default install.
     command:
       - python
       - -m
