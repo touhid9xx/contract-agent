@@ -717,6 +717,33 @@ another screen reads — unproven; the escalation and agent screens need `useSea
 which this page did not, so porting is three harnesses rather than a loop; and the viewer gate is the
 client's opinion of a role the server decides in another suite.
 
+**Then the gate gets somewhere to run that is not one person's machine** (`D10-46`, one commit: `ci`).
+Every check in this project had run from a developer's machine, and two had never run automatically
+anywhere: the **pytest suite is not a pre-commit hook**, and the **MySQL `integration` suite skips
+silently** whenever no server answers, which is the normal state of a laptop without the compose stack.
+`4a9e8e9` made the hook real, not mandatory — `--no-verify`, a second clone without `npm install`, and
+a fork all bypass it. The new `.github/workflows/ci.yml` **mirrors the gate rather than inventing a
+second one**: the same `ruff check`, `ruff format`, `mypy`, `bandit`, `tsc --noEmit`, eslint and vitest
+commands, with the hooks' `--fix` flags dropped so a runner reports a defect instead of repairing it and
+passing, and `npm ci` against the committed lockfiles so CI tests the resolved tree a developer has.
+Six named jobs, so a failure says which tool failed; `mysql:8.4` is the service container because that
+is the tag `docker-compose.yml` ships; and **a skip in the MySQL job is made a failure**, since a suite
+that skips when it cannot connect would otherwise be green while proving nothing. `gitleaks` is
+promoted from `manual` to mandatory — `ubuntu-latest` has the Docker image D1-03 assumed — which is the
+first thing to address gap 1's "it still gates nothing" residue other than a note. Node 22 is read off
+`@types/node` and Python 3.13 off `Dockerfile.backend` rather than chosen here; `next build` and a
+coverage threshold were **declined and recorded**, not forgotten, because a pipeline that is red on its
+first run teaches people to ignore it. **No dependency, no lockfile line, no application source, no
+migration (`0006`).** The honest limit is the one that matters: **the workflow has not been run.**
+There is no runner on this machine, so its correctness is *read*, not *observed* — the YAML parses, the
+workflow-expression sites survived the write, and every command was copied from a file in this
+repository rather than recalled. Three consequences follow, and are not waved away: the backend suite
+has never been gated, so the first run may legitimately be red — that would be the finding, not a
+regression; `--no-verify` still works until required status checks are enabled in repository settings,
+which is not a file this repository can commit, so the gate is now *elsewhere* rather than yet
+*unbypassable*; and the branch stands 113 commits ahead of `origin/main` with this slice adding two
+more, so the secret scan is evidence about the server's history and not yet about this tree.
+
 ## Phase history
 
 | Phase | State |
@@ -733,6 +760,7 @@ client's opinion of a role the server decides in another suite.
 | Python tooling | `pyproject.toml` — ruff (lint + format), `mypy --strict`, pytest + coverage, bandit |
 | Pre-commit | `.pre-commit-config.yaml` — hygiene, ruff, ruff-format, mypy, bandit, frontend typecheck, frontend eslint; gitleaks bound to `manual` (D1-03) |
 | Commit gate | husky `pre-commit` + `commit-msg`, commitlint (Conventional Commits), lint-staged — **written in F1 but not actually wired until `4a9e8e9`** (gap 13): the `prepare` hook never ran because root `node_modules` was absent |
+| CI | `.github/workflows/ci.yml` (**D10-46**, added long after F1 because the gap was invisible while the hook worked) — six jobs (python static, backend pytest, MySQL 8.4 integration, frontend typecheck/eslint/vitest, demo frontend typecheck, hygiene + `gitleaks`) plus one `gate` job as the single required check. **The first place anything in this repository ran automatically**, and the first time the backend suite and the `integration` suite were gated at all |
 | Backend | `app/core/config.py` fail-fast settings, `app/core/logging.py` structlog + PII redaction, `app/core/middleware.py` request/trace IDs, `app/main.py` factory + error envelope, `/api/v1/health` |
 | Frontend | Next.js 16 + Tailwind 4 + TanStack Query + Zustand + next-themes + next-intl (en, bn), ESLint flat config, Prettier, `[locale]` routing |
 | Scripts | `scripts/bootstrap.mjs` (one-command setup), `scripts/run-frontend-check.mjs` |
@@ -2792,8 +2820,13 @@ a hook finally ran and passed.
 1. **`gitleaks` needs Docker** and is manual-stage only (D1-03). Run
    `pre-commit run gitleaks --all-files` before pushing, or rely on CI.
    **Run once for real at `9b6cf0f`:** 46 commits scanned, no leaks, exit 0 — the daemon
-   answered that time. It remains manual, so it still gates nothing; one green run is
-   evidence about the history, not a new automatic check.
+   answered that time. ~~It remains manual, so it still gates nothing; one green run is
+   evidence about the history, not a new automatic check.~~ **Amended by D10-46:**
+   `.github/workflows/ci.yml` now runs `pre-commit run gitleaks --all-files` on every push,
+   checking out with `fetch-depth: 0`, because `ubuntu-latest` provides the Docker image D1-03
+   was waiting for. The scan is automatic **on the remote** — and that is the precise claim: it
+   covers the history that was pushed, so while this branch is unpushed it remains evidence
+   about the server's past rather than about the working tree.
 2. **`make` is optional** — not installed on the primary Windows host; `npm`
    scripts are the contract (D1-09).
 3. **Bandit's gate scope is `backend/app`.** A repo-wide `bandit -r backend`

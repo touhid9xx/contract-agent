@@ -4210,3 +4210,92 @@ real `useAuth`, but the *server's* authorization is a different suite; nothing p
 **Landed as** `test(web)` `3b16d9a` — one new file and nothing else. `STATUS.md`'s surviving
 "one screen" and "no screen's behaviour is proven" regions were amended by the follow-up
 `docs(status)` commit, the convention `D10-40` through `D10-44` all used.
+
+### D10-46 — CI: the gate stops being a suggestion, and the two checks the hook could never express
+
+Every gate in this project has run from a developer's machine. `.husky/pre-commit` invokes
+`pre-commit run --all-files` on each commit, and since `4a9e8e9` that is real rather than decorative —
+but it is **optional**: `git commit --no-verify` bypasses it, a second clone without `npm install` has
+no hook at all, and a fork inherits a config nothing enforces. Worse, two things were never gated
+anywhere: the **pytest suite is not a pre-commit hook**, so ~470 tests ran only when somebody
+remembered; and the **MySQL integration suite skips silently** when no server answers, which is the
+normal state of a machine that has not started the compose stack. Neither was a known unknown — both
+are recorded in `STATUS.md` — but until now the only mechanism that could ever have caught them was a
+person's memory. This slice adds `.github/workflows/ci.yml`.
+
+- **Mirror the existing gate; do not invent a second one.** Every job runs the *same command* its hook
+  already runs: `ruff check backend`, `ruff format --check backend`, `python -m mypy`,
+  `bandit -c pyproject.toml -r backend/app -q`, `npm run typecheck`, `npm run lint`, `npm test`. A
+  parallel pipeline that checks something subtly different is worse than none, because green stops
+  meaning one thing. The only difference is deliberate: **the hooks' `--fix` flags are dropped**, since
+  a runner must report a defect and never repair it and then pass. `ruff format --check` is the CI
+  spelling of the `ruff-format` hook, which fails precisely when it rewrote a file.
+- **Separate jobs, because attribution is the product.** One job running everything is one round trip
+  to learn that the failure was in `mypy` and not `eslint`. Six jobs also let a reader see four-of-six
+  at a glance rather than a single red cross over 19 checks.
+- **The two new gates are the point of the file.** `backend-tests` runs `pytest -m "not integration"`,
+  which nothing had ever run automatically. `mysql-integration` runs `pytest -m integration` against a
+  `mysql:8.4` service container — the same tag `docker-compose.yml` ships — so the six guarantees the
+  integration module lists in its docstring (SKIP LOCKED claiming, real `ENUM`s, the dispatch lock,
+  `NUMERIC(4, 3)` scale, refresh-token row locks, cascading FKs) stop being things that were proven
+  once by hand in `c99c792` and become things that are re-proven on every push.
+- **A skip on the MySQL job is a failure.** That suite *skips* rather than fails when it cannot
+  connect, which is right for a laptop and wrong for a service container: a run that skipped would be
+  green while proving nothing, and green-but-empty is the failure mode this whole slice exists to
+  remove. The step pipes pytest through `tee` (so `pipefail` keeps its exit status) and greps for the
+  word `skipped`, with `-rs` so a red run prints the reason. It is checked in the same step on purpose:
+  a separate "did it skip" step after a failing pytest would report a skip check that never ran.
+- **`gitleaks` is promoted from `manual` to mandatory.** D1-03 bound it to the manual stage because it
+  needs a Docker image, so it has never gated anything — gap 1's residue is explicit that "one green
+  run is evidence about the history, not a new automatic check". `ubuntu-latest` provides Docker, so
+  the hook's own documented command (`pre-commit run gitleaks --all-files`, run by name) finally runs
+  where it cannot be forgotten, against `fetch-depth: 0` so the scan sees history rather than one
+  commit.
+- **Versions come from other files, not from taste.** Node **22** because `@types/node` is `^22` and
+  `engines.node` says `>=20`, so 22 is the version the frontend is actually typed against. Python
+  **3.13** because that is what `Dockerfile.backend` ships — CI should exercise the interpreter the
+  artifact carries. That is a deliberate mismatch with `requirements.txt`'s comment ("verified on
+  CPython 3.14 / Windows"), which records where the pins were tested, not a second supported runtime;
+  `pyproject.toml`'s `py312` is a floor for ruff and mypy, not a different interpreter.
+- **`npm ci`, never `npm install`.** All three lockfiles are committed, so CI must test the resolved
+  tree a developer has, not a fresh resolution.
+- **One required check instead of six.** A `gate` job with `needs` on all six and `if: always()` fails
+  unless every one of them reports `success`; branch protection then needs to name one context, and
+  adding a seventh job later does not require touching the setting. `if: always()` is what makes it
+  meaningful — a *skipped* required check is a green light, which is how a gate becomes advice.
+
+**Deliberately omitted, with the reason rather than an apology.** (1) **`next build`.** It is the one
+check that would catch a server/client-boundary error `tsc` cannot see, and it is not here because it
+is unverified on a clean machine: it needs the whole Next toolchain plus whatever the build reads at
+build time, and a pipeline that is red on its first run teaches people to ignore it — the same
+argument `docker-compose.yml` makes about healthchecks pointing at readiness. It is the first
+candidate for the next slice. (2) **A coverage threshold.** `pytest-cov` is a dev dependency and
+`[tool.coverage]` is configured, but a percentage gate on a suite whose frontend half is two screens
+would enshrine the wrong number. (3) **A migration drift check.** `alembic check` is available and the
+MySQL job is the right place for it; it is left out only because it is one more unverifiable step in
+a slice that already cannot be run here.
+
+**Verified — and this is the limit that matters most.** The workflow **has not been run.** There is no
+runner on this machine, so the artifact's correctness is *read*, not *observed*: the YAML parses under
+PyYAML, the three workflow-expression sites survived the write intact, and every command in it was
+copied from a file in this repository rather than recalled. That is the strongest claim available and
+it is weaker than a green run. Three specific consequences are recorded rather than waved away:
+(1) **The backend suite has never been gated, so CI's first run may legitimately be red** — that would
+be the finding, not a regression, and it is exactly why this slice is worth landing before the suite
+is trusted further. (2) **`--no-verify` still works.** The workflow exists; making it *mandatory* is a
+repository setting (required status checks on `main`), which is not a file and cannot be committed, so
+"D10-46 makes the gate unbypassable" is false until an admin enables it — the honest claim is that the
+gate now exists somewhere other than one laptop. (3) **The scan has nothing new to scan yet:** 113
+commits are unpushed, so `gitleaks` in CI is evidence about what reaches the server, and until this
+lands remotely it is scanning a history no runner has seen.
+
+**Two risks worth naming while they are cheap.** Pinned wheels are verified on Windows/3.14 and now
+installed on Linux/3.13; every pin here is pure-Python or `abi3`, so this should resolve, but "should"
+is the correct word and the first run is the test. And the `gate` job uses `jq`, which `ubuntu-latest`
+ships — a runner image change would be a one-line fix, and is the sort of dependency a self-hosted
+runner would silently break.
+
+**Landed as** `ci: .github/workflows/ci.yml` — one new file, no dependency, no lockfile line, no
+application source, no migration (`0006` stays head). `STATUS.md`'s "gitleaks still gates nothing"
+residue and the F1 table were amended by the follow-up `docs(status)` commit, the convention `D10-40`
+through `D10-45` all used.
