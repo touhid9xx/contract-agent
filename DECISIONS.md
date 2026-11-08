@@ -3614,3 +3614,99 @@ only this run.
 
 This entry carried a commit type and no hash for as long as the gate was unrun, which no other entry
 here does; the `docs(status)` commit that lands this text appends it — **`f3a1bb1`**, `feat(backend)`.
+
+### D10-39 — An alarm that fires on a default install is one nobody reads
+
+`doctor` turned the invisible-failure states into an exit code, which is the hook an external alerter
+needs — and the record said plainly what it was not: a command nobody schedules is worth little more
+than the log line it replaces. This slice gave the check a process. `app/core/attention.py` now holds
+the counting, `app/workers/attention_watch.py` runs it on a timer, and `doctor` keeps only the part
+that needs an exit code. One behaviour genuinely changes, and the change is the slice: **a park that
+the configuration explains is counted and not failed.**
+
+- **The counting moved because there are two callers with different jobs.** The CLI turns the reading
+  into an exit code for a cron entry or a CI step; `AttentionWatch` turns the same reading into a log
+  line every few minutes. A second copy of the arithmetic would be a second answer to "what needs a
+  human", and the entire value of this check is that there is one.
+- **`AttentionReport` is a record, not the dictionary the check used to return.** With two callers, a
+  key spelled correctly in one and wrongly in the other is a `KeyError` at runtime that no test of the
+  other caller can catch. `as_dict()` keeps the flat, JSON-safe shape both callers already emit, so
+  the log line's key names did not change with the type.
+- **An explained park is counted, and not failed.** With `EVENT_TRANSPORT=none` — the default —
+  `build_publisher` returns the refusing stand-in, so the relay parks *every* event it claims. On a
+  fresh installation that is the designed behaviour. A check that called it a fault would exit
+  non-zero on the first `docker compose up` that ran a reminder, and be muted shortly after, which is
+  how a real alarm stops being read. `parks_explained` is `outbox_parked` when `bus_disabled` and
+  zero otherwise; `outbox_parked` itself is unchanged and present on every log line. **What changes
+  is the verdict, not the count**, so nothing is hidden by not alarming.
+- **Everything else is a reason, whatever the transport is.** A notification that ended `failed` or
+  `suppressed` and a field value still stored in the clear will not clear themselves. `needs_attention`
+  is a property computed from the record rather than a field each caller sets, so the rule lives in
+  one place and the two callers cannot disagree about it.
+- **The transport travels on the report.** `event_transport` and `bus_disabled` are part of the
+  record so a line in a log can be read months later without knowing what the deployment was
+  configured with that day; the explained/unexplained distinction is meaningless without them.
+- **`PII_COLUMNS` moved here, and it is the point of the move.** `reseal-fields` seals this tuple and
+  the attention check verifies it. A column added to one without the other is exactly the failure the
+  constant exists to prevent, and it now has one definition instead of two.
+- **The worker logs; it does not exit non-zero.** Its consumer is an orchestrator with
+  `restart: unless-stopped`, where a non-zero exit is not a signal but a crash loop — and a container
+  restarting every few seconds buries the line that says what is wrong. The states being reported (a
+  plaintext value, a suppressed notification) do not improve by being restarted. So the verdict is a
+  log event with a stable name and the report's fields attached, and the process exits 0 unless
+  something unexpected raised.
+- **A switched-off bus is named once, at startup, not on every tick.** It is a configuration fact,
+  not a finding; repeating it every five minutes is the noise that makes the one line that matters
+  filterable. The per-tick lines can then be read without knowing the deployment's configuration.
+- **A clean board logs at `debug`.** A process whose only product is a log line, saying "nothing to
+  do" every five minutes forever, is how its `error` line gets filtered out by whoever sets the log
+  level.
+- **A failed tick is logged, not fatal**, matching the relay and the scheduler: the database is the
+  only dependency, and a worker that dies on a transient connection error stops watching at exactly
+  the moment something is wrong.
+- **Five minutes, and a stated ceiling.** `attention_poll_interval_seconds` defaults to `300` with an
+  upper bound of an hour, because these states do not become more urgent between ticks and an
+  interval longer than an hour delivers the line after the operator who needed it has gone home.
+  `attention_field_scan_limit` defaults to `500`, matching `DEFAULT_RESEAL_LIMIT`, so a scheduled
+  check and a hand `doctor --limit` scan the same number of rows and cannot report different answers
+  to the same question by default.
+
+**The one test that had to change, and why that is the evidence.** `doctor`'s park test asserted
+`EXIT_ATTENTION` for a parked event, and under the default transport every park is now explained, so
+it was rewritten rather than adjusted to keep passing: a park under `none` **exits 0 and is still
+counted**, and the same park under a configured transport still exits `EXIT_ATTENTION`. A behaviour
+change that no test noticed would have been a behaviour change nobody chose. Its own teeth were
+checked by breaking them: flipping the clean verdict from `debug` to `info`, and making
+`needs_attention` count an explained park again, produced **exactly the three intended failures** and
+no others; both files were then restored and confirmed byte-identical by SHA-256.
+
+**Verified, and the limit of that verification.** Measured on the tree committed as `2572f53`, from
+the repository root: `ruff check .` → *All checks passed*; `ruff format --check .` → *109 files
+already formatted*; `mypy app` under `strict` → *no issues found in 61 source files*; `bandit -c
+pyproject.toml -r backend/app` → exit 0 with only the three expected `nosec B104` notices in
+`config.py`; `pytest -q` → **871 tests, 0 failures, 0 errors, 15 skipped**, exit 0, counted from the
+JUnit XML rather than from the progress dots. `tests/test_attention_watch.py` is **9 tests** and
+`tests/test_doctor.py` is **21**, 30 together. The fifteen skips are unchanged in kind — 13 MySQL
+unreachable at `127.0.0.1:3306`, 1 symlink privilege, 1 Kafka opt-in — which means the outbox and
+dispatch paths were proven on SQLite only, again.
+
+**The honest limit of the distinction.** It is drawn from the *current* configuration, so events
+parked while a transport was live and then switched off read as explained. The count is still on the
+line and an operator who did that knows they did it. A sharper version would classify each row by the
+error the relay recorded on it, which needs a query that reads row text — not worth it for a state
+this rare, and recorded here rather than hidden.
+
+**What this deliberately does not do, and what the next step would cost.** It does not deliver
+anything. A log line reaches a person only if something reads the log, and **nothing in this stack
+reads it**. Gap 22 is narrowed, not closed. The obvious next step is blocked rather than skipped: an
+HTTP route serving this same report cannot be written without deciding who may see counts that
+`dead_letter_count`, `undelivered_counts` and `fields_for_reseal` deliberately read **across tenants**
+— each of their docstrings says that scoping them to one tenant would be "actively misleading".
+Tenant-scoping the route contradicts three written decisions; serving it unscoped leaks other
+tenants' counts and their field primary keys. That is an owner decision, not a patch. No schema
+change and no migration: `alembic` head stays `0006`.
+
+The feature landed as `feat(backend)` `2572f53`; this record is written from the code and the
+measurements taken on that tree, and the `STATUS.md` regions it names were amended by the follow-up
+`docs(status)` commit rather than back-dated into the slice — the same convention `D10-26`…`D10-28`
+and `D10-38` used.

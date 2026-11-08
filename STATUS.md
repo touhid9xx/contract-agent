@@ -71,7 +71,11 @@ counts the two states in this system that fail *silently*: notifications parked
 `ENCRYPTION_KEY` (sealing is judged by envelope shape, so a rotated key still reads
 as sealed rather than as plaintext), it writes nothing, and it exits
 `EXIT_ATTENTION` (5) when either count is non-zero, so a cron entry or a CI step can
-watch it (D10-12). **Nothing schedules it yet** — it is a check, not an alarm.
+watch it (D10-12). ~~**Nothing schedules it yet** — it is a check, not an alarm.~~
+**Amended by `D10-39`, not deleted:** something schedules it now —
+`app/workers/attention_watch.py` on a five-minute timer, shipped as a compose service
+(`2572f53`) — so it is an alarm in the sense that it is *raised*; nothing in this stack
+reads the log it raises, which is the part that is still missing.
 **The fifth slice is tooling, not product code** (`16e8bb5`). A new `.gitattributes` pins
 `* text=auto eol=lf`, because `core.autocrlf` (a *checkout* setting, `true` on this
 host both locally and globally) and `mixed-line-ending --fix=lf` (a *post-checkout*
@@ -490,6 +494,35 @@ ran green on this tree from the repository root — `ruff check`, `ruff format -
 has ever been parsed**, a scanned PDF still yields nothing (no OCR), and **nothing calls the reader
 on its own**, so gap 12 is narrowed in a third place rather than closed and gap 5 is still blocked
 on the owner decision.
+
+**Then the invisible-failure check gets a process** (`D10-39`, one commit: `feat(backend)` `2572f53`):
+`D10-12` made those states machine-checkable and gave them an exit code, and said plainly what was
+still missing — *a command nobody schedules is worth little more than the log line it replaces.* This
+stack ships a Compose file and three worker services, not a crontab, so the check had no process, and
+a deployment that forgot to add one was indistinguishable from a deployment with nothing to report.
+The counting moved into `app/core/attention.py` because there are now **two callers with different
+jobs** — an exit code for a cron entry, a log line on a timer — and `AttentionReport` replaced the
+dictionary the check returned, since a key misspelled in one caller was a runtime `KeyError` no test
+of the other could catch; the timer landed in `app/workers/attention_watch.py`, mirroring
+`notification_scheduler`; and a fourth `attention` service runs it. **One behaviour genuinely changes
+and the change is the slice:** a park the configuration explains is *counted and not failed*, because
+with `EVENT_TRANSPORT=none` — the default — the relay parks every event it claims, so a check that
+called that a fault exited non-zero on the first `docker compose up` that ran a reminder, which is how
+the one command meant to be trusted becomes the one command that gets muted. Only the verdict moved:
+`outbox_parked` is unchanged and on every line, and a failed or suppressed notification or an
+unsealed field value still needs a human whatever the transport is set to. The test that had to
+change was **rewritten rather than adjusted** — a park under `none` exits `0` *and is still counted*,
+the same park under a configured transport still exits `5` — and the new tests were checked for teeth
+by breaking the two decisions they pin, giving exactly the three intended failures and no others.
+The full gate ran green on this tree from the repository root — `ruff check`, `ruff format --check`
+(109 files), `mypy app` strict (61 files), `bandit` exit 0, `pytest -q` **871 tests, 0 failures, 15
+skipped** (13 MySQL, 1 symlink, 1 Kafka) — after `ruff check` caught three real errors the gate would
+have caught later. **No schema change, no migration (`0006`)**; nothing was written by the slice.
+**Gap 22 is narrowed, not closed**: the check now has a process, but it reaches a person only if
+something reads the log and **nothing in this stack reads it**; the obvious next step, an HTTP route
+serving the same report, is **blocked rather than skipped** on who may see counts that
+`dead_letter_count`, `undelivered_counts` and `fields_for_reseal` deliberately read **across
+tenants**. Gap 25 and gap 5 are untouched.
 
 ## Phase history
 
@@ -2899,8 +2932,10 @@ a hook finally ran and passed.
     event is silently discarded. With `relay` running, `record_outcome` retries to
     `outbox_max_attempts` (10) and then parks the row `failed`, so every
     `POST /contracts` — and now every `POST /contracts/document` — ends as a parked
-    outbox row, and `python -m app.cli doctor` exits `EXIT_ATTENTION` (5) on a fresh
-    installation doing exactly what its configuration told it to. Each piece is right on
+    outbox row, and ~~`python -m app.cli doctor` exits `EXIT_ATTENTION` (5) on a fresh
+    installation doing exactly what its configuration told it to~~ — **amended by `D10-39`,
+    not deleted:** since `2572f53` the check tells a switched-off bus from a broken one, so
+    a fresh installation exits `0` and the parks stay counted on the line. Each piece is right on
     its own — no silent discard, bounded retries, dead-letter replay (`D5-03`), a doctor
     that counts the parks (`D10-12`) — and the combination reads as a fault on first
     run. **Not introduced by `D10-26`:** the metadata route has had this property since
@@ -2908,7 +2943,12 @@ a hook finally ran and passed.
     What is missing is a decision rather than a patch: whether `none` should mean
     "enqueue nothing" (there is no consumer to enqueue for) or stay "enqueue and park"
     (a visible backlog that never drains), and the second wants a doctor that can tell
-    "the bus is switched off" apart from "the bus is broken".
+    "the bus is switched off" apart from "the bus is broken". **Amended by `D10-39`, not
+    deleted:** that doctor now exists — `bus_disabled` and `event_transport` travel on the
+    report and the worker names a switched-off bus once at startup (`2572f53`) — so the
+    second reading is served and the decision above is the whole of what is left. The
+    heading's "nothing says so" is likewise narrower than it reads: something says so now,
+    quietly and on a timer, to a log nobody reads.
 
 ## The workers have a daemon ✅ (`D10-25`)
 
@@ -3312,8 +3352,11 @@ staging, as `D10-29` promised; it was gitignored, so its absence is not a tree c
 ### What this does not do — stated, not buried
 
 - **It does not close gap 25.** A default stack runs `EVENT_TRANSPORT=none`, so every event
-  is parked and `doctor` exits `EXIT_ATTENTION`. This screen makes the *notification* half of
-  that state legible and correctable; it does nothing for the outbox half.
+  is parked ~~and `doctor` exits `EXIT_ATTENTION`~~. This screen makes the *notification* half of
+  that state legible and correctable; it does nothing for the outbox half. **Amended by `D10-39`,
+  not deleted:** since `2572f53` an explained park is counted and **not** failed, so `doctor` exits
+  `0` on a default install; the outbox half is still open, and now has a scheduled worker whose
+  job is to say so.
 - **No recipient is shown.** The route does not return one — a row records *that* a contact
   was attempted, not who it reached — and the screen does not reconstruct it.
 - **No scheduling from here.** `POST /notifications` (schedule from a decision) still has no
@@ -4063,6 +4106,89 @@ the one real break and it was this slice's: `document_text.py` and its test were
 formatter, not a hand edit, fixed them. The fifteen skips are **13 MySQL unreachable, 1 symlink
 privilege, 1 Kafka opt-in**, so the outbox and dispatch paths were proven on SQLite only this run.
 
+## The check now has a process ✅ (`D10-39` — an explained park is counted, not alarmed on)
+
+`D10-12` made the invisible-failure states machine-checkable and gave them an exit code, and said
+plainly what was missing: **a command nobody schedules is worth little more than the log line it
+replaces.** This stack ships a Compose file and three worker services, not a crontab, so the check had
+no process — and a deployment that forgot to add one looked identical to a deployment with nothing to
+report. This slice is that process. One behaviour genuinely changes and the change *is* the slice: a
+park that the configuration explains is counted and no longer failed.
+
+| Change | Detail |
+| --- | --- |
+| `backend/app/core/attention.py` | **New, 195 lines.** The counting moved out of `cli.py` because there are now two callers with different jobs — an exit code for a cron entry, a log line on a timer — and a second copy would be a second answer to "what needs a human". `AttentionReport` is a **frozen, slotted record** rather than the dictionary the check returned: a key misspelled in one caller was a runtime `KeyError` no test of the other caller could catch. `as_dict()` keeps the flat, JSON-safe key names both callers already emit. `PII_COLUMNS` moved here too, so "did we miss a column?" has one answer shared with `reseal-fields`. |
+| `backend/app/workers/attention_watch.py` | **New, 179 lines.** `AttentionWatch.run_once` / `run_forever` / `main`, mirroring `notification_scheduler`. One verdict per tick, `debug` for a clean board, `error` for a finding, a startup warning that names a switched-off bus **once** rather than every tick, a truncation warning *before* the verdict, and a failed tick logged rather than fatal. Exits 0 on a finding. |
+| `backend/app/cli.py` | `_attention_report` **deleted**; `doctor` calls `attention_report` and keeps the part that needs an exit code. New `doctor_bus_is_switched_off` warning, deliberately *outside* the exit code. `EXIT_ATTENTION`'s docstring now says an explained park is not one. |
+| `backend/app/core/config.py` | `attention_poll_interval_seconds` (300 s, `>0, ≤3600`) and `attention_field_scan_limit` (500, `>0, ≤100000`). The limit matches `DEFAULT_RESEAL_LIMIT` so a scheduled check and a hand `doctor --limit` scan the same rows and cannot disagree by default. |
+| `docker-compose.yml` | New `attention` service on the `*worker` anchor, running `python -m app.workers.attention_watch`. |
+| `.env.example` | `ATTENTION_POLL_INTERVAL_SECONDS` and `ATTENTION_FIELD_SCAN_LIMIT`, beside the scheduler's interval. |
+| `backend/tests/test_attention_watch.py` | **New, 9 tests** — one line per tick and its level, the finding with ids attached and **no PII on the line**, a park under `none` logged as a parking notice, the same park under a configured transport logged as an error, the startup announcement said once, no warning when a transport is configured, a truncated scan warned before the verdict, and a failing tick logged not fatal. |
+| `backend/tests/test_doctor.py` | `report()` drives `attention_report(...).as_dict()`; the whole-dict assertion gains `outbox_parked_explained`, `event_transport`, `bus_disabled`, `needs_attention`. **21 tests.** |
+| No schema change, no migration | `alembic` head stays `0006`. Nothing is written by this slice; the check is read-only. |
+
+### An alarm that fires on a default install is one nobody reads
+
+With `EVENT_TRANSPORT=none` — the **default** — `build_publisher` returns the refusing stand-in, so
+the relay parks *every* event it claims. On a fresh installation that is the designed behaviour, and
+the check called it a fault: every run after the first reminder exited non-zero, which is precisely
+how the one command meant to be trusted becomes the one command that gets muted. So `parks_explained`
+is `outbox_parked` when the bus is disabled and zero otherwise, and `needs_attention` is that number
+plus failed notifications, suppressed notifications and unsealed field values — a **property computed
+from the record**, not a field each caller sets, so the two callers cannot disagree. **What changes is
+the verdict, not the count**: `outbox_parked` is unchanged and present on every log line, and the line
+says the events will not drain until a transport is configured. Everything else — a notification that
+ended `failed` or `suppressed`, a field value still in the clear — needs a human whatever the
+transport is set to, because it will not clear itself.
+
+The worker **logs and does not exit non-zero**. Its consumer is an orchestrator with
+`restart: unless-stopped`, where a non-zero exit is not a signal but a crash loop; a container
+restarting every few seconds buries the line that says what is wrong, and the state it complains about
+does not improve by being restarted. The honest limit of the explained/unexplained split is recorded
+rather than hidden: it is drawn from the **current** configuration, so events parked while a transport
+was live and then switched off read as explained. A sharper version would classify each row by the
+error the relay recorded on it, which needs a query that reads row text — not worth it for a state this
+rare.
+
+### The one test that had to change, and why that is the evidence
+
+`test_a_parked_event_is_counted` asserted `EXIT_ATTENTION` for a park. Under the default transport
+every park is now explained, so it was **rewritten rather than adjusted to keep passing**:
+`test_a_park_under_a_switched_off_bus_is_counted_and_not_a_fault` proves the count survives and the
+exit code does not, and `test_a_parked_event_under_a_configured_transport_needs_attention` proves the
+same park still fails when a transport is set. A behaviour change no test noticed would have been a
+behaviour change nobody chose. The new tests were then checked for teeth by breaking the two decisions
+they claim to pin — flipping the clean verdict from `debug` to `info`, and making `needs_attention`
+count an explained park again — which produced **exactly the three intended failures and no others**;
+both files were restored and confirmed byte-identical by SHA-256.
+
+### What this does not do — stated, not buried
+
+- **It does not deliver anything.** A log line reaches a person only if something reads the log, and
+  **nothing in this stack reads it.** Gap 22 is narrowed, not closed.
+- **The obvious next step is blocked, not skipped.** An HTTP route serving this same report cannot be
+  written without deciding who may see counts that `dead_letter_count`, `undelivered_counts` and
+  `fields_for_reseal` deliberately read **across tenants** — each docstring says scoping them to one
+  tenant would be "actively misleading". Tenant-scoping the route contradicts three written decisions;
+  serving it unscoped leaks other tenants' counts and their field primary keys. That is an owner
+  decision.
+- **Gap 25 is unchanged.** A default stack still parks every event; what changed is that the check now
+  says so without shouting, and runs on a timer.
+- **Gap 5 is untouched.** The `contract.ingested` consumer is still blocked on the same owner decision.
+- **No schema change.** `alembic` head stays `0006`.
+
+### Verified, and the limit of that verification
+
+Measured on the tree committed as `2572f53`, from the repository root: `ruff check .` → *All checks
+passed*; `ruff format --check .` → *109 files already formatted*; `mypy app` under `strict` → *no
+issues found in 61 source files*; `bandit -c pyproject.toml -r backend/app` → exit 0 with only the
+three expected `nosec B104` notices in `config.py`; `pytest -q` → **871 tests, 0 failures, 0 errors,
+15 skipped**, exit 0, counted from the JUnit XML rather than the progress dots. The fifteen skips are
+**13 MySQL unreachable, 1 symlink privilege, 1 Kafka opt-in** — unchanged in kind, which means the
+outbox and dispatch paths were proven on SQLite only again. `ruff check` caught three real errors
+before the gate did: `cli.py` still imported the names only the deleted `_attention_report` used, and
+an autouse fixture had a `yield` with no teardown.
+
 ## Next permitted step
 
 **F10 (step 6) is committed (`b344c17`), three gap-closing slices have landed since
@@ -4092,6 +4218,14 @@ frontend test runner, and no channel consented by default on a fresh database.
 has a runner — `vitest`, one `test` script, and a `frontend-test` hook in the commit gate —
 so the residue is narrower than the sentence reads but not gone: **one pure module is the
 whole of what runs**, and no component, browser or integration test exists for any screen.
+**Amended, not deleted (`D10-39`, `2572f53`):** the paragraph this one keeps narrowing ends
+by saying what is left is *not a missing feature and not a hardening pass* — still true, and
+one of the things left has stopped being nothing. The `doctor` check that counts invisible
+failures was a command with no schedule; it now has a worker of its own, logging one verdict
+per tick. What that does **not** change: nothing in this stack reads the log, so gap 22 is
+narrowed and not closed, and the obvious next step — an HTTP route serving the same report —
+is blocked on an owner decision about counts that three repository functions read **across
+tenants**, which the route cannot scope without contradicting them.
 
 - `app/db/models/` — every table in the flow now has a writer: `Contract`
   (`POST /contracts`), `ExtractedField` (`python -m app.cli extract`,
@@ -4231,8 +4365,11 @@ notification **retry** is too — the scheduler (`4e7dd5c`) now recovers a *defe
 row by itself, but a row parked `failed` or `suppressed` still sits until a human
 looks, and ~~nothing alerts when it does~~ — the residue of gap 22 is **narrowed after
 this record was signed** by `python -m app.cli doctor` (`D10-12`), which counts those
-rows and exits non-zero; what is still absent is anything that *runs* it, so a human
-still has to look; no live
+rows and exits non-zero; ~~what is still absent is anything that *runs* it, so a human
+still has to look~~ — **amended by `D10-39`, not deleted:** since `2572f53` a scheduled worker
+*does* run the check (`python -m app.workers.attention_watch`, five-minute default, one verdict
+per tick), so what is still absent moved one link down the chain: **nothing reads the log**, and
+a line on a timer is not an alert; a human still has to look; no live
 Ollama has answered anything; and the `review`, `agent` and `notification` routes
 have only ever been called by `TestClient`, because no screen talks to them yet.
 **Amended after this record was signed, not deleted:** `review` has a screen
@@ -4289,8 +4426,15 @@ MySQL, but a row that parks `failed` or `suppressed` still raises no alert (gap 
 Correctness under concurrency and visibility of failure are different problems, and
 only the first one moved. The second one has since moved a little: `doctor` (`D10-12`)
 makes the parked row **countable by a machine** and gives it an exit code, which is the
-half that was missing from the code. The half that is still missing is outside it — a
-schedule, and somewhere for the exit code to go.
+half that was missing from the code. The half that is still missing is outside it —
+~~a schedule, and somewhere for the exit code to go~~. **Amended by `D10-39`, not
+deleted:** since `2572f53` one of those two exists. `app/workers/attention_watch.py`
+runs the same check every `ATTENTION_POLL_INTERVAL_SECONDS` (300 by default), logs one
+verdict per tick, and the `attention` compose service keeps that process up. The other
+one is not narrowed at all, and it is the one that decides whether anyone finds out:
+the verdict is a **log line**, and nothing in this stack reads the log — no shipper, no
+alert rule, no dashboard query. A parked row still raises no alert, so a human still
+has to look, and a line on a timer is not an alert.
 
 ## GATE 2 — signed
 
@@ -4393,9 +4537,15 @@ sign-off, not footnotes:**
    concurrency moved at `c99c792`; *visibility of failure did not*.
    **Amended after the sign-off, not deleted from it:** `python -m app.cli doctor`
    (`D10-12`) now counts parked outbox rows and `failed`/`suppressed` notifications and
-   exits `EXIT_ATTENTION`, so failure is at least *observable by a machine*. The clause
+   exits `EXIT_ATTENTION`, so failure is at least *observable by a machine*. ~~The clause
    as signed stands in the part that matters — nothing runs that command, and no alert
-   reaches a person.
+   reaches a person.~~ **Amended again by `D10-39`, not deleted:** something *does* run it
+   now — `app/workers/attention_watch.py` on a five-minute timer, as a fourth compose
+   service (`2572f53`) — so the clause shrinks to its last link rather than standing whole:
+   **nothing reads the log**, so still no alert reaches a person, and the exit code is still
+   the only machine-readable form of the verdict. Note also that an *explained* park — a
+   default install with `EVENT_TRANSPORT=none` — is now counted and no longer failed, so
+   `EXIT_ATTENTION` no longer fires on that state at all.
 3. **Nothing has ever been sent to a real customer.** The shipped default transport
    refuses; SMTP has only spoken to a loopback relay this suite started and
    certified itself, so no handshake has chained to a public CA over a real network
