@@ -271,9 +271,10 @@ jobs:
   # The cheap file-shape hooks, plus `gitleaks` — which is bound to the `manual`
   # stage locally (D1-03) and therefore never ran automatically anywhere. The
   # hook is ordered to require Docker, which `ubuntu-latest` provides, so CI is
-  # the one place the documented `pre-commit run gitleaks --all-files` can be
-  # made mandatory. Runs with no npm/pip installs beyond pre-commit itself: each
-  # hook brings its own isolated environment from its pinned rev.
+  # the one place the documented command — `pre-commit run gitleaks --all-files
+  # --hook-stage manual`, the flag being required (D10-51) — can be made
+  # mandatory. Runs with no npm/pip installs beyond pre-commit itself: each hook
+  # brings its own isolated environment from its pinned rev.
   hygiene:
     name: hygiene + secret scan
     runs-on: ubuntu-latest
@@ -315,8 +316,17 @@ jobs:
 
       # Manual-stage hook, run by name. This is the command in the hook's own
       # comment, so CI and an operator run the same thing.
+      #
+      # `--hook-stage manual` is *required*, not decoration. `pre-commit run
+      # <id>` filters the named hook by stage as well, so naming a
+      # `stages: [manual]` hook without it is refused with `No hook with id
+      # 'gitleaks' in stage 'pre-commit'` and exit 1 — before any hook runs.
+      # That is the whole of run #1's failure (D10-51): the step died in the
+      # same second it started, which is the signature of a refusal, not a
+      # finding. A scan that had run and found a secret could not complete in
+      # zero seconds.
       - name: gitleaks
-        run: pre-commit run gitleaks --all-files
+        run: pre-commit run gitleaks --all-files --hook-stage manual
 
   # --------------------------------------------------------------------- gate
   # One required status check for branch protection, instead of six that have to

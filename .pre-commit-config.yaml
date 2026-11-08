@@ -87,7 +87,11 @@ repos:
     hooks:
       - id: gitleaks
         name: gitleaks (secret scan)
-        # Requires Docker. Run explicitly: pre-commit run gitleaks --all-files
+        # Requires Docker. Run explicitly:
+        #   pre-commit run gitleaks --all-files --hook-stage manual
+        # The stage flag is not optional. `pre-commit run <id>` filters by stage
+        # too, so naming this hook without it is refused with `No hook with id
+        # 'gitleaks' in stage 'pre-commit'` and exit 1 before anything runs.
         entry: zricethezav/gitleaks:v8.18.4 detect --source . --no-banner --redact --verbose
         language: docker_image
         pass_filenames: false
