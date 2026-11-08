@@ -4513,3 +4513,94 @@ statement about CI remains that its first real result is unknown.
 rationale comment, and no other file. No dependency, no lockfile line, no application source, no test,
 no migration (`0006` stays head). The `STATUS.md` claims that CI's every command is *read, not observed*
 are amended by the follow-up `docs(status)` commit, the convention `D10-40` through `D10-48` all used.
+
+### D10-50 — The third screen test, and the first whose state is the address
+
+`D10-45`'s fourth limit said porting this harness was *three harnesses rather than a loop*, because
+the escalation and agent screens import `useSearchParams` and `Suspense` and the review queue did
+neither. This slice builds the first of those three. It is not the cheapest screen left — the detail
+page would have been simpler — but it is the one that tests the harness rather than the page: if a
+screen whose entire filter state lives in the address can be pinned in `jsdom`, the remaining ports
+are copies of a proven shape.
+
+**What is being pinned, and why it needed its own file.** `contract-scope.test.ts` proves the parser
+round-trips and proves nothing about whether a *page* obeys it. `D10-36` moved both filters into the
+query string on the promise that the back button, a bookmark and a shared link all keep working;
+until this commit that promise was prose in a comment. The rules the source states and nothing had
+checked: the working queue asks for `open` + `in_progress` and **omits** `contractId` rather than
+sending an `undefined` one; a scoped address narrows that read and names the contract; an address
+naming something that cannot be a contract performs **no read at all** — falling through to the
+tenant-wide queue would answer a question nobody asked; each navigation **carries the other filter**
+instead of dropping it; a typed id is submitted trimmed and its unusable form is never navigated;
+`claim` sends no `status`, because the server derives the transition; `resolve` echoes the `version`
+it was shown and **omits an empty note** rather than storing a note that says nothing; resolving is
+not responding — the reply route is called with a channel and its outcome is reported on the page
+because the card usually disappears with it; the two `409` codes are named separately; lateness is
+the server's `overdue` flag; and an outage never renders as an empty queue.
+
+**The harness adds no dependency and no new pattern.** The `QueryClientProvider` is real with a
+client built per test, so one test's cache cannot answer another's question. The message catalogue is
+real, so every assertion is against the string a user reads. `AuthProvider` and the session store are
+real, because the role gating is read from the session and not from a prop. Only
+`escalations.queue`, `escalations.update` and `escalations.recordResponse` are replaced, each through
+`importOriginal` so the genuine `ApiError` survives — the screen branches on `instanceof` and on
+`cause.code`. `retry: false` is the one deviation from the shipped provider and it is recorded for
+the same reason `D10-45` recorded it: these tests ask *how often the screen asked*, and a retry policy
+would answer that question in its place.
+
+**`next/navigation` is the second double, and it is where this screen differs.** There is no Next
+runtime under `jsdom`, so `useSearchParams` reads a **mutable address the test writes**. That is a
+real limit and it is also the right shape for these assertions: the screen must derive what it asks
+the server from the address alone, so a test that writes the address is exercising exactly the input
+the rule is about, and a real router would only add a rendering pass to the same question. What it
+cannot prove is stated below rather than implied away — `router.replace` being *called* is not Next
+acting on it, so a navigation test asserts the URL the screen asked for and then writes that URL
+itself before re-rendering. The seam is the request, not the transition.
+
+**Teeth were measured by breaking the screen, and all four breakages were reverted afterwards.**
+Four mutants, four *different* tests failing:
+
+1. `enabled: !scopeIsInvalid` → `enabled: true` failed *refuses to read anything when the address
+   names an impossible contract* — which is the assertion that the no-read rule is load-bearing
+   rather than decorative.
+2. The resolved toggle dropping `withContractScope` failed *filters by navigating, carrying the other
+   filter with it* — it navigated to `?resolved=1` where the test wanted `?contract=12&resolved=1`.
+3. `resolution_note: trimmed` with the conditional spread removed failed *resolves with the version
+   it was shown and omits an empty note* — the request carried `resolution_note: ""` where the route
+   accepts a note only alongside the transition.
+4. Recomputing lateness as `new Date(row.sla_deadline).getTime() < Date.now()` failed *takes lateness
+   from the server rather than recomputing it*, which is `D10-20`'s derived-not-stored rule reaching
+   the browser.
+
+All four were reverted with `git restore` and the page is **byte-identical to `HEAD`**
+(`git diff HEAD --exit-code`), which is the check that matters: a mutation pass that ends with a
+mutated tree proves the opposite of what it claims.
+
+**One defect found in the test itself, and the screen was left alone.** A card's title was being
+derived from a row whose `status` the test had overridden, so the assertion looked for `· open` on a
+card rendering `· in progress` — the test was wrong and the page was right. It was fixed in the test
+rather than accommodated in the source, which is the only direction that keeps a pin honest.
+
+**Verified.** The spec is **25/25**; the whole frontend suite is **122 passed in 7 files** (was 97 in
+6, so the new file accounts for all 25); the commit gate ran all nineteen hooks green on the exact
+tree that landed, including `frontend tests (vitest run)` and `frontend typecheck (tsc --noEmit)`.
+
+**Honest limits, four.** (1) **`jsdom`, not a browser** — no layout, no real navigation, no `fetch`,
+so this proves the screen's half of the seam and not the server's, and no screen test in this
+repository puts a real screen in front of a real server. (2) **The router is a double and the
+assertion stops at the request** — `replace` being called is not Next honouring it, and the `Suspense`
+boundary is present but a `jsdom` fallback render is not a streaming pass. (3) **The `409` envelope is
+a fixture here** — `api.test.ts` pins the client's parse and `smoke_journey.py` pins the server's
+bytes, so the shape is proven from both ends and still not across. (4) **Rules, not branches** — this
+pins the behaviour the source states in prose; it is not a coverage figure. Of the six screens still
+without a test, **two need this harness** — the agent screen and notifications, the only other
+`page.tsx` files importing `useSearchParams` (checked by search, not recalled) — and both are
+untouched; the contract detail page doubles route params instead, which is a related but different
+double. `D10-45`'s prediction named the escalation and agent screens; it was right about the shape and
+incomplete about the count.
+
+**Landed as** `test(web)` `dd41c04` — one new file, 718 insertions, and **no source change**: the
+screen already behaved this way and the spec exists to keep it that way. No dependency, no lockfile
+line, no backend file, no migration (`0006` stays head). `STATUS.md`'s *two screens of nine* claims,
+and `D10-44`'s *React Query is still unexercised*, are amended by the follow-up `docs(status)`
+commit, the convention `D10-40` through `D10-49` all used.

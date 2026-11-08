@@ -690,6 +690,12 @@ build**, because they import `useSearchParams` or route params and TanStack Quer
 queue, the escalation queue and the detail page are three different harnesses rather than one; React
 Query is still unexercised; and only the two static locales are covered, so a locale added later with
 a missing key would fail at render rather than here.
+**Amended by `D10-50`, not deleted:** ~~React Query is still unexercised~~ stopped being true at
+`D10-45` and is now false twice over, since two screens build a real `QueryClientProvider` in a test;
+~~one screen of nine~~ is **three**; and the *three different harnesses* this paragraph predicts have
+been built two of three, so the address-and-`Suspense` shape is no longer hypothetical. What does not
+move: the six remaining screens each still need their own harness, and a wired screen is still not a
+behaving one.
 
 **Then the first screen that can *finish* work gets a test** (`D10-45`, one commit: `test(web)`
 `3b16d9a`): `D10-44` left one screen of nine tested and eight open, and the cheapest next one is not
@@ -732,6 +738,17 @@ shape the client promised to read, over a process boundary rather than an in-pro
 seam is proven from both ends and not across, which is a smaller claim than *client and server agree*.
 The cache-key question beside it is untouched, and so is the last clause: the viewer gate is still the
 client's opinion of a role another suite decides.
+**Amended a second time by `D10-50`, not deleted:** ~~two screens of nine~~ becomes **three of nine**,
+and the prediction that follows it is now the sentence to read carefully —
+~~the escalation and agent screens need `useSearchParams` and `Suspense`, which this page did not, so
+porting is three harnesses rather than a loop~~ — **the prediction was right and one of the three is
+built**: `escalations/page.test.tsx` is the address-and-`Suspense` harness, 25 cases, no new
+dependency and no provider this page did not already use. So *three harnesses rather than a loop* has
+been **started rather than finished**, and what remains is not only what the prediction named:
+`useSearchParams` appears in exactly three `page.tsx` files (checked, not recalled) — agent,
+escalations and notifications, so the screens that still need **this** harness are the agent
+screen and notifications, not the detail page, which doubles route params instead — a related
+but different double. *Both wired rather than working* still covers all three tested screens.
 
 **Then the gate gets somewhere to run that is not one person's machine** (`D10-46`, one commit: `ci`).
 Every check in this project had run from a developer's machine, and two had never run automatically
@@ -865,6 +882,47 @@ executed even here** — `mysql-integration` needs a MySQL service container, `g
 is inference from both `package.json` files rather than an executed run; and **runnable is not green** —
 it proves the commands can execute, not that the pipeline passes. The branch stands **121 commits ahead
 of `origin/main`** at this `docs(status)` commit, re-counted rather than carried forward.
+
+**Then the third screen test, and it is the first whose state is the address** (`D10-50`, one commit:
+`test(web)` `dd41c04`). `D10-45` said porting this harness was *three harnesses rather than a loop*
+because the escalation and agent screens need `useSearchParams` and `Suspense`, and it declined to
+find out which. This slice builds the first of the three: `escalations/page.test.tsx`, **25 cases**,
+pinning rules the source states in prose and nothing had checked — the working queue asks for
+`open` + `in_progress` and **omits** `contractId` rather than sending an `undefined` one; an address
+naming something that cannot be a contract performs **no read at all**, because falling through to
+the tenant-wide queue would answer a question nobody asked; each navigation **carries the other
+filter**; a typed id is submitted trimmed; `claim` sends no `status`, `resolve` echoes the `version`
+it was shown and **omits an empty note**; resolving is not responding; the two `409` codes are named
+separately; lateness is the server's `overdue` flag rather than arithmetic in the browser; and an
+outage never renders as an empty queue. **The harness adds no dependency**: the `QueryClientProvider`
+is real with a client built per test, the message catalogue is real, `AuthProvider` and the session
+store are real because the role gate is read from the session, and only `escalations.queue`,
+`escalations.update` and `escalations.recordResponse` are replaced — each through `importOriginal` so
+the genuine `ApiError` survives, since the screen branches on `instanceof` and on `cause.code`.
+`next/navigation` is the second double, and it is where this screen differs from the other two: there
+is no Next runtime under `jsdom`, so `useSearchParams` reads a **mutable address the test writes**, and
+a navigation assertion checks the URL the screen asked for and then writes that URL itself — which
+makes the seam the *request*, not the transition. **Teeth were measured by breaking the screen, and all four breakages were reverted** —
+four mutants, four *different* tests failing: `enabled: !scopeIsInvalid` → `true`; the resolved toggle
+dropping `withContractScope`; `resolution_note: trimmed` without the conditional spread (it sent
+`""`); and lateness recomputed from `sla_deadline` instead of the server's flag. **One defect was
+found in the test itself and fixed in the test** — a card's title was derived from a row whose `status`
+the test had overridden, so it looked for `· open` on a card rendering `· in progress` — the test was
+wrong and the page was right, and accommodating it in the source would have broken the pin. **Verified**:
+the spec **25/25**, the frontend suite **122 passed in 7 files** (was 97 in 6, so the new file accounts
+for all 25), and `git diff HEAD --exit-code` after the reverts — which is the check that matters, since
+a mutation pass that ends with a mutated tree proves the opposite of what it claims. **No source
+change, no dependency, no lockfile line, no backend file, no migration** (`0006` stays head). The
+honest limits: **`jsdom`, not a browser** — no layout, no real navigation, no `fetch`, so this proves
+the screen's half of the seam and not the server's, and no test in this repository puts a real screen
+in front of a real server; **the router is a double and the assertion stops at the request**; **the
+`409` envelope is a fixture here**, pinned from both ends by `api.test.ts` and `smoke_journey.py` and
+still not across; and **rules, not branches** — it pins the behaviour the source states, it is not a
+coverage figure, and the two screens that still need this harness are untouched: **the agent screen
+and notifications**, the only other `page.tsx` files importing `useSearchParams` (grep, not memory —
+the detail page doubles route params instead, which is a different double). The
+branch stands **123 commits ahead of `origin/main`** at this `docs(status)` commit, re-counted rather
+than carried forward.
 
 ## Phase history
 
@@ -4772,7 +4830,7 @@ it reads. Nothing about *behaviour* moved either: `jsdom` is still a DOM, the ro
 and `router.replace` being called is still not Next acting on it.
 **Amended a fifth time, by `D10-45`, not deleted — and the qualifier moves again, by a smaller step
 than the fourth.** A second page renders under a test: `review/page.test.tsx`, 16 cases. So ~~one
-screen of nine has one, and eight do not~~ becomes **two have one, and seven do not.** The distinction
+screen of nine has one, and eight do not~~ becomes ~~**two have one, and seven do not.**~~ The distinction
 this paragraph exists to keep is kept, and one of the fourth amendment's own sentences is **superseded
 by evidence rather than by preference**: it said *the screen tested is the one that needs the least —
 no query client, no route params, no list to page*, and the review queue is exactly a query client and
@@ -4787,6 +4845,21 @@ than collapsed: a real `uvicorn` now serves a real socket and `smoke_journey.py`
 → review → decide → notify over HTTP. So the sentence is not withdrawn — `jsdom` is still a DOM and a
 wired screen is still not a behaving one — but *no server anywhere in this repository has been real* is
 no longer true, and the two halves must be quoted separately from here on.
+**Amended a seventh time, by `D10-50`, not deleted — and it returns to the count the sixth amendment
+stepped away from.** A third page renders under a test: `escalations/page.test.tsx`, 25 cases. So
+~~two have one, and seven do not~~ becomes **three have one, and six do not.** The distinction this
+paragraph exists to keep is kept, and the fifth amendment's own concession is now **superseded by
+evidence for the second time**: it narrowed *"the eight that remain are exactly the ones that need
+more"* to *the query client is now proven buildable*, and the escalation queue needs the query client
+**and** `useSearchParams` **and** `Suspense` — the address-as-state shape `D10-45` called *three
+harnesses rather than a loop* — and it still cost no dependency and no provider the review page did
+not already use. So the harness that was the reason not to port is now built once, and the two
+screens that still need **this** one — the agent screen and notifications, the only other `page.tsx`
+files importing `useSearchParams` — are copies of a proven shape rather than unknowns. What does not
+move, and is the whole point of the chain: `jsdom` is still a DOM, the router is still a **double
+holding a mutable address**, and a screen that is wired is not a screen that behaves — the escalation
+page asserts the URL it asked for and then writes that URL itself, because `router.replace` being
+called is not Next acting on it.
 **Amended, not deleted (`D10-39`, `2572f53`):** the paragraph this one keeps narrowing ends
 by saying what is left is *not a missing feature and not a hardening pass* — still true, and
 one of the things left has stopped being nothing. The `doctor` check that counts invisible
