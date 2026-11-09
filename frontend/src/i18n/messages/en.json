@@ -324,7 +324,7 @@
     "detailForbidden": "Your role cannot read this contract.",
     "detailConsentNote": "Consent is recorded from the list, so one screen owns that write.",
     "detailRelatedHeading": "Related reads",
-    "detailRelatedNote": "Each read below asks its own route with this contract's id, so the numbers are this contract's. The links open those screens unfiltered: none of them reads a contract out of its address, and a query string would look like a filter while quietly showing everything.",
+    "detailRelatedNote": "Each read below asks its own route with this contract's id, so the numbers are this contract's. The links carry that same id, so each screen opens already filtered to this contract.",
     "detailDecisionsLabel": "Agent decisions",
     "detailDecisionsCount": "{count} decisions are recorded for this contract.",
     "detailLatestDecision": "Newest recommendation: {channel}.",

@@ -127,10 +127,11 @@ const STATUS_TONES = {
  * * **It does not compute "expires in N days".** That number is measured on the
  *   *contract's* clock, which is why the row carries a time zone; deriving it here
  *   would use the reader's zone and could be a day out.
- * * **It does not filter the other screens.** The related-reads card asks each of
- *   those routes with this contract's id, but the links open those screens
- *   unfiltered: a query string they ignore would look like a filter and quietly
- *   show every contract.
+ * * **It does not own another screen's filter.** The related-reads card asks each of
+ *   those routes with this contract's id, and links them with the same id through
+ *   `withContractScope`, so a link cannot spell the parameter differently from the
+ *   `readContractScope` the target screen parses with. Applying the filter stays
+ *   that screen's job; this page only hands over the id.
  */
 export default function ContractDetailPage() {
   const t = useTranslations();
