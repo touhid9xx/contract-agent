@@ -4973,3 +4973,93 @@ and not verified against `backend/app/api/v1/contracts.py`; the `404`/`403`/offl
 screen translates are fixtures; date formatting is asserted through the same `Intl` calls the screen
 makes, pinning the join and the zone rather than locale output; *wired is not behaving* still holds;
 and **two of nine screens still have no component test** — home and users.
+
+### D10-56 — The eighth screen test: rules that hold only because of who is asking
+
+The **users admin** screen is the eighth page under test and the first whose subject is **permission
+rather than data**: almost every rule it has is a statement about what one account may do to another.
+It is also the third of the three shapes `D10-54` named — `useParams`, `usePathname`, and **no router
+at all** — so that sentence is now *spent* in full rather than extended a third way: the spec doubles
+exactly one module, `@/lib/api`, and `vi.mock("next/navigation")` is not in the file at all. What 37
+cases against a 519-line screen spend themselves on is the pair of rules that only exist between two
+accounts — **an admin sees the list and a viewer never learns it exists**, and **the caller's own row
+carries no controls** — plus the one write that returns a secret it can never return again. One of the
+nine remains: home, which is the screen that reads `usePathname`.
+
+**The role gate is on the query, not on the controls.** `isAdmin` is computed once (`page.tsx:85`) and
+`users.list` is gated by `enabled: isAdmin` (`page.tsx:98`), so an operator who is not an admin issues
+**no request at all** and reads one sentence instead of a failed one. The spec therefore asserts the
+absence — *asks the route nothing* — rather than an error rendering, which is the same distinction
+`D10-55` drew about `validId`: a gate is proven by the read that never happens, not by the message that
+follows one. Mutating `enabled: isAdmin` to `enabled: true` fails the case named for it, 1 of 37.
+
+**The self row is the other rule that needs a second account to exist.** `canReset = !isSelf &&
+row.is_active` (`page.tsx:429`) hides the reset on the caller's own row — because changing your own
+password is `change-password`, not an admin reset — and on a deactivated row, because the server will
+refuse that and the screen should not offer what will be refused. The two ends are pinned separately:
+one case finds **no control at all** on the self row, another finds the deactivated row *saying* it
+cannot be reset instead of offering it. Dropping `!isSelf` fails the first, 1 of 37, and each rule is
+pinned exactly once — the trade `D10-52` through `D10-55` all recorded, and this is the fifth
+slice in that row.
+
+**`MIN_PASSWORD_LENGTH = 12` is a hint and the server is the gate, which is pinned as a round trip.**
+The create button is disabled on `create.isPending || email.trim() === "" || password === ""`
+(`page.tsx:248`) — **presence**, not length — so a short password still **reaches the server**, and the
+screen's job is to translate the `422` it gets back rather than to pre-empt it. That is deliberate: a
+second copy of the floor in the client is a second number that can drift from
+`backend/app/api/v1/auth.py`. The spec asserts the short password is *sent* and the `422` is
+translated, and separately that the hint names the server's floor, so the number the page shows and the
+number the route enforces are one claim in two places rather than two policies. The update path is
+pinned the same way in the opposite direction: `users.update` sends **only the changed field**, never
+both, so a role change cannot silently rewrite `is_active`.
+
+**Then the finding this slice is worth recording for: one mutant survived, and the test that let it
+through had been passing for the wrong reason.** Three mutants were caught on the first measurement;
+the fourth — `email.trim() === ""` → `email === ""` at `page.tsx:248` — **survived**, with the case
+named *keeps the button disabled for an email that is only whitespace* still green. The cause is not
+the screen. The field is `<input type="email">`, and the value sanitization algorithm the HTML spec
+gives that input type **empties a value that is only whitespace**, so `fireEvent.change` with `"   "`
+leaves `input.value === ""` and the two predicates are indistinguishable. That was proven *outside* the
+suite (one `node -e` running jsdom directly, printing `""` for `"   "` and `"a@b.test"` for
+`"  a@b.test  "`) and then reproduced by re-running the mutant, not inferred from the failure. The fix
+is the value the guard actually exists for: **U+00A0**, which survives the sanitizer and is still
+removed by `String.prototype.trim()` — the paste-from-a-word-processor case. Both whitespace cases now
+type `NBSP` (`page.test.tsx:92`, used at 404 and 423) and the mutant fails. A guard can be pinned by a
+test that cannot tell it from its replacement; only a mutation run tells those apart, and a green test
+is not the evidence.
+
+**A harness fact that cost thirteen type errors because it was assumed rather than checked: there is no
+`jest-dom` here.** `toBeDisabled`, `toBeEnabled`, `toHaveValue` and `toHaveAttribute` do not exist —
+the grep returns nothing — and every earlier spec uses `getAttribute(...)` and the raw `.disabled`
+property for exactly that reason. The file was written assuming the matchers, typechecked into thirteen
+errors, and finished by converting them rather than by adding a dependency. One grep before the first
+assertion would have cost nothing, which is the whole of the lesson.
+
+**Two initial run failures, both the test's and neither the screen's**, found by reading the screen
+rather than guessing: an **empty** organisation renders the empty sentence, but a lone **self** row
+still renders a count, and one case had conflated the two — they are now two cases (*gives an empty
+organisation its own words instead of a count*, and *counts the caller's own row like any other*, which
+expects `1`). And the `bn` case awaited `users.title`, which renders **before** the list resolves, so
+it could pass or fail on timing; it now awaits the account's email first and only then asserts the
+title and the `/bn` home link. The second is `D10-55`'s locale defect in a new shape: a test that
+awaits translated chrome is a test that can run ahead of its own data.
+
+**Four mutation passes, four catches, each reverted inside the turn** — `enabled: isAdmin`,
+`!isSelf && row.is_active`, `email.trim() === ""`, and `email: email.trim()` — with each revert proven
+by `git diff --stat HEAD` printing **nothing**, which is `D10-54`'s false-green lesson still applied
+rather than re-learned. **Landed as** `test(web)` `d3c84bb` — one new file, 822 insertions, **no source
+change**: `frontend/src/app/[locale]/users/page.test.tsx` is the only path in `git show --stat HEAD`.
+No dependency, no lockfile line, no backend source, no migration (`0006` stays head). Verification: the
+spec **37/37**, the full frontend suite **286 passed in 12 files** (was 249 in 11, so the new file
+accounts for every added case and nothing that existed changed), all nineteen pre-commit gates green
+and commitlint passed.
+
+`STATUS.md`'s *seven of nine*, *two of the nine* and *two of nine* claims are amended in place by
+the follow-up `docs(status)` commit, in four regions, rather than left to drift.
+
+**The honest limits.** The rules are proven against a **doubled API** — `jsdom`, no browser, no router,
+no server; `UserSummary` fixtures are **pinned from the screen's side** and not verified against
+`backend/app/api/v1/auth.py`; the `422` and the two `409` envelopes the screen translates are
+**fixtures**; the one-time password is proven to survive a refetch of the list, not to be absent from
+every later render; *wired is not behaving* still holds; and **one of nine screens still has no
+component test** — home.

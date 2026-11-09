@@ -620,6 +620,15 @@ untouched by it, because the component tested is the auth provider and not a pag
 page, 11 cases — so *the screens are still hand-tested* is now true of eight of the nine rather than
 all nine. What survives word for word is *React Query is not exercised at all*: the login page issues
 no query, so the limit this paragraph states most sharply is the one this slice did not touch.
+**Amended again by `D10-56`, not deleted:** ~~is now true of eight of the nine~~ went **five
+slices** without an amendment — `D10-45`, `D10-50`, `D10-52`, `D10-54` and `D10-55` each added a
+screen test and none came back to this sentence — so the honest count is now **one of the nine**,
+home. And the clause this paragraph put its weight on, *React Query is not exercised at all*, had
+already stopped being true at `D10-45` rather than surviving word for word: the review queue is a
+`useQuery` and an infinite list. What survives from the paragraph unchanged is the limit it was
+actually about — **a doubled API behind `jsdom` is not a server** — so eight tested screens are
+eight wired screens, and the staleness is the second thing this chain has recorded about a count
+that was correct when it was written.
 
 **Then the first component gets a test** (`D10-43`, one commit: `test(web)` `16803d0`): two
 slices in a row had closed with the same sentence — *no component, browser or integration test* — and
@@ -793,6 +802,19 @@ the count change does **not** say is that the screen is five harnesses — it is
 under one render, so what the cases buy is the **independence** of the reads (four can be failing while
 a fifth succeeded), not a sixth way to prove that a query works. *Both wired rather than working* now
 covers seven tested screens.
+
+**Amended a seventh time by `D10-56`, not deleted:** ~~seven of nine~~ becomes **eight of nine**,
+and the prediction above is **spent rather than extended** — ~~home, users~~ becomes **home**, because
+`users/page.test.tsx` renders the users screen: 37 cases, 822 lines, no new dependency and no provider
+`D10-50` did not already pay for. It is the third of the three shapes `D10-54` named and the only one
+that needed nothing new: the page reads **no router at all**, so this spec doubles `@/lib/api` and
+nothing else, and the group carrying a `vi.mock("next/navigation")` does not grow. What this count
+change buys is narrower than the previous six and worth saying plainly: the users screen's subject is
+**permission**, so its cases pin **the read that never happens** for a viewer (`enabled: isAdmin`) and
+the controls that are **absent** on the caller's own row — a gate proven by absence, which is a
+different kind of assertion from the seven screens above it. *Both wired rather than working* now
+covers eight tested screens, and the phrase is at its least reassuring here: eight screens that are
+wired are eight screens that have not run in a browser.
 
 **Then the gate gets somewhere to run that is not one person's machine** (`D10-46`, one commit: `ci`).
 Every check in this project had run from a developer's machine, and two had never run automatically
@@ -1168,6 +1190,38 @@ still have no component test** — home and users — which are not shaped alike
 for every added case and nothing that existed changed), all nineteen pre-commit gates green and
 commitlint passed. The branch stands **4 commits ahead of `origin/main`** after this `docs(status)`
 commit, re-counted rather than carried forward.
+
+**Then the eighth screen test, and the first whose subject is permission rather than data**
+(`D10-56`, one commit: `test(web)` `d3c84bb`). The users admin screen is the eighth of the nine and the
+third of the three shapes `D10-54` predicted: it reads **no router at all**, so its spec doubles one
+module and nothing else. Its rules are mostly **absences**, which is why it does not look like the
+seven before it. `isAdmin` gates the **query** (`enabled: isAdmin`, `page.tsx:98`), so an operator who
+is not an admin issues no read and reads one sentence instead of a failed one — the spec asserts *asks
+the route nothing*, not an error. `canReset = !isSelf && row.is_active` (`page.tsx:429`) hides the
+reset on the caller's own row and on a deactivated one, pinned as two separate cases: no control at
+all, and words rather than an offer. `MIN_PASSWORD_LENGTH = 12` (`page.tsx:29`) is a **hint and not a
+gate** — the create button tests presence, so a short password is **sent** and the server's `422` is
+translated, keeping one floor rather than two — and `users.update` sends only the field that changed,
+so a role change cannot rewrite `is_active` as a side effect. **Four mutation passes, four catches, but
+one only after the test was repaired:** `email.trim() === ""` → `email === ""` **survived** the first
+run because the field is `<input type="email">` and the HTML sanitizer empties a whitespace-only value,
+making the two predicates indistinguishable — proven outside the suite with `node -e` and jsdom, then
+reproduced by re-running the mutant. Both whitespace cases now type **U+00A0**, which survives the
+sanitizer and is still trimmed, and the mutant fails. Two initial run failures were the test's own, not
+the screen's: an empty organisation and a lone self row were conflated (the count still renders for one
+row), and the `bn` case awaited chrome that renders **before** the list resolves. A harness fact cost
+thirteen type errors because it was assumed rather than checked — **there is no `jest-dom`** here, so
+`toBeDisabled`, `toHaveValue` and `toHaveAttribute` do not exist and every assertion uses
+`getAttribute(...)` or `.disabled`. **No dependency, no lockfile line, no backend source, no source
+change at all, no migration** (`0006` stays head). The honest limits: the rules are proven against a
+**doubled API** — `jsdom`, no browser, no router, no server; `UserSummary` fixtures are **pinned from
+the screen's side** and not verified against `backend/app/api/v1/auth.py`; the `422` and two `409`
+envelopes are fixtures; the one-time password is proven to survive a refetch of the list, not to be
+absent from every later render; *wired is not behaving* still holds; and **one of nine screens still
+has no component test** — home. Verification: the spec **37/37**, the full frontend suite **286 passed
+in 12 files** (was 249 in 11, so the new file accounts for every added case and nothing that existed
+changed), all nineteen pre-commit gates green and commitlint passed. The branch stands **6 commits
+ahead of `origin/main`** after this `docs(status)` commit, re-counted rather than carried forward.
 
 ## Phase history
 
@@ -5154,6 +5208,21 @@ is the constant through all eleven amendments and is what *wired is not behaving
 What eleven amendments have each kept, and this one keeps: `jsdom` is still a DOM, and the `404`/`403`
 and offline envelopes the screen translates are **fixtures pinned from the screen's side** — asserted
 here and not verified against `backend/app/api/v1/contracts.py`.
+**Amended a twelfth time, by `D10-56`, not deleted — and the count returns an eighth time.** An
+eighth page renders under a test: `users/page.test.tsx`, 37 cases. So ~~seven have one, and two do
+not~~ becomes **eight have one, and one does not.** This amendment is the third third of the tenth
+amendment's shape sentence and therefore **spends** it rather than narrowing it: contract detail read
+`useParams`, home reads `usePathname`, and this screen reads no router at all — so *the three screens
+left are shaped differently from each other* has now been right three times out of three, which is the
+only prediction in twelve amendments that was ever made and never had to be withdrawn. What this one
+adds to the chain is a different kind of case rather than a different harness: with permission as the
+subject, most of its rules are **absences** — a viewer's read that is never issued, controls that are
+not rendered on the caller's own row — so a chain that has so far counted screens now holds a screen
+whose assertions are largely about what the DOM does **not** contain. `jsdom` is still a DOM, and the
+`422` and two `409` envelopes the screen translates are **fixtures pinned from the screen's side** —
+asserted here and not verified against `backend/app/api/v1/auth.py`. One screen is left, and it is the
+one that reads `usePathname`.
+
 **Amended, not deleted (`D10-39`, `2572f53`):** the paragraph this one keeps narrowing ends
 by saying what is left is *not a missing feature and not a hardening pass* — still true, and
 one of the things left has stopped being nothing. The `doctor` check that counts invisible
@@ -5547,10 +5616,15 @@ sign-off, not footnotes:**
    build now renders **every** app route once per locale in a real Next.js Server Component pass, so
    each screen has been *rendered* by the framework and not merely typechecked — eleven of twelve app
    routes produce static HTML, the twelfth being `/contracts/[id]`, which needs a path parameter and
-   is therefore the one screen a build still cannot render. Two of the nine are additionally driven in
-   `jsdom` (`D10-44`, `D10-45`). Neither is a browser: nothing has been hydrated, clicked or
-   navigated, and no screen has rendered with data behind it, so the residue stands — smaller, and
-   now with an account of what it costs.
+   is therefore the one screen a build still cannot render.
+   **Amended by `D10-56`, not deleted:** ~~two of the nine are additionally driven in `jsdom`
+   (`D10-44`, `D10-45`)~~ becomes **eight of the nine** — `D10-44`, `D10-45`, `D10-50`, `D10-52`,
+   `D10-54`, `D10-55` and `D10-56` — home alone excepted. The count was correct when it was written
+   and was never revisited while five further screen tests landed — the same stale-count failure the
+   amendment chains above keep recording.
+   Neither is a browser: nothing has been hydrated, clicked or navigated, and no screen has
+   rendered with data behind it, so the residue stands — smaller, and now with an account of what
+   it costs.
 6. ~~**`normalized_value` is still plaintext** (gap 20) — the one place a shipped
    column contradicts "no raw PII at rest", and it needs a decision (encrypt +
    compare on a blind index, or keep it and record the exception), not a patch.~~
