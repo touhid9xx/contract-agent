@@ -5214,3 +5214,63 @@ nothing.
 **Landed as** `docs(web)` `8eecdd7` — one file, a comment replaced, **no behaviour change**: no
 regex, no branch and no return value was touched, and the module's own cases were not edited to
 match the new wording.
+
+### D10-60 — The third copy of a false reason, crediting a line that cannot do the job
+
+`contracts/[id]/page.tsx` justified its id guard with a sentence that named the wrong line and the
+wrong reason: *"The route segment is a string. `Number.parseInt` is deliberate over `Number`: the
+server's path parameter is an `int`, so `12abc` must be an invalid id rather than silently reading as
+12, and the empty string must never become 0."* Two claims, and neither survives being measured.
+
+**The conversion cannot refuse a tail.** Measured, not recalled:
+
+| Expression | Value |
+| --- | --- |
+| `Number.parseInt("12abc", 10)` | **12** |
+| `Number("12abc")` | `NaN` |
+| `Number("")` | 0 |
+| `Number.parseInt("", 10)` | `NaN` |
+| `Number.parseInt("07", 10)` | 7 |
+
+So `Number.parseInt` reads `"12abc"` as twelve exactly as `Number` would have, and the comment
+credited it with a refusal performed one line below by `/^\d+$/`. Split the two shapes apart and
+the argument for `parseInt` over `Number` disappears with the claim: the only input on which the two
+functions differ *here* is the empty segment, `Number` reading it as 0 and `parseInt` as `NaN` — and
+the empty segment already fails the shape test. **On every string the guard admits, the two agree**,
+which makes the conversion a plain cast. It is left as `Number.parseInt` because removing it changes
+nothing observable; the record says swapping it for `Number` would be behaviour-neutral, so a reader
+may do it without fear rather than being told it is load-bearing.
+
+**`int` was never the reason, and `D10-59` had already proved it.** The second claim — that the
+server's `int` path parameter forces a whole-digit rule — is the identical inference `D10-59`
+measured and found false: `GET /api/v1/contracts/01` answers **200**. So the same false reason that
+was removed from `contract-scope.ts` survived here in the third place, carrying an extra error of its
+own. This is `D10-58`'s shape again with a longer fuse: one fact in three places, two of them
+attended to, the third reading to anyone who opens the file.
+
+**What it settles for the open call, and what it does not.** Splitting the guards by server
+behaviour: this page's `/^\d+$/` admits `"07"` and reads it as contract 7, which is what the server
+does with `/contracts/01`, so **this is the guard that matches the API**. `contract-scope.ts` refuses
+a padded id, which makes it the address bar's own narrower convention. The divergence `D10-55`
+recorded therefore stays open — it is still a product call about what an address means — but *which
+side deviates from the API* is no longer undecided, and it is not the side the earlier reasoning
+implied.
+
+**No behaviour change.** One doc comment replaced: **23 insertions, 3 deletions, every changed line
+inside `/** ... */`**, no regex, branch, return value or query key touched, and no spec edited to
+match the new wording. The frontend suite is **309 passed in 13 files**, the same count as before,
+which is the expected result for a comment: nothing asserts the sentence that changed. No dependency,
+no lockfile line, no backend source and no migration; `alembic` head stays `0006`.
+
+**The tooling lesson, which cost two corrupted files.** The replacement text was originally written
+with the shape test quoted between backticks, and `edit_file` applies a replacement through
+`String.replace`, where a dollar sign immediately followed by a backtick means *"the portion of the
+input before the match"*. The file's own header was therefore spliced into the middle of the comment
+— **271 syntax errors**, and the tool's echoed region showed it plainly as a comment fused to the
+first line of the module. Restored with `git checkout -- <path>`, re-read, retried, corrupted again
+the same way; the third attempt used slash-delimited regexes, which cannot contain that sequence, and
+landed. Both recoveries were a restore and a re-read, never a hand repair of the mangled text, and
+the change was trusted only after `git diff --stat` showed nothing outside the comment. A replacement
+string is pattern syntax, not literal text.
+
+**Landed as** `docs(web)` `ef21e47` — one file, comment-only, **no behaviour change**.

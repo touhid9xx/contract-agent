@@ -1331,6 +1331,31 @@ re-counted rather than carried forward. The lesson is `D10-57`'s and `D10-58`'s 
 fuse: a sentence that reasons **from** a premise is not checked by confirming the premise — `int` and
 `gt=0` were both exactly as described, and the claim built on them was still false.
 
+**Then the same false reason in the third place, crediting a line that cannot do the job**
+(`D10-60`, one commit: `docs(web)` `ef21e47`). `D10-58` found one fact in three places and fixed the
+copy a reader sees; `D10-59` measured the shared reason false in `contract-scope.ts`; this slice
+finds the last copy, in the contract detail page, where the comment justified `Number.parseInt` over
+`Number` on two grounds and **both are wrong**. `Number.parseInt("12abc", 10)` **is** 12 — measured,
+alongside `Number("12abc")` as `NaN` — so the conversion cannot be what refuses a tail; the
+`/^\d+$/` on the line below is. And *"the server's path parameter is an `int`"* is the identical
+inference `D10-59` measured the server not making, since `GET /contracts/01` answers **200**. Split
+by shape and the guard does all four jobs: the all-digits test refuses `"12abc"` and the empty
+segment, `Number.isSafeInteger` refuses twenty digits, and `> 0` refuses `"0"`. On every string the
+test admits the two conversions agree, so the call is a plain cast — swapping it for `Number` would
+be behaviour-neutral, and it is left alone because changing working code to no observable end is
+churn rather than a fix. **What this settles for `D10-55`:** `"07"` is the permissive guard's
+business, and the server serves a padded id, so *this* guard is the one that matches the API while
+`contract-scope.ts`'s strictness is the address bar's own convention — the divergence stays open, but
+which side deviates no longer does. **Comment-only: 23 insertions, 3 deletions, every changed line
+inside one doc comment**, and the frontend suite is **309 passed in 13 files**, the same count, which
+is the expected result for a comment. No dependency, no lockfile line, no backend source, no
+migration (`0006` stays head). The lesson is a tooling one this chain has not had before:
+`edit_file` applies a replacement as **replacement-pattern syntax**, so a dollar sign immediately
+followed by a backtick means *"the portion before the match"* and spliced the file's own header into
+the comment **twice** — 271 syntax errors the first time — with both recoveries a `git checkout --`
+plus a re-read rather than a hand repair, and the file trusted only after `git diff --stat` showed
+nothing outside the comment.
+
 
 ## Phase history
 
