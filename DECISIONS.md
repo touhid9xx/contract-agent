@@ -4880,3 +4880,96 @@ from the router at all.
 migration (`0006` stays head). Full frontend suite **204 passed in 10 files**, from 172 in 9.
 `STATUS.md`'s *five of nine* claims are amended in place by the follow-up `docs(status)` commit, the
 convention `D10-40` through `D10-53` all used.
+
+### D10-55 — The seventh screen test: five reads, and the one rule they all share
+
+The **contract detail** screen is the seventh page under test and the first that **fires five
+independent reads at once** — the contract, its extracted fields, its decisions, its notifications and
+its escalation queue — each a separate `useQuery` with its own lifecycle. That is what the 45 cases
+mostly spend themselves on: not a screen with more to say, but a screen where **four things can be
+failing while a fifth succeeded**, so "the page is broken" is not a state it has. It is also the
+**first screen that needs a `useParams` double**, which puts it back in the group `D10-54` had just
+left: that amendment said the three remaining screens were shaped *differently from each other*, and
+this one spends the first of the three — confirming the shape prediction rather than extending the
+harness a seventh time. The harness therefore needed exactly one new piece: a `useParams` that returns
+a **mutable id**, so the invalid-address cases can be driven without remounting. Two of nine remain,
+home and users.
+
+**The rule the whole screen hangs on is the route parse, and it is stricter than it looks.**
+`Number.parseInt` runs first, but the integer is not trusted until `/^\d+$/.test(raw)` passes, so
+`"12abc"` is **refused** rather than silently read as 12 — the exact coercion `parseInt` performs — and
+`"0"` is refused by a separate `> 0` clause, and `""` never reaches a query at all. All five reads are
+gated on the same computed `validId`, so the parse is one decision rather than five, and the spec pins
+the refusal rather than the number: it asserts **no read is issued**, which is what distinguishes a
+guard from a coercion that happens to produce a plausible id.
+
+**Three other rules, each pinned once.** Each related section reports **the count its own response
+returned** — `decisions.data.count`, not `items.length` — because the page receives a bounded page and
+the total is the server's number; a fixture whose count exceeds its items makes the difference
+visible. `may_contact` **decides** contactability and the consent flags only **explain** it, pinned
+with a fixture where the two disagree, so the page cannot grow its own opinion about consent; the doc
+comment at `page.tsx:355` argues this and the test is the argument's enforcement. And `404` is
+described as *not found* **ahead of** the generic failure branch, while one failing read leaves the
+other four intact — the ordering, not just the mapping.
+
+**Mutation evidence, three passes, each measured and reverted inside this turn.** Dropping
+`&& contractId > 0` from the route guard fails **1** case; replacing `may_contact` with `consent_email`
+fails **1**; replacing `decisions.data.count` with `.items.length` fails **1**. Three mutants, three
+catches, one case each — the same trade `D10-53` and `D10-54` both recorded, now unanimous rather than
+a majority: **every rule this spec pins is pinned exactly once**, so deleting a single test frees a
+rule silently. The reverts are proven by `git diff --name-status HEAD` printing **nothing**, not by
+`--exit-code` against a path, which is `D10-54`'s false-green lesson applied rather than re-learned.
+
+**Two harness defects, both mine, both found by the run rather than by reading.** (1) Four cases failed
+in **4 ms** because a card-scoped query (`within(relatedCard())`) ran before `contracts.get` resolved,
+so the card it scoped to did not exist — the fix is awaiting the contract title before scoping, in nine
+places rather than the four that failed, since the same race was latent in five passing tests. A fast
+failure is a harness signal rather than a screen signal, and the duration was the clue. (2) The locale
+case looked related links up **by their English label**, which is translated in `bn`, so it passed in
+`en` for the wrong reason; the links are now found by **the `?contract=` parameter they carry**, which
+incidentally makes the assertion about `withContractScope` rather than about copy. The second defect is
+the more interesting one: a test that reads a translated string to find an element is a test that only
+holds in one locale.
+
+**A mutant did cross a turn boundary, and this record differs from the one the previous three
+predicted.** This slice's first turn ended with `row.consent_email` staged in the source at
+`page.tsx:359` and the spec green at 45 cases. What prevented a bad commit was not the check —
+`D10-52` through `D10-54` all said `git status --porcelain` must be the turn's first command, and that
+command could not run, because the turn had already ended. It was the **written record of the mutation
+in the previous turn's summary**, naming the exact line and the exact revert, so the next turn's first
+action was the revert. Procedural memory carried what the gate did not. A workflow rule that only
+holds when a turn ends cleanly is not yet a rule.
+
+**Two things recorded rather than fixed, both needing an owner.** (1) `contracts.detailRelatedNote` in
+**both** `en.json` and `bn.json` still tells the reader the related links open *"unfiltered: none of
+them reads a contract out of its address"* — false since the links were changed to carry `?contract=`
+through `withContractScope`, and the screen's own doc comment at `page.tsx:130` repeats the same stale
+claim. The JSX comment above the note already admits both sentences are false; the **copy the reader
+sees was never updated**. It was not changed here because a string edit is a product decision: the spec
+asserts the **linkage**, not that sentence. (2) The route guards **disagree across the codebase**: this
+screen accepts `/^\d+$/` and a positive integer, so `"07"` reads as contract 7, while
+`contract-scope.ts` — which every related link is built with — uses `^[1-9][0-9]*$` and refuses it.
+Both behaviours are pinned by tests, so the divergence looks deliberate rather than accidental, and
+reconciling it is a product call rather than a test's.
+
+**This entry had to be written twice, and the measurement that caught the first attempt is the
+lesson.** The first pass produced a `D10-55` that ended mid-sentence with the **whole existing document
+appended beneath it**: `git diff --stat HEAD` reported **6182 insertions across two files that should
+have taken about one hundred and ninety**. Nothing was lost — the spec commit was already in, and both
+files were restored from `HEAD` and the prose re-authored — so the cost was a turn rather than content.
+What generalises is the check: on a docs commit, read `git diff --stat` before `git add`, because a
+duplicated document contains no single wrong-looking line. The mechanism is not established here and is
+not guessed at.
+
+**Landed as** `test(web)` `f598214` — one new file, 926 insertions, **no source change**:
+`frontend/src/app/[locale]/contracts/[id]/page.test.tsx` is the only path in `git show --stat HEAD`.
+No dependency, no lockfile line, no backend source, no migration (`0006` stays head). Verification: the
+spec **45/45**, the full frontend suite **249 passed in 11 files** (was 204 in 10, so the new file
+accounts for every added case and nothing that existed changed), all nineteen pre-commit gates green
+and commitlint passed. The honest limits: the rules are proven against a **doubled API and a doubled
+router** — `jsdom`, no browser, no real router, no server; `ContractListItem`, `ContractField`,
+`AgentDecision`, `NotificationRow` and `EscalationQueue` are **fixtures pinned from the screen's side**
+and not verified against `backend/app/api/v1/contracts.py`; the `404`/`403`/offline envelopes the
+screen translates are fixtures; date formatting is asserted through the same `Intl` calls the screen
+makes, pinning the join and the zone rather than locale output; *wired is not behaving* still holds;
+and **two of nine screens still have no component test** — home and users.

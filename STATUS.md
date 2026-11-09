@@ -783,6 +783,17 @@ users — is not this shape either, and the three are shaped differently from ea
 alike (`useParams`, `usePathname`, and no router at all). *Both wired rather than working* now covers
 six tested screens.
 
+**Amended a sixth time by `D10-55`, not deleted:** ~~six of nine~~ becomes **seven of nine**, and the
+prediction above is **half spent rather than contradicted** — ~~contract detail, home, users~~ becomes
+**home, users**, because `contracts/[id]/page.test.tsx` renders the contract detail screen: 45 cases,
+926 lines, no new dependency and no provider `D10-50` did not already pay for. It is the **first of the
+three to need a `useParams` double**, so it rejoins the specs that mock a router rather than extending
+the group `D10-54` had just described: that sentence was a prediction, and its first third held. What
+the count change does **not** say is that the screen is five harnesses — it is five `useQuery` calls
+under one render, so what the cases buy is the **independence** of the reads (four can be failing while
+a fifth succeeded), not a sixth way to prove that a query works. *Both wired rather than working* now
+covers seven tested screens.
+
 **Then the gate gets somewhere to run that is not one person's machine** (`D10-46`, one commit: `ci`).
 Every check in this project had run from a developer's machine, and two had never run automatically
 anywhere: the **pytest suite is not a pre-commit hook**, and the **MySQL `integration` suite skips
@@ -1063,9 +1074,10 @@ address** — `jsdom`, no browser, no real router, no server; `NotificationRow` 
 `backend/app/api/v1/notifications.py`; *wired is not behaving* still holds; the deferral case proves
 the screen **believes the server**, not that the server is right about quiet hours; and ~~four of nine
 screens still have no component test~~ — ~~contract list, contract detail, home, users~~ — amended in
-place by the paragraph that follows, which tested the contract list: **three of nine have none** —
-contract detail, home, users — of which one reads `useParams` and another `usePathname` and the third
-reads no router at all, so what is left is a different shape rather than this one four more times.
+place by the two paragraphs that follow, which first tested the contract list and then the contract
+detail: ~~three of nine have none~~ becomes **two of nine have none** — home, users — of which one
+reads `usePathname` and the other no router at all, so what is left is two different shapes rather
+than this one twice more.
 Verification: the spec **27/27**, the full frontend suite **172 passed in 9 files** (was 145 in 8, so
 the new file accounts for every added case and nothing that existed changed), all nineteen pre-commit
 gates green and commitlint passed. The branch stands **2 commits ahead of `origin/main`** after this
@@ -1104,12 +1116,58 @@ rules are proven against a **doubled API** — `jsdom`, no browser, no router, n
 against `backend/app/api/v1/contracts.py`; the **503** sentence is a fixture, so *a keyless
 deployment answers 503* is the backend's claim; date formatting is asserted through the same `Intl`
 call the screen makes, pinning the join and the zone rather than locale output; *wired is not
-behaving* still holds; and **three of nine screens still have no component test** — contract detail,
-home, users — no two of which are shaped alike. Verification: the spec **32/32**, the full frontend
+behaving* still holds; and **~~three of nine~~ two of nine screens still have no component test** —
+home, users — which are shaped differently from each other and from every screen above, as the
+paragraph that follows records. Verification: the spec **32/32**, the full frontend
 suite **204 passed in 10 files** (was 172 in 9, so the new file accounts for every added case and
 nothing that existed changed), all nineteen pre-commit gates green and commitlint passed. The branch
 stands **2 commits ahead of `origin/main`** after this `docs(status)` commit, re-counted rather than
 carried forward.
+
+**Then the seventh screen test, and the one where four reads can be failing while a fifth succeeds**
+(`D10-55`, one commit: `test(web)` `f598214`). The contract detail page is the first screen that fires
+**five independent reads at once** — the contract, its fields, its decisions, its notifications and its
+escalation queue — so the states worth pinning are the partial ones; "the page is broken" is not among
+them. It is also the **first of the three remaining screens to need a `useParams` double**, which is
+where `D10-54`'s shape sentence stops being a prediction, and it spends that prediction rather than
+extending the harness again. What the 45 cases spend themselves on is what this screen alone carries:
+the **route parse**, which is stricter than it looks — `Number.parseInt` runs first, but the integer is
+not trusted until `/^\d+$/` passes, so `"12abc"` is refused rather than silently read as 12, `"0"` is
+refused by a separate `> 0` clause, and `""` never reaches a query; all five reads are gated on the one
+computed `validId`, so the spec can assert **no read is issued**, which is what separates a guard from
+a coercion that happens to produce a plausible id. Then the three rules the screen alone decides: each
+related section reports **the count its own response returned** (`decisions.data.count`, not
+`items.length`, with a fixture whose count exceeds its items); `may_contact` **decides** contactability
+while the consent flags only **explain** it, pinned with a fixture where the two disagree; and `404` is
+described as *not found* **ahead of** the generic branch, one failing read leaving the other four
+intact. **Three mutation passes, each measured and reverted inside the turn:** dropping `&& contractId
+> 0` fails **1**, `may_contact` → `consent_email` fails **1**, `count` → `items.length` fails **1** — so
+every rule this spec pins is pinned exactly once, deleting a single case frees a rule silently. Two
+**harness defects** were the run's own, and both are recorded rather than smoothed: four cases failed
+in **4 ms** because a card-scoped query ran before the contract had resolved (fixed in nine places,
+since the race was latent in five passing tests — a fast failure is a harness signal, and the duration
+was the clue), and the locale case found related links **by their English label**, so it passed in `en`
+for the wrong reason; the links are now found by the `?contract=` they carry, which makes the assertion
+about `withContractScope` rather than about copy. **One mutant did cross a turn boundary** —
+`row.consent_email` staged at `page.tsx:359` for a whole turn end — and what caught it was the written
+record rather than the check, because the check could not run: a workflow rule that only holds when a
+turn ends cleanly is not yet a rule. **Two things recorded rather than fixed, both an owner's call:**
+`contracts.detailRelatedNote` in **both** locales still tells the reader the related links open
+*"unfiltered: none of them reads a contract out of its address"* — false since they began carrying
+`?contract=`, and `page.tsx:130` repeats the stale claim — and the route guards **disagree**: this page
+accepts `/^\d+$/` so `"07"` reads as contract 7, while `contract-scope.ts` uses `^[1-9][0-9]*$` and
+refuses it. **No dependency, no lockfile line, no backend source, no source change at all, no
+migration** (`0006` stays head). The honest limits: the rules are proven against a **doubled API and a
+doubled router** — `jsdom`, no browser, no real router, no server; `ContractListItem`, `ContractField`,
+`AgentDecision`, `NotificationRow` and `EscalationQueue` are **fixtures pinned from the screen's side**
+and not verified against `backend/app/api/v1/contracts.py`; the `404`/`403`/offline envelopes are
+fixtures; date formatting is asserted through the same `Intl` calls the screen makes, pinning the join
+and the zone rather than locale output; *wired is not behaving* still holds; and **two of nine screens
+still have no component test** — home and users — which are not shaped alike. Verification: the spec
+**45/45**, the full frontend suite **249 passed in 11 files** (was 204 in 10, so the new file accounts
+for every added case and nothing that existed changed), all nineteen pre-commit gates green and
+commitlint passed. The branch stands **4 commits ahead of `origin/main`** after this `docs(status)`
+commit, re-counted rather than carried forward.
 
 ## Phase history
 
@@ -5085,6 +5143,17 @@ contract detail reads `useParams`, home reads `usePathname`, users reads no rout
 remaining work is not one shape three times either. What ten amendments have each kept, and this one
 keeps: `jsdom` is still a DOM, and the `409`s the screen translates are **fixtures pinned from the
 screen's side** — asserted here and not verified against `backend/app/api/v1/contracts.py`.
+**Amended an eleventh time, by `D10-55`, not deleted — and the count returns a seventh time.** A
+seventh page renders under a test: `contracts/[id]/page.test.tsx`, 45 cases. So ~~six have one, and
+three do not~~ becomes **seven have one, and two do not.** This amendment does not narrow the previous
+one's shape claim, it **spends** it: the tenth said the three screens left were shaped differently from
+each other, and this one is the `useParams` third of that sentence — so a doubled router comes back to
+the harness after a spec that needed none, which is the point rather than a regression. What the count
+tracks is whether a screen is exercised at all; `jsdom` against a doubled API with no server behind it
+is the constant through all eleven amendments and is what *wired is not behaving* still means here.
+What eleven amendments have each kept, and this one keeps: `jsdom` is still a DOM, and the `404`/`403`
+and offline envelopes the screen translates are **fixtures pinned from the screen's side** — asserted
+here and not verified against `backend/app/api/v1/contracts.py`.
 **Amended, not deleted (`D10-39`, `2572f53`):** the paragraph this one keeps narrowing ends
 by saying what is left is *not a missing feature and not a hardening pass* — still true, and
 one of the things left has stopped being nothing. The `doctor` check that counts invisible
