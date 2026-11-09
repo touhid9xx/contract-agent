@@ -630,6 +630,12 @@ actually about — **a doubled API behind `jsdom` is not a server** — so eight
 eight wired screens, and the staleness is the second thing this chain has recorded about a count
 that was correct when it was written.
 
+**Amended once more by `D10-57`, not deleted:** ~~the honest count is now **one of the nine**,
+home~~ becomes **none of the nine** — home was the last of them — so *the screens are still
+hand-tested* is now true of no screen at all. What survives from the paragraph is then only the
+limit it was actually about, and nine tested screens do not make it smaller: **a doubled API
+behind `jsdom` is not a server**, so nine tested screens are nine wired screens.
+
 **Then the first component gets a test** (`D10-43`, one commit: `test(web)` `16803d0`): two
 slices in a row had closed with the same sentence — *no component, browser or integration test* — and
 both deferred it for the same reason, that `jsdom` is a dependency rather than a line of config. This
@@ -815,6 +821,19 @@ the controls that are **absent** on the caller's own row — a gate proven by ab
 different kind of assertion from the seven screens above it. *Both wired rather than working* now
 covers eight tested screens, and the phrase is at its least reassuring here: eight screens that are
 wired are eight screens that have not run in a browser.
+
+**Amended an eighth time by `D10-57`, not deleted:** ~~eight of nine~~ becomes **nine of nine**,
+and the prediction above is **finished rather than extended** — ~~home~~ becomes **none left**,
+because the home page's spec is the ninth: 23 cases, 524 lines, no new dependency and no
+provider `D10-50` did not already pay for. It is the third of the three shapes `D10-54` named,
+and the one that sends a doubled router back into the harness for the **address** rather than
+for a query: the page reads `usePathname`, so `vi.mock("next/navigation")` returns, and
+`useSearchParams` stays absent because no screen has one left. What the count change buys is
+the narrowest subject any of the nine has — a screen that reads **no tenant data** — so its
+cases pin a probe, two sign-outs that fail differently on purpose, and a locale switch that is
+a page load rather than a route push. *Both wired rather than working* now covers nine tested
+screens and has nothing left to qualify: every screen is wired, and no screen has run in a
+browser.
 
 **Then the gate gets somewhere to run that is not one person's machine** (`D10-46`, one commit: `ci`).
 Every check in this project had run from a developer's machine, and two had never run automatically
@@ -1222,6 +1241,42 @@ has no component test** — home. Verification: the spec **37/37**, the full fro
 in 12 files** (was 249 in 11, so the new file accounts for every added case and nothing that existed
 changed), all nineteen pre-commit gates green and commitlint passed. The branch stands **6 commits
 ahead of `origin/main`** after this `docs(status)` commit, re-counted rather than carried forward.
+
+**Then the ninth screen test, and the only screen that reads no tenant data** (`D10-57`, one commit:
+`test(web)` `d8bc237`). The home page is the last of the nine and the one that waited longest: it is
+the screen that reads `usePathname`, which is why `D10-54`'s shape sentence needed a third part. What
+the 23 cases spend themselves on is what this page alone carries: it asks the API **one question and
+no other** (`/health`), so the spec asserts a single probe in all four states and that a dead API
+leaves the page standing instead of blanking it; a signed-out visitor still gets all six
+working-screen links plus `/en/login`, in order and locale-aware; the two sign-out buttons **fail
+differently on purpose** — `signOut` clears the session before the revocation resolves and swallows a
+refusal with no alert, while `signOutEverywhere` sends the access token, reports `actionFailed` and
+still clears the session in its `finally`; and the locale switcher is a **page load**
+(`window.location.assign`), marks exactly one chip with `aria-current`, keeps the rest of the path
+and drops the doubled slash. **Three mutation passes, each applied and reverted inside the turn with
+`git diff --stat HEAD` printing nothing:** both buttons to `disabled={false}` fails **1** at line 423,
+only the wider button fails **1** at line 424 — each button's guard is pinned separately — and
+`segments[0] = target` → `segments.unshift(target)` fails **3**, the first reporting
+`Received: "/bn/en"`. **One defect was found by running the spec, not by reading it**, and it is
+`D10-56`'s lesson in a new shape: the connectivity heading renders as `"Backend connectivity:"` with
+the colon in the same text node, so an exact `getByText` on the message key threw; the assertion is a
+substring match now and the comment says why. **A second lesson is about the measuring instrument
+rather than the code:** a wedged Python REPL left every command returning fragments of the *previous*
+command's output, which is how an earlier turn's mutant run appeared to produce nothing; the shell was
+re-probed with `exit()` and the measurement repeated, and the rule recorded is that a terminal must be
+shown to echo what was sent before any number taken through it is trusted. **No dependency, no
+lockfile line, no backend source, no source change at all, no migration** (`0006` stays head). The
+honest limits: the rules are proven against a **doubled API, a doubled `usePathname` and a doubled
+`next-themes`** — `jsdom`, no browser, no next runtime, no server; the liveness sentence proves the
+screen **asks** `/health`, not that the API answers; the `next-themes` double pins a chip's *request*
+for a theme and not the document's colour, which is that library's promise; and the wire role `admin`
+is pinned as *current behaviour* on a card that does not translate it, which is a deliberate
+difference from the users screen rather than a decision this slice made; *wired is not behaving*
+still holds of all nine. Verification: the spec **23/23**, the full frontend suite **309 passed in 13
+files** (was 286 in 12, so the new file accounts for every added case and nothing that existed
+changed), all nineteen pre-commit gates green and commitlint passed. The branch stands **8 commits
+ahead of `origin/main`** after this `docs(status)` commit, re-counted rather than carried forward.
+
 
 ## Phase history
 
@@ -5223,6 +5278,20 @@ whose assertions are largely about what the DOM does **not** contain. `jsdom` is
 asserted here and not verified against `backend/app/api/v1/auth.py`. One screen is left, and it is the
 one that reads `usePathname`.
 
+**Amended a thirteenth time, by `D10-57`, not deleted — and the count returns a ninth time.**
+A ninth page renders under a test: `page.test.tsx`, 23 cases. So ~~eight have one, and one does
+not~~ becomes **nine have one, and none does not** — every locale screen in this app now renders
+under a test. This amendment **completes** the tenth amendment's shape sentence rather than
+spending a third of it: contract detail read `useParams`, users reads no router at all, and home
+reads `usePathname`, which was the last shape unexercised — so *the three screens left are
+shaped differently from each other* was right three times out of three, and the only prediction
+in thirteen amendments that was ever made and never withdrawn is now spent rather than pending.
+What this one adds is the smallest subject in the chain: a screen that reads **no tenant data**,
+asks the API one question (`/health`) and must still render when that question fails. What
+thirteen amendments have each kept, and this one keeps: `jsdom` is still a DOM, and the liveness
+sentence is asserted against a **doubled `@/lib/api`**, so it proves the screen asks `/health`,
+not that the API answers.
+
 **Amended, not deleted (`D10-39`, `2572f53`):** the paragraph this one keeps narrowing ends
 by saying what is left is *not a missing feature and not a hardening pass* — still true, and
 one of the things left has stopped being nothing. The `doctor` check that counts invisible
@@ -5622,6 +5691,11 @@ sign-off, not footnotes:**
    `D10-54`, `D10-55` and `D10-56` — home alone excepted. The count was correct when it was written
    and was never revisited while five further screen tests landed — the same stale-count failure the
    amendment chains above keep recording.
+
+   **Amended a second time by `D10-57`, not deleted:** ~~eight of the nine~~ becomes **nine of
+   the nine** — `D10-57` added `page.test.tsx` for home, so no locale screen is untested. What
+   follows is read rather than re-worded: *nothing has been hydrated, clicked or navigated* is
+   still what all nine do not do.
    Neither is a browser: nothing has been hydrated, clicked or navigated, and no screen has
    rendered with data behind it, so the residue stands — smaller, and now with an account of what
    it costs.

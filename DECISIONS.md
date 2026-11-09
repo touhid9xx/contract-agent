@@ -5063,3 +5063,71 @@ no server; `UserSummary` fixtures are **pinned from the screen's side** and not 
 **fixtures**; the one-time password is proven to survive a refetch of the list, not to be absent from
 every later render; *wired is not behaving* still holds; and **one of nine screens still has no
 component test** — home.
+
+### D10-57 — The ninth screen test: the screen that reads no tenant data
+
+The **home** page is the ninth and last locale screen to get a component test, so
+`frontend/src/app/[locale]` has **nine of nine** and the set is closed. It is also the smallest
+subject in the chain and the one that had waited longest, because it is the only screen whose
+rules are not about data at all: it performs **no query**, which is why its spec deliberately
+supplies **no `QueryClientProvider`** — providing one would hide a screen that began reading
+tenant data without saying so.
+
+**One question, and only one.** The liveness line asks `/health` and nothing else, and the spec
+asserts that single probe in all four states (checking, ok, down, and signed in) plus the sentence
+each produces. That is what lets the page render for a visitor whose API is dead, so the failure
+that matters is not *the read failed* but *the page still stands*: a dead API must not blank the
+links, the theme chips or the sign-in card.
+
+**The two sign-out buttons fail differently, on purpose, and both guards are pinned separately.**
+`signOut` clears the session locally *before* it tells the server and swallows the revocation's
+failure — the token expires on its own and a failed sign-out must never look broken —
+while `signOutEverywhere` is the remedy for a suspected leak, so its refusal is the one thing the
+user must be told. The spec asserts both halves: `signOut` calls `auth.logout` with the refresh
+token and shows no alert on a refusal, and `signOutEverywhere` sends the **access token**, never
+calls `auth.logout`, reports `actionFailed`, and still drops the session in its `finally`. Mutation
+evidence for the in-flight guard is deliberately two mutants rather than one — both buttons to
+`disabled={false}` fails **1** case at line 423, and only the wider one fails **1** case at line 424
+— because a single assertion covering both would have pinned the pair, not each button.
+
+**The visitor is never gated, and the account card prints the wire role.** A signed-out visitor
+gets all six working-screen links plus `/en/login`, in that order, every one locale-aware; hiding
+them would leave nobody a way to learn the screens exist, and each screen asks for a session for
+itself. The card prints the **wire** role (`admin`) while the users screen translates it — pinned
+as current behaviour so a later translation becomes a deliberate change rather than an accident.
+
+**The locale switcher is a page load, not a route push.** It calls `window.location.assign`
+(swapping the `[LegacyUnforgeable]` descriptor in jsdom and restoring it in `afterEach`), marks
+exactly one chip with `aria-current`, keeps the rest of the path (`/en/notifications` →
+`/bn/notifications`) and drops the doubled slash (`/en/` → `/bn`). Mutating `segments[0] = target`
+into `segments.unshift(target)` fails **3** cases, the first reporting `Received: "/bn/en"`.
+
+**Two lessons, one about the DOM and one about the instrument.** The first is `D10-56`'s lesson in a
+new shape and was found by *running* the spec rather than reading it: the connectivity heading
+renders as `"Backend connectivity:"` — the colon lives in the same text node — so an exact
+`getByText(EN.home.healthHeading)` threw; it is a substring match now, with the reason in a comment.
+The second is about measurement rather than code: a wedged Python REPL left every command returning
+fragments of the *previous* command's output, which is how an earlier turn's mutant run appeared to
+produce nothing at all. The shell was re-probed (`exit()`) and the measurement repeated, and the rule
+recorded is that a terminal must be shown to **echo what was sent** before any number taken through
+it is trusted. A harness fact from `D10-56` was applied rather than re-learned: there is no
+`jest-dom` here, so every assertion uses `getAttribute(...)` or raw `.disabled`.
+
+**Landed as** `test(web)` `d8bc237` — one new file, 524 insertions, **no source change**:
+`frontend/src/app/[locale]/page.test.tsx` is the only path in `git show --stat HEAD`. Spec **23/23**
+against a 211-line screen; full frontend suite **309 passed in 13 files** (was 286 in 12, so the new
+file accounts for every added case and nothing that existed changed); all nineteen pre-commit gates
+green and commitlint passed. No dependency, no lockfile line, no backend source, no migration
+(`0006` stays head).
+
+`STATUS.md`'s living counts — *one of the nine*, *eight of nine*, *eight have one, and one does not*
+and *eight of the nine* — are amended in place by the follow-up `docs(status)` commit, in five
+regions, rather than left to drift.
+
+**The honest limits.** The rules are proven against a **doubled API, a doubled `usePathname` and a
+doubled `next-themes`** — `jsdom`, no browser, no next runtime, no server; the liveness sentence
+proves the screen **asks** `/health`, not that the API answers; the `next-themes` double means a
+chip's *request* for a theme is pinned while the document's colour (that library's promise) is not;
+the wire-role assertion pins a difference from the users screen rather than a decision this slice
+made; *wired is not behaving* still holds of all nine; and the root redirect at
+`frontend/src/app/page.tsx` has no spec, because it is a redirect rather than a screen.
