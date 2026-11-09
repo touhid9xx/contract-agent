@@ -1200,16 +1200,21 @@ turn ends cleanly is not yet a rule. **Two things recorded rather than fixed, bo
 screen opens already filtered; the Bangla is a re-statement rather than a gloss of the new English.
 The second thing stands, and is still an owner's call — the route guards **disagree**: this page
 accepts `/^\d+$/` so `"07"` reads as contract 7, while `contract-scope.ts` uses `^[1-9][0-9]*$` and
-refuses it. **No dependency, no lockfile line, no backend source, no source change at all, no
-migration** (`0006` stays head). The honest limits: the rules are proven against a **doubled API and a
-doubled router** — `jsdom`, no browser, no real router, no server; `ContractListItem`, `ContractField`,
-`AgentDecision`, `NotificationRow` and `EscalationQueue` are **fixtures pinned from the screen's side**
-and not verified against `backend/app/api/v1/contracts.py`; the `404`/`403`/offline envelopes are
-fixtures; date formatting is asserted through the same `Intl` calls the screen makes, pinning the join
-and the zone rather than locale output; *wired is not behaving* still holds; and **two of nine screens
-still have no component test** — home and users — which are not shaped alike. Verification: the spec
-**45/45**, the full frontend suite **249 passed in 11 files** (was 204 in 10, so the new file accounts
-for every added case and nothing that existed changed), all nineteen pre-commit gates green and
+refuses it. ~~`contract-scope.ts` justified that rule as a copy of the server's
+own~~ — **that justification was measured false and is gone (`D10-59`):** `GET /contracts/01` answers
+**200**, so nothing on the server refuses a padded id, and the strict regex is the address bar's own
+choice rather than a mirror of the API. The divergence itself is untouched: still an owner's ruling,
+now stated as a free choice instead of an inherited rule. **No dependency, no lockfile line, no
+backend source, no source change at all, no migration** (`0006` stays head). The honest limits: the
+rules are proven against a **doubled API and a doubled router** — `jsdom`, no browser, no real
+router, no server; `ContractListItem`, `ContractField`, `AgentDecision`, `NotificationRow` and
+`EscalationQueue` are **fixtures pinned from the screen's side** and not verified against
+`backend/app/api/v1/contracts.py`; the `404`/`403`/offline envelopes are fixtures; date formatting
+is asserted through the same `Intl` calls the screen makes, pinning the join and the zone rather
+than locale output; *wired is not behaving* still holds; and **two of nine screens still have no
+component test** — home and users — which are not shaped alike. Verification: the spec **45/45**,
+the full frontend suite **249 passed in 11 files** (was 204 in 10, so the new file accounts for
+every added case and nothing that existed changed), all nineteen pre-commit gates green and
 commitlint passed. The branch stands **4 commits ahead of `origin/main`** after this `docs(status)`
 commit, re-counted rather than carried forward.
 
@@ -1300,6 +1305,31 @@ no backend source, no migration** (`0006` stays head). All nineteen pre-commit g
 commitlint passed. The lesson is the chain's oldest one in its cheapest form: a comment claiming a
 string was updated is not the string, and one grep for the sentence would have cost less than the
 comment did.
+
+**Then the justification measured, and found false** (`D10-59`, one commit: `docs(web)` `8eecdd7`).
+This slice changes **no behaviour at all** — it removes a false reason and puts a measured one in its
+place. `contract-scope.ts` justified its `^[1-9][0-9]*$` with *"the server's path parameter is an
+`int` and its query parameters are `gt=0`, so the same rule holds here"*. Both premises are true and
+the conclusion does not follow, so the sentence was probed against the real ASGI app instead of being
+argued about: `GET /contracts/01` answers **200** for contract 1 and `?contract_id=01` answers **200**
+as well, while `/contracts/0` and `/contracts/-1` reach the handler and come back **404** and
+`?contract_id=0` is refused **422**. **Nothing on the server refuses a leading zero**, so an `int`
+does not mean "no leading zero", and `gt=0` accepts seven whether it arrived spelled `7` or `01`. The
+strict rule is therefore the address bar's own choice, one step narrower than the API it talks to, and
+the comment now says that instead of claiming the server forced it. **The divergence itself is
+untouched:** `readContractScope` returns exactly what it returned before, the module's cases still
+pin `"012"` invalid, and `contracts/[id]/page.test.tsx:408` still pins `"07"` reading as contract 7 —
+so the open product call `D10-55` named is now **better posed rather than decided**, because an owner
+ruling given on a false reason would have been a ruling about nothing. **No dependency, no lockfile
+line, no backend source, no migration** (`0006` stays head), and the probe that produced the table was
+a temporary test file, run and then deleted, so nothing of it survives in the suite. Verification: the
+full frontend suite **309 passed in 13 files**, the same count as before, which is the expected result
+for a comment — nothing asserts the sentence that changed. The honest limits: the probe measured **the
+app's own routes**, not a browser's, and it read one really ingested contract; *wired is not behaving*
+still holds. The branch stands **2 commits ahead of `origin/main`** after this `docs(status)` commit,
+re-counted rather than carried forward. The lesson is `D10-57`'s and `D10-58`'s again with a longer
+fuse: a sentence that reasons **from** a premise is not checked by confirming the premise — `int` and
+`gt=0` were both exactly as described, and the claim built on them was still false.
 
 
 ## Phase history

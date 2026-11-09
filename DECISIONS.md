@@ -5180,3 +5180,37 @@ rule applied to the file being edited: the JSX comment saying "the note now says
 was read as evidence that the note had been fixed, when the only thing it proved was that someone had
 meant to. **A comment claiming a string was updated is not the string.** The check is one grep for
 the sentence, and it would have cost less than the comment did.
+
+### D10-59 — The id rule is stricter than the server, and the comment claiming otherwise is gone
+
+`contract-scope.ts` justified its `^[1-9][0-9]*$` with *"the server's path parameter is an `int` and
+its query parameters are `gt=0`, so the same rule holds here: whole digits, no leading zero, greater
+than zero."* Both premises are true and the conclusion does not follow, so the sentence was measured
+against the real ASGI app rather than argued about.
+
+**What the server actually does** — a temporary `backend/tests/test_zz_id_probe.py`, run and then
+deleted, using the existing `client` and `token` fixtures and one really ingested contract:
+
+| Request | Answer |
+| --- | --- |
+| `GET /api/v1/contracts/1` | 200 |
+| `GET /api/v1/contracts/01` | **200** — a padded id reads as contract 1 |
+| `GET /api/v1/contracts/0`, `/contracts/-1` | 404 — the bare `int` lets both reach the handler |
+| `GET /api/v1/contracts/12abc` | 422 |
+| `GET /api/v1/agent/decisions?contract_id=01` | **200** |
+| `?contract_id=0`, `?contract_id=-1`, `?contract_id=12abc` | 422 |
+
+Neither surface refuses a leading zero. An `int` does not mean "no leading zero", and `gt=0` accepts
+seven whether it arrived spelled `7` or `01`. The strict regex is therefore **the address vocabulary's
+own choice**, one step narrower than the API it talks to, and the comment now says that instead of
+claiming the server forced it.
+
+**No behaviour change.** `readContractScope` returns exactly what it returned before; the module's
+cases still pin `"012"` invalid, and `contracts/[id]/page.test.tsx:408` still pins `"07"` reading as
+contract 7. The divergence is untouched and remains the open product call `D10-55` named. What changes
+is that the reason on record was false, and an owner ruling given on a false reason is a ruling about
+nothing.
+
+**Landed as** `docs(web)` `8eecdd7` — one file, a comment replaced, **no behaviour change**: no
+regex, no branch and no return value was touched, and the module's own cases were not edited to
+match the new wording.
