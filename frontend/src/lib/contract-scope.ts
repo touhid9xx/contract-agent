@@ -44,8 +44,21 @@ type ReadableParams = { get(name: string): string | null };
  * Hand-checked rather than `Number(raw)`, for the reason `D10-34` records against
  * the route segment: `Number("12abc")` is `12` and `Number("")` is `0`, so a
  * malformed address would quietly become a real filter on a contract nobody named.
- * The server's path parameter is an `int` and its query parameters are `gt=0`, so
- * the same rule holds here: whole digits, no leading zero, greater than zero.
+ *
+ * **The rule is stricter than the server, and this comment said otherwise until it
+ * was measured (`D10-59`).** The route's path parameter is a bare `int` and its query
+ * parameters are `gt=0`, and both premises are true — but neither means what the
+ * earlier sentence here inferred from them. Measured against the real ASGI app:
+ * `GET /contracts/01` answers **200** for contract 1, `?contract_id=01` answers
+ * **200** as well, `/contracts/0` and `/contracts/-1` reach the handler and come back
+ * **404**, while `?contract_id=0` and `?contract_id=-1` are refused **422**. So an
+ * `int` does **not** mean "no leading zero": nothing on the server refuses a padded
+ * id, and this module refuses one the server would have served.
+ *
+ * That is a choice about the address bar rather than a mirror of the API, and it is
+ * recorded as the open product call `D10-55` named rather than as a rule the server
+ * forced. The regex below is what this module promises; the paragraph above is what
+ * the other side of the wire promises.
  */
 export function readContractScope(params: ReadableParams): ContractScope {
   const raw = params.get(CONTRACT_PARAM);
