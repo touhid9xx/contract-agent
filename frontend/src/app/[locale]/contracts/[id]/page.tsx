@@ -141,9 +141,29 @@ export default function ContractDetailPage() {
   const { isAuthenticated } = useAuth();
 
   /**
-   * The route segment is a string. `Number.parseInt` is deliberate over `Number`:
-   * the server's path parameter is an `int`, so `"12abc"` must be an invalid id
-   * rather than silently reading as 12, and `""` must never become 0.
+   * The route segment is a string, and the guard below is the thing that refuses
+   * the shapes that must never become an id: the all-digits test rejects "12abc"
+   * and the empty segment, `Number.isSafeInteger` rejects a digit string past the
+   * safe range, and `> 0` rejects "0".
+   *
+   * **This comment credited the wrong line until it was measured (`D10-60`).** It
+   * said `Number.parseInt` was deliberate over `Number` because "12abc" must not
+   * read as 12 — but `Number.parseInt("12abc", 10)` *is* 12, the same answer
+   * `Number` gives, so the conversion cannot be what refuses a tail. Split the two
+   * shapes apart and the stated reason disappears: the only difference between the
+   * two functions here is the empty segment, which `Number` reads as 0 and
+   * `parseInt` as `NaN` — and that segment already fails the digits test. On every
+   * string the test admits the two agree, so this conversion is a plain cast and
+   * swapping it for `Number` would be behaviour-neutral. It is left as `parseInt`
+   * because changing working code to no observable end is churn, not a fix.
+   *
+   * That digits test also admits "07", and the spec pins it as reading contract 7.
+   * That is not a deviation from the server: `D10-59` measured `GET /contracts/01`
+   * answering **200**, because an `int` path parameter does not refuse a leading
+   * zero. So this permissive guard is the one that matches the API, while
+   * `contract-scope.ts` refuses a padded id as an address-bar choice of its own.
+   * Their divergence is `D10-55`'s open call, and an `int` is the reason for
+   * neither.
    */
   const raw = typeof params.id === "string" ? params.id : "";
   const contractId = Number.parseInt(raw, 10);
