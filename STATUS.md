@@ -1193,9 +1193,12 @@ about `withContractScope` rather than about copy. **One mutant did cross a turn 
 `row.consent_email` staged at `page.tsx:359` for a whole turn end — and what caught it was the written
 record rather than the check, because the check could not run: a workflow rule that only holds when a
 turn ends cleanly is not yet a rule. **Two things recorded rather than fixed, both an owner's call:**
-`contracts.detailRelatedNote` in **both** locales still tells the reader the related links open
+~~`contracts.detailRelatedNote` in **both** locales still tells the reader the related links open
 *"unfiltered: none of them reads a contract out of its address"* — false since they began carrying
-`?contract=`, and `page.tsx:130` repeats the stale claim — and the route guards **disagree**: this page
+`?contract=`, and `page.tsx:130` repeats the stale claim~~ — **that half is closed, not deleted, by
+`D10-58`:** both locales and the doc comment now say the links carry this contract's id, so each
+screen opens already filtered; the Bangla is a re-statement rather than a gloss of the new English.
+The second thing stands, and is still an owner's call — the route guards **disagree**: this page
 accepts `/^\d+$/` so `"07"` reads as contract 7, while `contract-scope.ts` uses `^[1-9][0-9]*$` and
 refuses it. **No dependency, no lockfile line, no backend source, no source change at all, no
 migration** (`0006` stays head). The honest limits: the rules are proven against a **doubled API and a
@@ -1276,6 +1279,27 @@ still holds of all nine. Verification: the spec **23/23**, the full frontend sui
 files** (was 286 in 12, so the new file accounts for every added case and nothing that existed
 changed), all nineteen pre-commit gates green and commitlint passed. The branch stands **8 commits
 ahead of `origin/main`** after this `docs(status)` commit, re-counted rather than carried forward.
+
+**Then the copy that contradicted the card it sits under** (`D10-58`, one commit: `fix(i18n)`
+`2cf97e2`). This is the first slice since `D10-44` that is not a screen test, and it closes the first
+of the two things `D10-55` recorded instead of fixing. The related-reads card links the agent,
+notifications and escalations screens through `withContractScope`, so every link carries
+`?contract=<id>` — and the sentence under the card's heading told the reader those links open
+*"unfiltered: none of them reads a contract out of its address"*. Two comments in the same file had
+already conceded it: the JSX comment says *"both are now false, so the note says what the card does"*
+and the doc comment still listed *"does not filter the other screens"* as a rule the page holds. So
+the file held three copies of one fact, two updated and the third the one a reader sees. **Both
+locales and the doc comment are corrected in one change**, and the Bangla is a re-statement in that
+language's own idiom rather than a gloss of the new English. **The verification is a count that does
+not move:** the full frontend suite is **309 passed in 13 files**, the same as before, because no
+spec asserts that message — the 45 contract-detail cases find each related link by the `?contract=`
+it carries, so the linkage stays pinned while the words beside it change. **The second half of
+`D10-55`'s note stays open on purpose:** the route guards still disagree about `"07"`, which changes
+what an address means and is a product call. **No behaviour change, no dependency, no lockfile line,
+no backend source, no migration** (`0006` stays head). All nineteen pre-commit gates green and
+commitlint passed. The lesson is the chain's oldest one in its cheapest form: a comment claiming a
+string was updated is not the string, and one grep for the sentence would have cost less than the
+comment did.
 
 
 ## Phase history

@@ -5131,3 +5131,52 @@ chip's *request* for a theme is pinned while the document's colour (that library
 the wire-role assertion pins a difference from the users screen rather than a decision this slice
 made; *wired is not behaving* still holds of all nine; and the root redirect at
 `frontend/src/app/page.tsx` has no spec, because it is a redirect rather than a screen.
+
+### D10-58 — The copy that told the reader the opposite of what the code does
+
+The related-reads card on the contract detail screen links three screens, and those links have
+carried `?contract=<id>` since they were built through `withContractScope`. The sentence beneath the
+card's heading said the opposite — that the links open those screens *"unfiltered: none of them reads
+a contract out of its address"* — and `D10-55` recorded it rather than fixing it, on the ground that
+a string edit is a product decision. That was the right call for the half it was about and the wrong
+reading of this half: **the first sentence of that note was already true and the second was already
+false**, and a false sentence the reader sees is not a choice between two products.
+
+**What made it a defect rather than a preference.** Two comments in the same file had already
+conceded the point. The JSX comment above the note says *"both are now false, so the note says what
+the card does"* — and then the note said the old thing anyway. The page's doc comment still listed
+*"does not filter the other screens"* as one of the rules the screen holds itself to, which is the
+inverse of what line 592 does. So the code carried three copies of one fact: two of them updated, one
+of them the copy the reader actually sees. A comment that says the string is wrong is a note to the
+next turn, not a fix, and it had survived two turns of reading past it.
+
+**Both locales, and the doc comment, in one change.** `en.json:327` and `bn.json:327` now end the
+note at *"the links carry that same id, so each screen opens already filtered to this contract"*, and
+the doc comment's bullet is restated as *"does not own another screen's filter"* — this page hands
+over the id, applying it stays the target screen's job, which is true of all three screens and states
+the same fact without claiming this page does work it does not. The Bangla is a re-statement rather
+than a translation of the new English: both sentences were written to say the same thing in the two
+languages' own idiom, and the *"would look like a filter while quietly showing everything"* warning
+survives nowhere, because the links do not.
+
+**Verification.** `npx vitest run` in `frontend/` — **309 passed in 13 files**, exit 0, the same count
+as before the change, which is the expected result and the point: no spec asserts
+`contracts.detailRelatedNote`, so the suite that pins the *linkage* (`D10-55`'s 45 cases, which find
+each related link by the `?contract=` it carries) stays green while the words beside it change. Both
+message files still parse as JSON; each differs from HEAD at exactly one line, 327.
+
+**The second half of `D10-55`'s note stays open, deliberately.** The route guards still disagree —
+`contracts/[id]/page.tsx` accepts `/^\d+$/` so `"07"` reads as contract 7, while `contract-scope.ts`
+uses `^[1-9][0-9]*$` and refuses it. That one really is a product decision: it changes what an
+address means, and both behaviours are pinned by tests. It is not touched here.
+
+**Landed as** `fix(i18n)` `2cf97e2` — three files, 7 insertions and 6 deletions, **no behaviour
+change**: no link, query, request or render path was touched. No dependency, no lockfile line, no
+backend source, no migration (`0006` stays head).
+
+**The lesson, and it is the chain's oldest one in its cheapest form.** `D10-56` and `D10-57` both
+recorded *read what the thing actually holds* — the DOM, the suite, the terminal. This one is the same
+rule applied to the file being edited: the JSX comment saying "the note now says what the card does"
+was read as evidence that the note had been fixed, when the only thing it proved was that someone had
+meant to. **A comment claiming a string was updated is not the string.** The check is one grep for
+the sentence, and it would have cost less than the comment did.
