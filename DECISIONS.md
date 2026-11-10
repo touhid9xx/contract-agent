@@ -5574,3 +5574,49 @@ unchecked, exactly as `D10-64` said: a fluent Bengali sentence that says the wro
 passes this spec and its neighbour.
 
 **Landed as** a `test(web)` spec plus a `docs(status)` record, on top of `47a5e2b`.
+
+### D10-66 — The report the guard could never fill in
+
+`D10-65` landed a spec with one defect in it, found by reading the file rather than
+by a run: the branch that reports a composition whose table is not in its own file
+printed `no table undefined` — the one word a reader needs, gone.
+
+The cause is a shorthand, not a typo. The sites were paired with their tables as
+
+    { ...site, path: file.path, table: file.tables.get(site.table) }
+
+The spread copies the site's table *name*, and the property written immediately after
+it overwrites that name with the lookup's result. The report is built from
+`paired.filter((site) => site.table === undefined)`, so the field the message reads is
+the one field guaranteed to be `undefined` in every row it is ever asked about. A
+diagnostic that runs only once something else has broken is the code path nothing
+exercises, and it was written in the shape that reads best.
+
+`paired` now carries the name in a field of its own and the report reads that field.
+The comment above it says why the two are kept apart, because spreading the site is
+the thing that will be written again.
+
+Proven by breaking a real call site rather than by reasoning about the string: the
+first ``t(`contracts.${STATUS_KEYS[…]}…)`` in
+`frontend/src/app/[locale]/contracts/page.tsx` was renamed to `STATUS_KEYZ`, the spec
+went red on exactly one of two cases, and the failure read
+
+    app\[locale]\contracts\page.tsx: no table STATUS_KEYZ for t(`contracts.…`)
+
+The screen was then restored from the bytes read before the mutation, and the restore
+was verified by sha256 against that digest — so the line above is a mutated run, not a
+file left edited. Frontend suite 316 passing / 15 files, unchanged, as a repair to a
+failure message must be.
+
+Also removed: `contract-agent`, a 1733-byte file at the repo root holding `git log`
+output that an earlier redirect of mine wrote there instead of to the console. It was
+untracked and is in no commit.
+
+What this slice does not establish. The repaired report is proven by that one
+mutation and by nothing standing: no case in the suite drives the `unresolved` branch,
+so a later edit could put the spread back and every gate would stay green. The five
+raw-wire composition sites remain unread, exactly as `D10-65` recorded, and copy is
+still unchecked in both catalogues.
+
+**Landed as** a `fix(test)` commit plus this `docs(status)` record, on top of
+`19ba652`.

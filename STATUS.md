@@ -5400,6 +5400,20 @@ thirteen amendments have each kept, and this one keeps: `jsdom` is still a DOM, 
 sentence is asserted against a **doubled `@/lib/api`**, so it proves the screen asks `/health`,
 not that the API answers.
 
+**Amended again, by `D10-66`, not deleted — and this one repairs the sentence the
+previous amendment's guard would have printed.** No figure above moves: 10 screens, 25
+sites, 96 keys and both catalogue directions stand exactly as `D10-65` measured them.
+What was wrong was the guard's own failure path, which reported a composition whose
+table could not be found as `no table undefined` — the spread that paired each site
+with its table overwrote the table's *name* with the lookup's result, and the report
+reads only rows where that result is `undefined`. It now names the table. Proven by
+renaming one composition's table in `contracts/page.tsx`, watching exactly one of two
+cases go red with `app\[locale]\contracts\page.tsx: no table STATUS_KEYZ for
+t(`contracts.…`)`, and restoring the screen from bytes verified by sha256. Frontend
+suite 316 passing / 15 files, unchanged. Limits: the report is proven by that mutation
+and not by a standing case, the five raw-wire sites are still unread, and copy is still
+unchecked.
+
 **Amended again, by `D10-65`, not deleted — and this one closes the hole `D10-64` recorded in
 itself.** The 25 template call sites the previous amendment left unresolved are resolved, by
 reading the map literals rather than the call expressions: each map is `as const satisfies
