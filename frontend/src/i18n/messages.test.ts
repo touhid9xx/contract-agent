@@ -12,7 +12,9 @@
  *     literal text `{total}` and drops the number;
  *   - a key that exists in `bn.json` and not in `en.json`, which `tsc` allows —
  *     missing keys are caught, extra ones are not;
- *   - an empty string, which renders as nothing at all rather than as a gap.
+ *   - an empty string, which renders as nothing at all rather than as a gap;
+ *   - an English sentence pasted into `bn.json`, which passes every check above
+ *     and renders fluent English on a Bengali screen.
  *
  * Every assertion below is relational: no key name, count or sentence is written
  * down here. That is deliberate — a test that listed the keys would be a third
@@ -104,6 +106,25 @@ function shapeOf(text: string): Record<string, Arg> {
   return Object.fromEntries(argsOf(text));
 }
 
+/**
+ * One Bengali code point — the block `bn.json` is written in.
+ *
+ * Used as a presence test, never as a correctness one: this can tell that a
+ * value was *written* in Bengali, not that the Bengali says what the English
+ * says. A bad translation passes; a missing one does not.
+ */
+const BENGALI = /[\u0980-\u09FF]/;
+
+/**
+ * Whether a message is prose rather than a token.
+ *
+ * A run of three lowercase Latin letters is what separates `"Escalations"` from
+ * `"API"`, `"{id}"` and `"N/A"` — the values that are legitimately identical in
+ * both locales and must not be flagged. Widening this to any Latin letter would
+ * catch all three and the rule would be deleted within a week.
+ */
+const PROSE = /[a-z]{3}/;
+
 const flatEn = flatten(en);
 const flatBn = flatten(bn);
 
@@ -143,6 +164,31 @@ describe("the message catalogues", () => {
       ...[...flatBn].filter(([, text]) => text.trim() === "").map(([key]) => `bn.json: ${key}`),
     ];
     expect(empty).toEqual([]);
+  });
+
+  it("translates its prose into Bengali rather than copying the English", () => {
+    // The failure this catches is the ordinary one: a new key is added to both
+    // files in one commit and the `bn.json` half is the English sentence, so it
+    // typechecks, has the right arguments, is not empty — and is not translated.
+    // Nothing else in the suite can see that, because every other check compares
+    // the files to each other.
+    const copied = [...flatEn]
+      .filter(([key, english]) => {
+        const bengali = flatBn.get(key);
+        return bengali !== undefined && PROSE.test(english) && !BENGALI.test(bengali);
+      })
+      .map(([key, english]) => `${key}: ${JSON.stringify(english)}`);
+    expect(copied).toEqual([]);
+  });
+
+  it("never carries Bengali prose in the English catalogue", () => {
+    // The same mistake in the other direction: translating `en.json`'s value and
+    // leaving the English one replaced, which reads as fluent Bengali to a
+    // Bengali reviewer and as nonsense on the English screens.
+    const leaked = [...flatEn]
+      .filter(([, english]) => BENGALI.test(english))
+      .map(([key]) => key);
+    expect(leaked).toEqual([]);
   });
 
   it("reads a plural message, which the catalogue has none of yet", () => {
