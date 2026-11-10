@@ -5402,6 +5402,20 @@ thirteen amendments have each kept, and this one keeps: `jsdom` is still a DOM, 
 sentence is asserted against a **doubled `@/lib/api`**, so it proves the screen asks `/health`,
 not that the API answers.
 
+**Amended again, by `D10-75`, not deleted — and this one qualifies the premise the whole chain
+rests on.** No figure above moves: 10 screens, 25 sites, 96 keys, 464 leaf keys and both catalogue
+directions stand, and no test changed. What moves is what every amendment in this chain, and the
+sentence it amends, have taken for granted: that the gate they describe is *enforced*. The
+branches API reports `main` as `"protected": false` with
+`required_status_checks.enforcement_level: "off"`, so `ci.yml`'s `gate` job is an observer rather
+than an enforcer — its own comment called it "one required status check for branch protection",
+which is the shape it was built for and not a fact about the repository. This slice's three pushes
+(`9bbea40`, `419176f`, `7b13734`) went straight to `main` and nothing refused them. The gate
+`D10-73` split from `commit-msg` is still the real gate on the tree; what `D10-46` added is a
+second set of eyes, not a second lock. `D10-75` holds the measurement, the hedge that `"off"`
+cannot be told apart from protected-but-unenforced by an anonymous caller, and why the fix is
+prose plus a record — naming the check is a repository setting no YAML line can perform.
+
 **Amended again, by `D10-74`, not deleted — and this one corrects a number the record itself had
 just introduced.** No figure above moves: 10 screens, 25 sites, 96 keys, 464 leaf keys and both
 catalogue directions stand, and the F1 tooling table's other rows are untouched. What moves is a

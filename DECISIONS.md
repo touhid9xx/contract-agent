@@ -6071,10 +6071,54 @@ measured twice for this entry: once inside the hook's `frontend tests (vitest ru
 through `npx vitest run`. `git status --porcelain -uall` printed nothing between the amends.
 
 **Limits.** The four-mutation table was measured in the run that preceded this entry and was not
-re-performed for it; the suite figure above was. No CI run was observed for `419176f` — the push is
-this entry's next commit's problem, and the `frontend` job's checkout of the whole repository is the
-assumption the new spec rests on, stated in the code commit rather than proven by one. And a skipped
-hook cannot be caught by any test in this repository, only by reading the run instead of counting
-its config.
+re-performed for it; the suite figure above was. ~~No CI run was observed for `419176f` — the push
+is this entry's next commit's problem, and the `frontend` job's checkout of the whole repository
+is the assumption the new spec rests on, stated in the code commit rather than proven by one.~~
+`D10-75` supersedes that sentence with a run: `42889593155` is the push's own run, seven jobs,
+every one `success`, with `frontend`'s `vitest` and `production build` among them — so the
+cross-tree read is proven by a run and not merely asserted by a message. And a skipped hook cannot
+be caught by any test in this repository, only by reading the run instead of counting its config.
 
 Landed as `test(web)` (`419176f`) + `docs(status)`.
+
+### D10-75 — The gate job is advisory, because `main` has no protection
+
+`ci.yml` ends with a `gate` job whose comment opened *"One required status check for branch
+protection"*, and the file's header said CI is here "to make the existing gate mandatory". Both
+describe an enforcement. Neither is a fact about this repository: the aggregator is shaped for a
+required check, and no required check exists.
+
+**Measured, not inferred.** `GET /repos/touhid9xx/contract-agent/branches/main` answers
+anonymously and reports `"protected": false` with
+
+    "required_status_checks": {"enforcement_level": "off", "contexts": [], "checks": []}
+
+so a direct push to `main` lands whether the run is green or red. The `/protection` sub-resource
+answers 401 to an anonymous caller, which is not evidence either way; the boolean on the branch
+itself is, and it is unambiguous.
+
+**The evidence was already in this slice's own history.** `9bbea40`, `419176f` and `7b13734` were
+each pushed straight to `main` with no pull request and no merge, and nothing refused any of them.
+A required check would have stopped the first push in its tracks — a tree whose CI has not yet run
+is exactly what it refuses. `D10-46` built the checks; requiring them is a repository setting, and
+no line in a YAML file can perform it.
+
+**What changed, and what could not.** The `gate` comment now reads *"one job to name as a required
+status check"* and states the measurement instead of implying the wiring; the header sentence
+gains the same qualifier. No job, trigger, step, permission or `needs` entry changed. A comment
+that described enforcement which does not exist is `D10-59` again — a comment is a claim, and this
+one was checkable in a single unauthenticated call that nobody had made.
+
+**Verification.** `check-yaml` passes on the edited workflow, which is the hook CI itself runs,
+and every other gate is untouched by a comment. The measurement is one command, reproducible
+without a token: the same call printed `protected: False` and `enforcement_level: "off"`. The run
+that proves the pipeline green is `42889593155` — seven jobs, all `success`.
+
+**Limits.** Turning protection on needs an admin token this session does not have, so the fix here
+is prose plus a record, not a change of behaviour. Read strictly, `enforcement_level: "off"` is
+also what a protected-but-unenforced configuration reports, so the safe phrasing is "no
+enforcement is observable anonymously" rather than "no rule exists in the settings page". The
+consequence is identical either way: nothing has ever refused a push to `main`, and seven green
+runs have gated nothing.
+
+Landed as `ci(workflow)` + `docs(status)`.
