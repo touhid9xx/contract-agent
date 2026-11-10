@@ -5400,6 +5400,17 @@ thirteen amendments have each kept, and this one keeps: `jsdom` is still a DOM, 
 sentence is asserted against a **doubled `@/lib/api`**, so it proves the screen asks `/health`,
 not that the API answers.
 
+**Amended again, by `D10-65`, not deleted — and this one closes the hole `D10-64` recorded in
+itself.** The 25 template call sites the previous amendment left unresolved are resolved, by
+reading the map literals rather than the call expressions: each map is `as const satisfies
+Record<…, string>`, so its values are enumerable and a missing enum member is already a type
+error. Measured by the shipped spec — 10 screens, 25 sites, 96 keys, all present in both
+catalogues, both directions. Mutation-proven on the spec: deleting `contracts.statuses.renewed`
+from `en.json` turned exactly one of two cases red with three findings; restored, both passed.
+Frontend suite 316 passing / 15 files, up from 314/14 — and one comment in that same file claimed
+"27 sites" where the run says 25, corrected. Limits: five sites compose from a raw wire value with
+no table, so nothing here sees a fifth `EscalationStatus`; and copy is still unchecked.
+
 **Amended again, by `D10-64`, not deleted — and this one guards the strings rather than
 the envelopes.** The two message catalogues are now pinned to each other by
 `i18n/messages.test.ts`: five relational cases, no key name or count written down. Measured

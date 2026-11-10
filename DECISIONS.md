@@ -5528,3 +5528,49 @@ deliberately: so that adding or removing keys never forces an edit to a number t
 catalogue, not the test, owns.
 
 **Landed as** a `test(web)` spec plus a `docs(status)` record, on top of `2e064b4`.
+
+
+### D10-65 — The composed keys read where the keys are written, not where they are used
+
+`D10-64` closed the catalogue seam and named one hole in its own record: 25 call sites
+compose a key from a map value — `contracts.${STATUS_KEYS[row.status]}` wrapped in
+`t(...)` — and two attempts to resolve them by parsing call expressions both read
+`timeZone: "UTC"` and `style: "medium"` as message keys. Neither was repaired; both were
+discarded.
+
+The fix was to stop reading the call and read the table. Every such map is declared
+`as const satisfies Record<SomeEnum, string>`, which makes its values enumerable and
+makes the `satisfies` clause prove exhaustiveness — a new enum member with no entry is a
+type error in the screen, not a silent gap here. So the spec collects the maps declared
+in each `page.tsx`, collects the ``t(`<namespace>.${<TABLE>[…]}`)`` compositions in the
+same file, and asks each composed key to exist in both catalogues. It pairs a site with
+a table **from its own file** and fails when one cannot be found, so the guard cannot
+quietly shrink to nothing.
+
+Measured by the shipped spec: 10 screens, 25 sites, 96 keys, every one present in
+`en.json` and `bn.json`. Both directions are checked, so a key in one catalogue only is
+a failure rather than a tolerated extra.
+
+Mutation-proven on the spec itself, not only on the throwaway resolver that preceded it:
+deleting `contracts.statuses.renewed` from `en.json` turned **exactly one of two cases**
+red, and the failure named all three findings — two sites on the contracts list, one on
+contract detail. Restored, both passed. Frontend suite 316 passing / 15 files, up from
+314/14.
+
+Three claims of my own were wrong and are corrected in the file: the floor comment said
+"27 sites"; the run says 25. The same comment block called the raw-wire sites "four
+prefixes" where there are five, and warned that "a seventh" `EscalationStatus` would go
+unnoticed — that enum has four members, so the next one is the fifth. Both are now
+measured rather than recalled.
+
+What this slice does not establish. Five sites still compose a key from a raw wire value
+with no table in between — `review.fields.${item.field_name}`, `review.statuses.…`,
+`review.contractStatuses.…`, `escalations.statuses.…` and
+`escalations.contractStatuses.…` — so there is no literal for the spec to read, and a
+fifth `EscalationStatus` on the server would be caught by nothing in this suite. They
+were resolved by hand once, through the resolver: five prefixes, 28 wire values, every
+prefix fully present. That measurement is a snapshot, not a guard. And copy remains
+unchecked, exactly as `D10-64` said: a fluent Bengali sentence that says the wrong thing
+passes this spec and its neighbour.
+
+**Landed as** a `test(web)` spec plus a `docs(status)` record, on top of `47a5e2b`.
