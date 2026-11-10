@@ -6,7 +6,10 @@
 # fork all bypassed it, and nothing ever ran the backend test suite at all
 # (pytest is not a pre-commit hook). CI is here to make the existing gate
 # mandatory and to add the two checks the hook cannot express: the pytest suite
-# and the MySQL-only integration tests.
+# and the MySQL-only integration tests. The first half is not finished by this
+# file: it runs the checks, and only branch protection can require them —
+# measured off by `D10-75`, so a direct push to `main` still bypasses
+# everything below.
 #
 # Design rules, in the order they decided the shape below:
 #
@@ -329,10 +332,19 @@ jobs:
         run: pre-commit run gitleaks --all-files --hook-stage manual
 
   # --------------------------------------------------------------------- gate
-  # One required status check for branch protection, instead of six that have to
-  # be re-listed whenever a job is added. `if: always()` is what makes it run
-  # when an upstream job failed — otherwise the gate would be skipped, and a
-  # skipped required check is a green light.
+  # One job to name as a required status check, instead of six that have to be
+  # re-listed whenever a job is added. `if: always()` is what makes it run when
+  # an upstream job failed — otherwise the gate would be skipped, and a skipped
+  # required check is a green light.
+  #
+  # Nothing requires it today, and `D10-75` measured that rather than assuming
+  # it: the branches API reports `main` as `"protected": false` with
+  # `required_status_checks.enforcement_level: "off"`. So this job is an
+  # observer, not an enforcer — a direct push to `main` lands whether the run
+  # above it is green or red, which is the same bypass this file exists to
+  # close. Naming it in branch protection is a repository setting; no line
+  # here can perform it, and until it is named, the honest reading of a red run
+  # is "somebody looked", not "the push was stopped".
   gate:
     name: CI gate
     if: always()
