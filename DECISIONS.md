@@ -5423,3 +5423,64 @@ What this does **not** establish, stated so the entry is not read as more than i
    hazard `D10-58` names, so it was not done here — an owner decision, not a tidy-up.
 
 **Landed as** this `docs(status)` commit — ledgers only, **no code, no test, no behaviour change**.
+
+### D10-63 — Eighteen refusal codes read against the buttons that can raise them
+
+`D10-62` closed the shape half of the wire seam and named the strings half as its own
+limit: the refusal-code vocabulary the screens translate was not enumerated against
+the routers that raise it. This slice enumerated it — from the constant, to the
+`raise`, to the button that produces it.
+
+The vocabulary is 27 `REFUSAL_*` constants in five files: `decision.py` 6,
+`dispatch.py` 10, `escalation.py` 5, the `notifications` route 5,
+`notification_scheduler.py` 1. That is 26 distinct strings, because
+`CONTRACT_CLOSED` is defined in two of them, and one of the 27 never becomes a
+response at all: `TENANT_MISMATCH` is written to `Notification.last_error` by the
+scheduler and goes no further.
+
+Twenty-two button-reachable *sites* cover eighteen *distinct* codes: `CONTRACT_CLOSED`,
+`CONTACT_REFUSED`, `NO_CONSENT` and `PIPELINE_BLOCKED` are each raised on two screens.
+Every one of the eighteen is mapped at every site that can meet it:
+
+- **agent** — 7: the six decision-policy refusals (`CONTRACT_CLOSED`,
+  `PIPELINE_BLOCKED`, `CONTACT_REFUSED`, `NO_CONSENT`, `NO_CONTACT_VALUE`,
+  `CHANNEL_NOT_PERMITTED`) plus `NO_DECISION` when there is no row to correct.
+- **escalations** — 2: `ESCALATION_CLOSED` and `INVALID_TRANSITION`, the only two
+  `PATCH /escalations/{id}` can raise. The raise path's three codes
+  (`ALREADY_ESCALATED`, `RESPONSE_RECORDED`, `CONTRACT_CLOSED`) belong to a route
+  this screen never calls.
+- **notifications** — 13: the four consent gates, `PIPELINE_BLOCKED`, six dispatch
+  verdicts (`NOT_PENDING`, `NOT_YET_DUE`, `UNKNOWN_TIMEZONE`, `ATTEMPTS_EXHAUSTED`,
+  `SENDER_UNAVAILABLE`, `RECIPIENT_UNAVAILABLE`), and `NOT_FAILED` /
+  `CONCURRENT_UPDATE` on retry.
+
+The other six screens branch on status — 401, 403, 409, 422 — and never read
+`code`, so they have no vocabulary to drift.
+
+**One claim was false.** `notifications/page.tsx` grouped four codes under "these
+four are the consent gates, reached through `assert_may_contact`". Three are
+`assert_may_contact`'s; the fourth gate inside that function is
+`CHANNEL_NOT_CONSENTED`, not `PIPELINE_BLOCKED`, which the worker raises itself one
+gate below (`dispatch.py:591`) when a field is still awaiting approval. So the
+comment named a mechanism that does not produce the code beside it, while the code
+that mechanism does produce sat four lines down with no comment at all. Fixed by
+naming the four real gates and giving `PIPELINE_BLOCKED` its own line, its own
+mechanism, and the line number.
+
+**Three of the sixteen mapped codes cannot be provoked from this screen.**
+`NOT_IN_WINDOW`, `MISSING_END_DATE` and `NEEDS_REVIEW` come from
+`build_notification` — the schedule path — and `api.ts` sends only `/dispatch` and
+`/retry`. That is over-coverage, not drift: the sentences exist for an action that
+does not. Now recorded in the file so the map is not read as proof that a button
+can produce them.
+
+What this slice does not establish. That the translated sentences say the right
+thing: copy is not a code reading, and nothing here checks a locale string. That a
+new `raise` cannot drift silently: no test pins the vocabulary, so a twenty-eighth
+code would be exactly as invisible as this one was. And that a 409 carrying a bare
+`detail` and no `code` is distinguishable from a version conflict — it is not; the
+reveal route and the escalation `StaleDataError` both land on one conflict
+sentence, on purpose.
+
+**Landed as** a `docs(web)` comment fix plus a `docs(status)` record, on top of
+`5e4b204`.

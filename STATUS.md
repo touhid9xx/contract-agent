@@ -5400,6 +5400,15 @@ thirteen amendments have each kept, and this one keeps: `jsdom` is still a DOM, 
 sentence is asserted against a **doubled `@/lib/api`**, so it proves the screen asks `/health`,
 not that the API answers.
 
+**Amended again, by `D10-63`, not deleted — and this one measures the clause `D10-62` left open.**
+The refusal vocabulary is 27 constants, 26 distinct strings, and 18 of them reach a button; all 18
+are mapped. One comment was false: `notifications/page.tsx` called `PIPELINE_BLOCKED` a consent gate
+reached through `assert_may_contact`, whose fourth gate is actually `CHANNEL_NOT_CONSENTED` — fixed
+there, and three mapped codes (`NOT_IN_WINDOW`, `MISSING_END_DATE`, `NEEDS_REVIEW`) are now noted as
+over-coverage that only the schedule path raises. Limits: nothing pins the vocabulary, so a new
+`raise` still drifts silently; and the six status-branching screens were not read code by code.
+Frontend suite 309 passing / 13 files, unchanged by a comment-only edit.
+
 **Amended again, by `D10-62`, not deleted — and this amendment measures the clause instead of
 narrowing it.** Each amendment above keeps the same clause: the envelopes a screen translates are
 **fixtures pinned from the screen's side**, asserted there and never checked against the route that
