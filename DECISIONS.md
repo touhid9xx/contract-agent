@@ -5847,3 +5847,73 @@ creating `[locale]/probe/page.tsx` failed it naming that path — with the tree 
 `git status` clean between them. Suite after: 322 passed in 16 files.
 
 Landed as `test(web)` + `docs(status)`.
+
+### D10-71 — A key name on screen is not a sentence, and three tables of keys went unchecked
+
+Three screens turn a server refusal into something an operator can act on: the agent
+decision screen, the notification queue and the escalation queue. Each maps a `409`'s
+machine-readable `code` to a message key — `CONTRACT_CLOSED` → `agent.refuseContractClosed`
+— and between them the three tables held 25 keys. Nothing in this repository checked that
+any of those keys still existed. Renaming `notifications.refusalContractClosed` in **both**
+catalogues was allowed by every check the repo had, and the result would have been the
+literal string `notifications.refusalContractClosed` printed where a sentence belongs.
+
+**Three blind spots, each read in source rather than asserted.** `Record<string, string>`
+erases the literal type, so the compiler saw `string` and had nothing to compare it with.
+Every call site is `useTranslations()` with no namespace (`agent/page.tsx:102`,
+`notifications/page.tsx:131`, `escalations/page.tsx:91`), and `t()` accepts any key at all.
+And `composed-keys.test.ts` could not see them either: its parser looks for a table indexed
+*inside* the call — `t(\`ns.${TABLE[code]}\`)` — while these screens read the table into a
+local first (`const key = REFUSAL_KEYS[code]`) and handed the local to `t(\`ns.${key}\`)` a
+line later.
+
+**What that costs the standing figures.** `composed-keys.test.ts` resolves 96 keys and the
+catalogues hold 464 leaves; these 25 sat in neither set, so both i18n specs could pass while
+a refusal went out untranslated. That is `D10-58` again — one fact, and the check attached
+to a different copy of it.
+
+**The fix is a move, not a new abstraction.** The three tables left the screens for
+`frontend/src/lib/refusals.ts`, annotated `as const satisfies Record<string, string>` — the
+shape the status maps already use — for one reason: a node-environment spec can import a
+plain table, whereas reaching a `const` inside a `page.tsx` means parsing screen source,
+which is the seam that has broken twice here. The lookup helper returns `undefined` rather
+than a fallback sentence, because each screen walks its own `forbidden`/`offline`/`failed`
+ladder first; and it checks `typeof found === "string"`, because these are object literals,
+so `table["constructor"]` reaches `Object.prototype` and a refusal code is attacker-influenced
+data on the wire.
+
+**A guard that asserts relations, not key names.** `frontend/src/lib/refusals.test.ts` checks
+five things and writes down no sentence and no count: every named key resolves in the English
+catalogue *and* in the Bengali one, written as two assertions because a key present in one and
+absent from the other is a translation bug rather than the same bug twice; no table repeats a
+sentence, since these codes are translated separately precisely because they name different
+next actions; every table stays inside its own screen's namespace, derived from the table's own
+name; and the other direction — a catalogue key named like a refusal that no table reaches
+fails as an orphan. The two floors (`KEY_FLOOR = 24`, `flatEn.size >= 200`) are vacuity guards,
+not counts.
+
+**Mutation-proven, four runs, each landing on a different assertion.** Renaming
+`notifications.refusalContractClosed` in both catalogues failed *names only sentences that
+exist in both catalogues* and also the orphan check. Bengali alone failed at line 83, English
+alone at line 82 — the two directions are separate assertions, which is why they are written
+apart. Pointing an agent code at `notifications.refusalNoConsent` failed *keeps every table
+inside its own screen's namespace*. Tree restored and re-run green after each.
+
+**One thing deliberately left unpinned.** The *codes* are the server's vocabulary —
+`REFUSAL_*` constants in `app/workers/dispatch.py`, `decision.py`, `escalation.py` and
+`app/api/v1/notifications.py`. Restating them as a TypeScript union would be a fourth copy of
+a fact with nothing to verify it against Python (`D10-63`), so it is not done: a code the
+server stops sending leaves an unused entry, a code it starts sending falls through to the
+screen's generic sentence, and both are survivable. The sentences are pinned; the codes are
+not.
+
+**Reuse rather than a third copy.** `flatten`, byte-identical in `messages.test.ts` and
+`composed-keys.test.ts`, moved to `src/i18n/catalogue.ts`. Its docstring claims each spec
+keeps a floor so a broken `flatten` cannot pass three times at once; that claim was read and
+checked rather than left as prose — `flatEn.size > 300` and `checked >= 90` are both there.
+
+**Verification.** Suite 327 passed in 17 files, from 322 in 16, with all three screen specs
+green before the tables moved and after, so the refactor preserved behaviour. Both catalogues
+came out of the mutation runs unchanged (`git diff` empty on each).
+
+Landed as `test(web)` + `docs(status)`.

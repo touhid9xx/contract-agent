@@ -5402,6 +5402,21 @@ thirteen amendments have each kept, and this one keeps: `jsdom` is still a DOM, 
 sentence is asserted against a **doubled `@/lib/api`**, so it proves the screen asks `/health`,
 not that the API answers.
 
+**Amended again, by `D10-71`, not deleted — and this one moves no figure above.**
+Ten screens, 25 sites, 96 keys, 464 leaf keys, both catalogue directions: all still
+true, and none of them is the subject. Three screens — agent, notifications,
+escalations — turn a server `409` code into a sentence through 25 message keys, and
+those 25 are in *neither* figure above: `composed-keys.test.ts` resolves a key only
+when its table is indexed inside the call, while these screens read the table into a
+local and passed the local to `t()`. Renaming one in both catalogues therefore
+satisfied the parity test, the type checker and all 96 keys, and put a raw key name
+where a sentence belongs. The tables now live in `frontend/src/lib/refusals.ts` as
+`as const satisfies Record<string, string>`, and `frontend/src/lib/refusals.test.ts`
+pins five relations — both catalogues checked apart, one sentence per code, each
+table inside its own namespace, and the orphan direction — writing down no key name
+and no count, so the guard cannot rot the way the figure it protects did. Suite 327
+in 17 files, from 322 in 16. `D10-71` holds the mutation table.
+
 **Amended again, by `D10-70`, not deleted — and this one strikes a claim about the tree that
 the tree had outgrown.** No figure above moves: 10 screens, 25 sites, 96 keys, 464 leaf keys,
 both catalogue directions. What changes is `README.md`'s "what is still missing" list, which
