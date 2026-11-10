@@ -5402,6 +5402,19 @@ thirteen amendments have each kept, and this one keeps: `jsdom` is still a DOM, 
 sentence is asserted against a **doubled `@/lib/api`**, so it proves the screen asks `/health`,
 not that the API answers.
 
+**Amended again, by `D10-70`, not deleted — and this one strikes a claim about the tree that
+the tree had outgrown.** No figure above moves: 10 screens, 25 sites, 96 keys, 464 leaf keys,
+both catalogue directions. What changes is `README.md`'s "what is still missing" list, which
+said **no CI** and **7 of the 9 web screens have no test**. Both were false — CI is seven jobs
+(`python-static`, `backend-tests`, `mysql-integration`, `frontend`, `demo-frontend`, `hygiene`,
+`gate`) and 21 runs, 20 green, the one red on `6c02f66`; and all nine screens have a spec. The
+screen sentence was true for exactly the commit that wrote it (`e165ae8`, two specs, 9 − 2 = 7)
+and false from `dd41c04` onward, which landed the third — 37 commits before this one. The Kafka
+clause survives and is not struck: no broker in `docker-compose.yml`, no consumer in `backend/`.
+The corrected half is guarded rather than merely re-worded — `frontend/src/app/screens.test.ts`
+fails when a screen ships without a spec, when an exemption outlives its screen, and when a
+spec outlives its screen. Suite 322 in 16 files. `D10-70` holds the numbers.
+
 **Amended again, by `D10-69`, not deleted — and this one corrects the sentence that closes a
 slice, not any figure inside one.** Every figure above stands. What changes is the vocabulary: a
 closing line reading "the branch stands **N commits ahead of `origin/main`**, re-counted rather

@@ -13,10 +13,20 @@ and escalation to a human operator.
 > socket. **Phase 2 (P2-A … P2-L) has not started.**
 >
 > What is still missing, stated plainly rather than left to be discovered: there is
-> **no Kafka broker and no consumer**, **no CI** — gating runs from `pre-commit` on a
-> developer's machine — and **7 of the 9 web screens have no test**. See
-> [`STATUS.md`](STATUS.md) for per-feature detail and [`DECISIONS.md`](DECISIONS.md)
-> for the reasoning behind each choice.
+> **no Kafka broker and no consumer**. ~~**no CI** — gating runs from `pre-commit` on a
+> developer's machine — and **7 of the 9 web screens have no test**.~~ Struck, not
+> deleted, because both of those clauses had been false for 37 commits while they stood
+> here (`D10-70`): the sentence was written when two specs existed and became false the
+> commit a third landed. `.github/workflows/ci.yml` runs **seven jobs** — python static,
+> backend pytest, MySQL 8.4 integration, frontend typecheck/eslint/vitest/build, demo
+> frontend typecheck, hygiene + `gitleaks`, and a `gate` job that fails when any of them
+> does — and **every web screen has a test**; the only `page.tsx` without a spec is the
+> root redirect, and `frontend/src/app/screens.test.ts` now fails if a screen is ever
+> added without one. What survives of the CI half is narrower: it has been observed
+> passing and failing, never *gating* a merge, because required status checks are a
+> repository setting no unauthenticated read can see. See [`STATUS.md`](STATUS.md) for
+> per-feature detail and [`DECISIONS.md`](DECISIONS.md) for the reasoning behind each
+> choice.
 >
 > Struck, not deleted, because it was true when written and is now false in every
 > clause: ~~*Status: Phase 0 — interactive mocked demo, awaiting GATE 1 approval.

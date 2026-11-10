@@ -5792,3 +5792,58 @@ pattern containing `|` instead of a regex, which is `D10-63`'s lesson in the sam
 time. No application code, no test, no dependency, no migration.
 
 Landed as `docs(status)` — two Markdown files, no code.
+
+### D10-70 — A missing-features list is a claim about the tree, and nothing re-measured it
+
+`README.md` opens with a blockquote that names what this project lacks, and every handover
+in the last stretch read it as the description of the tree. It carried three claims: no
+Kafka broker and no consumer, **no CI**, and **7 of the 9 web screens have no test**. Two
+of the three had been false for a long time — not approximately false, or false in tone,
+but false against `ls`.
+
+**The CI claim.** `.github/workflows/ci.yml` defines seven jobs — `python-static`,
+`backend-tests`, `mysql-integration`, `frontend`, `demo-frontend`, `hygiene` and a `gate`
+job that needs all six and runs `if: always()`. The run list answers without a token: 21
+runs in this repository, 20 green, the one red being `6c02f66` — the `gitleaks` stage
+refusal `D10-51` itself fixed. Run `42817738711`, on `eb21e8e`, is seven jobs and seven
+successes. So "no CI — gating runs from `pre-commit` on a developer's machine" described
+a repository that stopped existing at `D10-46`, which is the commit that added the file.
+
+**The screen claim, with its interval measured rather than described.** The sentence was
+written at `e165ae8`. At that commit `git ls-tree -r --name-only e165ae8 -- frontend/src/app`
+lists exactly two `page.test.tsx` files, so 9 − 2 = 7 was **true when it was written**. The
+next screen test, `dd41c04`, landed the third, and from that commit the sentence was false.
+`git rev-list --count dd41c04..HEAD` prints 37: the claim was correct for the single commit
+that made it and wrong for the 37 that followed.
+
+**What was not touched, and why that matters here.** The Kafka clause is true — the compose
+file defines no broker, only a comment explaining its absence, and no consumer symbol exists
+in `backend/` — so it stays, unstruck. The neighbouring claim that migrations sit at head
+`0006` is also true: `0006_refresh_tokens.py` is the highest revision. A correction that
+sweeps up true clauses because they sit near false ones is how the previous correction
+becomes the next defect.
+
+**One copy.** `D10-61`'s rule is to grep every copy of a sentence before editing one. Both
+false clauses exist in exactly one place — `README.md:16` and `README.md:17` — across
+`README.md`, `STATUS.md`, `DECISIONS.md` and `DEMO.md`. `STATUS.md`'s own CI table already
+said seven jobs and was never wrong; the two files simply disagreed, and the file people
+read first was the wrong one.
+
+**The guard, because the correction alone would rot again.** A count in prose has no second
+copy to disagree with (`D10-58`), and re-counting by hand is exactly what drifted eleven
+times over in `D10-69`. So the corrected claim's machine-checkable half is now a test
+rather than a promise: `frontend/src/app/screens.test.ts` requires a `page.test.tsx` beside
+every `page.tsx` under `src/app`, exempts one path with its reason stated, and checks that
+exemption in both directions — a stale exemption fails as loudly as a missing spec, and an
+orphan spec fails too. It asserts the relation, never the count, so adding a tenth screen
+cannot make it wrong; it can only make it fail until that screen is tested.
+
+**Verification.** Fresh this turn rather than carried: 21 runs / 20 success from the
+actions API, seven of seven jobs on `eb21e8e`, ten `page.tsx` of which nine have a spec,
+`0006` confirmed as head, no Kafka service in `docker-compose.yml`, no consumer in
+`backend/`. The new spec was mutation-proven in both directions — renaming
+`[locale]/users/page.test.tsx` away failed it naming `[locale]/users/page.tsx`, and
+creating `[locale]/probe/page.tsx` failed it naming that path — with the tree restored and
+`git status` clean between them. Suite after: 322 passed in 16 files.
+
+Landed as `test(web)` + `docs(status)`.
