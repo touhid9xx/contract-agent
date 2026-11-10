@@ -5400,6 +5400,21 @@ thirteen amendments have each kept, and this one keeps: `jsdom` is still a DOM, 
 sentence is asserted against a **doubled `@/lib/api`**, so it proves the screen asks `/health`,
 not that the API answers.
 
+**Amended again, by `D10-67`, not deleted — and this one is the first amendment in the chain
+that changes a promise rather than a count.** No figure above moves: 10 screens, 25 sites, 96
+keys, 464 leaf keys and both catalogue directions stand exactly as `D10-65` and `D10-64`
+measured them, and the frontend suite moves from 316 to 318 passing. What changes is the
+closing clause three amendments above end with — *copy is not checked at all* — which was true
+when it was written and is now half false. A prose message whose `bn` value is the English
+sentence is caught, by requiring a Bengali code point in any value whose English half holds a
+run of three lowercase letters — which skips `"API"`, `"{id}"` and `"N/A"`, the values that are
+correctly identical in both locales. A Bengali value sitting in `en.json` is caught too, for
+the same mistake in the other direction. Proven by pasting one into each file: exactly one of
+seven cases red per mutation, naming the case for that direction, with the restore verified by
+sha256 rather than assumed. What remains true of that clause, and is the larger half: a Bengali
+value that says the wrong thing still passes, so this notices a missing translation and not a
+wrong one.
+
 **Amended again, by `D10-66`, not deleted — and this one repairs the sentence the
 previous amendment's guard would have printed.** No figure above moves: 10 screens, 25
 sites, 96 keys and both catalogue directions stand exactly as `D10-65` measured them.

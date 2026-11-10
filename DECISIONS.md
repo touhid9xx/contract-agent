@@ -5620,3 +5620,55 @@ still unchecked in both catalogues.
 
 **Landed as** a `fix(test)` commit plus this `docs(status)` record, on top of
 `19ba652`.
+
+### D10-67 — The sentence that was never asked what it was made of
+
+`D10-64` closed by naming a limit and leaving it: the two catalogues can agree with each
+other and both still be wrong, because every case in `messages.test.ts` compares them *to
+each other* — the same keys, the same ICU arguments, nothing empty — and none of them asks
+what a value is made of. So the commonest way an i18n catalogue rots went through the whole
+suite untouched: a key is added to both files in one commit, and the `bn.json` half is the
+English sentence. It typechecks, it carries the right arguments, it is not empty, and a
+Bengali screen renders fluent English.
+
+Three measurements came before the rule, because a rule written on an assumption is the
+thing this record keeps having to repair:
+
+    leaf keys                     464
+    bn values differing from en   462
+    bn values identical             2   "{id}" and "API", both legitimately so
+    messages that are prose       452   English half holds a run of 3+ lowercase letters
+    prose messages untranslated     0
+    Bengali script inside en.json   0
+
+With no exceptions to accommodate, the rule needs none: a prose message must carry at least
+one Bengali code point in `bn.json`, and no value in `en.json` may carry Bengali script at
+all. The three-letter lowercase run is the whole of the discrimination — `"API"`, `"{id}"`
+and `"N/A"` contain none and are skipped, which is what stops the rule flagging the values
+that are correctly identical in both locales.
+
+Proven by mutation against the real catalogues, with each restore verified by sha256:
+
+    English sentence into bn.json    exit 1   1 failed | 6 passed
+    Bengali sentence into en.json    exit 1   1 failed | 6 passed
+
+Exactly one of seven cases red each time, and the case that failed is the one that names that
+direction — the second reports `[ 'app.name' ]`. That pairing is the evidence: a mutation
+that reddened both cases would prove only that either one would have caught it. Frontend
+suite 318 passing / 15 files, up from 316.
+
+One error of mine, caught by the gate rather than by me: the commit subject read "notice a
+Bengali message that is still English", and `commitlint` refused it on `subject-case` — a
+capital `B` in the middle of a subject. Reworded to drop the proper noun rather than
+lowercasing it into a typo.
+
+What this does not establish is the larger half. Presence is not correctness: a Bengali value
+that says the wrong thing passes both cases, and so does a fluent sentence with its subject
+and object swapped. This notices a translation that is *missing*, not one that is *wrong*. It
+also supersedes the closing clause of `D10-64`'s and `D10-65`'s amendments, which said copy
+was not checked at all — the honest replacement is that a missing translation is now checked
+and a wrong one is not. And `D10-66`'s standing gap stands: the repaired failure report is
+still proven by one mutation rather than by a case, and the five raw-wire composition sites
+remain unread by anything.
+
+**Landed as** a `test(web)` commit plus this `docs(status)` record, on top of `133f88a`.
