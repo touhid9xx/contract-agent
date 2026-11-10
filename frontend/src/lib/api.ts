@@ -67,6 +67,17 @@ interface ErrorEnvelope {
     message?: string;
     request_id?: string | null;
     /**
+     * The log-correlation id bound to the request that failed.
+     *
+     * A sibling of `request_id`, not a duplicate: `request_id` is the value
+     * echoed back in `x-request-id`, while `trace_id` is what
+     * `app.core.middleware` binds into every log line the request emits. An
+     * operator pasting one into a log search wants the other. The server always
+     * writes the key; it is `null` only when the envelope was built outside a
+     * request context (a CLI command, a worker tick), so read it defensively.
+     */
+    trace_id?: string | null;
+    /**
      * Structured extra context, when the route chose to send some.
      *
      * `app.main.http_exception_handler` passes a raised `{code, message,
@@ -94,13 +105,21 @@ export class ApiError extends Error {
   readonly requestId: string | null;
   /** The envelope's `details`, untouched. Narrow it where the route is known. */
   readonly details: unknown;
+  /** Log-correlation id from the envelope, if the server sent one. */
+  readonly traceId: string | null;
 
+  /**
+   * `traceId` is appended rather than sitting beside `requestId` on purpose:
+   * `details` already holds the fifth position at the call sites that build an
+   * error by hand, and moving it would silently re-bind those arguments.
+   */
   constructor(
     status: number,
     code: string,
     message: string,
     requestId: string | null = null,
     details: unknown = null,
+    traceId: string | null = null,
   ) {
     super(message);
     this.name = "ApiError";
@@ -108,6 +127,7 @@ export class ApiError extends Error {
     this.code = code;
     this.requestId = requestId;
     this.details = details;
+    this.traceId = traceId;
   }
 
   /** The credential was not accepted, or is no longer valid. */
@@ -178,6 +198,7 @@ async function failure(response: Response): Promise<ApiError> {
   let message = `The server answered with status ${response.status}.`;
   let requestId: string | null = null;
   let details: unknown = null;
+  let traceId: string | null = null;
 
   try {
     const body = (await response.json()) as ErrorEnvelope;
@@ -186,12 +207,13 @@ async function failure(response: Response): Promise<ApiError> {
       message = body.error.message ?? message;
       requestId = body.error.request_id ?? null;
       details = body.error.details ?? null;
+      traceId = body.error.trace_id ?? null;
     }
   } catch {
     // Keep the status-derived message: the response was not our envelope.
   }
 
-  return new ApiError(response.status, code, message, requestId, details);
+  return new ApiError(response.status, code, message, requestId, details, traceId);
 }
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {

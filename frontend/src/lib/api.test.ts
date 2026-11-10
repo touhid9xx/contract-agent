@@ -182,10 +182,15 @@ describe("a document upload", () => {
 });
 
 describe("a call the server refuses", () => {
-  it("surfaces the envelope's code, message and request id", async () => {
+  it("surfaces the envelope's code, message, request id and trace id", async () => {
     fetchMock.mockResolvedValue(
       envelope(
-        { code: "unauthorized", message: "Invalid credentials", request_id: "req-9" },
+        {
+          code: "unauthorized",
+          message: "Invalid credentials",
+          request_id: "req-9",
+          trace_id: "trace-9",
+        },
         401,
       ),
     );
@@ -198,8 +203,26 @@ describe("a call the server refuses", () => {
       code: "unauthorized",
       message: "Invalid credentials",
       requestId: "req-9",
+      traceId: "trace-9",
     });
     expect((error as ApiError).isUnauthorized).toBe(true);
+  });
+
+  it("answers null when the envelope carries no trace id", async () => {
+    // `app.main.error_payload` always writes the key; it is null when the
+    // envelope was built with nothing bound in the request contextvars, which is
+    // how a CLI or worker failure reaches the client.
+    fetchMock.mockResolvedValue(
+      envelope(
+        { code: "internal_error", message: "boom", request_id: "req-9", trace_id: null },
+        500,
+      ),
+    );
+
+    const error = (await auth.me("access-1").catch((cause: unknown) => cause)) as ApiError;
+
+    expect(error.traceId).toBeNull();
+    expect(error.requestId).toBe("req-9");
   });
 
   it("keeps `details` untouched, because only the calling route knows its shape", async () => {
@@ -237,6 +260,7 @@ describe("a call the server refuses", () => {
     expect(error.code).toBe("request_failed");
     expect(error.message).toContain("502");
     expect(error.requestId).toBeNull();
+    expect(error.traceId).toBeNull();
   });
 
   it("treats a 200 with an unreadable body as a refusal, not an empty success", async () => {
