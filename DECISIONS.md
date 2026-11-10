@@ -5732,3 +5732,63 @@ totals the reporter prints (which sum to 869) and from the progress line's 867 m
 skips. Frontend `npm test`: 318 passed, 15 files, unchanged from `D10-67`.
 
 Landed as `docs(status)` — two Markdown files. No code, no test, no dependency, no migration.
+
+### D10-69 — One phrase, three measurements, and none of them survives a push
+
+Eleven sentences in `STATUS.md` close a slice with the same figure: the branch stands **N commits
+ahead of `origin/main`**, *re-counted rather than carried forward*. The phrase was inherited from
+the first of them, the number was re-counted by hand each time, and the drift was admitted in prose
+— the `113` written for `D10-46` had "already drifted" by the next slice. That admission is what
+made this worth measuring instead of trusting: a figure known to drift, pinned eleven times by
+hand, is a figure nobody can check.
+
+**What the early numbers count.** Measured against history rather than read off the sentence:
+
+    claim   commit that carries it      `git rev-list --count`
+    113     8d54176  `docs(status)`     113
+    117     7198c42  `docs(status)`     117
+    121     cc3cba9  `docs(status)`     121
+    123     5f05e37  `docs(status)`     123
+    124     dd41c04  `test(web)`        124
+    125     6c02f66  `docs(status)`     125
+
+Every one equals the *history length* of the commit it sits in, to the commit. That is not
+divergence from anything: history length can equal commits-ahead only if the remote holds no
+commits at all. So the early figures counted **the branch**, not the distance from `origin/main`,
+and the word "ahead" was decoration around a `git rev-list --count HEAD`.
+
+**The fifth row breaks the label rather than the arithmetic.** `STATUS.md` says 124 was counted
+"at this `docs(status)` commit", but the commit whose history is 124 is `dd41c04`, a `test(web)`
+commit — the third screen test. Its `docs(status)` companion is 125, the figure quoted by the
+paragraph *below* it. Either the number was taken one commit early, or the label was copied from
+the sentence it sits beside; both cannot hold.
+
+**Then the phrase quietly changed meaning.** The fourth-screen paragraph claims 125 "after this
+`docs(status)` commit", but its own commit carries 130, and CI run #1 had already run on `6c02f66`
+— commit 125. So at that moment the remote tip *was* 125, and the branch was five ahead
+(126–130). 125 is the **remote's** count, not the branch's divergence. After the first push the
+same sentence reports 2, 2, 4, 2, 2, 2, and none of those can be anything but divergence: a history
+length of 2 does not exist here and a remote tip of 2 does not either. Three quantities wear one
+phrase — history length, remote tip, divergence.
+
+**Why that is a defect and not a footnote.** It is `D10-58`'s shape, one fact written in many
+places, with the aggravating difference that the places disagree about *which* fact it is; and it
+is `D10-62`'s shape, a figure nobody re-measured, except that here somebody did re-measure it, by
+hand, eleven times, and the drift arrived anyway. At HEAD the sentence is false under all three
+readings at once: `rev-list --left-right --count HEAD...origin/main` prints `0 0`, because a branch
+that has just been pushed is never ahead of itself. A divergence written into the document that the
+push itself carries has no state in which it can be read.
+
+**What was not done.** The eleven figures are not rewritten. Each was true of the measurement it
+actually took, and replacing them with `0` would be inventing a different past to make a sentence
+look tidy. What is corrected is the *practice*, in the accompanying amendment: a slice reports
+divergence as the pair `rev-list --left-right --count` prints, reports history length under its own
+name, and never lets one number stand in for the other.
+
+**Verification.** Counted, not recalled: `STATUS.md` holds eleven `commits ahead of` sentences, the
+five pre-push figures were matched to commits with `git rev-list --count`, and the divergence at
+HEAD is `0 0`. The first attempt to count them returned zero matches and was wrong — a literal
+pattern containing `|` instead of a regex, which is `D10-63`'s lesson in the same costume a third
+time. No application code, no test, no dependency, no migration.
+
+Landed as `docs(status)` — two Markdown files, no code.

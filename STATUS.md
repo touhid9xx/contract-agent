@@ -5402,6 +5402,21 @@ thirteen amendments have each kept, and this one keeps: `jsdom` is still a DOM, 
 sentence is asserted against a **doubled `@/lib/api`**, so it proves the screen asks `/health`,
 not that the API answers.
 
+**Amended again, by `D10-69`, not deleted — and this one corrects the sentence that closes a
+slice, not any figure inside one.** Every figure above stands. What changes is the vocabulary: a
+closing line reading "the branch stands **N commits ahead of `origin/main`**, re-counted rather
+than carried forward" measured, in this document, three different quantities. The early figures
+(113, 117, 121, 123, 125) equal the *history length* of their own commit to the commit, which
+cannot be divergence from a remote holding anything at all; the fourth-screen figure (125) equals
+the *remote tip* at the time, when the true divergence was five; and the six later figures (2, 2,
+4, 2, 2, 2) are real divergences — an unpushed `test` and `docs` pair. One of them, 124, is
+attached to a `test(web)` commit while the sentence says `docs(status)`: its history is 124, and
+its `docs` companion is 125. No number is rewritten here, since each was true of the measurement
+it took, but the rule changes: a slice reports divergence as the pair `rev-list --left-right
+--count` prints — `0 0` at HEAD, and it is `0 0` precisely because the push carrying this sentence
+is the push that erases the reading — and reports history length as history length. `D10-69` holds
+the table.
+
 **Amended again, by `D10-68`, not deleted — and this one moves no figure, only a limit I had been
 repeating in my own words.** Every number above stands: 10 screens, 25 sites, 96 keys, 464 leaf
 keys, both catalogue directions, suite 318/15. What changes is the limit `D10-51` recorded and that
