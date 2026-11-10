@@ -5484,3 +5484,47 @@ sentence, on purpose.
 
 **Landed as** a `docs(web)` comment fix plus a `docs(status)` record, on top of
 `5e4b204`.
+
+### D10-64 — Both catalogues pinned against each other, five relational cases
+
+`i18n/messages.ts` already makes a missing translation key a compile error: `bn` is
+assigned to `Record<Locale, Messages>` with no `as` cast, so a namespace or key added
+to `en.json` and forgotten in `bn.json` fails `tsc`. That guard is real, and it stops
+at the strings. A compiler cannot see inside a value, which leaves three defects free
+to reach a Bengali screen while every English one looks perfect: an argument renamed
+on one side (`{count}` to `{total}`), which renders the literal braces and drops the
+number; a key present only in `bn.json`, which assignability allows because excess
+properties are not checked on a non-fresh object; and an empty string, which renders
+as nothing rather than as a gap.
+
+`frontend/src/i18n/messages.test.ts` closes those three. Every assertion in it is
+relational — no key name, count or sentence is written down — because a test that
+listed the keys would be a third copy of the catalogue, and the copy is what drifts.
+It flattens both files, compares the key sets in both directions, compares each
+message's ICU arguments by name and kind, compares plural categories where a message
+branches, and asserts no value is blank. A floor of 300 leaves keeps it honest: a
+broken flattener fails instead of passing over an empty map.
+
+Measured: 464 leaf keys on each side, 11 namespaces, zero one-sided, zero empty, zero
+argument drift. Forty-three messages carry braces and all 43 are plain `{name}`
+interpolation — there is no ICU plural or select anywhere in either file, so the
+category comparison cannot fire today. The fifth case therefore runs the reader over a
+synthetic plural and over two real strings, so that tripwire is proven rather than
+merely intended.
+
+Mutation-proven, seven mutations to `bn.json` applied one at a time and restored: two
+deletions (top level and nested), a key only `bn.json` has, a renamed argument, a plain
+argument turned plural, and a whitespace-only value. All seven turned the suite red with
+exactly one of five cases failing — the count is the evidence, since an import or JSON
+error fails all five — and the restored file returned five passing. Frontend suite 314
+passing / 14 files, up from 309/13.
+
+What this slice does not establish. The 25 template call sites whose suffix comes from a
+local map or a server enum (`contracts.${STATUS_KEYS[row.status]}`) are not resolved: two
+attempts to model them read `timeZone: "UTC"` and `style: "medium"` as message keys, so
+their output was discarded rather than repaired. Copy is not checked at all — a Bengali
+sentence that is fluent and wrong passes every case here. And the floor is 300, not 464,
+deliberately: so that adding or removing keys never forces an edit to a number the
+catalogue, not the test, owns.
+
+**Landed as** a `test(web)` spec plus a `docs(status)` record, on top of `2e064b4`.

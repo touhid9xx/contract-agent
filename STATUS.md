@@ -5400,6 +5400,16 @@ thirteen amendments have each kept, and this one keeps: `jsdom` is still a DOM, 
 sentence is asserted against a **doubled `@/lib/api`**, so it proves the screen asks `/health`,
 not that the API answers.
 
+**Amended again, by `D10-64`, not deleted — and this one guards the strings rather than
+the envelopes.** The two message catalogues are now pinned to each other by
+`i18n/messages.test.ts`: five relational cases, no key name or count written down. Measured
+first — 464 leaf keys on each side, 11 namespaces, zero one-sided, zero empty, zero argument
+drift, 43 messages carrying braces and all 43 plain `{name}` interpolation, so neither file
+has an ICU plural and the category comparison is proven on a synthetic one. Seven mutations
+to `bn.json` each turned exactly one case red; frontend suite 314 passing / 14 files, up from
+309/13. Limits: the 25 template call sites are unresolved, and copy is not checked at all —
+a fluent Bengali sentence that says the wrong thing passes.
+
 **Amended again, by `D10-63`, not deleted — and this one measures the clause `D10-62` left open.**
 The refusal vocabulary is 27 constants, 26 distinct strings, and 18 of them reach a button; all 18
 are mapped. One comment was false: `notifications/page.tsx` called `PIPELINE_BLOCKED` a consent gate
