@@ -316,9 +316,26 @@ describe("the address is the state", () => {
     expect(screen.queryByText(say(EN.agent.scopeContract, { id: 12 }))).toBeNull();
   });
 
+  it("reads a padded id as the same contract and sends the number, not the text", async () => {
+    setSession(sessionFor("operator"));
+    // `D10-76`'s ruling, at the one place it could reach the wire: the address says
+    // "012" and the request must ask for contract 12, because the parse returns a
+    // number. A raw passthrough would have sent `contract_id=012`.
+    address.current = "contract=012";
+    readAnswers(listing([decision({ contract_id: 12 })], { contract_id: 12 }));
+    renderScreen();
+
+    expect(await screen.findByText(titleOf(decision({ contract_id: 12 })))).toBeDefined();
+    expect(vi.mocked(agent.decisions).mock.calls[0]![1]).toBe(12);
+    expect(screen.getByText(say(EN.agent.scopeContract, { id: 12 }))).toBeDefined();
+  });
+
   it("refuses to read anything when the address names an impossible contract", () => {
     setSession(sessionFor("operator"));
-    address.current = "contract=012";
+    // A zero-padded id is no longer one of the impossible ones: `D10-76` ruled that
+    // "012" reads as contract 12, the same contract the server serves. What stays
+    // impossible is a tail, which `Number.parseInt` would quietly turn into 12.
+    address.current = "contract=12abc";
     renderScreen();
 
     // The most damaging confusion this screen could make: showing the tenant's whole

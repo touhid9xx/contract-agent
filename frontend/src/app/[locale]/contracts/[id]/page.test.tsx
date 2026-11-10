@@ -408,9 +408,10 @@ describe("the address", () => {
   });
 
   it("reads a leading zero as the same contract", async () => {
-    // Pinned as it is: this screen's guard is `^\\d+$`, so "07" is 7 — unlike
-    // `contract-scope.ts`, whose `^[1-9][0-9]*$` refuses it. The divergence is
-    // recorded in D10-55 rather than quietly reconciled here.
+    // This screen's guard matches the digits and then requires > 0, so "07" is 7.
+    // `contract-scope.ts` used to refuse the same string; `D10-76` ruled in favour
+    // of this reading, on the measured ground that `GET /contracts/01` answers 200,
+    // so both sides now agree and this case pins the ruling rather than a split.
     address.current = "07";
     signedIn();
     renderScreen();

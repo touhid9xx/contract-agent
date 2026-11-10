@@ -4,8 +4,12 @@
  * `D10-36` put a contract's scope in the query string and then had to record the
  * cost: `contract-scope.ts` is pure, total and free of React, its parsing rules
  * were hand-checked against `Number()`'s traps, and nothing but `tsc` exercised
- * them. A compiler proves the shapes line up; it cannot prove that `"012"` is
+ * them. A compiler proves the shapes line up; it cannot prove that `"0"` is
  * refused or that `"12abc"` does not become contract 12. This file is that test.
+ *
+ * The tables below are also where the `"07"` ruling is pinned (`D10-76`): a
+ * zero-padded id is the same contract, so `"012"` is 12 and `"0"` still is not
+ * an id at all.
  *
  * It passes a stub to `readContractScope` instead of a router, which is what the
  * structural `ReadableParams` type in the module was written for.
@@ -42,19 +46,31 @@ const A_CONTRACT: [string, number][] = [
   ["1", 1],
   ["12", 12],
   ["9007199254740991", Number.MAX_SAFE_INTEGER],
+  // Padded with zeros and read as the same contract, which is the ruling
+  // `D10-76` records: the server answers `GET /contracts/01` with 200, and the
+  // detail page has always opened `/contracts/07` as contract 7.
+  ["07", 7],
+  ["012", 12],
+  ["070", 70],
+  ["0007", 7],
 ];
 
 /**
  * Inputs that cannot be a contract id.
  *
- * `"012"`, `" 12"`, `"12 "`, `"1.5"`, `"1e3"`, `"0x10"` and `""` are the ones
- * `Number()` would rescue — it reads them as 12, 12, 12, 1.5, 1000, 16 and 0 —
- * which is exactly why the module tests the digits instead.
+ * These are the shapes `Number()` would rescue into a *different* contract —
+ * `" 12"`, `"12 "`, `"1.5"`, `"1e3"` and `"0x10"` are 12, 12, 1.5, 1000 and 16 —
+ * plus the tails it cannot rescue (`"12abc"` is `NaN`, and `Number.parseInt` reads
+ * it as 12 anyway) and the zero id, which no contract has. Padding a *zero* is no
+ * rescue either: `"00"` and `"000"` are still id zero.
+ *
+ * `"012"` used to sit in this list and no longer does: padding a non-zero number
+ * with zeros is the one spelling that cannot change what it names (`D10-76`).
  */
 const MALFORMED = [
   "0",
   "00",
-  "012",
+  "000",
   "12abc",
   "abc",
   "1.5",
@@ -179,7 +195,8 @@ describe("contractIdFromInput", () => {
     // A typed id is a draft in a box; a query string is an address someone may
     // have pasted. Only the box gets to trim, so this difference is stated here
     // rather than left for the two paths to drift into.
-    expect(contractIdFromInput(" 012 ")).toBeUndefined();
+    expect(contractIdFromInput(" 012 ")).toBe(12);
+    expect(contractIdFromInput(" 0 ")).toBeUndefined();
     expect(contractIdFromInput(" 1 ")).toBe(1);
     expect(readContractScope(params({ [CONTRACT_PARAM]: " 1 " }))).toEqual({
       kind: "invalid",
@@ -200,13 +217,13 @@ describe("contractIdFromInput", () => {
 
 describe("inputNamesAContract", () => {
   it("keeps the submit button live for an empty box or a whole number", () => {
-    for (const raw of ["", "   ", "1", "12", " 12 "]) {
+    for (const raw of ["", "   ", "1", "12", " 12 ", "07", " 012 "]) {
       expect(inputNamesAContract(raw), `raw=${raw}`).toBe(true);
     }
   });
 
   it("disables it as soon as the box holds no usable id", () => {
-    for (const raw of ["0", "012", "abc", "12abc", "1.5", "9007199254740992"]) {
+    for (const raw of ["0", "00", "abc", "12abc", "1.5", "9007199254740992"]) {
       expect(inputNamesAContract(raw), `raw=${raw}`).toBe(false);
     }
   });

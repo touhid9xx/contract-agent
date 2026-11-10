@@ -345,7 +345,10 @@ describe("the address is the state", () => {
 
   it("refuses to read anything when the address names an impossible contract", () => {
     setSession(sessionFor("operator"));
-    address.current = "contract=012";
+    // A zero-padded id is no longer one of the impossible ones: `D10-76` ruled that
+    // "012" reads as contract 12, the same contract the server serves. What stays
+    // impossible is a tail, which `Number.parseInt` would quietly turn into 12.
+    address.current = "contract=12abc";
     renderScreen();
 
     // The most damaging confusion this screen could make: showing the tenant's whole
