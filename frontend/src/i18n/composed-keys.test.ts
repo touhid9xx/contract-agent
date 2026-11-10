@@ -122,9 +122,21 @@ describe("keys the screens compose", () => {
     };
   });
 
-  /** Every site paired with the table its call site indexes. */
+  /**
+   * Every site paired with the table its call site indexes.
+   *
+   * The table's *name* is kept alongside its lookup deliberately: spreading the
+   * site would let the resolved table overwrite the name, and the failure report
+   * below would then name no table at all — `no table undefined`, the one word
+   * the reader needs.
+   */
   const paired = found.flatMap((file) =>
-    file.sites.map((site) => ({ ...site, path: file.path, table: file.tables.get(site.table) })),
+    file.sites.map((site) => ({
+      path: file.path,
+      namespace: site.namespace,
+      name: site.table,
+      table: file.tables.get(site.table),
+    })),
   );
 
   it("found the screens and their compositions, so the checks below are not vacuous", () => {
@@ -138,7 +150,7 @@ describe("keys the screens compose", () => {
   it("resolves every composed key in both catalogues", () => {
     const unresolved = paired
       .filter((site) => site.table === undefined)
-      .map((site) => `${site.path}: no table ${site.table} for t(\`${site.namespace}.…\`)`);
+      .map((site) => `${site.path}: no table ${site.name} for t(\`${site.namespace}.…\`)`);
     const missing: string[] = [];
     let checked = 0;
     for (const site of paired) {
