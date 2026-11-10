@@ -3402,10 +3402,17 @@ a link instead of by reading a whole queue and matching ids by eye.
   `none | contract | invalid`. Falling through to the tenant-wide list on a malformed filter would
   answer a question nobody asked — the same lie as ignoring the filter, only louder — so an invalid
   address shows a card saying so and the query stays `enabled: false` rather than widening.
-- **Parsing is hand-checked, for `D10-34`'s reason.** `/^[1-9][0-9]*$/` then `Number.isSafeInteger`,
-  never `Number(raw)`: `Number("12abc")` is `12` and `Number("")` is `0`, so a malformed address would
-  quietly become a real filter on a contract nobody named. The server's path parameter is an `int`
-  and its query parameters are `gt=0`, so the browser tests the shape the server enforces.
+- **Parsing is hand-checked, for `D10-34`'s reason.** `/^[1-9][0-9]*$/` then
+  `Number.isSafeInteger`, never `Number(raw)`: `Number("")` is `0`, and a zero-padded, exponent, hex
+  or space-wrapped spelling of a real id survives it — `"012"`, `"1e3"`, `"0x10"`, `" 12"` and
+  `"12 "` read 12, 1000, 16, 12 and 12 — so a malformed address would quietly become a real filter
+  on a contract nobody named. ~~`Number("12abc")` is `12`~~ That one comes back `NaN`, not 12:
+  reading it as twelve is `Number.parseInt`'s doing, so the digit test is what refuses a tail, not
+  the conversion. ~~The server's path parameter is an `int` and its query parameters are `gt=0`, so
+  the browser tests the shape the server enforces.~~ `D10-59` measured both premises true and the
+  inference built on them false — nothing on the server refuses a padded id, and `GET /contracts/01`
+  answers **200** — so this stricter shape is the address bar's own choice rather than the server's,
+  recorded as `D10-55`.
 - **The way in and the way out test the same shape.** `contractIdFromInput` is the single answer to
   "what is a usable typed id", and `inputNamesAContract` disables the submit button with that same
   predicate — so a typed id can never be one the screen then calls malformed on its way back out.
@@ -3488,11 +3495,15 @@ frontend test *culture* in the same commit is not.
   the gate runs. The hook fires only on `frontend/**/*.{ts,tsx}` and the whole suite takes well under
   a second.
 - **What the table pins.** `readContractScope` over absent, empty, whole numbers up to
-  `Number.MAX_SAFE_INTEGER`, and a malformed set chosen to be the ones `Number()` would *rescue* —
-  `"0"`, `"00"`, `"012"`, `"12abc"`, `"1.5"`, `"+12"`, `" 12"`, `"12 "`, `"0x10"`, `"1e3"`, `"12,"`
-  and `"9007199254740992"`. Plus `readResolved` (only `"1"` is yes), both writers, a round-trip that
-  reads back every address the writers produce, and the composition that keeps `?contract=` when
-  `?resolved=1` is added.
+  `Number.MAX_SAFE_INTEGER`, and a malformed set — `"0"`, `"00"`, `"012"`, `"12abc"`, `"1.5"`,
+  `"+12"`, `" 12"`, `"12 "`, `"0x10"`, `"1e3"`, `"12,"` and `"9007199254740992"`. Plus
+  `readResolved` (only `"1"` is yes), both writers, a round-trip that reads back every address the
+  writers produce, and the composition that keeps `?contract=` when `?resolved=1` is added. ~~chosen
+  to be the ones `Number()` would *rescue*~~ That criterion is one this set does not meet:
+  `Number()` reads `"012"`, `"+12"`, `" 12"` and `"12 "` as 12, `"1e3"` as 1000 and `"0x10"` as 16,
+  but answers `NaN` for `"12abc"`, `"abc"` and `"12,"` and a non-integer for `"1.5"`. The set spans
+  what the coercion performs *and* what it refuses, which is the better rule — a refusal that held
+  only for the rescued spellings would be measuring the conversion rather than the shape (`D10-61`).
 - **The table found a real asymmetry, and it was mine.** The first run failed on
   `contractIdFromInput(" 12 ")`, which is `12` — so the malformed list cannot be shared between the
   two paths. The difference is deliberate and was previously only implied by two separate regexes:
@@ -5274,3 +5285,70 @@ the change was trusted only after `git diff --stat` showed nothing outside the c
 string is pattern syntax, not literal text.
 
 **Landed as** `docs(web)` `ef21e47` — one file, comment-only, **no behaviour change**.
+
+### D10-61 — The fourth copy, and a list that fails its own membership test
+
+`D10-60` corrected the sentence in the file it had open, and stopped there. The sentence was
+`Number("12abc")` is `12`; it was still standing in two frontend files — `contract-scope.ts` and two
+comments in the `contracts/[id]` spec — and in three ledger paragraphs, none of which had been
+opened since. Searching for the sentence rather than for the file it was found in turns up six
+sites, and one of them was already right:
+
+| Site | Said | Measured |
+| --- | --- | --- |
+| `contract-scope.ts:45` | `Number("12abc")` is `12` | `NaN` |
+| `[id]/page.test.tsx:12`, `:356` | `Number` reads `"12abc"` as 12 | `NaN`; `parseInt` gives 12 |
+| `DECISIONS.md:3406` (`D10-34`) | `Number("12abc")` is `12` | `NaN` |
+| `STATUS.md:446` | `Number("12abc")` is `12` | `NaN` |
+| `STATUS.md:4753` | `Number("12abc")` is `12` | `NaN` |
+| `contract-scope.test.ts:50` | lists only the rescued spellings | **correct already** |
+
+**The one that was right is the tell.** The spec's own table has always listed only the inputs
+`Number()` really rescues — 012, a space-padded 12, 1.5, 1e3, 0x10 and the empty string — and
+quietly omitted `"12abc"`, because whoever wrote it was looking at measured output rather than at a
+sentence three files away. So one site was correct, five asserted the reverse, and the suite stayed
+green throughout: **nothing asserts a comment.** This is `D10-58`'s shape for the third time in this
+chain, with the twist that the correction itself did not travel — fixing a claim where you found it
+is not fixing the claim.
+
+**The second defect is a criterion a list does not satisfy.** Two paragraphs introduced the
+malformed set as *"chosen to be the ones `Number()` would rescue"*, and it is not: `"12abc"`,
+`"abc"` and `"12,"` come back `NaN`, and `"1.5"` comes back a non-integer that no id can be.
+Measured over the whole set of fourteen:
+
+| Inputs | `Number(...)` |
+| --- | --- |
+| `"0"`, `"00"` | 0 |
+| `"012"`, `"+12"`, `" 12"`, `"12 "` | 12 |
+| `"1e3"` | 1000 |
+| `"0x10"` | 16 |
+| `"12abc"`, `"abc"`, `"12,"` | `NaN` |
+| `"1.5"` | 1.5 |
+| `"-1"` | -1 |
+| `"9007199254740992"` | 2^53 |
+
+So the set spans what the coercion performs *and* what it refuses, which is the stronger rule and
+the one the module needs: a refusal that held only for the rescued spellings would be measuring
+`Number` rather than the shape. The amendment strikes the criterion and states the wider one,
+because deleting the words would lose the fact that anyone once believed them.
+
+**No behaviour change.** Two files, comment-only: **13 insertions, 6 deletions**, every changed line
+inside a comment or doc comment, no regex, branch, return value, query key, fixture or assertion
+touched. The frontend suite is **309 passed in 13 files**, the same count as before, which is the
+expected result for a comment. No dependency, no lockfile line, no backend source and no migration;
+`alembic` head stays `0006`.
+
+**What this does not decide.** `D10-55` is untouched: the page's `/^\d+$/` still admits `"07"` and
+`contract-scope.ts` still refuses it, which `D10-60` established is this page matching the API while
+the address bar holds a narrower convention of its own. That remains a product call.
+
+**The tooling lesson, second in a row and the same one.** The replacement text here is applied by a
+script that proves the wrapped paragraph holds the same words in the same order before it writes —
+the check `apply_d59b.py` introduced — because a hand-wrapped paragraph is a silent edit waiting to
+happen: earlier attempts in this chain produced a 139-column line and then a 214-column one. The
+other new check is negative. Every criterion a sentence asserts about a list is now measured over
+the whole list, because the sentence about the malformed set had been false in two files for as long
+as it had existed.
+
+**Landed as** `docs(web)` `2f78a0d` and this `docs(status)` commit — comment-only plus ledgers,
+**no behaviour change**.

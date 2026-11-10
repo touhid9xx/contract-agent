@@ -443,8 +443,11 @@ clicking rather than by matching ids by eye. The vocabulary is one module,
 parses — the classic half-rename is not available. The parameter is `contract`, **not** the wire's
 `contract_id`: the address bar is the reader's vocabulary and bookmarks should not freeze a
 transport name. Parsing is hand-checked (`/^[1-9][0-9]*$/` then `Number.isSafeInteger`), never
-`Number(raw)`, for `D10-34`'s reason — `Number("12abc")` is `12` and `Number("")` is `0`, which would
-turn a malformed address into a real filter on a contract nobody named. The scope type is
+`Number(raw)`, for `D10-34`'s reason — `Number("")` is `0` and a zero-padded, exponent, hex or
+space-wrapped spelling survives it, which would turn a malformed address into a real filter on a
+contract nobody named. ~~`Number("12abc")` is `12`~~ That one is `NaN`, and reading it as twelve is
+`Number.parseInt`'s doing, so the digits test is what refuses a tail rather than the conversion
+(`D10-61`). The scope type is
 `none | contract | invalid` rather than `number | undefined`, and an **invalid address does not fall
 back to the tenant-wide list**: the query stays idle and a card says so, because answering a
 malformed filter with everything is the same lie as ignoring it, only louder. The escalation queue's
@@ -463,8 +466,11 @@ entire job is branching on strings, was exercised by nothing but `tsc`. The modu
 shaped for the test that did not exist (`ReadableParams` is a structural
 `{ get(name): string | null }`, so a stub stands in for a router), and this slice writes it: **19
 tests in three tables** — what is no scope, what is a contract, and what is malformed, the last
-chosen as the inputs `Number()` would *rescue* (`"0"`, `"012"`, `"12abc"`, `"1e3"`, `"0x10"`,
-`"9007199254740992"`) — plus `readResolved`, both writers, a read-after-write round trip, the
+~~chosen as the inputs `Number()` would *rescue* (`"0"`, `"012"`, `"12abc"`, `"1e3"`, `"0x10"`,
+`"9007199254740992"`)~~ chosen to span the spellings a coercion rewrites *and* the ones it refuses —
+`Number()` reads `"0"` and `"012"` as 0 and 12, `"1e3"` as 1000 and `"0x10"` as 16, and answers
+`NaN` for `"12abc"` (`D10-61`) — plus `readResolved`, both writers, a read-after-write round trip,
+the
 composition of `?contract=` and `?resolved=1`, `contractIdFromInput` and `inputNamesAContract`. The
 table **failed on its first run**, on `contractIdFromInput(" 12 ")`: the address is read verbatim
 and the typed box trims, a rule that existed only as an implication of two separate regexes and is
@@ -1355,6 +1361,26 @@ followed by a backtick means *"the portion before the match"* and spliced the fi
 the comment **twice** — 271 syntax errors the first time — with both recoveries a `git checkout --`
 plus a re-read rather than a hand repair, and the file trusted only after `git diff --stat` showed
 nothing outside the comment.
+
+**Then the same false reason turned up twice more in the frontend and three more times in these
+ledgers** (`D10-61`, two commits: `docs(web)` `2f78a0d`, and this one). `D10-60` corrected the
+sentence in the file it had open and did not search for it: `contract-scope.ts:45` and two comments
+in the contract-detail spec still said `Number("12abc")` is `12`, and so did `D10-34` at
+`DECISIONS.md:3406` and two paragraphs here. `Number("12abc")` is `NaN`;
+`Number.parseInt("12abc", 10)` is 12. The giveaway is that `contract-scope.test.ts:50-52` already
+had it right — it listed only the spellings `Number()` really rescues and omitted `"12abc"` — so one
+site was correct and five asserted the reverse while the suite stayed green, because nothing asserts
+a comment. **The second defect was in a list's criterion.** Two paragraphs said the malformed set
+was "chosen to be the ones `Number()` would *rescue*"; it is not, since `"12abc"`, `"abc"` and
+`"12,"` come back `NaN` and `"1.5"` a non-integer. The set spans what the coercion performs *and*
+what it refuses, which is the better rule — a refusal that held only for the rescued spellings would
+be measuring the conversion rather than the shape. **Comment-only: 13 insertions, 6 deletions, every
+changed line inside a comment**, and the frontend suite is **309 passed in 13 files**, the same
+count, which is the expected result for a comment. No dependency, no lockfile line, no backend
+source, no migration (`0006` stays head). The lesson is `D10-58`'s with a longer fuse again:
+correcting a claim where you found it is not correcting the claim — search for the sentence, in
+every file, before calling it fixed — and a list introduced by a criterion has to be tested against
+that criterion.
 
 
 ## Phase history
@@ -4750,10 +4776,13 @@ Falling through to everything would answer a question nobody asked — the same 
 filter, only louder.
 
 Parsing is hand-checked (`/^[1-9][0-9]*$/` then `Number.isSafeInteger`), never `Number(raw)`, for
-`D10-34`'s reason: `Number("12abc")` is `12` and `Number("")` is `0`, so a malformed address would
-quietly become a real filter on a contract nobody named. The way in and the way out share one
-predicate — `inputNamesAContract` disables the submit button with the same test `contractIdFromInput`
-uses — so a typed id can never be one the screen then calls malformed on its way back out.
+`D10-34`'s reason: `Number("")` is `0` and a zero-padded, exponent, hex or space-wrapped spelling
+survives it, so a malformed address would quietly become a real filter on a contract nobody named.
+~~`Number("12abc")` is `12`~~ That one is `NaN`; reading it as twelve is `Number.parseInt`'s doing,
+so the digits test is what refuses a tail rather than the conversion (`D10-61`). The way in and the
+way out share one predicate — `inputNamesAContract` disables the submit button with the same test
+`contractIdFromInput` uses — so a typed id can never be one the screen then calls malformed on its
+way back out.
 
 ### `?resolved=1`, and only `1`
 
