@@ -6304,3 +6304,51 @@ filesystem, so this proves the frontend's tables against the server's declaratio
 any route emits a given code on a given input, which remains `D10-63`'s territory.
 
 Landed as `test(web)` + `docs(status)`.
+
+### D10-78 — The correction reached four copies and skipped the one that is read
+
+Gap 15 in `STATUS.md` ended with a limit sentence: no *screen* talks to the real API, sign-in
+was the only one, `frontend/src/app/*` still called the mocked demo backend everywhere else, so
+the F8, F9 and F10 routes had only ever been called by `TestClient`. Every clause of that is
+false. Four other copies of the same sentence had already been struck and corrected in place —
+F8's verification paragraph, F9's, the signed GATE 2 item 5 and the F1 inventory — and each
+correction was written by the slice that happened to be reading that copy. The copy in the gap
+list had not been, and the gap list is the one a reader consults to ask what is still open.
+
+**Measured, not re-argued.** `from "@/lib/api"` appears in eight of the nine data screens under
+`frontend/src/app/[locale]`: `contracts`, `contracts/[id]`, `review`, `agent`, `escalations`,
+`notifications`, `users` and `login`. The ninth, the home screen, reads `/health` through
+`HealthStatus`, which imports `probeHealth` from the same module, so it is a caller too. The
+tenth `page.tsx` in the tree is the root redirect and calls nothing. A grep for any import of
+the demo client under `frontend/src` returns **no files**: the mock is `demo/backend`, and
+`demo/frontend` is its only consumer. `D10-29` had already recorded the consequence — no v1
+router is `TestClient`-only — and `D10-33` had recorded the consent editor, so no half of this
+sentence had been true for dozens of commits.
+
+**Why it survived is the correction economy, not carelessness.** `D10-19` amended the copy in
+F1, `D10-22` the review copy, `D10-23` the escalation one, `D10-24` the agent one and `D10-29`
+the signed inventory — each slice fixing the sentence it could see. `D10-61` said to grep every
+copy. Nobody had, because a struck sentence reads as handled, and the living list is not where
+those slices were looking. This is the same failure mode as `D10-58` one ledger further out: a
+fact is not amended until every copy of it is.
+
+**What survives, and it is what survived all along.** No browser has ever rendered any of these
+screens. Every one of the screen tests builds its own DOM under `jsdom` and stubs
+`next/navigation`; `test_zz`-style probes have driven the *server*, and `smoke_journey.py`
+drives it over a real socket, but no human and no browser has clicked through the product. That
+limit is what the sentence should have said, and now does.
+
+**Limits.** This is a ledger correction: no code, test, dependency, route, key or schema
+changed, and the suite is untouched. The F8 and F9 verification paragraphs are left as written
+because they are dated records of the slices that ran those checks; a strike there would claim
+those slices had a screen, which they did not. The absence of a browser is not something this
+repository can demonstrate — it is an absence, and only a reader can confirm it. Nothing here
+asserts `STATUS.md`'s truths either: no gate can fail on a stale claim, which is the whole
+reason the living list needs to be read by a human now and then.
+
+**Verification.** `STATUS.md` and `DECISIONS.md` rewritten in bytes, CR **0** in both, single
+trailing LF in both, no added line over 100 columns, every anchor asserted to occur exactly
+once before either file was opened for writing, and both re-read after the write to confirm
+the only changed region is the one intended.
+
+Landed as `docs(status)`.

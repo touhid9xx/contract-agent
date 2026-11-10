@@ -3636,9 +3636,21 @@ a hook finally ran and passed.
     a reply or opens an SLA clock~~ — **closed by the escalation slice**
     (`feat(escalations)`, D10-20): five routes now write both tables, and recording a
     reply is what moves a contract to `responded`. What is left of this entry is the
-    second half: no *screen* talks to the real API — sign-in is the only one —
+    second half: ~~no *screen* talks to the real API — sign-in is the only one —
     `frontend/src/app/*` still calls the mocked demo backend everywhere else, so the F8,
-    F9 and F10 routes have only ever been called by `TestClient`.
+    F9 and F10 routes have only ever been called by `TestClient`.~~ **That clause was
+    false when it was written and stayed false until `D10-78` struck it here, which is
+    why it is struck rather than deleted:** the mock is `demo/backend` and
+    `demo/frontend` is its only consumer — no file under `frontend/src` imports it.
+    Eight of the nine screens in `frontend/src/app/[locale]` import `@/lib/api`, the
+    real client (`contracts`, `contracts/[id]`, `review`, `agent`, `escalations`,
+    `notifications`, `users`, `login`), and the ninth, the home screen, reads `/health`
+    through `HealthStatus`, which imports `probeHealth` from the same module. No v1
+    router is `TestClient`-only (`D10-29` recorded that at the signed inventory). What
+    survives is the limit that was always the real one: **no browser has ever rendered
+    one of these screens**, so every screen test is a DOM the suite built. The F8 and F9
+    verification paragraphs above still say these routes had only `TestClient`; those
+    are dated records of those slices and are left as written.
 16. ~~**The review queue paginates by `limit` only.**~~ — **closed by `c90423b`.**
     `awaiting_review()` takes an `after=ReviewCursor` keyset and the route accepts
     `?cursor=` / returns `next_cursor`, so a backlog longer than the 500-row cap is
