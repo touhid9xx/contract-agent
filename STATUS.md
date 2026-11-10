@@ -5402,6 +5402,23 @@ thirteen amendments have each kept, and this one keeps: `jsdom` is still a DOM, 
 sentence is asserted against a **doubled `@/lib/api`**, so it proves the screen asks `/health`,
 not that the API answers.
 
+**Amended again, by `D10-72`, not deleted — and this one spends a limit rather than narrowing
+it.** No figure above moves: 10 screens, 25 sites, 96 keys, 464 leaf keys, both catalogue
+directions. What changes is the fifteenth row of the type-parity table inside `D10-62`:
+`ErrorEnvelope` declared four of the five keys `app.main.error_payload` has always sent, and the
+fifth — `trace_id` — is now declared and surfaced as `ApiError.traceId`. `D10-62` ended by saying
+one word would take the score from 14 of 15 to 15 of 15; the word has now been written, and the
+evidence is a spec rather than the sentence that promised it: `api.test.ts` pins
+`traceId: "trace-9"` for a populated envelope, `null` when the envelope carries `trace_id: null`,
+and `null` on the path where the body is not our envelope at all. One mutation —
+`traceId = body.error.trace_id ?? null` rewritten to `traceId = null` — turned exactly the first
+assertion red and left the rest of the file green. Suite 328 in 17 files, from 327. The
+parameters were appended, not inserted: `details` already held position five at the hand-built
+call sites, so `traceId` is sixth and no existing argument re-binds. What this does *not* touch
+is the other half of the same limit — the refusal-code vocabulary the screens translate is still
+unenumerated against the routers that raise it, and no gate holds either side of that comparison
+(`D10-71`, `D10-63`).
+
 **Amended again, by `D10-71`, not deleted — and this one moves no figure above.**
 Ten screens, 25 sites, 96 keys, 464 leaf keys, both catalogue directions: all still
 true, and none of them is the subject. Three screens — agent, notifications,
@@ -5522,14 +5539,19 @@ narrowing it.** Each amendment above keeps the same clause: the envelopes a scre
 **fixtures pinned from the screen's side**, asserted there and never checked against the route that
 emits them. That clause was about *shape* as much as about strings, and the shape half is now
 spent. All fifteen response declarations behind `@/lib/api` were read against what emits them,
-field for field, and all nine wire enums member for member. Fourteen agree — `UserSummary` at six
-fields, `ContractListItem` at eighteen, `ReviewItem` at seventeen, that last one only because the
-server composes eight of its own onto the nine it inherits from `ExtractedFieldSummary`, which is
-the seventeen the flat interface inlines. The fifteenth does not agree: `app.main.error_payload`
-always sends `trace_id` beside `code`, `message` and `request_id`, and the client's
-`ErrorEnvelope` does not declare it. That is the harmless kind of drift — a client reading named
-fields ignores a key it never asked for — but it is drift, and it is the only row in the table that
-is. What this amendment does **not** do is close the clause: the refusal-code vocabulary the
+field for field, and all nine wire enums member for member. ~~Fourteen agree~~ **Fifteen
+agree, since `D10-72`** — `UserSummary` at six fields, `ContractListItem` at eighteen,
+`ReviewItem` at seventeen, that last one only because the server composes eight of its own
+onto the nine it inherits from `ExtractedFieldSummary`, which is the seventeen the flat
+interface inlines. ~~The fifteenth does not agree:
+`app.main.error_payload` always sends `trace_id` beside `code`, `message` and `request_id`,
+and the client's `ErrorEnvelope` does not declare it. That is the harmless kind of drift —
+a client reading named fields ignores a key it never asked for — but it is drift, and it
+is the only row in the table that is.~~ That last row agrees too, now that `ErrorEnvelope`
+declares `trace_id` and `ApiError` carries it as `traceId`. It was the harmless kind of
+drift — a client reading named fields ignores a key it never asked for — which is exactly
+why nothing failed while it stood. What this amendment does **not** do is close the
+clause: the refusal-code vocabulary the
 screens translate, `CHANNEL_NOT_PERMITTED` with its `details.permitted`, the two `409`s and the
 `422`, was not enumerated against the routers that raise it, and no gate holds either side of the
 comparison. So the standing limit narrows from *not verified* about **shape** to *not verified*

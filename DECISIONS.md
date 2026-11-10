@@ -5384,13 +5384,16 @@ declarations agree, so two declarations were read.
 | `EscalationQueue` | 5 | `escalations.EscalationListResponse` | same 5, same order |
 | `NotificationRow` | 12 | `notifications.NotificationView` | same 12, same order |
 | `DispatchOutcome` | 4 | `notifications.DispatchResponse` | same 4, same order |
-| `ErrorEnvelope` | 4 | `app.main.error_payload` | **4 of 5 — `trace_id` absent** |
+| `ErrorEnvelope` | ~~4~~ 5 | `app.main.error_payload` | ~~4 of 5~~ same 5, same order |
 
-Fourteen matched and one did not, and the one that did not is the envelope every screen reads on
-every failure. `error_payload` always emits four keys — `code`, `message`, `request_id`,
-`trace_id` — and adds `details` only when the route supplied some. The interface declares `code`,
-`message`, `request_id`, `details`: the four it does declare are in the same relative order, and
-the one it omits is absent from every failure path alike.
+~~Fourteen matched and one did not, and the one that did not is the envelope every screen reads on
+every failure.~~ **Amended by `D10-72`, not deleted: fifteen match and none does not.** The row
+that did not agree was the envelope every screen reads on every failure: `error_payload` always
+emits four keys — `code`, `message`, `request_id`, `trace_id` — and adds `details` only when the
+route supplied some, while the interface declared `code`, `message`, `request_id`, `details`, in
+the same relative order, with `trace_id` absent from every failure path alike. `api.ts` now
+declares it and surfaces it as `ApiError.traceId`, so the shape half of the standing limit in
+`STATUS.md` is spent rather than narrowed.
 
 The omission is harmless at run time, which is exactly why it survived. A client reading named
 fields off a JSON object ignores a key it never asked for, so no screen could have noticed and no
@@ -5915,5 +5918,48 @@ checked rather than left as prose — `flatEn.size > 300` and `checked >= 90` ar
 **Verification.** Suite 327 passed in 17 files, from 322 in 16, with all three screen specs
 green before the tables moved and after, so the refactor preserved behaviour. Both catalogues
 came out of the mutation runs unchanged (`git diff` empty on each).
+
+Landed as `test(web)` + `docs(status)`.
+
+### D10-72 — Fifteen of fifteen was one word, and the word was the claim
+
+`D10-62` read all fifteen response declarations behind `@/lib/api` against the routes that emit
+them and found fourteen agree, with `ErrorEnvelope` declaring four of the five keys
+`app.main.error_payload` has always written. It recorded the fifth — `trace_id` — and said one
+word would end the disagreement. That word went unwritten until now, which is the lesson rather
+than the anecdote: a ledger entry that names its own fix is still only a claim until something
+can fail on it.
+
+**The key is not a copy of `request_id`.** The obvious reading — two correlation ids, one
+redundant — is wrong, and the code says so: `request_id` is the value echoed back in
+`x-request-id`, while `trace_id` is what `app.core.middleware` binds into every log line the
+request emits. An operator holding one and searching a log wants the other. The declared type is
+`string | null`, and `null` is a real case rather than a placeholder: `error_payload` composes
+the envelope from the request contextvars, which are empty outside a request, so a CLI command
+or a worker tick produces a failure with nothing bound at all.
+
+**Appended, not inserted.** `ApiError`'s constructor gained `traceId` as its sixth parameter,
+because `details` already held position five at roughly sixty hand-built call sites. Inserting
+beside `requestId` — the readable place — would have re-bound all of them to the wrong argument
+with no type error to catch it, both being nullable. The readable place and the safe place were
+not the same place, and the safe one won; the constructor says why in a comment.
+
+**Three assertions, one mutation.** The spec pins each path separately: `traceId: "trace-9"` when
+the envelope carries one, `null` when it carries `trace_id: null`, and `null` on the fallback
+where the body is not our envelope at all. The middle one matters because the type admits `null`;
+the fallback one because a spec that only ever sees the populated path cannot tell "parsed" from
+"always null". Rewriting `traceId = body.error.trace_id ?? null` to `traceId = null` turned
+exactly the first assertion red and left the other twenty-one green — one mutation, one failure,
+and it is the test that names the field.
+
+**A defect found in the doing, and it was mine.** The mutation script's `Path.write_text` writes
+in text mode, so on Windows it converted the whole of `api.ts` to CRLF while mutating *and*
+restoring it. The `mixed-line-ending` hook that rejected the previous slice's commit would have
+caught it, but the fix belongs in the script, which now passes `newline="\n"` on every read and
+write. A harness that silently rewrites the file under test is a second change to the code, not
+only to a copy of it.
+
+**Verification.** Suite 328 passed in 17 files, from 327, and the worktree came out of the
+mutation run at LF with the index unchanged.
 
 Landed as `test(web)` + `docs(status)`.
