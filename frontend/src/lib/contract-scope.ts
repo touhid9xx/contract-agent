@@ -42,8 +42,13 @@ type ReadableParams = { get(name: string): string | null };
  * Parse `?contract=` into a scope.
  *
  * Hand-checked rather than `Number(raw)`, for the reason `D10-34` records against
- * the route segment: `Number("12abc")` is `12` and `Number("")` is `0`, so a
- * malformed address would quietly become a real filter on a contract nobody named.
+ * the route segment: `Number("")` is `0`, and a padded, spaced, exponent or hex
+ * spelling of a real id survives it — `Number("012")`, `Number(" 12")`,
+ * `Number("1e3")` and `Number("0x10")` are 12, 12, 1000 and 16 — so a malformed
+ * address would quietly become a real filter on a contract nobody named. What
+ * `Number` cannot rescue comes back `NaN`, which is not an id either: `"12abc"`
+ * is `NaN`, not 12. Reading that one as twelve is `Number.parseInt`'s doing, and
+ * this module does neither: it tests the digits first.
  *
  * **The rule is stricter than the server, and this comment said otherwise until it
  * was measured (`D10-59`).** The route's path parameter is a bare `int` and its query

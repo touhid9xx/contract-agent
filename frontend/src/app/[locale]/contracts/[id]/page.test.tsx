@@ -10,8 +10,9 @@
  * transports and a card a version. This screen carries rules none of them reach:
  *
  *   * **the route segment is a string that must not be coerced.** `"12abc"` is an
- *     invalid id, not 12, and `""` is an invalid id, not 0 — the two mistakes
- *     `Number(raw)` makes silently and `Number.parseInt` plus a shape test do not.
+ *     invalid id, not 12, and `""` is an invalid id, not 0. `Number.parseInt` reads
+ *     the first as twelve and `Number` as `NaN`; `Number` reads the empty segment as
+ *     zero. The digit test refuses all three before any of them can be an id.
  *   * **five reads fail independently.** A 403 on one of them may not blank the
  *     other four: they are separate queries for exactly that reason.
  *   * **`may_contact` decides and the flags only explain.** The screen states the
@@ -353,8 +354,9 @@ describe("the address", () => {
   });
 
   it("asks nothing and claims nothing for a segment with a tail", async () => {
-    // `"12abc"` is what `Number` would silently read as 12 — the id of a contract
-    // nobody named. A whole-digit shape test is what refuses it.
+    // `"12abc"` is a tail that coerces: `Number.parseInt` reads it as 12, the id of
+    // a contract nobody named, while `Number` gives `NaN`. The whole-digit shape test
+    // is what refuses the string, so no read is ever enabled with either number.
     address.current = "12abc";
     signedIn();
     renderScreen();
