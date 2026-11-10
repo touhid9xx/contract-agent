@@ -108,16 +108,24 @@ const STATUS_TONES = {
  * `POST /notifications`, which schedules a row and has no button on this screen, and
  * `TENANT_MISMATCH`, which only the scheduler records onto `last_error`. They fall
  * through to the generic failure rather than being translated for a click that
- * cannot happen.
+ * cannot happen. Three codes that *are* mapped share that home — `NOT_IN_WINDOW`,
+ * `MISSING_END_DATE` and `NEEDS_REVIEW` are raised by `build_notification` while
+ * planning a schedule, which no button on this screen reaches either — so the map
+ * is over-coverage rather than exactly this screen's vocabulary. That is recorded
+ * here so it is not read as proof that a button can produce them.
  */
 const REFUSAL_KEYS: Record<string, string> = {
-  // Reached through `assert_may_contact`, which dispatch re-runs at send time
-  // rather than trusting the decision row. These four are the consent gates, and
-  // a withdrawn consent is the *most* likely refusal an operator sees here: the
-  // row was schedulable yesterday and the customer opted out this morning.
+  // The four consent gates, all of them raised by `assert_may_contact`, which
+  // dispatch re-runs at send time rather than trusting the decision row. A
+  // withdrawn consent is the *most* likely refusal an operator sees here: the row
+  // was schedulable yesterday and the customer opted out this morning.
   CONTRACT_CLOSED: "refusalContractClosed",
   CONTACT_REFUSED: "refusalContactRefused",
   NO_CONSENT: "refusalNoConsent",
+  CHANNEL_NOT_CONSENTED: "refusalChannelNotConsented",
+  // Not a consent gate, and not raised by `assert_may_contact`: the worker raises
+  // this one itself, one gate below the consent checks, when an extracted field is
+  // still awaiting approval (`dispatch.py:591`).
   PIPELINE_BLOCKED: "refusalPipelineBlocked",
   NOT_PENDING: "refusalNotPending",
   NOT_YET_DUE: "refusalNotYetDue",
@@ -125,7 +133,6 @@ const REFUSAL_KEYS: Record<string, string> = {
   MISSING_END_DATE: "refusalMissingEndDate",
   UNKNOWN_TIMEZONE: "refusalUnknownTimezone",
   NEEDS_REVIEW: "refusalNeedsReview",
-  CHANNEL_NOT_CONSENTED: "refusalChannelNotConsented",
   ATTEMPTS_EXHAUSTED: "refusalAttemptsExhausted",
   SENDER_UNAVAILABLE: "refusalSenderUnavailable",
   RECIPIENT_UNAVAILABLE: "refusalRecipientUnavailable",
