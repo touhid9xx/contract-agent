@@ -5352,3 +5352,74 @@ as it had existed.
 
 **Landed as** `docs(web)` `2f78a0d` and this `docs(status)` commit — comment-only plus ledgers,
 **no behaviour change**.
+
+### D10-62 — Fifteen wire shapes read against what emits them
+
+Every screen spec in this app doubles `@/lib/api`, so what they assert against is not the API: it
+is a fixture written on the screen's side. The ledgers say so repeatedly, in both files, and each
+restatement was true when it was written and then copied forward rather than re-measured — the
+shape `D10-58` names, where one fact in many places is many places to fix and every copy but the
+first goes stale unread.
+
+So it was measured. Every interface in `frontend/src/lib/api.ts` that carries a route's response
+body was read against the declaration its own docstring names — field names, field count, order —
+and all nine wire enums member for member. No HTTP was involved: the claim was that two
+declarations agree, so two declarations were read.
+
+| Type | TS fields | Server declaration | Verdict |
+| --- | --- | --- | --- |
+| `UserSummary` | 6 | `auth.UserSummary` | same 6, same order |
+| `Session` | 7 | `auth.SessionResponse` | same 7, same order |
+| `ContractSummary` | 12 | `contracts.ContractSummary` | same 12, same order |
+| `ContractListItem` | 18 | `contracts.ContractListItem` | same 18, same order |
+| `ConsentState` | 9 | `contracts.ConsentView` | same 9, same order |
+| `ContractField` | 9 | `contracts.ExtractedFieldSummary` | same 9, same order |
+| `ReviewItem` | 17 | `review.ReviewItem` | 8 own + 9 inherited |
+| `ReviewQueue` | 5 | `review.ReviewQueueResponse` | same 5, same order |
+| `AgentDecision` | 14 | `agent.AgentDecisionView` | same 14, same order |
+| `AgentDecisionList` | 3 | `agent.AgentDecisionListResponse` | same 3, same order |
+| `Escalation` | 9 | `escalations.EscalationView` | same 9, same order |
+| `EscalationQueue` | 5 | `escalations.EscalationListResponse` | same 5, same order |
+| `NotificationRow` | 12 | `notifications.NotificationView` | same 12, same order |
+| `DispatchOutcome` | 4 | `notifications.DispatchResponse` | same 4, same order |
+| `ErrorEnvelope` | 4 | `app.main.error_payload` | **4 of 5 — `trace_id` absent** |
+
+Fourteen matched and one did not, and the one that did not is the envelope every screen reads on
+every failure. `error_payload` always emits four keys — `code`, `message`, `request_id`,
+`trace_id` — and adds `details` only when the route supplied some. The interface declares `code`,
+`message`, `request_id`, `details`: the four it does declare are in the same relative order, and
+the one it omits is absent from every failure path alike.
+
+The omission is harmless at run time, which is exactly why it survived. A client reading named
+fields off a JSON object ignores a key it never asked for, so no screen could have noticed and no
+test could have failed. It is still drift: `trace_id` is bound into the log context for the
+request and echoed back in an `x-trace-id` header that CORS explicitly exposes, so the client is
+declining the one value that would tie a user's error report to the server's log line. Whether to
+declare it is an owner decision — a field nothing reads is weight, but a correlation id is what a
+support conversation needs — so it was recorded rather than changed. This slice touches no code.
+
+`ReviewItem` is the row whose counts do not line up by copying, and the one that shows the reading
+was done rather than assumed: the interface lists seventeen fields flat, while the server composes
+eight of its own onto the nine it inherits from `ExtractedFieldSummary`. The two sets are disjoint,
+so seventeen is right on both sides and the flat interface is a faithful flattening rather than a
+second list free to drift. Which group is listed first differs between the two; a JSON object's key
+order is not something either side reads, so the shapes agree.
+
+The nine enums agree member for member, values included: `UserRole` (3), `ContractStatus` (6),
+`ContractSource` (2), `RiskLevel` (3), `FieldName` (7), `FieldStatus` (5), `ContactChannel` (3),
+`NotificationStatus` (7), `EscalationStatus` (4). `FieldName` is the sharpest of the nine, being
+the closed set the extractor may produce: `email`, `phone`, `address`, `dob`, `start_date`,
+`end_date`, `contract_value` on both sides.
+
+What this does **not** establish, stated so the entry is not read as more than it is:
+
+1. **Fields agree; which route fills them was not checked.** A model may declare a field that a
+   route answers `None` for. Shape parity says nothing about population.
+2. **The envelope's key set was compared, its vocabulary was not.** The `code` *strings* the
+   screens translate — `CHANNEL_NOT_PERMITTED` and its `details.permitted`, the two `409`s, the
+   `422` — were not matched against the routers that raise them.
+3. **Nothing keeps this true.** No gate fails if a server field is renamed tomorrow. A Python
+   test could pin the server side of this seam, but pinning a third copy of a field list is the
+   hazard `D10-58` names, so it was not done here — an owner decision, not a tidy-up.
+
+**Landed as** this `docs(status)` commit — ledgers only, **no code, no test, no behaviour change**.

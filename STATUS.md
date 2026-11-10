@@ -5400,6 +5400,24 @@ thirteen amendments have each kept, and this one keeps: `jsdom` is still a DOM, 
 sentence is asserted against a **doubled `@/lib/api`**, so it proves the screen asks `/health`,
 not that the API answers.
 
+**Amended again, by `D10-62`, not deleted — and this amendment measures the clause instead of
+narrowing it.** Each amendment above keeps the same clause: the envelopes a screen translates are
+**fixtures pinned from the screen's side**, asserted there and never checked against the route that
+emits them. That clause was about *shape* as much as about strings, and the shape half is now
+spent. All fifteen response declarations behind `@/lib/api` were read against what emits them,
+field for field, and all nine wire enums member for member. Fourteen agree — `UserSummary` at six
+fields, `ContractListItem` at eighteen, `ReviewItem` at seventeen, that last one only because the
+server composes eight of its own onto the nine it inherits from `ExtractedFieldSummary`, which is
+the seventeen the flat interface inlines. The fifteenth does not agree: `app.main.error_payload`
+always sends `trace_id` beside `code`, `message` and `request_id`, and the client's
+`ErrorEnvelope` does not declare it. That is the harmless kind of drift — a client reading named
+fields ignores a key it never asked for — but it is drift, and it is the only row in the table that
+is. What this amendment does **not** do is close the clause: the refusal-code vocabulary the
+screens translate, `CHANNEL_NOT_PERMITTED` with its `details.permitted`, the two `409`s and the
+`422`, was not enumerated against the routers that raise it, and no gate holds either side of the
+comparison. So the standing limit narrows from *not verified* about **shape** to *not verified*
+about **strings**.
+
 **Amended, not deleted (`D10-39`, `2572f53`):** the paragraph this one keeps narrowing ends
 by saying what is left is *not a missing feature and not a hardening pass* — still true, and
 one of the things left has stopped being nothing. The `doctor` check that counts invisible
