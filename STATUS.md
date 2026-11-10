@@ -1040,16 +1040,18 @@ comment, which carried the same omission. Two documents agreeing is not evidence
 right; here the agreement was the artefact that made the defect look verified. It is `D10-49`'s shape
 one layer down: a command that reads perfectly and cannot execute. Fixed in the step and in the hook's
 instruction to the operator, with the reason written beside both. **No dependency, no lockfile line, no
-backend source, no test, no migration** (`0006` stays head). The honest limits: **`gitleaks` has still
-never scanned anything** — run #1 refused before pulling the image, so a red run #2 is a finding and
-not a failed fix; **the step logs are unreadable from here** (`403` for job logs to an unauthenticated
-client, and `gh` is not installed), so the diagnosis rests on a local reproduction of the identical
-command plus the timestamp argument rather than the runner's own words; **required status checks are
-still not enabled on `main`**, so a red `gate` has been *observed failing* and never *observed gating*
-a merge; and **the action versions are untouched** — `checkout@v4`, `setup-python@v5`, `setup-node@v4`
-all ran with Node 20 deprecation warnings, cosmetic, and worth their own green run rather than a rider
-on this one. The branch stands **124 commits ahead of `origin/main`** at this `docs(status)` commit,
-re-counted rather than carried forward.
+backend source, no test, no migration** (`0006` stays head). The honest limits: ~~**`gitleaks` has
+still never scanned anything**~~ — **closed by `D10-68`**: run #2 and every run after it are green,
+and the head run lists `gitleaks` as a succeeded step; **the log text is still unreadable from
+here** (`403` for job logs to an unauthenticated client, and `gh` is not installed), though the
+*conclusions* never were — `D10-68` read all nineteen runs without a token — so the diagnosis rests
+on the job list and a local reproduction of the command rather than the runner's own words;
+**required status checks are still not enabled on `main`**, so a red `gate` has been *observed
+failing* and never *observed gating* a merge; and **the action versions are untouched** —
+`checkout@v4`, `setup-python@v5`, `setup-node@v4` all ran with Node 20 deprecation warnings,
+cosmetic, and worth their own green run rather than a rider on this one. The branch stands **124
+commits ahead of `origin/main`** at this `docs(status)` commit, re-counted rather than carried
+forward.
 
 **Then the fourth screen test, and it is the first where two actions look interchangeable and are not**
 (`D10-52`, one commit: `test(web)` `585dcd7`). The agent decision screen was the second address-and-
@@ -5399,6 +5401,19 @@ asks the API one question (`/health`) and must still render when that question f
 thirteen amendments have each kept, and this one keeps: `jsdom` is still a DOM, and the liveness
 sentence is asserted against a **doubled `@/lib/api`**, so it proves the screen asks `/health`,
 not that the API answers.
+
+**Amended again, by `D10-68`, not deleted — and this one moves no figure, only a limit I had been
+repeating in my own words.** Every number above stands: 10 screens, 25 sites, 96 keys, 464 leaf
+keys, both catalogue directions, suite 318/15. What changes is the limit `D10-51` recorded and that
+the handovers kept restating as "CI is unreadable here" — it is not. The run list, every job's
+conclusion and every step's conclusion are readable without a token: nineteen runs in this
+repository, eighteen green, the one red being run #1 on `6c02f66`, the `gitleaks` stage refusal
+`D10-51` fixed. On `5130924` all seven jobs succeeded, `backend integration tests (mysql 8.4)` and
+the `CI gate` among them, and so did the `gitleaks` step itself — six seconds, not the same-second
+signature that proved run #1's step never ran. Only the *log text* is still `403`, which `D10-51`
+said correctly and I generalised wrongly. `D10-68` holds the numbers. What stays open: the gate has
+now been observed passing and observed failing, and still never observed *gating* a merge, because
+required status checks are a repository setting no unauthenticated call can read.
 
 **Amended again, by `D10-67`, not deleted — and this one is the first amendment in the chain
 that changes a promise rather than a count.** No figure above moves: 10 screens, 25 sites, 96

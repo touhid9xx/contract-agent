@@ -4667,11 +4667,13 @@ step and in `.pre-commit-config.yaml`'s own instruction to the operator, with a 
 the flag is required rather than decoration and quoting the error a future reader will otherwise
 re-derive from scratch.
 
-**Honest limits, four.** (1) **`gitleaks` has still never scanned anything** — run #1 refused before
-pulling the image; run #2 is its first real execution, so if it goes red that is a finding, not a
-failed fix. (2) **The step logs are unreadable from here** — GitHub returns `403` for job logs to an
+**Honest limits, four — one of which `D10-68` later closed and one it narrowed.** (1) ~~**`gitleaks`
+has still never scanned anything**~~ — **closed:** run #2 and every run since are green, and the
+head run lists `gitleaks` as a succeeded step, so the first real execution happened and found
+nothing. (2) **The log text is unreadable from here** — GitHub returns `403` for job logs to an
 unauthenticated client and `gh` is not installed, so the diagnosis rests on a local reproduction of
-the identical command plus the timestamp argument, not on the runner's own words. (3) **Required status
+the identical command plus the timestamp argument, not on the runner's own words. `D10-68` narrows
+that: the log *text* is still out of reach, the *conclusions* never were. (3) **Required status
 checks are still not enabled on `main`**, so a red `gate` has never actually blocked a merge; the
 branch is pushed to directly and the gate has only been observed failing, never observed gating.
 (4) **The action versions are untouched** — `checkout@v4`, `setup-python@v5` and `setup-node@v4` all
@@ -5672,3 +5674,61 @@ still proven by one mutation rather than by a case, and the five raw-wire compos
 remain unread by anything.
 
 **Landed as** a `test(web)` commit plus this `docs(status)` record, on top of `133f88a`.
+
+### D10-68 — The CI verdict was readable the whole time; only its log text was not
+
+`D10-51` fixed the `gitleaks` step by reproducing its refusal locally, and recorded two limits: that
+`gitleaks` had still never scanned anything, and that the step logs are unreadable from here,
+because GitHub answers `403` for job logs to an unauthenticated client and `gh` is not installed.
+Both were true when written. Both have now been re-measured. One closed. The other narrowed — and
+the narrowing is the larger finding, because the over-broad form of it has been repeated as a
+blocked item in every handover since, and it was never blocked.
+
+**What the API does answer without a token.** `GET /repos/touhid9xx/contract-agent/actions/runs` and
+`/actions/runs/{id}/jobs` return `200`. The repository is public; the `403` is specific to the *log*
+endpoint, not to the run. So the conclusion, the status, every job's name and conclusion, and every
+step's name, conclusion and start/finish timestamps are readable from a shell with no credentials.
+
+    runs in the repository              19   18 success, 1 failure
+    the one failure                     run #1, `6c02f66` — the `gitleaks` refusal `D10-51` fixed
+    HEAD `5130924`, run 42811394561     conclusion success, 7 jobs, 7 success
+
+    frontend (typecheck, eslint, vitest, build)          success
+    backend tests (pytest, sqlite)                       success
+    demo frontend (typecheck)                            success
+    backend integration tests (mysql 8.4)                success
+    python static (ruff, mypy strict, bandit)            success
+    hygiene + secret scan                                success
+    CI gate — "Every required job must have succeeded"  success
+
+**`D10-51`'s first limit closes.** Its own criterion was that run #2 would be `gitleaks`' first real
+execution, and that a red run #2 would be a finding rather than a failed fix. Run #2 was green, and
+so is every run after it: eighteen in all, the whole history except run #1. On the head run the
+`gitleaks` step is listed as `success`, running `11:55:40Z` to `11:55:46Z` — six seconds, which is
+not the same-second signature `D10-51` used to prove run #1's red step never executed at all.
+`pre-commit` exits 1 when its stage filter finds no matching hook, which is precisely what run #1's
+step died of, so a step that succeeds means the hook was found and ran; and `gitleaks` exits
+non-zero when it finds anything. The evidence is that exit code and that duration, not the log line:
+the one artefact still out of reach is the text that prints the hook's own verdict.
+
+**`D10-51`'s second limit narrows, and this part is my error rather than the file's.** `GET
+/actions/jobs/{id}/logs` answers `403` unauthenticated — re-measured today, so the claim stands as
+written. What is wrong is where I took it. Every turn of this streak has ended with "CI unreadable
+here (no `gh`; `403`)" as an item blocked on the owner, and the item was never blocked: I retried
+the one endpoint I had already failed on, and reported its refusal as a property of CI. It is
+`D10-59`'s shape one layer out — a tool's failure text is not evidence about the thing you asked —
+and `D10-63`'s as well, where the fault was a query that could not have returned the answer it was
+trusted for. A `403` on one path is not a `403` on the API.
+
+**What this does not establish.** The `CI gate` job succeeding proves the gate *evaluated* seven
+jobs and passed. It still has never been *observed gating* a merge, because required status checks
+on `main` are a repository setting that no unauthenticated call can read. Green runs are evidence
+about what the runner did with these trees; they are not evidence about branch protection, and not a
+claim that the workflow catches what the suites miss.
+
+**Local suites, measured this turn rather than recalled.** `python -m pytest -m "not integration"`
+exits 0: 869 tests, 867 passed, 2 skipped, 0 failed — counted twice, from the per-file collection
+totals the reporter prints (which sum to 869) and from the progress line's 867 marks plus its two
+skips. Frontend `npm test`: 318 passed, 15 files, unchanged from `D10-67`.
+
+Landed as `docs(status)` — two Markdown files. No code, no test, no dependency, no migration.
