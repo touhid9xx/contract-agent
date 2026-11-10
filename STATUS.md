@@ -5410,6 +5410,21 @@ thirteen amendments have each kept, and this one keeps: `jsdom` is still a DOM, 
 sentence is asserted against a **doubled `@/lib/api`**, so it proves the screen asks `/health`,
 not that the API answers.
 
+**Amended again, by `D10-77`, not deleted — and this one closes half of a clause it can close
+exactly.** No figure above moves: 10 screens, 25 sites, 96 keys, 464 leaf keys, both catalogue
+directions. What moves is the suite — **335 passed in 17 files**, up from 333 — and a sentence
+three amendments in this chain repeated, that the refusal **codes** the screens translate were
+unchecked against the server. They are checked now, and nothing was copied to do it:
+`refusals.test.ts` walks `backend/app` for `.py` files and reads the `REFUSAL_* = "…"`
+assignments out of them, the same directory walk `composed-keys.test.ts` already used to read
+`app/db/enums.py`. Measured rather than assumed: 27 declarations in 5 modules, 26 distinct
+codes; 25 table entries, 21 distinct codes; **0 stale entries**, so the degradation this chain
+called survivable had never once happened. The other direction stays loose on purpose and is
+now a named trade instead of a gap — five declared codes (`NOTIFICATION_EXISTS`,
+`DECISION_MISMATCH`, `TENANT_MISMATCH`, `ALREADY_ESCALATED`, `RESPONSE_RECORDED`) are raised
+only by routes no button on these three screens walks. `D10-77` holds the walk, the three struck
+clauses and the mutation.
+
 **Amended again, by `D10-76`, not deleted — and this one closes an open call rather
 than a count.** No figure above moves: 10 screens, 25 sites, 96 keys and 464 leaf keys stand, as do
 both catalogue directions. What moves is the suite — **333 passed in 17 files**, up from 332 —
@@ -5481,9 +5496,10 @@ and `null` on the path where the body is not our envelope at all. One mutation �
 assertion red and left the rest of the file green. Suite 328 in 17 files, from 327. The
 parameters were appended, not inserted: `details` already held position five at the hand-built
 call sites, so `traceId` is sixth and no existing argument re-binds. What this does *not* touch
-is the other half of the same limit — the refusal-code vocabulary the screens translate is still
-unenumerated against the routers that raise it, and no gate holds either side of that comparison
-(`D10-71`, `D10-63`).
+is the other half of the same limit — the refusal-code vocabulary the screens translate is ~~still
+unenumerated against the routers that raise it, and no gate holds either side of that
+comparison~~ **enumerated against the server, and gated one way, by `D10-77`** (`D10-71`,
+`D10-63`).
 
 **Amended again, by `D10-71`, not deleted — and this one moves no figure above.**
 Ten screens, 25 sites, 96 keys, 464 leaf keys, both catalogue directions: all still
@@ -5619,9 +5635,11 @@ drift — a client reading named fields ignores a key it never asked for — whi
 why nothing failed while it stood. What this amendment does **not** do is close the
 clause: the refusal-code vocabulary the
 screens translate, `CHANNEL_NOT_PERMITTED` with its `details.permitted`, the two `409`s and the
-`422`, was not enumerated against the routers that raise it, and no gate holds either side of the
-comparison. So the standing limit narrows from *not verified* about **shape** to *not verified*
-about **strings**.
+`422`, was ~~not enumerated against the routers that raise it, and no gate holds either side of
+the comparison~~ **enumerated against the server by `D10-77`, which gated the direction that can
+rot silently**. So the standing limit narrows from *not verified* about **shape** to *not
+verified* about **strings** — and the string half is now open only for the five codes the server
+declares and no button can reach.
 
 **Amended, not deleted (`D10-39`, `2572f53`):** the paragraph this one keeps narrowing ends
 by saying what is left is *not a missing feature and not a hardening pass* — still true, and

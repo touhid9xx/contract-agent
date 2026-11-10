@@ -5915,13 +5915,19 @@ alone at line 82 — the two directions are separate assertions, which is why th
 apart. Pointing an agent code at `notifications.refusalNoConsent` failed *keeps every table
 inside its own screen's namespace*. Tree restored and re-run green after each.
 
-**One thing deliberately left unpinned.** The *codes* are the server's vocabulary —
-`REFUSAL_*` constants in `app/workers/dispatch.py`, `decision.py`, `escalation.py` and
-`app/api/v1/notifications.py`. Restating them as a TypeScript union would be a fourth copy of
-a fact with nothing to verify it against Python (`D10-63`), so it is not done: a code the
+**~~One thing deliberately left unpinned.~~ Pinned on one side and loose on the other, by
+`D10-77`.** The *codes* are the server's vocabulary — `REFUSAL_*` constants in
+`app/workers/dispatch.py`, `decision.py`, `escalation.py` and
+`app/api/v1/notifications.py`. ~~Restating them as a TypeScript union would be a fourth copy
+of a fact with nothing to verify it against Python (`D10-63`), so it is not done: a code the
 server stops sending leaves an unused entry, a code it starts sending falls through to the
 screen's generic sentence, and both are survivable. The sentences are pinned; the codes are
-not.
+not.~~ The union was refused for the right reason and the wrong one: the copies were never
+required, because the assignments can be read out of the server tree the way
+`composed-keys.test.ts` already reads `app/db/enums.py`, so a code the server stops sending now
+fails a test instead of lingering as an entry nobody can reach. A code the server *starts*
+sending still falls through to the screen's generic sentence — that half stays a named trade
+(`D10-77`) rather than an unexamined limit.
 
 **Reuse rather than a third copy.** `flatten`, byte-identical in `messages.test.ts` and
 `composed-keys.test.ts`, moved to `src/i18n/catalogue.ts`. Its docstring claims each spec
@@ -6230,3 +6236,71 @@ decision this slice could not have made on evidence alone: the evidence said whi
 side was wrong, not which answer an owner wanted.
 
 Landed as `fix(contract-scope)` + `docs(status)`.
+
+### D10-77 — The refusal codes were never unpinnable, they were unread
+
+`refusals.ts` ended its docstring with a limit and a reason for it: the codes are the server's
+vocabulary, and pinning them would be "a fourth copy of the same fact **with nothing to verify
+it against Python**". The first clause is a judgement this entry does not overturn — a
+`TypeScript` union restating `REFUSAL_*` would indeed be a copy. The second clause was simply
+false about this repository, and it was load bearing: it was the reason the codes were the one
+half of the refusal vocabulary no test looked at, while `D10-71` pinned the sentences.
+
+**Nothing had to be added to the server to verify them.** `i18n/composed-keys.test.ts` already
+reaches into `backend/app/db/enums.py` from a node-environment spec, by walking up from the spec
+to the repo root. The refusal codes are declared the same way the enums are — module-level
+`REFUSAL_* = "CODE"` assignments — so reading them costs one directory walk over `backend/app`
+and one regex. The new assertion compares the two sources; it writes down no code of its own, so
+the guard cannot rot the way the figure it protects did.
+
+**What the walk found, measured rather than assumed.** 27 declarations across 5 modules, **26
+distinct codes**. The three tables carry 25 entries, **21 distinct codes**.
+
+- **Stale entries: 0.** Every code the frontend translates is a constant the server declares.
+  The degradation the old comment called survivable had never actually degraded, which is the
+  fourth time in this chain a stated limit turned out to be a limit nobody had measured
+  (`D10-62`, `D10-63`, `D10-65`).
+- **Untranslated server codes: 5** — `NOTIFICATION_EXISTS`, `DECISION_MISMATCH`,
+  `TENANT_MISMATCH`, `ALREADY_ESCALATED`, `RESPONSE_RECORDED`. Each is reachable only from a
+  route no button on these three screens walks. `api.ts` exposes the escalation queue's
+  `queue`, `update` (PATCH) and `recordResponse`, and no `raise`, so `refusal_to_raise`'s three
+  codes (`escalations.py:397`) are genuinely unreachable from the UI; `record_response`
+  (`:253`) calls no `refusal_to_*` at all.
+
+**One direction is asserted, and that is the design.** Failing on an untranslated *server* code
+would contradict the module's own stated choice — a sentence for a click that cannot happen is
+copy that never helps, and the screens' generic ladder already covers it. So that direction
+stays loose and is now documented as the trade it is, with the five codes named. The direction
+that is asserted is the one that can rot silently: a code the server stops sending, or renames,
+leaving a table entry nothing can reach and no failure to notice it by.
+
+**Floors, not counts.** The spec asserts 20+ `.py` files walked, 4+ declaring modules and 20+
+codes, so that a broken walk or a pattern that stops matching fails loudly instead of comparing
+two empty sets and passing — the vacuity guard this chain has used since `D10-71`.
+
+**Mutation-proven on the committed tree.** Renaming `ESCALATION_CLOSED` to
+`ESCALATION_RESOLVED` in `refusals.ts` failed *translates only codes the server actually
+declares* with `ESCALATION_REFUSALS.ESCALATION_RESOLVED is not a REFUSAL_* constant under
+backend/app`, while the six other cases in the file stayed green — the new case isolates this
+direction rather than riding on a neighbour. Restored with `git checkout` and the sha256
+compared against one taken first, `c53c814e44b8…`, identical afterwards: the restore is done in
+bytes for the reason `D10-76` recorded.
+
+**Three false sentences struck in place.** The clause above inside `D10-71`; the `D10-62`
+amendment's "no gate holds either side of the comparison"; and the `D10-72` amendment's "the
+refusal-code vocabulary … is still unenumerated against the routers that raise it, and no gate
+holds either side". Each is struck and pointed here rather than deleted, the convention this
+chain already follows.
+
+**Verification.** Suite **335 passed in 17 files**, up from 333. No screen, key, namespace,
+catalogue entry, enum, route or dependency changed — the whole slice is one spec, one docstring
+and two ledgers. `refusals.test.ts` gained 77 lines.
+
+**Limits.** Only the assignment form is read, so a refusal code written inline at a `raise` site
+instead of through its constant is invisible, and so is one assembled at runtime; both would
+need the offending file to abandon the vocabulary, which is why the floors count files as well
+as codes. The reverse direction is unasserted by design, not by omission. `node` reads the
+filesystem, so this proves the frontend's tables against the server's declarations — not that
+any route emits a given code on a given input, which remains `D10-63`'s territory.
+
+Landed as `test(web)` + `docs(status)`.
