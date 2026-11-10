@@ -6022,3 +6022,59 @@ scratch files are gone and not merely ignored. Suite 328 passed in 17 files, re-
 entry through `node scripts/run-frontend-check.mjs test` — the same entry point the hook calls.
 
 Landed as `docs(status)`.
+
+### D10-74 — Eighteen of nineteen, and the nineteenth could never have failed
+
+The two guards owed above are landed: the five table-less compositions `D10-65` measured by hand
+are read from `backend/app/db/enums.py` and the `Wire values of app.db.enums.…` docstrings in
+`lib/api.ts` and resolved under their prefixes in both catalogues, and `D10-66`'s failure branch is
+driven through the same `pair()` the rest of the suite uses. Four mutations, each restored and
+verified by sha256 against a digest taken first, and a fifth enum on the server now fails in three
+places. The code commit's message holds that table; what this entry records is what the run
+corrected in the record itself.
+
+**The number was counted from a config, never from a run.** `D10-73` says
+`pre-commit run --all-files` "in this repository is nineteen hook ids … All nineteen passed."
+Nineteen is right as a count of ids in the `pre-commit` stage. *All nineteen passed* is not a
+sentence this repository can print. The run that landed `419176f` printed eighteen `Passed` lines
+and one line that is neither:
+
+    forbid submodules....................................(no files to check)Skipped
+
+**The skip belongs to the tree, not to the change.** husky invokes `pre-commit run --all-files`, so
+the candidate file list is the whole repository and every hook's `files:` filter selects from all of
+it — nothing about which files this commit touched narrowed anything. `forbid-submodules` is
+declared upstream as `types: [directory]`, which in pre-commit's vocabulary means gitlinks, and this
+repository has none, so the hook has nothing to inspect on any commit it will ever see. That was
+read out of the hook manifest in the pre-commit cache rather than remembered from the failure
+message, because the failure message does not say it.
+
+**A skipped hook is not a passed hook, and an id is not a check.** Nineteen ids, eighteen checks,
+one of which cannot fail here. The gate is not weaker for it — a repository with no submodules has
+nothing for a submodule check to find — but the sentence was weaker for saying it, and the F1
+tooling table and the amendment below had both already said it. A green line is a claim about a
+check that ran; `Skipped` is a claim about a check that declined to, and the two are counted
+together only by someone who is not counting.
+
+**The first amend carried a second wrong reason, and that one was mine.** The message was first
+corrected to *"eighteen hooks passed; `forbid submodules` skipped, having no files to check in a
+frontend-only change."* The count was right and the cause was invented: `(no files to check)` names
+the selection, and I supplied the reason it did not give, then made it specific enough to be false —
+a backend-only commit would have skipped the same hook. Reading the upstream definition took one
+command. The second amend replaced the clause, and `commitlint --edit` ran on the message file with
+nothing staged before git was touched at all: `D10-73`'s cheapest gate, this time used first instead
+of last.
+
+**Verification.** `419176f`, one file, +227 −35, amended twice before it was ever pushed — the hooks
+re-ran on both, so the tree was re-checked and not merely re-worded. Suite 332 passed in 17 files,
+measured twice for this entry: once inside the hook's `frontend tests (vitest run)`, once directly
+through `npx vitest run`. `git status --porcelain -uall` printed nothing between the amends.
+
+**Limits.** The four-mutation table was measured in the run that preceded this entry and was not
+re-performed for it; the suite figure above was. No CI run was observed for `419176f` — the push is
+this entry's next commit's problem, and the `frontend` job's checkout of the whole repository is the
+assumption the new spec rests on, stated in the code commit rather than proven by one. And a skipped
+hook cannot be caught by any test in this repository, only by reading the run instead of counting
+its config.
+
+Landed as `test(web)` (`419176f`) + `docs(status)`.

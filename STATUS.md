@@ -1400,7 +1400,7 @@ that criterion.
 | --- | --- |
 | Python tooling | `pyproject.toml` — ruff (lint + format), `mypy --strict`, pytest + coverage, bandit |
 | Pre-commit | `.pre-commit-config.yaml` — hygiene, ruff, ruff-format, mypy, bandit, frontend typecheck, frontend eslint; gitleaks bound to `manual` (D1-03) |
-| Commit gate | husky `pre-commit` + `commit-msg`, commitlint (Conventional Commits), lint-staged — **written in F1 but not actually wired until `4a9e8e9`** (gap 13): the `prepare` hook never ran because root `node_modules` was absent. **Two ordered gates, not one** (`D10-73`): `pre-commit` runs nineteen hook ids over the tree, none of which can read a message that does not exist yet, and `commit-msg` then runs `commitlint --edit` over the header and can refuse the commit whole |
+| Commit gate | husky `pre-commit` + `commit-msg`, commitlint (Conventional Commits), lint-staged — **written in F1 but not actually wired until `4a9e8e9`** (gap 13): the `prepare` hook never ran because root `node_modules` was absent. **Two ordered gates, not one** (`D10-73`): `pre-commit` runs nineteen hook ids over the tree — eighteen of which execute here, since `forbid submodules` is `types: [directory]` and there are no gitlinks (`D10-74`) — none of which can read a message that does not exist yet, and `commit-msg` then runs `commitlint --edit` over the header and can refuse the commit whole |
 | CI | `.github/workflows/ci.yml` (**D10-46**, added long after F1 because the gap was invisible while the hook worked) — six jobs (python static, backend pytest, MySQL 8.4 integration, frontend typecheck/eslint/vitest/**production build**, demo frontend typecheck, hygiene + `gitleaks`) plus one `gate` job as the single required check. The build step joined the frontend job in **`D10-47`** (`20ccc7c`), after it had been run locally and made green. **The first place anything in this repository ran automatically**, and the first time the backend suite and the `integration` suite were gated at all. **`D10-48`** (`5f2b085`) added a `smoke journey (real uvicorn, real socket)` **step** to the `backend-tests` job — the count stays six because it is a step and not a seventh job, and it is the only check in the pipeline that boots a real server rather than calling the ASGI app in process |
 | Backend | `app/core/config.py` fail-fast settings, `app/core/logging.py` structlog + PII redaction, `app/core/middleware.py` request/trace IDs, `app/main.py` factory + error envelope, `/api/v1/health` |
 | Frontend | Next.js 16 + Tailwind 4 + TanStack Query + Zustand + next-themes + next-intl (en, bn), ESLint flat config, Prettier, `[locale]` routing |
@@ -5401,6 +5401,23 @@ asks the API one question (`/health`) and must still render when that question f
 thirteen amendments have each kept, and this one keeps: `jsdom` is still a DOM, and the liveness
 sentence is asserted against a **doubled `@/lib/api`**, so it proves the screen asks `/health`,
 not that the API answers.
+
+**Amended again, by `D10-74`, not deleted — and this one corrects a number the record itself had
+just introduced.** No figure above moves: 10 screens, 25 sites, 96 keys, 464 leaf keys and both
+catalogue directions stand, and the F1 tooling table's other rows are untouched. What moves is a
+count in the amendment directly below, which says the `pre-commit` stage "runs nineteen hook ids".
+True of the ids, false of the checks: the run that landed this slice printed eighteen `Passed` lines
+and `forbid submodules … (no files to check)Skipped`. The hook is `types: [directory]`, so it
+inspects gitlinks and this repository has none — a skip that belongs to the tree rather than to any
+commit, and one that `--all-files` does not change, because that flag already means the whole
+repository. What belongs in this chain is not a lower number but the distinction: a green line is a
+check that ran, `Skipped` is a check that declined, and *nineteen hooks passed* counted the second
+as the first. The F1 row itself is corrected in place above, so the count a reader meets first is no
+longer the one that was never run. What `D10-65` and `D10-66` owed is settled rather than amended:
+~~five wire-value compositions measured once by hand~~ read from the tree, and ~~a failure branch no
+case had driven~~ driven through the same `pair()` the suite uses. Suite 332 passed in 17 files, up
+from 328 — the four new cases, no screen, key, namespace, catalogue entry or enum changed.
+`D10-74` holds the detail, including the reason I invented for the skip and then had to retract.
 
 **Amended again, by `D10-73`, not deleted — and this one splits a row that named two gates as
 one.** No figure above moves: 10 screens, 25 sites, 96 keys, 464 leaf keys and both catalogue
