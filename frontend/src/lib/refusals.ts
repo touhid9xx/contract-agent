@@ -20,15 +20,27 @@
  * namespace at the call site, and `refusals.test.ts` asserts every one of them
  * resolves in both catalogues.
  *
- * **What this cannot pin.** The *codes* — `CONTRACT_CLOSED`, `NOT_YET_DUE` and
- * the rest — are the server's vocabulary, declared as `REFUSAL_*` constants in
- * `app/workers/dispatch.py`, `app/workers/decision.py`, `app/workers/escalation.py`
- * and `app/api/v1/notifications.py`. Restating them as a TypeScript union would
- * be a fourth copy of the same fact with nothing to verify it against Python, so
- * this module deliberately does not: a code the server stops sending leaves a
- * table entry unused, and a code it starts sending falls through to the screens'
- * generic sentence. Both are survivable, which is why the codes are not pinned
- * and the sentences are.
+ * **The codes are not restated — and they are no longer unchecked.** The *codes*
+ * — `CONTRACT_CLOSED`, `NOT_YET_DUE` and the rest — are the server's vocabulary,
+ * declared as `REFUSAL_*` constants in `app/workers/decision.py`,
+ * `app/workers/dispatch.py`, `app/workers/escalation.py`,
+ * `app/workers/notification_scheduler.py` and `app/api/v1/notifications.py`.
+ * Writing them out again as a TypeScript union would be a fourth copy of the same
+ * fact with nothing to verify it against Python, so this module does not. It
+ * turns out that copies were never required: `refusals.test.ts` reads those
+ * assignments straight out of the server tree, exactly as
+ * `i18n/composed-keys.test.ts` reads `app/db/enums.py`, and fails if a table here
+ * names a code the server does not declare. A code the server *stops* sending
+ * can therefore no longer leave a table entry nobody can reach.
+ *
+ * The reverse direction stays deliberately loose, and is the one thing this file
+ * still accepts rather than proves: a code the server *starts* sending falls
+ * through to the screens' generic sentence. `NOTIFICATION_EXISTS`,
+ * `DECISION_MISMATCH`, `TENANT_MISMATCH`, `ALREADY_ESCALATED` and
+ * `RESPONSE_RECORDED` are that case today — raised only by routes no button on
+ * these three screens walks, so a sentence for them would be copy for a click
+ * that cannot happen. That trade is one fact in one place: when a button is added
+ * that can provoke one, it is added here.
  *
  * A table is `as const satisfies Record<string, string>` for the reason the
  * status maps are: the shape is checked, and the values stay literal strings

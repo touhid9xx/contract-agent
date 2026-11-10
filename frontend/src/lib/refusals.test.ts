@@ -26,6 +26,10 @@
  * the tables against the catalogues, and the floors exist only so that reading
  * nothing cannot pass.
  */
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
 import { flatten } from "@/i18n/catalogue";
@@ -119,5 +123,78 @@ describe("the refusal vocabulary", () => {
     expect(namedLikeRefusals.length).toBeGreaterThanOrEqual(20);
     const orphans = namedLikeRefusals.filter((key) => !reached.has(key));
     expect(orphans).toEqual([]);
+  });
+});
+
+/**
+ * The other half of the vocabulary — the codes themselves, against the server.
+ *
+ * `@/lib/refusals` used to say these could not be checked: that pinning them
+ * would be "a fourth copy of the same fact with nothing to verify it against
+ * Python". The second clause was wrong about this repo. `composed-keys.test.ts`
+ * already reads `backend/app/db/enums.py` out of a node-environment spec by
+ * walking up to the repo root, and the codes are declared the same way enums
+ * are: as `REFUSAL_* = "CODE"` assignments in module scope. Reading them costs
+ * one directory walk, and nothing is copied — the assertion compares two
+ * sources rather than restating either.
+ *
+ * Only one direction is checked, deliberately. A code the server declares and
+ * these tables ignore is the *documented* outcome (`NOTIFICATION_EXISTS`,
+ * `DECISION_MISMATCH`, `TENANT_MISMATCH` … fall through to the screens' generic
+ * sentence on purpose, reachable only from paths no button walks). A code these
+ * tables translate and the server does not declare is an entry nothing can ever
+ * reach — the failure that makes a rename on the server look harmless.
+ *
+ * **What this cannot see.** Only the assignment form is read, so a refusal code
+ * written inline at a `raise` site instead of through its constant is invisible;
+ * so is one assembled at runtime. Both would need the offending file to stop
+ * using the vocabulary this test is about, which is why the floor below counts
+ * files as well as codes.
+ */
+const SRC = dirname(dirname(fileURLToPath(import.meta.url)));
+/** The repo root, one level above this app — the server's vocabulary lives there. */
+const ROOT = dirname(dirname(SRC));
+const BACKEND = join(ROOT, "backend", "app");
+
+/** Every `.py` file under `backend/app`, the tree the refusal codes are declared in. */
+function pythonFiles(dir = BACKEND): string[] {
+  if (!existsSync(dir)) return [];
+  const found: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) found.push(...pythonFiles(path));
+    else if (entry.name.endsWith(".py")) found.push(path);
+  }
+  return found;
+}
+
+/** The codes one module declares as module-level `REFUSAL_* = "…"` assignments. */
+function serverCodesIn(source: string): string[] {
+  return [...source.matchAll(/^REFUSAL_[A-Z0-9_]+ = "([^"]+)"/gm)].map((match) => match[1]!);
+}
+
+const python = pythonFiles().map((path) => ({
+  path: path.slice(ROOT.length + 1),
+  codes: serverCodesIn(readFileSync(path, "utf8")),
+}));
+const serverCodes = new Set(python.flatMap((file) => file.codes));
+
+describe("the refusal vocabulary against the server's", () => {
+  it("can see the server's refusal constants, so the check below is not vacuous", () => {
+    // Floors, not counts to maintain: they fail if the walk or the pattern stops
+    // matching. 26 codes today across the five modules that declare them.
+    expect(existsSync(BACKEND)).toBe(true);
+    expect(python.length).toBeGreaterThanOrEqual(20);
+    expect(python.filter((file) => file.codes.length > 0).length).toBeGreaterThanOrEqual(4);
+    expect(serverCodes.size).toBeGreaterThanOrEqual(20);
+  });
+
+  it("translates only codes the server actually declares", () => {
+    // The direction that keeps a renamed or deleted server code from leaving a
+    // table entry nobody can reach and no failure to notice it by.
+    const stale = named()
+      .filter(({ code }) => !serverCodes.has(code))
+      .map(({ table, code }) => `${table}.${code} is not a REFUSAL_* constant under backend/app`);
+    expect(stale).toEqual([]);
   });
 });
