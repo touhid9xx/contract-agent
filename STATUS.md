@@ -1400,7 +1400,7 @@ that criterion.
 | --- | --- |
 | Python tooling | `pyproject.toml` — ruff (lint + format), `mypy --strict`, pytest + coverage, bandit |
 | Pre-commit | `.pre-commit-config.yaml` — hygiene, ruff, ruff-format, mypy, bandit, frontend typecheck, frontend eslint; gitleaks bound to `manual` (D1-03) |
-| Commit gate | husky `pre-commit` + `commit-msg`, commitlint (Conventional Commits), lint-staged — **written in F1 but not actually wired until `4a9e8e9`** (gap 13): the `prepare` hook never ran because root `node_modules` was absent |
+| Commit gate | husky `pre-commit` + `commit-msg`, commitlint (Conventional Commits), lint-staged — **written in F1 but not actually wired until `4a9e8e9`** (gap 13): the `prepare` hook never ran because root `node_modules` was absent. **Two ordered gates, not one** (`D10-73`): `pre-commit` runs nineteen hook ids over the tree, none of which can read a message that does not exist yet, and `commit-msg` then runs `commitlint --edit` over the header and can refuse the commit whole |
 | CI | `.github/workflows/ci.yml` (**D10-46**, added long after F1 because the gap was invisible while the hook worked) — six jobs (python static, backend pytest, MySQL 8.4 integration, frontend typecheck/eslint/vitest/**production build**, demo frontend typecheck, hygiene + `gitleaks`) plus one `gate` job as the single required check. The build step joined the frontend job in **`D10-47`** (`20ccc7c`), after it had been run locally and made green. **The first place anything in this repository ran automatically**, and the first time the backend suite and the `integration` suite were gated at all. **`D10-48`** (`5f2b085`) added a `smoke journey (real uvicorn, real socket)` **step** to the `backend-tests` job — the count stays six because it is a step and not a seventh job, and it is the only check in the pipeline that boots a real server rather than calling the ASGI app in process |
 | Backend | `app/core/config.py` fail-fast settings, `app/core/logging.py` structlog + PII redaction, `app/core/middleware.py` request/trace IDs, `app/main.py` factory + error envelope, `/api/v1/health` |
 | Frontend | Next.js 16 + Tailwind 4 + TanStack Query + Zustand + next-themes + next-intl (en, bn), ESLint flat config, Prettier, `[locale]` routing |
@@ -5401,6 +5401,21 @@ asks the API one question (`/health`) and must still render when that question f
 thirteen amendments have each kept, and this one keeps: `jsdom` is still a DOM, and the liveness
 sentence is asserted against a **doubled `@/lib/api`**, so it proves the screen asks `/health`,
 not that the API answers.
+
+**Amended again, by `D10-73`, not deleted — and this one splits a row that named two gates as
+one.** No figure above moves: 10 screens, 25 sites, 96 keys, 464 leaf keys and both catalogue
+directions stand, and no test changed. What changes is the F1 tooling table's `Commit gate` row,
+which listed husky `pre-commit` + `commit-msg` + commitlint + lint-staged as a single gate. They
+are two gates, ordered, and only the first reads the tree: `pre-commit run --all-files` runs
+nineteen hook ids — `gitleaks` is `manual` by `D1-03` and correctly not among them — and
+`commit-msg` then hands `commitlint --edit` a path that was written after all nineteen had already
+said `Passed`. The slice below is the proof rather than the theory: its first commit attempt was
+refused with `subject must be sentence-case, lower-case, start-case` over the camelCase identifier
+`ApiError`, created nothing, and left `HEAD` at `de56299`, so the retry was a clean first commit
+and not an `--amend`. No hook count predicts a rule about a string, and the cheapest gate in this
+repository is the one that had been left until last — `commitlint --edit` runs on a file that
+needs nothing staged. `D10-73` holds the detail, including the guard in my own finisher script
+that matched `api.test.ts` and not `api.ts`.
 
 **Amended again, by `D10-72`, not deleted — and this one spends a limit rather than narrowing
 it.** No figure above moves: 10 screens, 25 sites, 96 keys, 464 leaf keys, both catalogue

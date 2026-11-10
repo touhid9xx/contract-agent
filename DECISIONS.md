@@ -5963,3 +5963,62 @@ only to a copy of it.
 mutation run at LF with the index unchanged.
 
 Landed as `test(web)` + `docs(status)`.
+
+### D10-73 — The code passed nineteen hooks and the commit did not land
+
+The slice above was finished, measured and green, every hook printed `Passed`, and the commit was
+refused. `.husky/pre-commit` runs `pre-commit run --all-files`, which in this repository is
+nineteen hook ids in the `pre-commit` stage — eleven hygiene, two `ruff`, `mypy`, `bandit` and
+four node checks, counted from `.pre-commit-config.yaml` for this entry rather than carried
+forward, with `gitleaks` correctly absent because it is `stages: [manual]`. All nineteen passed.
+Then:
+
+    ✖ subject must be sentence-case, lower-case, start-case [subject-case]
+    husky - commit-msg script failed (code 1)
+
+**A twentieth hook ran, and it read the one input the other nineteen cannot see.** The commit
+message does not exist while `pre-commit` runs. `.husky/commit-msg` is handed the path to it
+afterwards and passes it straight to `commitlint --edit`, so *the hooks passed* is a sentence
+about the tree, and the commit is a later and separate decision about a string. Both were
+reported together, which is why they read as one gate. They are not one gate.
+
+**Why the subject is a syntax error rather than a style nit.** `commitlint.config.mjs:7` sets
+`subject-case` to `["sentence-case", "lower-case", "start-case"]`. commitlint reads the subject as
+words and asks which shape each one has: the header ended `… on ApiError`, and `ApiError` is
+camelCase — not all-lowercase, which is what `lower-case` accepts; not capitalised with the rest
+lowercase, which is what `sentence-case` accepts; not Capitalised, which is what `start-case`
+accepts. The identifier satisfied none of the three, and the header was rejected whole. The fix
+was the one the gate named rather than a suppression: the class name moved into the body, where it
+already appeared eleven times, and the header became `carry the envelope's trace id onto the api
+error`. A name is welcome in the body and refused in the subject, because only one of the two
+becomes history.
+
+**The cheapest gate was the one run last.** Nineteen hooks cost minutes. `commitlint --edit
+<path>` is the exact command the hook runs and costs a fraction of a second. Running it before
+`git add` inverts the order of discovery, and this is the repository's only gate that can be
+applied to its own input before that input exists anywhere else — a message can be linted as a
+file, written by hand, with nothing staged at all. It was left until after everything else had
+already said yes.
+
+**Nothing was created, so there was nothing to unwind.** `HEAD` was still `de56299` and only
+`api.ts` and `api.test.ts` were staged, so the retry was a clean first commit rather than an
+`--amend` over something already in history. The finisher threw on the non-zero exit, so the docs
+commit, the push and the divergence check never ran: a gate that fires before a commit exists
+cannot leave a half-pushed tree. That was read off `HEAD` and the index after the failure rather
+than assumed.
+
+**A second defect in the same attempt, and it was mine too.** The finisher's pre-push guard
+tested `-match 'api\.test?\.ts|DECISIONS\.md|STATUS\.md'`, where `?` makes only the final `t`
+optional: the pattern matches `api.test.ts` and does **not** match `api.ts`, so the guard would
+have pushed with the source file still unstaged while reporting four clean paths. It was found by
+reading the script, not by a run that failed. Same family as `D10-65`, one step further: a guard
+that has never failed has not been tested, and a guard that has never been read has not been
+written either. It now asks git about the four paths by name.
+
+**Verification.** `6c9d6ee` (`test(web)`) and `cf6c95a` (`docs(status)`) both landed;
+`git rev-list --left-right --count HEAD...origin/main` printed `0	0`; `git status --porcelain
+-uall` printed nothing; `git ls-files -- .agent-cache` printed nothing, so this slice's nine
+scratch files are gone and not merely ignored. Suite 328 passed in 17 files, re-measured for this
+entry through `node scripts/run-frontend-check.mjs test` — the same entry point the hook calls.
+
+Landed as `docs(status)`.
