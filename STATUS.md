@@ -1206,13 +1206,18 @@ turn ends cleanly is not yet a rule. **Two things recorded rather than fixed, bo
 `?contract=`, and `page.tsx:130` repeats the stale claim~~ — **that half is closed, not deleted, by
 `D10-58`:** both locales and the doc comment now say the links carry this contract's id, so each
 screen opens already filtered; the Bangla is a re-statement rather than a gloss of the new English.
-The second thing stands, and is still an owner's call — the route guards **disagree**: this page
-accepts `/^\d+$/` so `"07"` reads as contract 7, while `contract-scope.ts` uses `^[1-9][0-9]*$` and
-refuses it. ~~`contract-scope.ts` justified that rule as a copy of the server's
-own~~ — **that justification was measured false and is gone (`D10-59`):** `GET /contracts/01` answers
+~~The second thing stands, and is still an owner's call — the route guards
+**disagree**: this page accepts `/^\d+$/` so `"07"` reads as contract 7, while
+`contract-scope.ts` uses `^[1-9][0-9]*$` and refuses it.~~ **That second thing is closed, not
+deleted, by `D10-76`:** the ruling went to this page's guard, so `contract-scope.ts` now reads a
+padded id as the same contract. ~~`contract-scope.ts` justified that rule as a copy of the
+server's own~~ — **that justification was measured false and is gone (`D10-59`):**
+`GET /contracts/01` answers
 **200**, so nothing on the server refuses a padded id, and the strict regex is the address bar's own
-choice rather than a mirror of the API. The divergence itself is untouched: still an owner's ruling,
-now stated as a free choice instead of an inherited rule. **No dependency, no lockfile line, no
+choice rather than a mirror of the API. ~~The divergence itself is untouched: still an owner's
+ruling, now stated as a free choice instead of an inherited rule.~~ **The free choice became a
+ruling in `D10-76`**, and it went the way the measurement pointed.
+**No dependency, no lockfile line, no
 backend source, no source change at all, no migration** (`0006` stays head). The honest limits: the
 rules are proven against a **doubled API and a doubled router** — `jsdom`, no browser, no real
 router, no server; `ContractListItem`, `ContractField`, `AgentDecision`, `NotificationRow` and
@@ -1306,9 +1311,10 @@ locales and the doc comment are corrected in one change**, and the Bangla is a r
 language's own idiom rather than a gloss of the new English. **The verification is a count that does
 not move:** the full frontend suite is **309 passed in 13 files**, the same as before, because no
 spec asserts that message — the 45 contract-detail cases find each related link by the `?contract=`
-it carries, so the linkage stays pinned while the words beside it change. **The second half of
+it carries, so the linkage stays pinned while the words beside it change. ~~**The second half of
 `D10-55`'s note stays open on purpose:** the route guards still disagree about `"07"`, which changes
-what an address means and is a product call. **No behaviour change, no dependency, no lockfile line,
+what an address means and is a product call.~~ **It was left open here and closed by `D10-76`:** the
+guards agree about `"07"` now. **No behaviour change, no dependency, no lockfile line,
 no backend source, no migration** (`0006` stays head). All nineteen pre-commit gates green and
 commitlint passed. The lesson is the chain's oldest one in its cheapest form: a comment claiming a
 string was updated is not the string, and one grep for the sentence would have cost less than the
@@ -1324,11 +1330,13 @@ as well, while `/contracts/0` and `/contracts/-1` reach the handler and come bac
 `?contract_id=0` is refused **422**. **Nothing on the server refuses a leading zero**, so an `int`
 does not mean "no leading zero", and `gt=0` accepts seven whether it arrived spelled `7` or `01`. The
 strict rule is therefore the address bar's own choice, one step narrower than the API it talks to, and
-the comment now says that instead of claiming the server forced it. **The divergence itself is
+the comment now says that instead of claiming the server forced it. ~~**The divergence itself is
 untouched:** `readContractScope` returns exactly what it returned before, the module's cases still
 pin `"012"` invalid, and `contracts/[id]/page.test.tsx:408` still pins `"07"` reading as contract 7 —
 so the open product call `D10-55` named is now **better posed rather than decided**, because an owner
-ruling given on a false reason would have been a ruling about nothing. **No dependency, no lockfile
+ruling given on a false reason would have been a ruling about nothing.~~ **`D10-76` decided it, the
+way this slice had posed it:** the module's cases pin `"012"` as contract 12, and `"07"` reads as
+contract 7 on both sides. **No dependency, no lockfile
 line, no backend source, no migration** (`0006` stays head), and the probe that produced the table was
 a temporary test file, run and then deleted, so nothing of it survives in the suite. Verification: the
 full frontend suite **309 passed in 13 files**, the same count as before, which is the expected result
@@ -5401,6 +5409,18 @@ asks the API one question (`/health`) and must still render when that question f
 thirteen amendments have each kept, and this one keeps: `jsdom` is still a DOM, and the liveness
 sentence is asserted against a **doubled `@/lib/api`**, so it proves the screen asks `/health`,
 not that the API answers.
+
+**Amended again, by `D10-76`, not deleted — and this one closes an open call rather
+than a count.** No figure above moves: 10 screens, 25 sites, 96 keys and 464 leaf keys stand, as do
+both catalogue directions. What moves is the suite — **333 passed in 17 files**, up from 332 —
+because `D10-55`'s open ruling was finally taken: a zero-padded id names the same contract, so
+`"012"` moved out of the module's refused table and into its admitted one. ~~The route guards
+disagree~~ becomes **the guards agree**, by two spellings of one rule — the page's `/^\d+$/` then
+`> 0`, the module's `/^0*[1-9][0-9]*$/` — measured equal over 22,643 generated strings with zero
+disagreements and 89 strings changed. The ruling went to the page's side because the server already
+agreed with it: `GET /contracts/01` answers **200**. Zero still is not a contract, and every
+spelling that could name a *different* contract is still refused. `D10-76` holds the measurement,
+the four mutation cases, and the reason the restore had to be done in bytes.
 
 **Amended again, by `D10-75`, not deleted — and this one qualifies the premise the whole chain
 rests on.** No figure above moves: 10 screens, 25 sites, 96 keys, 464 leaf keys and both catalogue

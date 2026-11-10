@@ -3402,17 +3402,20 @@ a link instead of by reading a whole queue and matching ids by eye.
   `none | contract | invalid`. Falling through to the tenant-wide list on a malformed filter would
   answer a question nobody asked — the same lie as ignoring the filter, only louder — so an invalid
   address shows a card saying so and the query stays `enabled: false` rather than widening.
-- **Parsing is hand-checked, for `D10-34`'s reason.** `/^[1-9][0-9]*$/` then
-  `Number.isSafeInteger`, never `Number(raw)`: `Number("")` is `0`, and a zero-padded, exponent, hex
-  or space-wrapped spelling of a real id survives it — `"012"`, `"1e3"`, `"0x10"`, `" 12"` and
-  `"12 "` read 12, 1000, 16, 12 and 12 — so a malformed address would quietly become a real filter
-  on a contract nobody named. ~~`Number("12abc")` is `12`~~ That one comes back `NaN`, not 12:
+- **Parsing is hand-checked, for `D10-34`'s reason.** `/^0*[1-9][0-9]*$/` then
+  `Number.isSafeInteger`, never `Number(raw)`: `Number("")` is `0`, and an exponent, hex or
+  space-wrapped spelling of a real id survives it — `"1e3"`, `"0x10"`, `" 12"` and `"12 "` read
+  1000, 16, 12 and 12 — so a malformed address would quietly become a real filter on a contract
+  nobody named. ~~A zero-padded spelling is one of those traps~~ — **`D10-76` measured it the one
+  spelling that cannot change what it names**: `"012"` was always contract 12 to the server, so the
+  guard admits it now, at the cost of the `0*` in front and nothing else.
+  ~~`Number("12abc")` is `12`~~ That one comes back `NaN`, not 12:
   reading it as twelve is `Number.parseInt`'s doing, so the digit test is what refuses a tail, not
   the conversion. ~~The server's path parameter is an `int` and its query parameters are `gt=0`, so
   the browser tests the shape the server enforces.~~ `D10-59` measured both premises true and the
   inference built on them false — nothing on the server refuses a padded id, and `GET /contracts/01`
-  answers **200** — so this stricter shape is the address bar's own choice rather than the server's,
-  recorded as `D10-55`.
+  answers **200** — so the rule is the address bar's own, not a copy of the server's;
+  it was recorded as `D10-55` and ruled in `D10-76`.
 - **The way in and the way out test the same shape.** `contractIdFromInput` is the single answer to
   "what is a usable typed id", and `inputNamesAContract` disables the submit button with that same
   predicate — so a typed id can never be one the screen then calls malformed on its way back out.
@@ -4959,11 +4962,14 @@ them reads a contract out of its address"* — false since the links were change
 through `withContractScope`, and the screen's own doc comment at `page.tsx:130` repeats the same stale
 claim. The JSX comment above the note already admits both sentences are false; the **copy the reader
 sees was never updated**. It was not changed here because a string edit is a product decision: the spec
-asserts the **linkage**, not that sentence. (2) The route guards **disagree across the codebase**: this
-screen accepts `/^\d+$/` and a positive integer, so `"07"` reads as contract 7, while
+asserts the **linkage**, not that sentence. (2) The route guards **disagree across the codebase**:
+~~this screen accepts `/^\d+$/` and a positive integer, so `"07"` reads as contract 7, while
 `contract-scope.ts` — which every related link is built with — uses `^[1-9][0-9]*$` and refuses it.
 Both behaviours are pinned by tests, so the divergence looks deliberate rather than accidental, and
-reconciling it is a product call rather than a test's.
+reconciling it is a product call rather than a test's.~~
+**It was reconciled in `D10-76`**, on the side `D10-60` had already measured as the one matching the
+API: the module now reads a padded id as the same contract, so a related link can carry
+`?contract=07` without the bar refusing it.
 
 **This entry had to be written twice, and the measurement that caught the first attempt is the
 lesson.** The first pass produced a `D10-55` that ended mid-sentence with the **whole existing document
@@ -5178,10 +5184,12 @@ as before the change, which is the expected result and the point: no spec assert
 each related link by the `?contract=` it carries) stays green while the words beside it change. Both
 message files still parse as JSON; each differs from HEAD at exactly one line, 327.
 
-**The second half of `D10-55`'s note stays open, deliberately.** The route guards still disagree —
-`contracts/[id]/page.tsx` accepts `/^\d+$/` so `"07"` reads as contract 7, while `contract-scope.ts`
-uses `^[1-9][0-9]*$` and refuses it. That one really is a product decision: it changes what an
-address means, and both behaviours are pinned by tests. It is not touched here.
+**The second half of `D10-55`'s note stays open, deliberately.** ~~The route guards still
+disagree — `contracts/[id]/page.tsx` accepts `/^\d+$/` so `"07"` reads as contract 7, while
+`contract-scope.ts` uses `^[1-9][0-9]*$` and refuses it. That one really is a product decision: it
+changes what an address means, and both behaviours are pinned by tests. It is not touched here.~~
+**It was left alone here and ruled on in `D10-76`**, which moved `contract-scope.ts` to the page's
+side — the side the server already answered.
 
 **Landed as** `fix(i18n)` `2cf97e2` — three files, 7 insertions and 6 deletions, **no behaviour
 change**: no link, query, request or render path was touched. No dependency, no lockfile line, no
@@ -5219,10 +5227,12 @@ own choice**, one step narrower than the API it talks to, and the comment now sa
 claiming the server forced it.
 
 **No behaviour change.** `readContractScope` returns exactly what it returned before; the module's
-cases still pin `"012"` invalid, and `contracts/[id]/page.test.tsx:408` still pins `"07"` reading as
-contract 7. The divergence is untouched and remains the open product call `D10-55` named. What changes
-is that the reason on record was false, and an owner ruling given on a false reason is a ruling about
-nothing.
+~~cases still pin `"012"` invalid~~, and `contracts/[id]/page.test.tsx:408` still pins `"07"`
+reading as contract 7. ~~The divergence is untouched and remains the open product call `D10-55`
+named.~~ What changes is that the reason on record was false, and an owner ruling given on a false
+reason is a ruling about nothing. **`D10-76` then took the open call the way this slice had posed
+it:** the module's cases pin `"012"` as contract 12 now, and `"07"` reads as contract 7 on both
+sides.
 
 **Landed as** `docs(web)` `8eecdd7` — one file, a comment replaced, **no behaviour change**: no
 regex, no branch and no return value was touched, and the module's own cases were not edited to
@@ -5264,10 +5274,11 @@ attended to, the third reading to anyone who opens the file.
 **What it settles for the open call, and what it does not.** Splitting the guards by server
 behaviour: this page's `/^\d+$/` admits `"07"` and reads it as contract 7, which is what the server
 does with `/contracts/01`, so **this is the guard that matches the API**. `contract-scope.ts` refuses
-a padded id, which makes it the address bar's own narrower convention. The divergence `D10-55`
-recorded therefore stays open — it is still a product call about what an address means — but *which
-side deviates from the API* is no longer undecided, and it is not the side the earlier reasoning
-implied.
+~~a padded id~~, which makes it the address bar's own narrower convention. ~~The divergence `D10-55`
+recorded therefore stays open — it is still a product call about what an address means —~~ but
+*which side deviates from the API* is no longer undecided, and it is not the side the earlier
+reasoning implied. **That is what decided `D10-76`:** the side the measurement had already named is
+the side the ruling kept.
 
 **No behaviour change.** One doc comment replaced: **23 insertions, 3 deletions, every changed line
 inside `/** ... */`**, no regex, branch, return value or query key touched, and no spec edited to
@@ -5340,9 +5351,11 @@ touched. The frontend suite is **309 passed in 13 files**, the same count as bef
 expected result for a comment. No dependency, no lockfile line, no backend source and no migration;
 `alembic` head stays `0006`.
 
-**What this does not decide.** `D10-55` is untouched: the page's `/^\d+$/` still admits `"07"` and
+**What this does not decide.** ~~`D10-55` is untouched: the page's `/^\d+$/` still admits `"07"` and
 `contract-scope.ts` still refuses it, which `D10-60` established is this page matching the API while
-the address bar holds a narrower convention of its own. That remains a product call.
+the address bar holds a narrower convention of its own. That remains a product call.~~
+**`D10-76` came back to it**, and it went the way `D10-60` had already pointed: this page's guard
+matches the API, so the address bar was moved to match it rather than the other way round.
 
 **The tooling lesson, second in a row and the same one.** The replacement text here is applied by a
 script that proves the wrapped paragraph holds the same words in the same order before it writes —
@@ -6122,3 +6135,98 @@ consequence is identical either way: nothing has ever refused a push to `main`, 
 runs have gated nothing.
 
 Landed as `ci(workflow)` + `docs(status)`.
+
+### D10-76 — The padded id was one contract all along, so the address bar now says so
+
+`D10-55` left exactly one ruling for an owner: `contracts/[id]/page.tsx` accepted
+`/^\d+$/` and read `"07"` as contract 7, while `contract-scope.ts` — which every
+related link is built with — refused it. One client, two grammars for one id. The
+ruling is **admit**, and the reason is not that permissive is friendlier: the
+disagreement had a correct side, and which side it was had already been measured.
+
+**The server never refused a padded id.** `D10-59` measured `GET /contracts/01`
+answering **200**, and the route says the same thing structurally — `contract_id:
+int` in `contracts.py` is resolved by Pydantic, so `'07'` is 7, `'012'` is 12 and
+`'0070'` is 70. A client stricter than its own API protects nothing; it turns an
+address that works into *"invalid filter"*, which is the same class of lie as
+answering a filter it could not parse with the whole tenant.
+
+**Nothing is rescued that should not be.** The shape is `/^0*[1-9][0-9]*$/`: the
+old `/^[1-9][0-9]*$/` with a run of zeros in front, and nothing else. `"00"` and
+`"000"` are still id zero, because no amount of padding turns zero into a
+contract. `"12abc"`, `"1e3"`, `"0x10"`, `" 12"`, `"12 "`, `"1.5"`, `"-1"`,
+`"+12"` and `"9007199254740992"` are still refused, by the same digit test and
+the same `Number.isSafeInteger` ceiling that refused them before. `readId` still
+returns a `number`, so a padded address is canonicalised before anything reaches
+the wire.
+
+**The two guards are one rule, and that was measured rather than argued.** The
+page tests `/^\d+$/`, then `Number.isSafeInteger`, then `> 0`; the module tests
+`/^0*[1-9][0-9]*$/` and then `Number.isSafeInteger`. Over **22,643 generated
+strings** — every string of length 0 to 4 over an alphabet of the characters that
+matter, plus the boundary integers and the padded spellings — the two predicates
+returned the same verdict on **all 22,643**, zero disagreements, and nothing
+admitted or refused that the other does not. The same run sizes the ruling: **89**
+strings changed hands, every one of them a zero-padded spelling of a real id
+(`"001"`, `"0012"`, `"0001"`, ...). The module's half of that probe is **read out
+of `contract-scope.ts`** rather than retyped inside the probe, so the measurement
+cannot drift from the rule it claims to measure.
+
+**Both ways in agree because there is one way in.** `contractIdFromInput` no
+longer holds a second copy of the digits test — it trims and then calls the same
+`readId` the address bar calls, so the box and the URL are one function called
+twice rather than two tests that happen to agree. `inputNamesAContract` was
+already built on `contractIdFromInput`, so the submit button moved with them, and
+a typed `"07"` is no longer something the screen calls malformed on its way back
+out.
+
+**Two mutations, each restored and proven restored.** Reverting `ID_SHAPE` to
+`/^[1-9][0-9]*$/` fails **four** cases — the four padded spellings the tables now
+pin as contracts. Making the detail page's guard refuse a padded id fails
+**one**, its `"07"` case. Each was restored and compared by sha256 against a
+digest taken first, `825ac9d064af` and `dd7cdded78f3`, both byte-identical
+afterwards. The restore works in bytes rather than text for a reason the commit
+gate then measured for itself. The first version used `Path.read_text`/`write_text`,
+which is **not a byte-neutral round trip on this host**: reading in text mode folds
+CRLF to `\n` and writing in text mode emits `\r\n`, so a file written that way
+comes back holding different bytes than it went in with, and that version reported
+a mutation restored while its sha256 had changed. `.gitattributes` sets `* text=auto
+eol=lf`, so a checkout is LF and the index expects LF; the CRLF was this slice's own
+tooling writing in text mode, not a property of the clone, and that is the opposite
+of what this paragraph said first. Two of the seven files were left **mixed**, which
+the first version of this entry also got wrong by calling it "at CRLF" — and the
+gate said so rather than a reader: `mixed-line-ending` (`--fix=lf`) rewrote both and
+refused the commit, so the first attempt at landing the code exited 1 with every
+other hook green, and the commit was re-run after the rewrite. A restore that cannot
+reproduce the bytes it started from cannot vouch for the code it restored, and a
+claim about line endings is a claim like any other: this one was false until a hook
+measured it.
+
+**Six false sentences struck in `DECISIONS.md`, three in `STATUS.md`.** The
+divergence was asserted live in nine places — this chain's parsing note, the
+second half of `D10-55`, then `D10-58`, `D10-59`, `D10-60` and `D10-61`, plus the
+three matching `STATUS.md` slices. Each is struck in place and pointed at this
+entry rather than deleted, which is the convention the chain already uses: that
+someone once believed it is part of the record, and a struck claim is cheaper to
+audit than a missing one. Seven of the nine are struck whole; the parsing note is
+partly rewritten because its own regex line is the thing that changed.
+
+**Verification.** The suite is **333 passed in 17 files**, up from 332. One
+`agent` case flipped from refusal to acceptance and one new `agent` refusal case
+was added beside it; the `notifications` and `escalations` refusal cases moved to
+`contract=12abc`, which still exercises the damaging path. No screen, key,
+namespace, catalogue entry, enum or dependency changed. The module's tables
+gained four admitted spellings — `"07"`, `"012"`, `"070"` and `"0007"` — and
+one refused one, `"000"`, while `"012"` left `MALFORMED`, where it had been the
+wrong answer.
+
+**Limits.** The equivalence is over strings of at most four characters plus a
+hand-listed set of longer ones: a very strong sample, not a proof. The argument
+covers all lengths; the probe covers the sample. The page's half of the probe is
+its guard quoted, because that guard is inline in the component and not exported,
+so it is a faithful copy rather than an import. No browser was involved — these
+are two predicates, not two rendered screens. And the ruling is a product
+decision this slice could not have made on evidence alone: the evidence said which
+side was wrong, not which answer an owner wanted.
+
+Landed as `fix(contract-scope)` + `docs(status)`.
