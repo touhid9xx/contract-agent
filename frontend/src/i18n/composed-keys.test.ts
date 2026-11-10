@@ -39,22 +39,11 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import { flatten } from "@/i18n/catalogue";
 import bn from "@/i18n/messages/bn.json";
 import en from "@/i18n/messages/en.json";
 
 const SRC = dirname(dirname(fileURLToPath(import.meta.url)));
-
-/** `node.key.key` → value, for every leaf string in a catalogue. */
-function flatten(node: unknown, prefix = ""): Map<string, string> {
-  const out = new Map<string, string>();
-  if (node === null || typeof node !== "object") return out;
-  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
-    const path = prefix ? `${prefix}.${key}` : key;
-    if (typeof value === "string") out.set(path, value);
-    else for (const [nested, text] of flatten(value, path)) out.set(nested, text);
-  }
-  return out;
-}
 
 /** Every `page.tsx` under `src/app`, as a path relative to `src`. */
 function screens(dir = join(SRC, "app")): string[] {

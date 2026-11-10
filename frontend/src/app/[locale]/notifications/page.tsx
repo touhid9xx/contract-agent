@@ -23,6 +23,7 @@ import {
   readContractScope,
   withContractScope,
 } from "@/lib/contract-scope";
+import { NOTIFICATION_REFUSALS, refusalKey } from "@/lib/refusals";
 import { authorized } from "@/lib/session";
 
 /**
@@ -89,56 +90,6 @@ const STATUS_TONES = {
   failed: "bg-danger-muted text-danger",
   suppressed: "bg-danger-muted text-danger",
 } as const satisfies Record<NotificationStatus, string>;
-
-/**
- * Server refusal code → message key.
- *
- * The codes are strings on the wire (`DispatchRefusedError.code`), not a TypeScript
- * enum, so this map cannot be exhaustive `satisfies`-checked the way the status
- * maps are. It is therefore looked up with a fallback: an unrecognised code still
- * says "that did not work" instead of printing a key or a raw code.
- *
- * Each code is translated rather than collapsed into one sentence because they name
- * different, actionable facts. "A field still needs approval" and "the retry budget
- * is spent" call for two different next actions, and an operator who is told only
- * "refused" has to read the server logs to find out which.
- *
- * Every code this screen's two actions can provoke is mapped. The codes *not* here
- * — `NOTIFICATION_EXISTS`, `NO_DECISION`, `DECISION_MISMATCH` — come only from
- * `POST /notifications`, which schedules a row and has no button on this screen, and
- * `TENANT_MISMATCH`, which only the scheduler records onto `last_error`. They fall
- * through to the generic failure rather than being translated for a click that
- * cannot happen. Three codes that *are* mapped share that home — `NOT_IN_WINDOW`,
- * `MISSING_END_DATE` and `NEEDS_REVIEW` are raised by `build_notification` while
- * planning a schedule, which no button on this screen reaches either — so the map
- * is over-coverage rather than exactly this screen's vocabulary. That is recorded
- * here so it is not read as proof that a button can produce them.
- */
-const REFUSAL_KEYS: Record<string, string> = {
-  // The four consent gates, all of them raised by `assert_may_contact`, which
-  // dispatch re-runs at send time rather than trusting the decision row. A
-  // withdrawn consent is the *most* likely refusal an operator sees here: the row
-  // was schedulable yesterday and the customer opted out this morning.
-  CONTRACT_CLOSED: "refusalContractClosed",
-  CONTACT_REFUSED: "refusalContactRefused",
-  NO_CONSENT: "refusalNoConsent",
-  CHANNEL_NOT_CONSENTED: "refusalChannelNotConsented",
-  // Not a consent gate, and not raised by `assert_may_contact`: the worker raises
-  // this one itself, one gate below the consent checks, when an extracted field is
-  // still awaiting approval (`dispatch.py:591`).
-  PIPELINE_BLOCKED: "refusalPipelineBlocked",
-  NOT_PENDING: "refusalNotPending",
-  NOT_YET_DUE: "refusalNotYetDue",
-  NOT_IN_WINDOW: "refusalNotInWindow",
-  MISSING_END_DATE: "refusalMissingEndDate",
-  UNKNOWN_TIMEZONE: "refusalUnknownTimezone",
-  NEEDS_REVIEW: "refusalNeedsReview",
-  ATTEMPTS_EXHAUSTED: "refusalAttemptsExhausted",
-  SENDER_UNAVAILABLE: "refusalSenderUnavailable",
-  RECIPIENT_UNAVAILABLE: "refusalRecipientUnavailable",
-  NOT_FAILED: "refusalNotFailed",
-  CONCURRENT_UPDATE: "refusalConcurrentUpdate",
-};
 
 /**
  * The notification queue — the last route family that only a `TestClient` had
@@ -269,8 +220,11 @@ function NotificationsScreen() {
   /** A refusal in the operator's own language, falling back to a generic failure. */
   function describeFailure(cause: unknown): string {
     if (cause instanceof ApiError) {
-      const key = REFUSAL_KEYS[cause.code];
-      if (key !== undefined) return t(`notifications.${key}`);
+      // The code→sentence table lives in `@/lib/refusals`, next to the agent and
+      // escalation ones, so `refusals.test.ts` can check every name it uses
+      // against both catalogues — which nothing could while it lived here.
+      const known = refusalKey(NOTIFICATION_REFUSALS, cause.code);
+      if (known !== undefined) return t(known);
       if (cause.isForbidden) return t("notifications.forbidden");
       if (cause.isOffline) return t("notifications.offline");
     }

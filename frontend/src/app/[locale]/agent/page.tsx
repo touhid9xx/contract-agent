@@ -18,6 +18,7 @@ import {
   readContractScope,
   withContractScope,
 } from "@/lib/contract-scope";
+import { AGENT_REFUSALS, refusalKey } from "@/lib/refusals";
 import { authorized } from "@/lib/session";
 
 /** The channels an override may ask for — one per `app.db.enums.Channel`. */
@@ -35,24 +36,6 @@ const CHANNEL_KEYS = {
   sms: "channelSms",
   voice: "channelVoice",
 } as const satisfies Record<ContactChannel, string>;
-
-/**
- * Policy refusal code → message key.
- *
- * `app.workers.decision` deliberately gives each refusal its own machine-readable
- * code rather than one `409`, so this screen translates them separately: "the
- * customer consented to nothing" and "the extraction pipeline is blocked" are
- * different facts and they call for different next actions. A code that is not
- * listed here still gets a generic sentence, so a new refusal degrades to vague
- * rather than to blank.
- */
-const REFUSAL_KEYS: Record<string, string> = {
-  PIPELINE_BLOCKED: "refusePipelineBlocked",
-  NO_CONSENT: "refuseNoConsent",
-  CONTACT_REFUSED: "refuseContactRefused",
-  CONTRACT_CLOSED: "refuseContractClosed",
-  NO_CONTACT_VALUE: "refuseNoContactValue",
-};
 
 /**
  * The channels a refusal said *would* have been allowed.
@@ -219,14 +202,18 @@ function AgentScreen() {
     if (cause instanceof ApiError) {
       if (cause.code === "CHANNEL_NOT_PERMITTED") {
         const permitted = permittedChannelsFrom(cause);
-        if (permitted.length === 0) return t("agent.refuseChannelNotPermitted");
-        return `${t("agent.refuseChannelNotPermitted")} ${t("agent.permittedChannels", {
+        const alone = t(AGENT_REFUSALS.CHANNEL_NOT_PERMITTED);
+        if (permitted.length === 0) return alone;
+        return `${alone} ${t("agent.permittedChannels", {
           channels: permitted.map((channel) => t(`agent.${CHANNEL_KEYS[channel]}`)).join(", "),
         })}`;
       }
-      const refusalKey = REFUSAL_KEYS[cause.code];
-      if (refusalKey !== undefined) return t(`agent.${refusalKey}`);
-      if (cause.code === "NO_DECISION") return t("agent.noDecision");
+      // The whole code→sentence table lives in `@/lib/refusals`, so the names it
+      // uses can be checked against the catalogues (`refusals.test.ts`). A code
+      // the table does not know still walks the ladder below and lands on a
+      // generic sentence, so a new server refusal degrades to vague, not blank.
+      const known = refusalKey(AGENT_REFUSALS, cause.code);
+      if (known !== undefined) return t(known);
       if (cause.isConflict) return t("agent.conflict");
       if (cause.isForbidden) return t("agent.forbidden");
       if (cause.isOffline) return t("agent.offline");

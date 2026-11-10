@@ -29,20 +29,9 @@
  */
 import { describe, expect, it } from "vitest";
 
+import { flatten } from "@/i18n/catalogue";
 import bn from "@/i18n/messages/bn.json";
 import en from "@/i18n/messages/en.json";
-
-/** `node.key.key` → value, for every leaf string in a catalogue. */
-function flatten(node: unknown, prefix = ""): Map<string, string> {
-  const out = new Map<string, string>();
-  if (node === null || typeof node !== "object") return out;
-  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
-    const path = prefix ? `${prefix}.${key}` : key;
-    if (typeof value === "string") out.set(path, value);
-    else for (const [nested, text] of flatten(value, path)) out.set(nested, text);
-  }
-  return out;
-}
 
 /** Index one past the brace that closes the one at `open`. */
 function closeOf(text: string, open: number): number {

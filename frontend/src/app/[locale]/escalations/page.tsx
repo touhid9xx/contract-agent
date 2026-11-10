@@ -25,6 +25,7 @@ import {
   withContractScope,
   withResolved,
 } from "@/lib/contract-scope";
+import { ESCALATION_REFUSALS, refusalKey } from "@/lib/refusals";
 import { authorized } from "@/lib/session";
 
 /**
@@ -183,8 +184,10 @@ function EscalationsScreen() {
    */
   function describeFailure(cause: unknown): string {
     if (cause instanceof ApiError) {
-      if (cause.code === "ESCALATION_CLOSED") return t("escalations.closedRefusal");
-      if (cause.code === "INVALID_TRANSITION") return t("escalations.invalidTransition");
+      // Named in `@/lib/refusals` rather than here, so the catalogue keys can be
+      // checked against the messages this screen actually asks for.
+      const known = refusalKey(ESCALATION_REFUSALS, cause.code);
+      if (known !== undefined) return t(known);
       if (cause.isConflict) return t("escalations.conflict");
       if (cause.isForbidden) return t("escalations.forbidden");
       if (cause.isOffline) return t("escalations.offline");
