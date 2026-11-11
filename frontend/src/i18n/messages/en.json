@@ -536,6 +536,7 @@
     "system": "System",
     "email": "Email",
     "role": "Role",
-    "organisation": "Organisation"
+    "organisation": "Organisation",
+    "traceId": "Trace id: {id}"
   }
 }

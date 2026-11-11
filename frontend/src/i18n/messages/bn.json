@@ -536,6 +536,7 @@
     "system": "সিস্টেম",
     "email": "ইমেইল",
     "role": "ভূমিকা",
-    "organisation": "প্রতিষ্ঠান"
+    "organisation": "প্রতিষ্ঠান",
+    "traceId": "ট্রেস আইডি: {id}"
   }
 }

@@ -8,6 +8,7 @@ import { useParams } from "next/navigation";
 import { useAuth } from "@/components/auth-provider";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { TraceId } from "@/components/ui/trace-id";
 import { ApiError, agent, contracts, escalations, notifications } from "@/lib/api";
 import type {
   AgentDecisionList,
@@ -291,6 +292,7 @@ export default function ContractDetailPage() {
                 <p className="text-sm text-danger" role="alert">
                   {describeFailure(contract.error)}
                 </p>
+                <TraceId error={contract.error} />
                 <Button
                   size="sm"
                   variant="outline"
@@ -473,6 +475,7 @@ function FieldsCard({ fields, describeFailure, onRetry }: FieldsCardProps) {
             <p className="text-sm text-danger" role="alert">
               {describeFailure(fields.error)}
             </p>
+            <TraceId error={fields.error} />
             <Button size="sm" variant="outline" onClick={onRetry}>
               {t("contracts.retry")}
             </Button>
@@ -732,6 +735,7 @@ function RelatedRead({
           <p className="text-danger" role="alert">
             {describeFailure(state.error)}
           </p>
+          <TraceId error={state.error} />
           <Button size="sm" variant="outline" onClick={onRetry}>
             {t("contracts.retry")}
           </Button>

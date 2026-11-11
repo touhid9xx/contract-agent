@@ -10,6 +10,7 @@ import { useAuth } from "@/components/auth-provider";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { FieldLabel, Input } from "@/components/ui/input";
+import { TraceId } from "@/components/ui/trace-id";
 import { agent, ApiError } from "@/lib/api";
 import type { AgentDecision, ContactChannel } from "@/lib/api";
 import {
@@ -378,6 +379,7 @@ function AgentScreen() {
                 <p className="text-sm text-danger" role="alert">
                   {describeFailure(decisions.error)}
                 </p>
+                <TraceId error={decisions.error} />
                 <Button
                   size="sm"
                   variant="outline"

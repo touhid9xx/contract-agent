@@ -9,6 +9,7 @@ import { useAuth } from "@/components/auth-provider";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { FieldLabel, Input } from "@/components/ui/input";
+import { TraceId } from "@/components/ui/trace-id";
 import { ApiError } from "@/lib/api";
 
 /**
@@ -28,7 +29,13 @@ export default function LoginPage() {
   const [tenant, setTenant] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  /*
+   * The cause, not its wording. Storing the translated sentence discarded the one
+   * thing worth quoting: the envelope's `trace_id`, which is what ties a "sign-in
+   * is broken" report to the server's own line (D10-83). The sentence is derived
+   * below instead, so there is no second copy of it to drift.
+   */
+  const [failure, setFailure] = useState<unknown>(null);
   const [submitting, setSubmitting] = useState(false);
 
   /**
@@ -53,7 +60,7 @@ export default function LoginPage() {
     if (submitting) return;
 
     setSubmitting(true);
-    setError(null);
+    setFailure(null);
 
     try {
       await signIn({ tenant: tenant.trim(), email: email.trim(), password });
@@ -61,7 +68,7 @@ export default function LoginPage() {
       // away from the page the user just authenticated in order to reach.
       router.replace(`/${locale}`);
     } catch (cause) {
-      setError(describeFailure(cause));
+      setFailure(cause);
     } finally {
       setSubmitting(false);
     }
@@ -132,10 +139,16 @@ export default function LoginPage() {
               />
             </div>
 
-            {error !== null && (
-              <p className="rounded-lg bg-danger-muted px-3 py-2 text-xs text-danger" role="alert">
-                {error}
-              </p>
+            {failure !== null && (
+              <div className="space-y-1.5">
+                <p
+                  className="rounded-lg bg-danger-muted px-3 py-2 text-xs text-danger"
+                  role="alert"
+                >
+                  {describeFailure(failure)}
+                </p>
+                <TraceId error={failure} />
+              </div>
             )}
 
             <Button type="submit" className="w-full" disabled={submitting}>

@@ -9,6 +9,7 @@ import { useAuth } from "@/components/auth-provider";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { FieldLabel, Input } from "@/components/ui/input";
+import { TraceId } from "@/components/ui/trace-id";
 import { ApiError, review } from "@/lib/api";
 import type { ReviewDecision, ReviewItem } from "@/lib/api";
 import { authorized } from "@/lib/session";
@@ -150,6 +151,7 @@ export default function ReviewQueuePage() {
                 <p className="text-sm text-danger" role="alert">
                   {describeFailure(queue.error)}
                 </p>
+                <TraceId error={queue.error} />
                 <Button
                   size="sm"
                   variant="outline"

@@ -7,6 +7,7 @@ import Link from "next/link";
 import { useAuth } from "@/components/auth-provider";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { TraceId } from "@/components/ui/trace-id";
 import { ApiError, attention } from "@/lib/api";
 import { authorized } from "@/lib/session";
 
@@ -105,7 +106,10 @@ export default function AttentionPage() {
       ) : report.isError ? (
         <Card>
           <CardContent className="space-y-3">
-            <p className="text-sm">{describeFailure(report.error)}</p>
+            <p className="text-sm text-danger" role="alert">
+              {describeFailure(report.error)}
+            </p>
+            <TraceId error={report.error} />
             <Button size="sm" variant="secondary" onClick={() => void report.refetch()}>
               {t("attention.retry")}
             </Button>

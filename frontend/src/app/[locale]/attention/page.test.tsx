@@ -278,6 +278,25 @@ describe("the cards a finding gets", () => {
     expect(await screen.findByText(EN.attention.truncated)).toBeDefined();
   });
 
+  it("names the findings in Bengali on a Bengali page", async () => {
+    // `D10-82` closed the verdict half of the Bengali coverage and left this half
+    // named as open: the case it rewrote hands the page a *clean* board, so the three
+    // finding headings — the only lines a Bengali operator reads when the board needs
+    // attention — were never rendered in Bengali at all. A clean board cannot reach
+    // them, so this is a separate case rather than extra assertions on that one.
+    const bn = getMessages("bn");
+    setSession(sessionFor("admin"));
+    vi.mocked(attention.read).mockResolvedValue(FINDING);
+    renderScreen("bn");
+
+    expect(await screen.findByText(bn.attention.failedHeading)).toBeDefined();
+    expect(screen.getByText(bn.attention.suppressedHeading)).toBeDefined();
+    expect(screen.getByText(bn.attention.unsealedHeading)).toBeDefined();
+    expect(screen.getByText(say(bn.attention.scanned, { count: 500 }))).toBeDefined();
+    // The headings are what a fallback to the English catalogue would leave in place.
+    expect(screen.queryByText(EN.attention.failedHeading)).toBeNull();
+  });
+
   it("offers no action of its own", async () => {
     // Read-only is a claim the source makes in prose. The cheap way it could become
     // false is a button that retried a send or sealed a value from here, so the
@@ -327,6 +346,34 @@ describe("a read that fails", () => {
     expect(screen.queryByText("Boom.")).toBeNull();
     // A failed read is not a calm board: the clean sentence must not appear.
     expect(screen.queryByText(EN.attention.cleanHeading)).toBeNull();
+  });
+
+  it("quotes the envelope's trace id beside the failure, and only there", async () => {
+    // The id is the one thing a person can hand back that names the server's own log
+    // line; `D10-62` and `D10-72` made it readable, and until now nothing showed it.
+    setSession(sessionFor("admin"));
+    vi.mocked(attention.read).mockRejectedValue(
+      new ApiError(500, "server", "Boom.", null, null, "trace-42"),
+    );
+    renderScreen();
+
+    expect(await screen.findByText(EN.attention.failed)).toBeDefined();
+    expect(screen.getByText(say(EN.common.traceId, { id: "trace-42" }))).toBeDefined();
+    // It is support material, not the diagnosis: the alert stays the one sentence,
+    // so a screen reader hears the failure once rather than twice.
+    expect(alertTexts()).toStrictEqual([EN.attention.failed]);
+  });
+
+  it("stays silent when the envelope carried no trace id", async () => {
+    // A `null` id is a real answer — the server had no request to name — and printing
+    // "Trace id: null" would invite quoting a value that does not exist.
+    setSession(sessionFor("admin"));
+    vi.mocked(attention.read).mockRejectedValue(new ApiError(500, "server", "Boom."));
+    renderScreen();
+
+    await screen.findByText(EN.attention.failed);
+    expect(screen.queryByText(/trace/i)).toBeNull();
+    expect(alertTexts()).toStrictEqual([EN.attention.failed]);
   });
 
   it("shows no retry once the board has loaded", async () => {

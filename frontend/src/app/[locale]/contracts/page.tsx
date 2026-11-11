@@ -9,6 +9,7 @@ import { useAuth } from "@/components/auth-provider";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { FieldLabel, Input } from "@/components/ui/input";
+import { TraceId } from "@/components/ui/trace-id";
 import { ApiError, contracts } from "@/lib/api";
 import type {
   ContactChannel,
@@ -559,6 +560,7 @@ export default function ContractsPage() {
                 <p className="text-sm text-danger" role="alert">
                   {describeFailure(list.error)}
                 </p>
+                <TraceId error={list.error} />
                 <Button
                   size="sm"
                   variant="outline"
