@@ -158,6 +158,16 @@ export default function HomePage() {
               </Button>
             </Link>
             {/*
+              The board for work that is already stuck. Every queue above answers
+              "what is next?"; this one answers "how much has stopped, across the
+              whole organisation, right now?" — a question no single row can.
+            */}
+            <Link href={`/${locale}/attention`}>
+              <Button size="sm" variant="secondary">
+                {t("nav.attention")}
+              </Button>
+            </Link>
+            {/*
               Last, and not role-gated: the screen says for itself that only an
               admin may use it, and hiding the link would leave an operator with
               no way to learn that the route exists.

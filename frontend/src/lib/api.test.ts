@@ -24,7 +24,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError, auth, contracts, escalations, notifications, review } from "@/lib/api";
+import { ApiError, attention, auth, contracts, escalations, notifications, review } from "@/lib/api";
 
 /** The one seam replaced: no test here talks to a network. */
 const fetchMock = vi.fn<typeof fetch>();
@@ -301,6 +301,66 @@ describe("a call that never reached a server", () => {
     fetchMock.mockRejectedValue(aborted);
 
     await expect(auth.me("access-1")).rejects.toBe(aborted);
+  });
+});
+
+describe("the tenant attention board", () => {
+  const board = {
+    notifications_failed: 2,
+    notifications_suppressed: 1,
+    unsealed_field_values: 3,
+    unsealed_field_ids: [41, 42, 43],
+    fields_scanned: 500,
+    field_scan_truncated: false,
+    needs_attention: true,
+  };
+
+  it("asks the versioned route and nothing else", () => {
+    // The whole point of `D10-79`'s second reader is that the tenant comes from
+    // the token, so the client must not be able to name one. This pins the URL
+    // the route is mounted on and the absence of any narrowing the route would
+    // silently ignore.
+    fetchMock.mockResolvedValue(jsonResponse(board));
+
+    return attention.read("access-1").then(() => {
+      expect(requestedUrl()).toBe("/api/v1/attention");
+      expect(new URL(requestedUrl(), "http://localhost").search).toBe("");
+      expect(requestedInit().method).toBe("GET");
+      expect(requestedInit().body).toBeUndefined();
+      expect(requestedHeaders()["Authorization"]).toBe("Bearer access-1");
+    });
+  });
+
+  it("returns the board's seven fields as the body had them", () => {
+    fetchMock.mockResolvedValue(jsonResponse(board));
+
+    return attention.read("access-1").then((report) => {
+      expect(report).toEqual(board);
+      // `outbox_parked` is absent from the wire on purpose: a parked event is a
+      // relay fault the tenant neither causes nor clears. A client that invented
+      // the key would show a tenant a count they cannot act on.
+      expect(Object.keys(report)).toHaveLength(7);
+      expect("outbox_parked" in report).toBe(false);
+    });
+  });
+
+  it("maps the route's 403 to a refusal the screen can name", () => {
+    // The route answers 200 or 403 and carries no machine refusal code, so the
+    // screen keys on the status. This pins that `isForbidden` is what it gets.
+    fetchMock.mockResolvedValue(
+      envelope({ code: "forbidden", message: "Your role cannot read this board." }, 403),
+    );
+
+    return attention.read("access-1").then(
+      () => {
+        throw new Error("expected a refusal");
+      },
+      (cause: unknown) => {
+        expect(cause).toBeInstanceOf(ApiError);
+        expect((cause as ApiError).isForbidden).toBe(true);
+        expect((cause as ApiError).status).toBe(403);
+      },
+    );
   });
 });
 

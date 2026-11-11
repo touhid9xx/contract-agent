@@ -276,6 +276,7 @@ describe("the account card when signed out", () => {
       "/en/agent",
       "/en/escalations",
       "/en/notifications",
+      "/en/attention",
       "/en/users",
     ]);
   });

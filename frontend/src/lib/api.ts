@@ -1178,6 +1178,50 @@ export const users = {
 };
 
 /**
+ * One organisation's own attention reading, `GET /api/v1/attention`.
+ *
+ * Seven fields and no metadata: the route does not echo `tenant_id` back, because
+ * the caller is the tenant and a field the server never reads from the client is a
+ * field a client starts trusting. `outbox_parked` is absent by design — a parked
+ * event is a relay fault the tenant can neither cause nor clear, so it belongs on
+ * the operator's board (`python -m app.cli doctor`), not here.
+ *
+ * `unsealed_field_ids` are primary keys and never values. The route returns no
+ * field value in any form; sealing happens from the review queue, so that is where
+ * the ids lead.
+ */
+export interface AttentionReport {
+  /** Notifications that ended `failed` — a send the transport refused. */
+  notifications_failed: number;
+  /** Notifications that ended `suppressed` — a policy gate refused. */
+  notifications_suppressed: number;
+  /** Rows holding a value in the clear. Rows, not columns: one row counts once. */
+  unsealed_field_values: number;
+  /** Ids of those rows, so the screen can point at something actionable. */
+  unsealed_field_ids: number[];
+  /** Rows the unsealed scan examined, bounded by the configured limit. */
+  fields_scanned: number;
+  /** True when the scan filled its page, making the count a floor, not a total. */
+  field_scan_truncated: boolean;
+  /** Whether any count is non-zero, i.e. somebody can act. */
+  needs_attention: boolean;
+}
+
+/**
+ * The tenant's attention board — one read, `ADMIN` only.
+ *
+ * A sibling of the operator reading rather than a view over it: the operator
+ * functions scan every tenant at once, so serving them behind a route would have
+ * published one organisation's counts and ids to another. See `D10-79`.
+ *
+ * Read-only and idempotent: no body, no query parameter, and no tenant anywhere in
+ * the request. A clean board is a `200` with every count zero, not an error.
+ */
+export const attention = {
+  read: (accessToken: string) => request<AttentionReport>("/attention", { accessToken }),
+};
+
+/**
  * Liveness probe.
  *
  * Built on `fetch` directly rather than on {@link request} because `/health`
