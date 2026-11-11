@@ -6514,11 +6514,15 @@ migration: `alembic` head stays `0006`. The screen added 14 tests and the client
 
 **What this record does not claim.** (1) **No browser has run it.** Every assertion is a DOM the
 suite built; `jsdom` proves the wiring, not the rendering. (2) **The mutation evidence is uneven,
-and one gap is admitted rather than closed.** Flipping `needs_attention` to a recomputed `> 0` was
-caught by **one** test, not the two predicted, and the reason is a defect in this slice's own spec:
-the case titled "renders the catalogue in Bengali" only exercises a clean board, so it cannot
-distinguish the two branch conditions it appears to cover. The title was tightened; the coverage was
-not added. (3) **One write reported failure and had landed.** Two `EBUSY` responses on the catalogue
+and one gap was admitted rather than closed.** Flipping `needs_attention` to a recomputed `> 0` was
+caught by **one** test, not the two predicted, and the reason is a defect in this slice's own
+spec: the case titled "renders the catalogue in Bengali" only exercises a clean board, so it cannot
+distinguish the two branch conditions it appears to cover. ~~The title was tightened; the coverage
+was not added.~~ **Amended by `D10-82`, not deleted:** the coverage was added — that case now hands
+the page the one board that separates a wire verdict from a recomputed `> 0` (counts non-zero, flag
+`false`), so the same mutation fails there too: **two** tests, measured. Nothing above is deleted,
+because the diagnosis was right and being specific in it is what made the fix a one-fixture change.
+(3) **One write reported failure and had landed.** Two `EBUSY` responses on the catalogue
 files were false — the JSON was correct, verified by reading it back. Earlier in this project the
 same error class failed the other way, which is why neither the error nor the success was trusted.
 (4) **The home screen's own copy moved with it** — `home.body` said administrators "get a sixth"
@@ -6588,3 +6592,61 @@ the observed behaviour plus an independent earlier diagnosis that agreed with it
 file's creation was never witnessed.** Its name, size and contents were measured when it was found;
 the redirect that wrote it is inferred from the shape of the file and from the earlier session
 recording the same artifact, not from a log.
+
+### D10-82 — The limit named its own missing fixture, and that was the whole fix
+
+`D10-80`'s second limit was unusually specific: flipping `needs_attention` to a recomputed `> 0` was
+caught by **one** test where two were predicted, because the case titled "renders the catalogue in
+Bengali" only ever exercised a *clean* board. It named the defect and named the fixture, then
+stopped. A limit whose remedy is legible in the limit itself is a to-do written where nobody reads
+it, so this record closes it.
+
+**A clean board agrees with both readings, which is why that case could not
+fail.** `needs_attention` and `sum(counts) > 0` differ in exactly one situation: counts non-zero
+with the flag `false`. Hand the page that board and the two readings disagree; hand it zeros and
+any recomputation passes. So the fix was not a new test but the right fixture — the Bengali case
+now receives `notifications_failed: 3` with `needs_attention: false`, and asserts the *Bengali*
+clean heading.
+
+**The test count did not move, which is the point.** Fourteen cases before and after. A fifteenth
+asserting the same branch under the same clean fixture would have raised a number and closed
+nothing: the count was never the defect, the input was. This is `D10-65`'s distinction — a snapshot
+is not a guard — arriving at a branch. Two tests agreeing with the code are not two guards unless
+their *inputs* differ.
+
+**Measured in both directions rather than reasoned.** Mutation applied, old body: **1** failure,
+`trusts the wire's verdict over the counts it was handed`. Mutation applied, new body: **2**, that
+case plus `reads the verdict off the wire in Bengali, not English` — those two being the only
+failures, so the change caught the mutation and nothing else. Mutation reverted: **352 tests in 18
+files, 0 failures**, unchanged, because no source file was touched. The diff is
+`frontend/src/app/[locale]/attention/page.test.tsx`, 13 insertions and 2 deletions.
+
+**The title had to move with the fixture.** `D10-80` records that this case's title was tightened
+because it claimed branch coverage it did not have. It carries both halves of what it asks now — the
+wire verdict and the second catalogue — so it reads "reads the verdict off the wire in Bengali, not
+English". Renaming a case that a previous record renamed is the honest cost of the fixture changing
+underneath it; keeping the old title would have re-broken the claim it was fixed for.
+
+**What this record does not claim.** (1) **No browser has run it**, here or in `D10-80`; `jsdom`
+proves the wiring, not the rendering. (2) **The finding branch's Bengali copy is still
+unexercised.** The new fixture keeps the clean branch deliberately, because it has to be the clean
+branch to discriminate, so the Bengali wording of the three count cards is still verified only by
+`messages.test.ts`'s catalogue parity and not by a render. (3) **The fixture is a wire state the
+server cannot emit.** `needs_attention` is derived from the counts this fixture contradicts, so the
+test proves the branch reads the field; it does not prove such a board can be served.
+
+**No `STATUS.md` amendment, and that is a measurement rather than an omission.** A search of
+`STATUS.md` for the mutation count, for the Bengali case and for the string `352` returns nothing:
+the limit was recorded in `DECISIONS.md` alone, so the only stale sentence was the one struck above.
+
+**Two commands stalled this slice, both `D10-81`'s class.** Piping a *running* process —
+`npx vitest | Select-String` — blocked for the full 300-second ceiling, while the same run
+redirected to a file and then searched finished in seconds: the pipeline waits on a producer that
+writes on exit, which reads exactly like a hung tool. And the shell keeps its working directory
+between calls, so a second `cd frontend` failed *from inside* `frontend` and the command after it
+ran from the wrong place. Neither was silent, but the redirect habit `D10-81` established is what
+made the first one diagnosable instead of mysterious.
+
+**Gates.** 352 tests, 18 files, 0 failures, run on this tree. No backend file, no dependency, no
+schema, no migration: `alembic` head stays `0006`. One file outside `.agent-cache/` changed, and it
+is a spec.
