@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.v1.agent import router as agent_router
+from app.api.v1.attention import router as attention_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.contracts import router as contracts_router
 from app.api.v1.escalations import router as escalations_router
@@ -187,6 +188,7 @@ def create_app(
     app.include_router(agent_router, prefix=app_settings.api_v1_prefix)
     app.include_router(notifications_router, prefix=app_settings.api_v1_prefix)
     app.include_router(escalations_router, prefix=app_settings.api_v1_prefix)
+    app.include_router(attention_router, prefix=app_settings.api_v1_prefix)
 
     @app.get("/", include_in_schema=False)
     async def root() -> dict[str, Any]:

@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -271,6 +272,44 @@ def fields_for_reseal(
     where the first stopped instead of re-reading the same rows.
     """
     stmt = select(ExtractedField).order_by(ExtractedField.id.asc()).limit(limit)
+    if field_ids is not None:
+        stmt = stmt.where(ExtractedField.id.in_(list(field_ids)))
+    return list(session.execute(stmt).scalars())
+
+
+def fields_for_reseal_for_tenant(
+    session: Session,
+    tenant_id: uuid.UUID,
+    *,
+    field_ids: Sequence[int] | None = None,
+    limit: int = DEFAULT_RESEAL_LIMIT,
+) -> list[ExtractedField]:
+    """Field rows belonging to **one organisation**, for the tenant attention read.
+
+    The tenant-scoped twin of :func:`fields_for_reseal`, and like it in every respect
+    except the ``tenant_id`` predicate. Written beside it rather than replacing it:
+    ``reseal-fields`` runs from a shell with a database connection and no principal,
+    and it must seal *every* tenant's plaintext in one pass — scoping that run to one
+    organisation would leave the others in the clear while reporting success. The
+    sibling's docstring is an argument about that operator command, not about a
+    request-scoped read, so neither reading narrows the other.
+
+    This one exists for the opposite situation: an authenticated request where the
+    tenant came from the token. Handing it another organisation's field ids would
+    both leak and be useless, since ``reseal-fields --ids`` is the only thing that
+    can act on them and it is not reachable over HTTP.
+
+    Ordered by id for the same reason as the sibling: a bounded scan takes a stable
+    prefix, and a full page means the count is a **floor**, which the caller reports
+    as ``field_scan_truncated`` rather than rounding away.
+    ``ix_extracted_fields_tenant_status`` leads on ``tenant_id``.
+    """
+    stmt = (
+        select(ExtractedField)
+        .where(ExtractedField.tenant_id == tenant_id)
+        .order_by(ExtractedField.id.asc())
+        .limit(limit)
+    )
     if field_ids is not None:
         stmt = stmt.where(ExtractedField.id.in_(list(field_ids)))
     return list(session.execute(stmt).scalars())

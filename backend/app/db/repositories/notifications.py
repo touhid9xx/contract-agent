@@ -20,6 +20,7 @@ Two shapes worth stating, both inherited from :mod:`app.db.repositories.agent`:
 
 from __future__ import annotations
 
+import uuid
 from datetime import date, datetime
 
 from sqlalchemy import and_, func, or_, select
@@ -222,6 +223,48 @@ def undelivered_counts(session: Session) -> dict[NotificationStatus, int]:
     stmt = (
         select(Notification.status, func.count())
         .where(Notification.status.in_(UNDELIVERED_STATUSES))
+        .group_by(Notification.status)
+    )
+    counts: dict[NotificationStatus, int] = dict.fromkeys(UNDELIVERED_STATUSES, 0)
+    for status, total in session.execute(stmt).all():
+        counts[status] = int(total)
+    return counts
+
+
+def undelivered_counts_for_tenant(
+    session: Session, tenant_id: uuid.UUID
+) -> dict[NotificationStatus, int]:
+    """Count **one organisation's** undelivered rows.
+
+    The tenant-scoped twin of :func:`undelivered_counts`, and it is written beside
+    it rather than replacing it because the two answer different questions:
+
+    * :func:`undelivered_counts` backs ``python -m app.cli doctor`` and the
+      scheduled attention watch. Neither runs behind a request, so neither has a
+      principal, and both must see the whole board.
+    * this one runs inside an authenticated request, where the tenant is known from
+      the token. Reading another organisation's count there would be a cross-tenant
+      disclosure, and the caller could do nothing with it anyway.
+
+    **It does not contradict the sibling's docstring.** That sentence — scoping a
+    count "would be actively misleading ... it would report a clean board while
+    another organisation's sends sat parked" — is an argument about the *operator's*
+    board, whose whole job is to describe every tenant at once. It stays true of
+    that board. A tenant asking about their own queue is not the reader it is
+    about, so the two readings coexist without either being narrowed.
+
+    ``ix_notifications_tenant_status`` leads on ``tenant_id``, so this is an index
+    scan over one organisation's rows rather than a filter over the table.
+
+    Both statuses are always present and zero-filled, for the reason the sibling
+    gives; no row content is read, so no count can leak a recipient.
+    """
+    stmt = (
+        select(Notification.status, func.count())
+        .where(
+            Notification.tenant_id == tenant_id,
+            Notification.status.in_(UNDELIVERED_STATUSES),
+        )
         .group_by(Notification.status)
     )
     counts: dict[NotificationStatus, int] = dict.fromkeys(UNDELIVERED_STATUSES, 0)

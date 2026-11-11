@@ -45,21 +45,41 @@ quiet at exactly the moment the key was wrong, which is the one moment it matter
 **``unsealed_field_ids`` is the only row-level detail.** No companion list of values:
 an id plus a column name is enough to run ``reseal-fields --ids``, and nothing here
 should be able to put PII on a log line even by accident.
+
+**Two readings, two questions, one home.** Everything above describes the *operator*
+reading: no principal, every organisation at once, three counts. When gap 22's
+residue grew an HTTP route it needed a second reader, which is
+:func:`tenant_attention_report` — and it answers a narrower question, *what on my own
+board needs me?* It reports the two counts a tenant can act on, and deliberately not
+the third: a parked outbox event is a relay fault attributable to the deployment, so
+showing it to a tenant would invite a support ticket about somebody else's
+misconfigured transport. The counting lives here rather than in the route for the
+same reason the operator counts do — a second copy would be a second answer to "what
+needs a human", and the two readings share one ``is_sealed`` scan so that they cannot
+eventually disagree about the same database.
 """
 
 from __future__ import annotations
 
+import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.core.crypto import is_sealed
 from app.db.enums import NotificationStatus
-from app.db.repositories.fields import fields_for_reseal
-from app.db.repositories.notifications import undelivered_counts
+from app.db.repositories.fields import fields_for_reseal, fields_for_reseal_for_tenant
+from app.db.repositories.notifications import (
+    undelivered_counts,
+    undelivered_counts_for_tenant,
+)
 from app.db.repositories.outbox import dead_letter_count
+
+if TYPE_CHECKING:
+    from app.db.models import ExtractedField
 
 #: The two columns on :class:`~app.db.models.ExtractedField` that hold PII, and so
 #: must be sealed. Named once, here, so "did we miss a column?" has one answer —
@@ -153,6 +173,28 @@ class AttentionReport:
         }
 
 
+def _unsealed_ids(fields: Sequence[ExtractedField]) -> tuple[int, ...]:
+    """Ids of rows holding at least one PII column still in the clear.
+
+    Shared by both readings on purpose. ``reseal-fields`` seals :data:`PII_COLUMNS`,
+    the operator check verifies it, and now a tenant's own board verifies it for that
+    tenant — three consumers of one predicate. Two copies of this comprehension would
+    be two answers to "is this row sealed?", and the day one copy learned about a new
+    column the other would keep reporting a clean board for it.
+
+    ``is_sealed`` is shape-based, so this needs no ``ENCRYPTION_KEY``; that property is
+    claimed in the module docstring and would be lost by a helper that decrypted.
+    """
+    return tuple(
+        field.id
+        for field in fields
+        if any(
+            getattr(field, column) is not None and not is_sealed(str(getattr(field, column)))
+            for column in PII_COLUMNS
+        )
+    )
+
+
 def attention_report(
     session: Session,
     *,
@@ -172,15 +214,7 @@ def attention_report(
     """
     undelivered = undelivered_counts(session)
     fields = fields_for_reseal(session, limit=limit)
-
-    unsealed = tuple(
-        field.id
-        for field in fields
-        if any(
-            getattr(field, column) is not None and not is_sealed(str(getattr(field, column)))
-            for column in PII_COLUMNS
-        )
-    )
+    unsealed = _unsealed_ids(fields)
 
     return AttentionReport(
         outbox_parked=dead_letter_count(session),
@@ -192,4 +226,93 @@ def attention_report(
         field_scan_truncated=len(fields) == limit,
         event_transport=settings.event_transport,
         bus_disabled=settings.event_transport == "none",
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class TenantAttentionReport:
+    """One reading of **one organisation's** attention states.
+
+    Deliberately not a field-for-field copy of :class:`AttentionReport`. There is no
+    ``outbox_parked`` because a parked event is a deployment fault rather than a
+    tenant's, and no ``event_transport``/``bus_disabled`` because whether the bus is
+    switched off is neither something a tenant can act on nor something they should
+    hear about from their own board. A shared record with three fields blanked for
+    this reader would make "this tenant has no parks" and "we do not report parks to
+    tenants" the same value — which is exactly the confusion ``D10-39`` spent a
+    section avoiding on the operator side.
+
+    ``slots`` and ``frozen`` for the same reason every other result record here has
+    them: it is a value, it is not edited after the fact, and a typo that assigns an
+    attribute should raise rather than invent a field.
+    """
+
+    notifications_failed: int
+    notifications_suppressed: int
+    unsealed_field_values: int
+    unsealed_field_ids: tuple[int, ...]
+    fields_scanned: int
+    field_scan_truncated: bool
+
+    @property
+    def needs_attention(self) -> bool:
+        """Whether somebody in this organisation can act on the reading.
+
+        Every count here is actionable by the organisation that owns the rows: a
+        ``failed``/``suppressed`` notification is retried — or the policy gate that
+        suppressed it is fixed — from their own queue, and a plaintext field value is
+        sealed from their own data. That is the same test that *disqualifies* the park
+        count from this report: a tenant cannot fix a relay.
+        """
+        return bool(
+            self.notifications_failed or self.notifications_suppressed or self.unsealed_field_values
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        """The wire shape. Flat and JSON-safe, as the operator report's is."""
+        return {
+            "notifications_failed": self.notifications_failed,
+            "notifications_suppressed": self.notifications_suppressed,
+            "unsealed_field_values": self.unsealed_field_values,
+            "unsealed_field_ids": list(self.unsealed_field_ids),
+            "fields_scanned": self.fields_scanned,
+            "field_scan_truncated": self.field_scan_truncated,
+            "needs_attention": self.needs_attention,
+        }
+
+
+def tenant_attention_report(
+    session: Session,
+    *,
+    tenant_id: uuid.UUID,
+    limit: int,
+) -> TenantAttentionReport:
+    """Read one organisation's attention states on an open session.
+
+    Never writes and never commits: the caller owns the transaction, as everywhere
+    else in this codebase.
+
+    ``tenant_id`` must come from the authenticated principal. This function cannot
+    enforce that — it has no way to know who is asking — which is the same division
+    every repository in this codebase uses: the data layer scopes, the route is
+    responsible for having got the id from :class:`~app.core.principal.Principal`
+    rather than from the request. ``GET /attention`` reads ``principal.tenant_id``
+    and accepts no tenant from anywhere else.
+
+    ``limit`` bounds the field scan exactly as :func:`attention_report` does, and a
+    full page makes the unsealed count a floor rather than a total, reported as
+    ``field_scan_truncated``. "0 unsealed" from a truncated scan is the one answer
+    this report must never give confidently either.
+    """
+    undelivered = undelivered_counts_for_tenant(session, tenant_id)
+    fields = fields_for_reseal_for_tenant(session, tenant_id, limit=limit)
+    unsealed = _unsealed_ids(fields)
+
+    return TenantAttentionReport(
+        notifications_failed=undelivered[NotificationStatus.FAILED],
+        notifications_suppressed=undelivered[NotificationStatus.SUPPRESSED],
+        unsealed_field_values=len(unsealed),
+        unsealed_field_ids=unsealed,
+        fields_scanned=len(fields),
+        field_scan_truncated=len(fields) == limit,
     )
