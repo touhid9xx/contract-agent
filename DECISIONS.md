@@ -5436,10 +5436,16 @@ declares it and surfaces it as `ApiError.traceId`, so the shape half of the stan
 The omission is harmless at run time, which is exactly why it survived. A client reading named
 fields off a JSON object ignores a key it never asked for, so no screen could have noticed and no
 test could have failed. It is still drift: `trace_id` is bound into the log context for the
-request and echoed back in an `x-trace-id` header that CORS explicitly exposes, so the client is
-declining the one value that would tie a user's error report to the server's log line. Whether to
-declare it is an owner decision — a field nothing reads is weight, but a correlation id is what a
-support conversation needs — so it was recorded rather than changed. This slice touches no code.
+request and echoed back in an `x-trace-id` header that CORS explicitly exposes
+~~so the client is declining the one value that would tie a user's error report to the server's log
+line. Whether to declare it is an owner decision — a field nothing reads is weight, but a
+correlation id is what a support conversation needs — so it was recorded rather than changed.~~
+**Struck by `D10-83`, not deleted: the choice was made twice and neither time by an owner.**
+`D10-72` declared the field and surfaced it as `ApiError.traceId`; `D10-83` then gave it eleven
+call sites on nine screens. So "the client is declining" describes what `D10-62` found rather than
+what the tree does, and "a field nothing reads is weight" stopped being the state of things. The
+correlation id did turn out to be what a support conversation needs; nothing was waiting on a
+ruling for it. This slice touched no code.
 
 `ReviewItem` is the row whose counts do not line up by copying, and the one that shows the reading
 was done rather than assumed: the interface lists seventeen fields flat, while the server composes
@@ -6650,3 +6656,63 @@ made the first one diagnosable instead of mysterious.
 **Gates.** 352 tests, 18 files, 0 failures, run on this tree. No backend file, no dependency, no
 schema, no migration: `alembic` head stays `0006`. One file outside `.agent-cache/` changed, and it
 is a spec.
+
+### D10-83 — The correlation id reached no screen, and the board that needed it shouted least
+
+`D10-62` measured fifteen response shapes and found one key missing; `D10-72` wrote the key down and
+surfaced it as `ApiError.traceId`. Neither made it reach a person. A search for `traceId` outside
+`api.ts` and its spec returned the constructor, the docstring and nothing else: the value was typed,
+documented, deliberately `null`-aware, and read by no screen. That is `D10-77`'s shape exactly — not
+unpinnable, unread — and the one thing a person can hand back that names the server's own log line.
+
+**Eleven call sites on nine screens.** Every route-level failure card now renders `<TraceId>` under
+the sentence that says what went wrong: agent, attention, contracts, the contract detail's three
+independent reads, escalations, login, notifications, review, users. The sentence above it is the
+diagnosis; this is the quote.
+
+**A component, because the three wrong renderings are the hard part.** An absent id must print
+nothing rather than `Trace id: null`; a failure that is not our envelope — a `TypeError` from
+render, a rejected `fetch` — must print nothing, since the prop is typed `unknown` because every
+screen's failure slot can hold anything; and it must not be a `role="alert"`, because the failure
+is already announced and a second alert makes one failure read twice. A template string gets all
+three wrong, so the rules live in one component with a spec that fails on each. The copy is
+`common.traceId`, and `bn` is uncast in `i18n/messages.ts`, so a missing translation is a type error
+here rather than a key name in production.
+
+**A defect found in the doing, on the screen where it mattered most.** `attention/page.tsx`
+rendered its failure sentence as `<p className="text-sm">` — no `role="alert"`, no danger tone —
+while every other route-level failure card had both. On the single board whose purpose is "something
+here needs a person", a screen reader was told nothing and the sentence did not look like a failure.
+That is fixed, and it is what makes `TraceId`'s own docstring true for that page: "the failure is
+already announced" was false there, so the comment was a claim and the claim was wrong (`D10-59`).
+`attention/page.test.tsx` now asserts the alert stack holds exactly one sentence, which is the check
+that would have caught it.
+
+**Login stored the sentence, so the cause died at the boundary.** Its state was `string | null`,
+filled by `describeFailure(cause)`: by the time anything rendered, the `ApiError` was gone and the
+id with it. It now holds the cause and derives the sentence, which also deletes a second copy of
+the wording. The pre-auth failure is the one a person reports with no other context to offer.
+
+**Measured in both directions.** Deleting the null guard — `|| error.traceId === null` — turned
+exactly two cases red: the explicit-`null` envelope and the offline `status: 0` one, both printing
+`Trace id: ` with an empty id, and left the other four green. Reverted, the suite is **361 tests in
+19 files, 0 failures**. Fourteen files changed: twelve modified, two new, two of those a spec.
+
+**What this record does not claim.** (1) **A failed write still loses its id.** Every alert that
+reports a failed action — a submit, a toggle, a retry, the home screen's sign-out — keeps a
+translated string in state, so the cause is gone by the time it renders; login is the only one
+converted. No count is quoted because the shape differs per screen, and citing a number nobody
+measured is `D10-62`'s lesson rather than its remedy. (2) **No browser has run this**; `jsdom`
+proves the wiring, not the rendering. (3) **It does not prove a route emits `trace_id`** — that half
+is `backend/tests/test_health.py`, which pins the envelope's id to the response header. (4)
+**Silence is not a fault signal.** A failure produced before our middleware ran — a proxy's `502`, a
+refused connection — carries no id and renders nothing, which is correct and also indistinguishable
+from an envelope that simply had none.
+
+**No `STATUS.md` amendment, and that is a measurement rather than an omission.** Its trace-id
+paragraphs stop at the declaration — `ErrorEnvelope` declares the key, `ApiError` carries it — and
+none claims a screen shows it, so nothing there became false. Counts and file totals moved, but they
+are timestamped measurements of other slices, not standing claims.
+
+**Gates.** 361 tests, 19 files, 0 failures, on this tree. No backend file, no dependency, no schema,
+no migration: `alembic` head stays `0006`.
