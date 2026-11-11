@@ -6065,8 +6065,8 @@ sign-off, not footnotes:**
    through `PATCH /escalations/{id}` and records a reply through
    `POST /contracts/{id}/response`, so the scanner's rows are actionable outside a test.
    **`agent` and `notification` are still `TestClient`-only** — two of the four — and no
-   browser has run *any* of these screens, because `frontend/` has no test runner and no
-   e2e suite. The UI is typechecked and linted, which is weaker than a test.
+   browser has run *any* of these screens~~, because `frontend/` has no test runner and no
+   e2e suite. The UI is typechecked and linted, which is weaker than a test~~.
    **Amended by `D10-29`, and this sentence had already gone stale before it:** `agent`
    stopped being `TestClient`-only when `D10-24` shipped `/[locale]/agent` (`25886aa`), and
    this line was not updated then — the two amendment chains above and here disagreed. With
@@ -6083,13 +6083,27 @@ sign-off, not footnotes:**
    and was never revisited while five further screen tests landed — the same stale-count failure the
    amendment chains above keep recording.
 
-   **Amended a second time by `D10-57`, not deleted:** ~~eight of the nine~~ becomes **nine of
-   the nine** — `D10-57` added `page.test.tsx` for home, so no locale screen is untested. What
-   follows is read rather than re-worded: *nothing has been hydrated, clicked or navigated* is
-   still what all nine do not do.
+   **Amended a second time by `D10-57`, not deleted:** ~~eight of the nine~~ becomes
+   **~~nine of the nine~~ ten of the ten** — `D10-57` added `page.test.tsx` for home, so no
+   locale screen is untested. What follows is read rather than re-worded: *nothing has been
+   hydrated, clicked or navigated* is still what all ten do not do.
    Neither is a browser: nothing has been hydrated, clicked or navigated, and no screen has
    rendered with data behind it, so the residue stands — smaller, and now with an account of what
    it costs.
+
+   **Amended a third time, by `D10-85`, not deleted — and this one strikes the *reason*, not a
+   count.** The premise struck above was true when this record was signed and stopped being true
+   at `D10-37` (`df81b8e`), which gave `frontend/` a runner, a gate that runs it, and — in
+   `D10-41` — a config that resolves the `@/*` alias. Every amendment below it then went on
+   measuring *how many* screens are driven in that runner while the sentence saying there was no
+   runner to drive them sat underneath, unread, so the residue was restated in terms of a test
+   setup the repository no longer lacked. `/[locale]/attention` then gained a screen and a spec
+   (`D10-80`) without this entry being revisited, which is why the count moved again: **ten of
+   the ten** locale screens have a `page.test.tsx`, measured on this tree, and the suite the
+   struck sentence said did not exist is **370 tests in 20 files, 0 failures**. What survives
+   unstruck is the half that never depended on a runner: `jsdom` is not a browser, nothing has
+   been hydrated, clicked or navigated, and no screen has rendered with data behind it — so the
+   residue is real, and it is one clause shorter.
 6. ~~**`normalized_value` is still plaintext** (gap 20) — the one place a shipped
    column contradicts "no raw PII at rest", and it needs a decision (encrypt +
    compare on a blind index, or keep it and record the exception), not a patch.~~

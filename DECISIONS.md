@@ -6773,3 +6773,51 @@ it quotes are timestamped measurements of other slices, not standing claims.
 
 **Gates.** 370 tests, 20 files, 0 failures, on this tree. No backend file, no dependency, no
 schema, no migration: `alembic` head stays `0006`.
+
+### D10-85 — The reminders struck a count three times and left the reason standing
+
+`GATE 2`'s fifth reminder states the residue of every screen slice in one sentence: no browser has
+run any of these screens, "because `frontend/` has no test runner and no e2e suite. The UI is
+typechecked and linted, which is weaker than a test." That was true when the record was signed. It
+stopped being true at `D10-37` (`df81b8e`), which gave `frontend/` a runner, one spec and a gate
+that runs it, and `D10-41` (`8f65fbf`) then taught that runner the `@/*` alias. Between those
+commits and this one, four amendments landed directly underneath the sentence — `D10-29`,
+`D10-47`, `D10-56`, `D10-57` — and not one of them read it.
+
+**Why four passes missed it.** Each amendment answered the question its own slice asked: which
+routers a screen now calls (`D10-22`, `D10-23`, `D10-29`), whether a production build renders a
+route (`D10-47`), how many screens are driven in `jsdom` (`D10-56`, `D10-57`). None of those
+questions is "is the sentence underneath still true", and each inherited it unchanged. The count
+was re-measured twice; the premise never was. That is `D10-56`'s defect one layer down — there a
+stale count went unrevisited while new specs landed, here a stale *reason* survived while the
+count above it was corrected.
+
+**The sweep, enumerated rather than estimated.** Twenty-eight places in the ledgers say some form
+of "no frontend test runner": nineteen in `STATUS.md`, nine in `DECISIONS.md`, none in
+`README.md` — `D10-70` had already taken the current-document copy. Twenty-seven of the
+twenty-eight are dated records of slices written before `D10-37`, and this document's own rule
+leaves them as written (stated in `STATUS.md` gap 15, `:3663`–`:3665`: "those are dated records of
+those slices and are left as written"). The twenty-eighth is the live reminder, and it is struck.
+
+**A second stale number in the same entry, found by reading it.** `D10-80` gave
+`/[locale]/attention` a screen and a `page.test.tsx`, and reminder 5 was not revisited then, so it
+still said "nine of the nine" where the tree holds ten `page.test.tsx` files under `src/app`.
+Gap 15 *was* amended for that tenth screen; reminder 5 was not, which is the disagreement `D10-29`
+recorded between those same two chains. The count is struck to ten, measured by listing the
+directory rather than by counting the sections.
+
+**What the strike keeps, because it never depended on the runner.** `jsdom` is not a browser:
+nothing is hydrated, clicked or navigated, no screen has rendered with data behind it, and there
+is no e2e suite. That half stands unstruck, so the residue is one clause smaller and not closed.
+
+**What this record does not claim.** (1) **No product behaviour changed** — two Markdown files; no
+code, no test, no dependency, no schema, and `alembic` head stays `0006`. (2) **The suite figure is
+re-measured, not copied forward:** `npx vitest run` on this tree reports **370 passed in 20
+files**, the same number `D10-84` recorded, which is the expected result when only prose moves.
+(3) **It does not rule on the reproducibility clauses.** Two records say a key audit can be rerun
+only on the machine that ran it; whether the counts those audits produced are now re-derivable
+from committed specs is a different question, and this record does not decide it.
+
+**Gates.** 370 tests, 20 files, 0 failures, on this tree. Ledger invariants rechecked: no `CR`, one
+trailing `LF`, no added line over 100 columns, balanced strikethrough markers, `D10-` headings
+contiguous through `D10-85`.
