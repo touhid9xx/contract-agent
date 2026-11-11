@@ -2866,9 +2866,12 @@ work it could correctly do; it only gives an operator a way to find a contract i
   follow-up `docs(status)` commit rather than back-dated into the slice.
 
   One correction to how the audit is described: the script that produced those counts lives
-  in `.agent-cache/`, which is gitignored. The counts are reproducible, the command is not
-  — a reader with this repo cannot re-run it as written, so `STATUS.md` says so instead of
-  citing a path that does not exist in the tree.
+  in `.agent-cache/`, which is gitignored, so `STATUS.md` cites no path that the tree does not
+  have. ~~The counts are reproducible, the command is not — a reader with this repo cannot
+  re-run it as written.~~ **Amended by `D10-86`:** the properties that script checked are now
+  asked by committed specs running in CI, so a reader can re-derive the parity, the drift and
+  the composed reachability; `0 unused` still cannot be re-derived, and which is which is
+  recorded there rather than left as a caveat.
 
 ### D10-29 — The notification queue gets a face, and the screen is not the policy
 
@@ -2942,8 +2945,11 @@ referenced-but-absent, zero placeholder drift, zero bare map keys passed to `t()
 proven, and stated rather than buried: **this repo has no frontend test runner**, so no test
 covers this screen and none was written that could run, and nothing rendered it in a browser
 or called the API from one. It has passed a compiler and a linter and nothing more. The
-audit script lives in `.agent-cache/` and is deleted before commit, so the counts are
-reproducible only on the machine that ran them — the same caveat `D10-28` recorded.
+audit script lives in `.agent-cache/` and is deleted before commit ~~— so the counts are
+reproducible only on the machine that ran them, the same caveat `D10-28` recorded.~~
+**Amended by `D10-86`, which strikes the same inference in `D10-28`:** the counts' parity,
+placeholder drift and composed reachability are now held by specs CI runs; the unused-key
+verdict and the absolute figures are not, and that entry says which is which.
 
 - **No backend change, no migration, no new dependency.** `alembic` head stays `0006`.
   `notifications` needed no route added; it needed a reader.
@@ -6821,3 +6827,49 @@ from committed specs is a different question, and this record does not decide it
 **Gates.** 370 tests, 20 files, 0 failures, on this tree. Ledger invariants rechecked: no `CR`, one
 trailing `LF`, no added line over 100 columns, balanced strikethrough markers, `D10-` headings
 contiguous through `D10-85`.
+
+### D10-86 — Four clauses said "only on my machine", and three specs had landed since
+
+Two `STATUS.md` rows carry the same parenthesis — at `:4127` and `:4244` — and the two decision
+entries that copied it carry it again, `D10-28` at `:2868` and `D10-29` at `:2948`. Each says the
+key audit is reproducible only on the machine that ran it, because the script lived in
+`.agent-cache/`, which is gitignored. The clause was true when it was written: nothing in the tree
+parsed those catalogues. It stopped being true on 2026-11-10, in three commits — `9ed8361` pinned
+the two catalogues against each other, `19066f4` checked the keys the screens compose, `894161b`
+pinned the refusal vocabulary to both catalogues — and `.github/workflows/ci.yml:234` runs
+`npm test` inside the `frontend` job, so all three run on every push.
+
+**Which verdicts are now asked, one at a time.** `messages.test.ts:127` compares the key sets in
+both directions and writes no key down, which is `0 only-in-en` and `0 only-in-bn`. `:136`
+compares the ICU argument shape of every key across the two catalogues, which is
+`0 placeholder drift`. `composed-keys.test.ts:276` resolves every key a screen composes from a
+table, in both catalogues, which is `0 referenced-but-absent` for those sites. Not asked, and the
+strike does not pretend otherwise: a literal `t("…")` key is typed nowhere — `useTranslations()`
+takes no namespace and `t()` accepts any string (`D10-71`) — so a renamed literal still reaches a
+screen as a raw key; `0 unused` is asked by `lib/refusals.test.ts:117` and only of keys named like
+a refusal; and the bare-map-key verdict was a grep at the time and stays one.
+
+**The figures stay, because they describe the commit they name.** `271` describes `07c31ab` and
+`337`/`66` describe `bcfce75`; neither row claims those numbers describe today. Measured on this
+tree: **492** leaves per locale in each catalogue, **109** under `contracts`, **75** under
+`notifications`; `npx vitest run src/i18n` reports **13 passed in two files**.
+
+**Why this is a ruling and not a fourth caveat.** `D10-85` recorded at `:6823`–`:6825` that it did
+not decide whether those counts are re-derivable from committed specs — "a different question", it
+wrote. This entry is that decision. The failure the clause described was not that the counts were
+wrong; it is that a reader had no way to ask the same questions again, and inherited a caveat
+instead.
+
+**What this record does not claim.** (1) **No product behaviour changed** — two Markdown files, no
+code, no test, no dependency, no schema, and `alembic` head stays `0006`. (2) **The audits'
+arithmetic is not re-run.** Nothing here certifies that the 271 or 337 counts were right; it says
+only that the same questions are now asked by committed code, which fails the build when broken.
+(3) **The four clauses struck are the four that exist** — `README.md` and `DEMO.md` were swept and
+hold none.
+
+**Gates.** 370 tests, 20 files, 0 failures on this tree. Ledger invariants rechecked: no `CR`, one
+trailing `LF`, every added prose line under 100 columns, an even count of strikethrough markers on
+the added lines, `D10-` headings contiguous through `D10-86`. The two amended cells are the
+exception and are named rather than rounded away: they were 363 and 381 columns at `HEAD` and are
+404 and 422 now, because this slice inserts a strike and a pointer into table cells that were
+already wider than the rest of the file keeps.

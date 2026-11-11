@@ -4124,7 +4124,7 @@ labelled field instead of a bare `low` after the source.
 
 | Check | Command | Result |
 | --- | --- | --- |
-| Key parity + reachability | `python .agent-cache/contracts_i18n_audit.py` (a **local, gitignored** script — `.agent-cache/` is not in the repo, so this command is reproducible only on the machine that ran it) | **271 keys per locale**; 0 only-in-en, 0 only-in-bn, 0 unused, 0 referenced-but-absent, 0 placeholder drift; 47 `contracts` keys reached by the page |
+| Key parity + reachability | `python .agent-cache/contracts_i18n_audit.py` (a **local, gitignored** script — `.agent-cache/` is not in the repo, ~~so this command is reproducible only on the machine that ran it~~ — **amended by `D10-86`**, see below) | **271 keys per locale**; 0 only-in-en, 0 only-in-bn, 0 unused, 0 referenced-but-absent, 0 placeholder drift; 47 `contracts` keys reached by the page |
 | Types (frontend) | commit gate: `tsc --noEmit` | **Passed** on `07c31ab` — the root `frontend typecheck` hook, not a `(no files to check)` skip |
 | Lint (frontend) | commit gate: `eslint` | **Passed** on the same commit |
 | Commit gate | `git commit` (all 17 hooks) | **all green** — plus `check json` (this slice edits two JSON catalogues), `ruff`, `mypy --strict`, `bandit` and the demo `tsc`/`eslint` hooks |
@@ -4142,6 +4142,22 @@ named it, not back-dated into the slice — the same convention `D10-26` and `D1
 used. No `frontend/` source file changed between the audit above and this commit, which is
 the only reason the key counts still describe the commit rather than a snapshot of the
 working tree.
+
+**Amended by `D10-86`: the figure is checkable from the tree now.** The struck clause was true
+when this row was written and stopped being true afterwards: `D10-64` committed
+`i18n/messages.test.ts`, `D10-65` committed `i18n/composed-keys.test.ts`, and
+`.github/workflows/ci.yml:234` runs `npm test` in the `frontend` job, so both files run on
+every push. Three of the five counts in the row above are now asked there — both parity
+directions and the placeholder drift — because `messages.test.ts` compares the two catalogues
+to each other and writes down no key. A fourth, `referenced-but-absent`, is asked for exactly
+the sites whose key is composed from a table: `composed-keys.test.ts` resolves every one of
+those in both catalogues. What stays unchecked is the literal `t("…")`, which nothing types —
+`useTranslations()` is called with no namespace and `t()` accepts any key (`D10-71`) — so a
+renamed literal key still reaches a screen as a raw key string. The fifth count, `0 unused`, is
+asked by one committed check, `lib/refusals.test.ts:117`, and only of keys named like a
+refusal. On this tree `npx vitest run src/i18n` reports **13 passed** in two files. The
+absolute figures stay as written, because 271 described `07c31ab` and no row claims it
+describes today; the catalogues now hold **492** leaves per locale.
 
 ### What this does not do — stated, not buried
 
@@ -4228,7 +4244,7 @@ flagged decision. Both sentences now match the code that raises them.
 
 | Check | Command | Result |
 | --- | --- | --- |
-| Key parity + reachability + placeholders | `python .agent-cache/notifications_i18n_audit.py` (a **local, gitignored, deleted-before-commit** script — not in the tree, so reproducible only on the machine that ran it) | **337 keys per locale**; **66** under `notifications`; 0 one-sided, 0 unused, 0 referenced-but-absent, 0 placeholder drift, **0 bare map keys passed to `t()`** |
+| Key parity + reachability + placeholders | `python .agent-cache/notifications_i18n_audit.py` (a **local, gitignored, deleted-before-commit** script — not in the tree, ~~so reproducible only on the machine that ran it~~ — **amended by `D10-86`**, see below) | **337 keys per locale**; **66** under `notifications`; 0 one-sided, 0 unused, 0 referenced-but-absent, 0 placeholder drift, **0 bare map keys passed to `t()`** |
 | Refusal vocabulary | read `app/workers/dispatch.py` and `app/api/v1/notifications.py` | **14** dispatch codes + **5** route codes. The screen maps all 14 plus the 2 its buttons can provoke (`NOT_FAILED`, `CONCURRENT_UPDATE`). `NOTIFICATION_EXISTS`/`NO_DECISION`/`DECISION_MISMATCH` come only from `POST /notifications`, which has no button here; `TENANT_MISMATCH` only reaches `last_error`. |
 | Types (frontend) | commit gate: `tsc --noEmit` | **Passed** on `bcfce75` — the root `frontend typecheck` hook, not a `(no files to check)` skip |
 | Demo types | commit gate: `tsc --noEmit` (`demo/frontend`) | **Passed** — no demo file changed, and the hook still ran its own check |
@@ -4251,6 +4267,16 @@ not is named instead of rounded into the total. No `frontend/` source file chang
 the audit above and the commit, which is the only reason the key counts still describe
 `bcfce75` rather than a snapshot of the working tree. The audit script was deleted before
 staging, as `D10-29` promised; it was gitignored, so its absence is not a tree change.
+
+**Amended by `D10-86`: the same struck clause, for the same reason.** The one-sided counts, the
+placeholder drift and the composed-key reachability in this row are now asked by committed specs
+that `npm test` runs in the `frontend` CI job (`.github/workflows/ci.yml:234`), so a reader can
+re-derive them from the tree. Two verdicts here cannot be re-derived from a committed spec.
+`0 unused` is asked only by `lib/refusals.test.ts:117`, and only of keys named like a refusal.
+And the bare-map-key verdict was a grep at the time and stays one: the composition spec reads
+tables indexed inside the call, not a key read into a local first (`D10-71`). The figures 337 and
+66 stay as written because they describe `bcfce75`; the catalogues today hold **492** leaves per
+locale and **75** under `notifications`.
 
 ### What this does not do — stated, not buried
 
