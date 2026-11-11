@@ -16,8 +16,12 @@
 #        every worker), but no broker is defined here yet, so the relay defaults
 #        to EVENT_TRANSPORT=none and parks events instead of dropping them.
 #        F5 added /health/ready, which probes MySQL and — when a broker is
-#        configured — Kafka. No Redis/Ollama service is defined yet because no
-#        code talks to either; they arrive with the milestones that use them.
+#        configured — Kafka. No Redis service is defined yet because no code
+#        talks to one; it arrives with the slice that first needs one. Ollama is
+#        the reverse case: the client that speaks to a model is written and
+#        wired (F7, `EXTRACTION_BACKEND=ollama`), so what is missing is the
+#        service, not the code. Until one is defined here, `pattern` is what
+#        runs — gap 17, and the reason the default is the provable backend.
 name: contract-agent
 
 # One image, five processes: each worker is the API image with a different
