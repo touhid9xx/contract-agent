@@ -6698,16 +6698,21 @@ exactly two cases red: the explicit-`null` envelope and the offline `status: 0` 
 `Trace id: ` with an empty id, and left the other four green. Reverted, the suite is **361 tests in
 19 files, 0 failures**. Fourteen files changed: twelve modified, two new, two of those a spec.
 
-**What this record does not claim.** (1) **A failed write still loses its id.** Every alert that
+**What this record does not claim.** (1) ~~**A failed write still loses its id.** Every alert that
 reports a failed action — a submit, a toggle, a retry, the home screen's sign-out — keeps a
 translated string in state, so the cause is gone by the time it renders; login is the only one
 converted. No count is quoted because the shape differs per screen, and citing a number nobody
-measured is `D10-62`'s lesson rather than its remedy. (2) **No browser has run this**; `jsdom`
-proves the wiring, not the rendering. (3) **It does not prove a route emits `trace_id`** — that half
-is `backend/tests/test_health.py`, which pins the envelope's id to the response header. (4)
-**Silence is not a fault signal.** A failure produced before our middleware ran — a proxy's `502`, a
-refused connection — carries no id and renders nothing, which is correct and also indistinguishable
-from an envelope that simply had none.
+measured is `D10-62`'s lesson rather than its remedy.~~ **Struck by `D10-84`, not deleted: the
+direction was right and the mechanism was wrong.** On four of those eleven sites the cause was
+never lost — it sat in the mutation object, in scope the whole render — and the sentence was
+printed inline beside it rather than in place of it, so the id was *unread*, which is `D10-77`'s
+shape. What genuinely flattened was the six card props typed `error: string | null`. Eleven sites
+on seven screens are counted this time rather than declined. (2) **No browser has run this**;
+`jsdom` proves the wiring, not the rendering. (3) **It does not prove a route emits `trace_id`** —
+that half is `backend/tests/test_health.py`, which pins the envelope's id to the response
+header. (4) **Silence is not a fault signal.** A failure produced before our middleware ran — a
+proxy's `502`, a refused connection — carries no id and renders nothing, which is correct and also
+indistinguishable from an envelope that simply had none.
 
 **No `STATUS.md` amendment, and that is a measurement rather than an omission.** Its trace-id
 paragraphs stop at the declaration — `ErrorEnvelope` declares the key, `ApiError` carries it — and
@@ -6716,3 +6721,55 @@ are timestamped measurements of other slices, not standing claims.
 
 **Gates.** 361 tests, 19 files, 0 failures, on this tree. No backend file, no dependency, no schema,
 no migration: `alembic` head stays `0006`.
+
+### D10-84 — A refused write now says which request it was
+
+`D10-83` gave the reads their correlation id and closed by admitting the writes still had none:
+eleven mutation paths across seven screens — home, agent, contracts, escalations, notifications,
+review, users — rendered each refusal as a sentence built by `describeFailure(cause)` at the
+moment the card was constructed. The mutation held the `ApiError`; the card received the
+sentence; the id was gone before any element could show it. The fix is one component, not eleven.
+
+**`ErrorNote` takes the cause and the wording, never the sentence.** `describe` is a callback, so
+the words an operator reads and the id beneath them are derived from the same value in the same
+render. A finished string would have left the id to be found somewhere else and rebuilt the exact
+bug the component removes: a card printing one request's words beside another request's id. Each
+screen keeps its own vocabulary — `contracts` words an ingest failure and a consent failure
+differently, `review` separates a refused decision from a refused reveal — and every one of them
+already had a `describeFailure` in the file. Nothing was reworded, which is why no copy test moved.
+
+**A defect in the record, found by doing the work.** `D10-83`'s limit (1) said every failed action
+"keeps a translated string in state, so the cause is gone by the time it renders". On four of the
+eleven that was false: `contracts`' ingest form, `users`' create form, `escalations`' reply note
+and the home screen's sign-out all held the mutation object with the cause intact and printed
+`describeFailure(x.error)` inline, so the id was in scope and unread rather than destroyed. What
+genuinely flattened was the six card props typed `error: string | null` — the boundary — and
+those needed the prop widened to `ReactElement | null`, not a second mechanism. The amendment above
+carries the correction; a limit stated from the shape of the code is worth less than one measured.
+
+**The block-element constraint.** `TraceId` renders a `<p>`, and so did every failure box it was
+being placed into, so each box became a `<div>` rather than nesting one paragraph in another. That
+is also why the existing `queryAllByRole("alert")` assertions kept passing unchanged: the element
+carrying the role is still the sentence, and the id is still a sibling below it, not inside it.
+
+**Measured in both directions, on this tree.** Deleting `|| error.traceId === null` from
+`trace-id.tsx` turned five cases red across three spec files — `trace-id`, `error-note` and
+`users`, the last because a widened prop is only worth widening if the id survives the crossing.
+Pointing `ErrorNote`'s `<TraceId>` at the sentence instead of the cause turned four red, all of
+them the present-id cases, and left the absence cases green — which is what shows the spec bites
+on the pairing rather than on any rendering at all. Reverted, the suite is **370 tests in 20 files,
+0 failures**. Ten files changed: eight modified, two new, one of those a spec.
+
+**What this record does not claim.** (1) **No browser has run this**, as in `D10-83`; `jsdom`
+proves the wiring, not the rendering. (2) **It still does not prove a route emits `trace_id`** —
+that half is `backend/tests/test_health.py`, which pins the envelope's id to the response header.
+(3) **The log the id points at is not opened here.** An id on screen names the server's own log
+line; nobody has walked from one to the other in this repository, and this record does not.
+
+**No `STATUS.md` amendment, and that is a measurement rather than an omission.** Its trace-id
+paragraphs still stop at the declaration — the envelope declares the key, `ApiError` carries
+it — and none claims which screens show it, so the widening made none of them false. The counts
+it quotes are timestamped measurements of other slices, not standing claims.
+
+**Gates.** 370 tests, 20 files, 0 failures, on this tree. No backend file, no dependency, no
+schema, no migration: `alembic` head stays `0006`.
