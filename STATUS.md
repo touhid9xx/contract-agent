@@ -3363,12 +3363,16 @@ shell was never dead — `git` was starting `less` as its pager and blocking on 
 the `echo` probe only *looked* dead because it ran in the same response as a hung git
 call. The proof was in the working tree: a stray root file named `hell-alive` held 336
 lines of `less` help text, and `contract-agent` held ANSI-coloured `git diff` output. With
-`--no-pager` (or `GIT_PAGER=cat`) every command returns immediately. The screen was then
-committed normally and all 17 hooks ran, including `frontend typecheck` and
-`frontend eslint` — which is where the two rows above stopped saying "not yet run". The
-parity figure was re-measured by script rather than inherited: **165 keys each, 0
-one-sided, 58 under `escalations`** on both sides. Both artifacts are deleted and the
-tree is clean.
+`--no-pager` (or `GIT_PAGER=cat`) every command returns immediately. **`D10-81` makes that a
+standing rule, not a remedy:** this sentence is where the fix stopped — written down as a diagnosis
+and carried by the session it had just rescued. The screen was then committed normally and all 17
+hooks ran, including `frontend typecheck` and `frontend eslint` — which is where the two rows above
+stopped saying "not yet run". The parity figure was re-measured by script rather than inherited:
+**165 keys each, 0 one-sided, 58 under `escalations`** on both sides. ~~Both artifacts are deleted
+and the tree is clean.~~ **Amended by `D10-81`:** both came back. A later session, which had never
+read this paragraph, found a root file named `contract-agent` again — escaped `git diff` output with
+ANSI codes intact, never committed — and then wedged the command channel the same way with a bare
+`git log`. Deleting an artifact removes the evidence, not the habit.
 
 ### What this does not do — state it, do not bury it
 
@@ -3440,14 +3444,15 @@ every command returned only its own **first character** and exit code 1 — `git
 → `g`, `echo hi` → `e`, `"echo"` → `"`. A bare `printf 'abcdefghij\n'` coming back as `p`
 is what pinned the mechanism: the command's first byte was echoed instead of executed, so
 no process started at all and `git`, `pytest`, `npm` and the 17 hooks were equally out of
-reach. That was not a pager blocking on stdin (the previous session's cause, and
-`--no-pager` was already in use here). It was a fault in the harness's command path, not in
-the repository, and **restarting the IDE cleared it** — the next session ran `git`, `node`,
-`pytest` and `npm` normally. During the fault nothing was committed: the seven files this
-slice touches sat untracked and modified in the working tree, and the phase history above
-could only carry a placeholder where a commit hash belongs. Both are resolved now — the
-slice is `25886aa`, every hash site names it, and the two rows above read "passed" because
-a hook finally ran and passed.
+reach. That was not a pager blocking on stdin (the previous session's cause, and `--no-pager` was
+already in use here — the practice was in this session's hands and not in the repository, which is
+why `D10-81` had to be written: the next session reached for a bare `git log` and lost the channel
+the same way). It was a fault in the harness's command path, not in the repository, and **restarting
+the IDE cleared it** — the next session ran `git`, `node`, `pytest` and `npm` normally. During the
+fault nothing was committed: the seven files this slice touches sat untracked and modified in the
+working tree, and the phase history above could only carry a placeholder where a commit hash
+belongs. Both are resolved now — the slice is `25886aa`, every hash site names it, and the two rows
+above read "passed" because a hook finally ran and passed.
 
 ### What this does not do — state it, do not bury it
 

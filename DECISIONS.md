@@ -3619,16 +3619,17 @@ and the refusal of a contract with no document stored. That suite was run green 
 tests/test_document_text.py -q` → **11 passed**, exit 0) in the session that wrote it. **It is not
 the gate**, and the sentence that first stood here said the gate had not run at all: the shell in
 that session had wedged behind a `git diff` pager, every later command queued behind it, and no
-commit existed. **Amended, not deleted — the gate has since run against this exact tree**, from the
-repository root, with the results rather than the intention recorded: `ruff check .` → *All checks
-passed*; `ruff format --check .` → *106 files already formatted*; `mypy app` under `strict` (59
-source files) → *no issues found*; `bandit -c pyproject.toml -r backend/app` → exit 0 with the three
-expected `nosec B104` notices in `config.py`; `pytest -q` → **860 tests, 0 failures, 0 errors, 15
-skipped**, exit 0, the fifteen being 13 MySQL unreachable, 1 symlink privilege and 1 Kafka opt-in.
-`ruff format` was the one real break and it was mine: `document_text.py` and its test were
-unformatted, and the formatter — not a hand edit — fixed them. What that verification does *not*
-cover is unchanged by it: the fifteen skips mean the outbox and dispatch paths were proven on SQLite
-only this run.
+commit existed. **`D10-81` turns this into a rule rather than a footnote** — the fix it taught was
+left here as history, and history is not what the next session reads. **Amended, not deleted — the
+gate has since run against this exact tree**, from the repository root, with the results rather than
+the intention recorded: `ruff check .` → *All checks passed*; `ruff format --check .` → *106 files
+already formatted*; `mypy app` under `strict` (59 source files) → *no issues found*;
+`bandit -c pyproject.toml -r backend/app` → exit 0 with the three expected `nosec B104` notices in
+`config.py`; `pytest -q` → **860 tests, 0 failures, 0 errors, 15 skipped**, exit 0, the fifteen
+being 13 MySQL unreachable, 1 symlink privilege and 1 Kafka opt-in. `ruff format` was the one real
+break and it was mine: `document_text.py` and its test were unformatted, and the formatter — not a
+hand edit — fixed them. What that verification does *not* cover is unchanged by it: the fifteen
+skips mean the outbox and dispatch paths were proven on SQLite only this run.
 
 This entry carried a commit type and no hash for as long as the gate was unrun, which no other entry
 here does; the `docs(status)` commit that lands this text appends it — **`f3a1bb1`**, `feat(backend)`.
@@ -6524,3 +6525,66 @@ same error class failed the other way, which is why neither the error nor the su
 link, which this screen made false in both catalogues before either commit.
 
 No source file outside `frontend/` changed.
+
+### D10-81 — The pager took the channel twice, because a rule kept in a session is not a rule
+
+A bare `git log -1 --format=%B 42ff55b` opened `less`, and `less` waits on a stdin nobody is going
+to type into. The harness stopped waiting at 120 seconds; the process did not stop. Every command
+after it timed out — `git status`, `echo`, `python -c "print(1)"`, and `cmd /c exit 7`, which starts
+nothing worth waiting for and prints nothing at all. A redirect whose target file was, afterwards,
+not on disk is what made the diagnosis unambiguous rather than a guess: commands were not failing,
+they were not *running*. Nothing was at risk — the index was on disk and no partial commit existed —
+but the channel was gone until a human killed the pager.
+
+**It was the second time, and the first time was diagnosed correctly.** `STATUS.md` records it, in
+the paragraph that begins *"Why this took three sessions, and what the shell actually did."* That
+session saw `git status`, `echo shell-alive` and `python -c "print(1)"` all time out with no output,
+and the proof was on disk: a root file named `hell-alive` holding 336 lines of `less` help text. The
+cause was named then, and the remedy was written down — `--no-pager`, or `GIT_PAGER=cat`. The
+practice then survived into at least one later session, which recorded it in passing: *"`--no-pager`
+was already in use here."* So the knowledge existed, in three places, as history.
+
+**What history cannot do is arrive in a session that has not read it.** The session that wedged the
+channel this time carried no memory of either paragraph; it typed `git log` because a commit body
+was wanted, and inherited the entire failure. That asymmetry is the argument for a decision record
+rather than another paragraph of narrative: the ledger is what a fresh session inherits, and a
+lesson stored as an anecdote is stored where the next session will not look for it. `D10-74` drew
+the same distinction about a hook: *a skipped hook is not a passed hook, and an id is not a check.*
+A remedy that lives only in the session that found it is not a rule, for the same reason — the
+knowledge exists and nobody consults it.
+
+**The rule.** Run git with the pager disabled, on every call whose body reaches stdout:
+`git --no-pager log|diff|show …`, or `git -c core.pager=cat …`, or `GIT_PAGER=cat` in the
+environment. The class is wider than git, and wider than this failure: anything that can take the
+terminal and wait for a keypress — `less`, `more`, `man`, an interactive REPL — holds the same
+single channel, and a wedged Python REPL had already done it once in this project. What earns it a
+rule is the asymmetry. A wrong answer costs one turn and announces itself in the answer; a wedged
+channel costs every subsequent command and *presents as a dead tool*, which is the one symptom this
+project has now mis-diagnosed more than once.
+
+**The artifact recurred too, which is why deleting it was not the fix.** A root file named
+`contract-agent` — 3,194 bytes of escaped `git diff` output, ANSI codes intact — was in the working
+tree when the channel came back, and it carries the same filename the earlier session's record
+names. It was read, confirmed to be diff text, and deleted; `git log --all -- contract-agent` is
+empty, so it never entered a commit and the tree is clean. But the earlier paragraph reports
+deleting that same file, and a later session produced it again. Deleting an artifact removes the
+evidence, not the mechanism.
+
+**Gates.** No code, no dependency, no schema, no migration — `alembic` head stays `0006`. This is
+written against `83b194e`, whose CI run `43003158157` is green on all seven jobs, the MySQL 8.4
+integration job among them. The only gates that apply are the pre-commit hook set and `commitlint`
+over two Markdown files, plus the ledger's own checks, which the apply script enforces by refusing
+to write: no CR, exactly one trailing LF, `### D10-` headings contiguous `1..81`, no added line over
+100 columns, and every removed line covered by an anchor.
+
+**What this record does not claim.** (1) **It is a habit, not a guard.** No hook can hold a
+keyboard; nothing in this repository stops the next session from typing a bare `git log`, and the
+only evidence the rule works is that every git call in the slice that landed the attention board and
+its ledger carried the flag. One session, not a proof. (2) **It covers git only.** `pytest`, a
+database client with its own pager, and an editor can take the same channel, and none of them is
+addressed here. (3) **The mechanism was not reproduced deliberately.** Proving it would have meant
+wedging the channel a third time, which is exactly what the rule exists to prevent; the evidence is
+the observed behaviour plus an independent earlier diagnosis that agreed with it. (4) **The stray
+file's creation was never witnessed.** Its name, size and contents were measured when it was found;
+the redirect that wrote it is inferred from the shape of the file and from the earlier session
+recording the same artifact, not from a log.
