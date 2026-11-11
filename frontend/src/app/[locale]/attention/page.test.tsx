@@ -191,14 +191,25 @@ describe("a clean board is an answer, not an empty state", () => {
     expect(await screen.findByText(EN.attention.cleanHeading)).toBeDefined();
   });
 
-  it("renders the catalogue in Bengali rather than falling back to English", async () => {
+  it("reads the verdict off the wire in Bengali, not English", async () => {
+    // The board here is the discriminating one on purpose: counts non-zero with the
+    // flag `false`. That is the only fixture that tells a wire-read `needs_attention`
+    // apart from a locally recomputed `> 0`, so asking the question in the second
+    // locale as well means a mutation to that branch fails twice instead of once.
+    // A clean board — what this case used to hand the page — agrees with both
+    // readings and could not distinguish them.
     const bn = getMessages("bn");
     setSession(sessionFor("admin"));
-    vi.mocked(attention.read).mockResolvedValue(board());
+    vi.mocked(attention.read).mockResolvedValue(
+      board({ notifications_failed: 3, needs_attention: false }),
+    );
     renderScreen("bn");
 
     expect(await screen.findByText(bn.attention.cleanHeading)).toBeDefined();
     expect(screen.getByRole("heading", { name: bn.attention.title })).toBeDefined();
+    // A locale switch that fell back to the English catalogue would still render a
+    // heading, so the calm sentence is the one that has to be the Bengali one.
+    expect(screen.queryByText(EN.attention.cleanHeading)).toBeNull();
   });
 });
 
