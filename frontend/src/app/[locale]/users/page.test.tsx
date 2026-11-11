@@ -679,6 +679,50 @@ describe("changing a role or an account's state", () => {
     expect(within(cardOf(SELF)).queryByRole("alert")).toBeNull();
   });
 
+  it("quotes the server's trace id beside the refusal it belongs to", async () => {
+    // The chain this screen now owns end to end: the mutation rejects with an
+    // `ApiError`, the card is handed that *cause* rather than a finished sentence,
+    // and `ErrorNote` prints the id beneath the wording. Before this slice the
+    // cause was flattened to `describeFailure(...)` at the prop boundary, so by the
+    // time the card rendered the id existed nowhere at all.
+    vi.mocked(users.update).mockRejectedValue(
+      new ApiError(500, "server", "Boom.", null, null, "trace-9"),
+    );
+    signedIn();
+    renderScreen();
+    await screen.findByText(account().email);
+
+    fireEvent.click(within(cardOf(account())).getByRole("button", { name: EN.users.roles.admin }));
+
+    await screen.findByText(EN.users.failed);
+
+    expect(
+      within(cardOf(account())).getByText(say(EN.common.traceId, { id: "trace-9" })),
+    ).toBeTruthy();
+    // The id is not part of the announcement: one failure, one alert, one sentence.
+    expect(alertTexts()).toEqual([EN.users.failed]);
+    // And it stays on the row that was refused, never on every card.
+    expect(within(cardOf(SELF)).queryByText("trace-9", { exact: false })).toBeNull();
+  });
+
+  it("says nothing about an id the server never sent", async () => {
+    // `trace_id` is `null` for an envelope built outside a request, and absent when
+    // the browser never reached the server — the `status: 0` case below. Silence is
+    // the right answer for the id, but the sentence must still be there: absence of
+    // an id may never swallow the message.
+    vi.mocked(users.update).mockRejectedValue(new ApiError(0, "unreachable", "Down."));
+    signedIn();
+    renderScreen();
+    await screen.findByText(account().email);
+
+    fireEvent.click(within(cardOf(account())).getByRole("button", { name: EN.users.roles.admin }));
+
+    await screen.findByText(EN.users.offline);
+
+    expect(alertTexts()).toEqual([EN.users.offline]);
+    expect(cardOf(account()).textContent).not.toContain(EN.common.traceId.split("{id}")[0]);
+  });
+
   it("reads a 409 on a change as the server refusing it", async () => {
     vi.mocked(users.update).mockRejectedValue(new ApiError(409, "self_change", "No."));
     signedIn();

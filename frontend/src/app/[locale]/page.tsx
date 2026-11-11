@@ -10,6 +10,7 @@ import { useAuth } from "@/components/auth-provider";
 import { HealthStatus } from "@/components/health-status";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ErrorNote } from "@/components/ui/error-note";
 import { localeLabels, locales } from "@/i18n/config";
 
 const THEMES = ["light", "dark", "system"] as const;
@@ -22,7 +23,15 @@ export default function HomePage() {
   const { user, signOut, signOutEverywhere } = useAuth();
 
   const [busy, setBusy] = useState(false);
-  const [actionError, setActionError] = useState<string | null>(null);
+  /**
+   * The cause, not its wording.
+   *
+   * The sentence below is still the screen's own — *why* a revocation failed is a
+   * server detail nobody can act on — but the `ApiError` itself has to survive to
+   * the render, because it carries the trace id that ties this refusal to the log
+   * line that explains it. Storing `t("home.actionFailed")` threw that away.
+   */
+  const [actionError, setActionError] = useState<unknown>(null);
 
   /** Swap the leading locale segment while keeping the rest of the path. */
   function pathForLocale(target: string): string {
@@ -36,10 +45,11 @@ export default function HomePage() {
     setActionError(null);
     try {
       await action();
-    } catch {
+    } catch (cause) {
       // The one thing worth saying is that the button did not do what it said.
-      // Why is a server detail the user cannot act on.
-      setActionError(t("home.actionFailed"));
+      // Why is a server detail the user cannot act on — but *where* it happened
+      // is not, so the cause is kept and `<ErrorNote>` prints the id under it.
+      setActionError(cause);
     } finally {
       setBusy(false);
     }
@@ -107,9 +117,7 @@ export default function HomePage() {
           )}
 
           {actionError !== null && (
-            <p className="rounded-lg bg-danger-muted px-3 py-2 text-xs text-danger" role="alert">
-              {actionError}
-            </p>
+            <ErrorNote cause={actionError} describe={() => t("home.actionFailed")} />
           )}
         </CardContent>
       </Card>

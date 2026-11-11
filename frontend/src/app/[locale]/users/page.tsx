@@ -4,10 +4,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocale, useTranslations } from "next-intl";
 import Link from "next/link";
 import { useState } from "react";
+import type { ReactElement } from "react";
 
 import { useAuth } from "@/components/auth-provider";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ErrorNote } from "@/components/ui/error-note";
 import { FieldLabel, Input } from "@/components/ui/input";
 import { TraceId } from "@/components/ui/trace-id";
 import { ApiError, users } from "@/lib/api";
@@ -262,9 +264,7 @@ export default function UsersPage() {
               )}
 
               {create.isError && (
-                <p className="rounded-lg bg-danger-muted px-3 py-2 text-xs text-danger" role="alert">
-                  {describeFailure(create.error)}
-                </p>
+                <ErrorNote cause={create.error} describe={describeFailure} />
               )}
             </CardContent>
           </Card>
@@ -341,40 +341,49 @@ export default function UsersPage() {
             </p>
           )}
 
-          {rows.map((row) => (
-            <UserCard
-              key={row.id}
-              row={row}
-              isSelf={row.id === user.id}
-              busy={busyId === row.id}
-              resetting={resettingId === row.id}
-              confirmingReset={confirmingReset === row.id}
-              // Only the row an operator acted on may show an error: one shared
-              // message would blame every card for one refusal.
-              error={
-                update.isError && update.variables.id === row.id
-                  ? describeFailure(update.error)
-                  : reset.isError && reset.variables.id === row.id
-                    ? describeFailure(reset.error)
-                    : null
-              }
-              onRole={(next) => {
-                update.mutate({ id: row.id, role: next });
-              }}
-              onToggleActive={() => {
-                update.mutate({ id: row.id, is_active: !row.is_active });
-              }}
-              onAskReset={() => {
-                setConfirmingReset(row.id);
-              }}
-              onCancelReset={() => {
-                setConfirmingReset(null);
-              }}
-              onReset={() => {
-                reset.mutate(row);
-              }}
-            />
-          ))}
+          {rows.map((row) => {
+            // The cause, not its wording: the card needs the `ApiError` itself
+            // to print the id that ties this refusal to a server log line.
+            const failure =
+              update.isError && update.variables.id === row.id
+                ? update.error
+                : reset.isError && reset.variables.id === row.id
+                  ? reset.error
+                  : null;
+
+            return (
+              <UserCard
+                key={row.id}
+                row={row}
+                isSelf={row.id === user.id}
+                busy={busyId === row.id}
+                resetting={resettingId === row.id}
+                confirmingReset={confirmingReset === row.id}
+                // Only the row an operator acted on may show an error: one shared
+                // message would blame every card for one refusal.
+                error={
+                  failure === null ? null : (
+                    <ErrorNote cause={failure} describe={describeFailure} />
+                  )
+                }
+                onRole={(next) => {
+                  update.mutate({ id: row.id, role: next });
+                }}
+                onToggleActive={() => {
+                  update.mutate({ id: row.id, is_active: !row.is_active });
+                }}
+                onAskReset={() => {
+                  setConfirmingReset(row.id);
+                }}
+                onCancelReset={() => {
+                  setConfirmingReset(null);
+                }}
+                onReset={() => {
+                  reset.mutate(row);
+                }}
+              />
+            );
+          })}
         </>
       )}
 
@@ -396,7 +405,15 @@ interface UserCardProps {
   /** This row's password reset is in flight. */
   resetting: boolean;
   confirmingReset: boolean;
-  error: string | null;
+  /**
+   * This row's refusal, already rendered.
+   *
+   * A `ReactElement` rather than a `string` because the sentence and the server's
+   * trace id must come from the *same* `ApiError`: flattening the cause to its
+   * wording here is what made the id unreachable on every failed write. The caller
+   * builds it with `<ErrorNote>`, which owns that pairing.
+   */
+  error: ReactElement | null;
   onRole: (role: UserRole) => void;
   onToggleActive: () => void;
   onAskReset: () => void;
@@ -509,11 +526,7 @@ function UserCard({
           </div>
         )}
 
-        {error !== null && (
-          <p className="rounded-lg bg-danger-muted px-3 py-2 text-xs text-danger" role="alert">
-            {error}
-          </p>
-        )}
+        {error}
       </CardContent>
     </Card>
   );

@@ -4,11 +4,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocale, useTranslations } from "next-intl";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState, type ReactElement } from "react";
 
 import { useAuth } from "@/components/auth-provider";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ErrorNote } from "@/components/ui/error-note";
 import { FieldLabel, Input } from "@/components/ui/input";
 import { TraceId } from "@/components/ui/trace-id";
 import { agent, ApiError } from "@/lib/api";
@@ -415,6 +416,15 @@ function AgentScreen() {
               isLatest &&
               ((override.isPending && override.variables?.contractId === row.contract_id) ||
                 (flag.isPending && flag.variables?.contractId === row.contract_id));
+            // The cause behind that refusal, kept whole until the card renders it.
+            const failure =
+              actedOn && rerun.isError
+                ? rerun.error
+                : isLatest && override.isError && override.variables?.contractId === row.contract_id
+                  ? override.error
+                  : isLatest && flag.isError && flag.variables?.contractId === row.contract_id
+                    ? flag.error
+                    : null;
 
             return (
               <DecisionCard
@@ -426,14 +436,12 @@ function AgentScreen() {
                 confidence={percent.format(row.confidence)}
                 busy={actedOn && rerun.isPending}
                 correcting={correctingHere}
+                // The cause, not its wording: the card needs the `ApiError` itself
+                // to print the id that ties this refusal to a server log line.
                 error={
-                  actedOn && rerun.isError
-                    ? describeFailure(rerun.error)
-                    : isLatest && override.isError && override.variables?.contractId === row.contract_id
-                      ? describeFailure(override.error)
-                      : isLatest && flag.isError && flag.variables?.contractId === row.contract_id
-                        ? describeFailure(flag.error)
-                        : null
+                  failure === null ? null : (
+                    <ErrorNote cause={failure} describe={describeFailure} />
+                  )
                 }
                 onRerun={() => {
                   rerun.mutate({ contractId: row.contract_id });
@@ -475,7 +483,8 @@ interface DecisionCardProps {
   confidence: string;
   busy: boolean;
   correcting: boolean;
-  error: string | null;
+  /** The refusal, already rendered from its cause so its trace id survives. */
+  error: ReactElement | null;
   onRerun: () => void;
   onOverride: (channel: ContactChannel, reason: string) => void;
   onFlag: (reason: string) => void;
@@ -684,11 +693,7 @@ function DecisionCard({
           <p className="text-xs text-muted-foreground">{t("agent.olderRowNote")}</p>
         )}
 
-        {error !== null && (
-          <p className="rounded-lg bg-danger-muted px-3 py-2 text-xs text-danger" role="alert">
-            {error}
-          </p>
-        )}
+        {error}
       </CardContent>
     </Card>
   );

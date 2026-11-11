@@ -4,11 +4,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocale, useTranslations } from "next-intl";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useState, type ReactElement } from "react";
 
 import { useAuth } from "@/components/auth-provider";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ErrorNote } from "@/components/ui/error-note";
 import { FieldLabel, Input } from "@/components/ui/input";
 import { TraceId } from "@/components/ui/trace-id";
 import { ApiError, escalations } from "@/lib/api";
@@ -386,11 +387,7 @@ function EscalationsScreen() {
             </p>
           )}
 
-          {reply.isError && (
-            <p className="rounded-lg bg-danger-muted px-3 py-2 text-xs text-danger" role="alert">
-              {describeFailure(reply.error)}
-            </p>
-          )}
+          {reply.isError && <ErrorNote cause={reply.error} describe={describeFailure} />}
 
           {!scopeIsInvalid && queue.isPending && (
             <Card>
@@ -453,11 +450,12 @@ function EscalationsScreen() {
               busy={busyId === row.id}
               replying={reply.isPending && reply.variables?.contractId === row.contract_id}
               // Only the row an operator acted on may show an error: a shared
-              // message would blame every card on the page for one refusal.
+              // message would blame every card on the page for one refusal. The
+              // cause, not its wording, so the card keeps the refusal's trace id.
               error={
-                update.isError && update.variables?.id === row.id
-                  ? describeFailure(update.error)
-                  : null
+                update.isError && update.variables?.id === row.id ? (
+                  <ErrorNote cause={update.error} describe={describeFailure} />
+                ) : null
               }
               onClaim={() => {
                 claim(row);
@@ -492,7 +490,8 @@ interface EscalationCardProps {
   resolvedAt: string | null;
   busy: boolean;
   replying: boolean;
-  error: string | null;
+  /** The refusal, already rendered from its cause so its trace id survives. */
+  error: ReactElement | null;
   onClaim: () => void;
   onResolve: (note: string) => void;
   onReply: (channel: ContactChannel) => void;
@@ -647,11 +646,7 @@ function EscalationCard({
           </div>
         )}
 
-        {error !== null && (
-          <p className="rounded-lg bg-danger-muted px-3 py-2 text-xs text-danger" role="alert">
-            {error}
-          </p>
-        )}
+        {error}
       </CardContent>
     </Card>
   );

@@ -4,10 +4,12 @@ import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-q
 import { useLocale, useTranslations } from "next-intl";
 import Link from "next/link";
 import { useState } from "react";
+import type { ReactElement } from "react";
 
 import { useAuth } from "@/components/auth-provider";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ErrorNote } from "@/components/ui/error-note";
 import { FieldLabel, Input } from "@/components/ui/input";
 import { TraceId } from "@/components/ui/trace-id";
 import { ApiError, contracts } from "@/lib/api";
@@ -113,7 +115,14 @@ const CONSENT_LABELS = {
 interface ConsentRowState {
   canRecord: boolean;
   busy: boolean;
-  error: string | null;
+  /**
+   * This row's refusal, already rendered with the server's id beneath it.
+   *
+   * An element rather than the finished sentence, because the sentence and the id
+   * must come from the same `ApiError`. Flattening the cause to its wording here
+   * was what left a refused consent write with nothing to quote to support.
+   */
+  error: ReactElement | null;
   /** `unchanged` is a real answer, not a failure: the stored flags already matched. */
   outcome: "saved" | "unchanged" | null;
 }
@@ -311,7 +320,10 @@ export default function ContractsPage() {
     return {
       canRecord: canRecordConsent,
       busy: mine && consent.isPending,
-      error: mine && consent.isError ? describeConsentFailure(consent.error) : null,
+      error:
+        mine && consent.isError ? (
+          <ErrorNote cause={consent.error} describe={describeConsentFailure} />
+        ) : null,
       /**
        * A no-op answers the version it was given; a recorded change answers a
        * higher one. That difference is the only way to tell an operator their
@@ -507,9 +519,7 @@ export default function ContractsPage() {
                 )}
 
                 {ingest.isError && (
-                  <p className="text-xs text-danger" role="alert">
-                    {describeIngestFailure(ingest.error)}
-                  </p>
+                  <ErrorNote cause={ingest.error} describe={describeIngestFailure} />
                 )}
               </CardContent>
             </Card>
@@ -872,11 +882,7 @@ function ConsentEditor({ row, state, onSave }: ConsentEditorProps) {
         </p>
       )}
 
-      {!edited && state.error !== null && (
-        <p className="text-xs text-danger" role="alert">
-          {state.error}
-        </p>
-      )}
+      {!edited && state.error}
     </div>
   );
 }

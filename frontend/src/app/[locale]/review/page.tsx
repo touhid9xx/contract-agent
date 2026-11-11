@@ -4,10 +4,12 @@ import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-q
 import { useLocale, useTranslations } from "next-intl";
 import Link from "next/link";
 import { useState } from "react";
+import type { ReactElement } from "react";
 
 import { useAuth } from "@/components/auth-provider";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ErrorNote } from "@/components/ui/error-note";
 import { FieldLabel, Input } from "@/components/ui/input";
 import { TraceId } from "@/components/ui/trace-id";
 import { ApiError, review } from "@/lib/api";
@@ -184,8 +186,16 @@ export default function ReviewQueuePage() {
               revealing={revealingId === item.field_id}
               // Only the row the reviewer acted on may show an error: a shared
               // message would blame every card on the page for one refusal.
-              error={decide.variables?.fieldId === item.field_id ? describeFailure(decide.error) : null}
-              revealError={reveal.variables === item.field_id ? describeFailure(reveal.error) : null}
+              error={
+                decide.variables?.fieldId === item.field_id ? (
+                  <ErrorNote cause={decide.error} describe={describeFailure} />
+                ) : null
+              }
+              revealError={
+                reveal.variables === item.field_id ? (
+                  <ErrorNote cause={reveal.error} describe={describeFailure} />
+                ) : null
+              }
               decidedBlocking={
                 decide.data?.item.field_id === item.field_id ? decide.data.blocking : null
               }
@@ -230,8 +240,15 @@ interface ReviewCardProps {
   revealedValue: string | undefined;
   deciding: boolean;
   revealing: boolean;
-  error: string | null;
-  revealError: string | null;
+  /**
+   * This card's refusal, already rendered.
+   *
+   * Elements rather than finished sentences: a decision and a reveal are two
+   * different requests, and each refusal has to carry *its own* trace id. The
+   * screen builds both with `<ErrorNote>`, which pairs each cause with its wording.
+   */
+  error: ReactElement | null;
+  revealError: ReactElement | null;
   /** How many fields still block this contract, once a decision landed. */
   decidedBlocking: number | null;
   onDecide: (decision: ReviewDecision) => void;
@@ -340,11 +357,7 @@ function ReviewCard({
           </div>
         )}
 
-        {revealError !== null && (
-          <p className="rounded-lg bg-danger-muted px-3 py-2 text-xs text-danger" role="alert">
-            {revealError}
-          </p>
-        )}
+        {revealError}
 
         {canDecide && !editing && (
           <div className="flex flex-wrap items-center gap-2">
@@ -427,11 +440,7 @@ function ReviewCard({
           <p className="text-xs text-muted-foreground">{t("review.saving")}</p>
         )}
 
-        {error !== null && (
-          <p className="rounded-lg bg-danger-muted px-3 py-2 text-xs text-danger" role="alert">
-            {error}
-          </p>
-        )}
+        {error}
 
         {decidedBlocking !== null && (
           <p className="text-xs text-muted-foreground">

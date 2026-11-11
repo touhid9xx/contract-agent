@@ -4,11 +4,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocale, useTranslations } from "next-intl";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useState, type ReactElement } from "react";
 
 import { useAuth } from "@/components/auth-provider";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ErrorNote } from "@/components/ui/error-note";
 import { FieldLabel, Input } from "@/components/ui/input";
 import { TraceId } from "@/components/ui/trace-id";
 import { ApiError, notifications } from "@/lib/api";
@@ -473,34 +474,44 @@ function NotificationsScreen() {
             </Card>
           )}
 
-          {items.map((row) => (
-            <NotificationCard
-              key={row.id}
-              row={row}
-              canAct={canAct}
-              busy={busyId === row.id}
-              scheduledDate={dateFormat.format(new Date(row.scheduled_date))}
-              deferredUntil={
-                row.scheduled_at === null ? null : instantFormat.format(new Date(row.scheduled_at))
-              }
-              sentAt={row.sent_at === null ? null : instantFormat.format(new Date(row.sent_at))}
-              // Only the row an operator acted on may show an error: one shared
-              // message would blame every card on the page for one refusal.
-              error={
-                send.isError && send.variables === row.id
-                  ? describeFailure(send.error)
-                  : requeue.isError && requeue.variables === row.id
-                    ? describeFailure(requeue.error)
-                    : null
-              }
-              onSend={() => {
-                send.mutate(row.id);
-              }}
-              onRequeue={() => {
-                requeue.mutate(row.id);
-              }}
-            />
-          ))}
+          {items.map((row) => {
+            // Only the row an operator acted on may show an error: one shared
+            // message would blame every card on the page for one refusal. The
+            // cause, not its wording, so the card keeps the refusal's trace id.
+            const failure =
+              send.isError && send.variables === row.id
+                ? send.error
+                : requeue.isError && requeue.variables === row.id
+                  ? requeue.error
+                  : null;
+
+            return (
+              <NotificationCard
+                key={row.id}
+                row={row}
+                canAct={canAct}
+                busy={busyId === row.id}
+                scheduledDate={dateFormat.format(new Date(row.scheduled_date))}
+                deferredUntil={
+                  row.scheduled_at === null
+                    ? null
+                    : instantFormat.format(new Date(row.scheduled_at))
+                }
+                sentAt={row.sent_at === null ? null : instantFormat.format(new Date(row.sent_at))}
+                error={
+                  failure === null ? null : (
+                    <ErrorNote cause={failure} describe={describeFailure} />
+                  )
+                }
+                onSend={() => {
+                  send.mutate(row.id);
+                }}
+                onRequeue={() => {
+                  requeue.mutate(row.id);
+                }}
+              />
+            );
+          })}
 
           <p className="text-xs text-muted-foreground">{t("notifications.recipientNote")}</p>
         </>
@@ -526,7 +537,8 @@ interface NotificationCardProps {
   deferredUntil: string | null;
   /** `null` while the row has not reached a transport. */
   sentAt: string | null;
-  error: string | null;
+  /** The refusal, already rendered from its cause so its trace id survives. */
+  error: ReactElement | null;
   onSend: () => void;
   onRequeue: () => void;
 }
@@ -654,11 +666,7 @@ function NotificationCard({
           </div>
         )}
 
-        {error !== null && (
-          <p className="rounded-lg bg-danger-muted px-3 py-2 text-xs text-danger" role="alert">
-            {error}
-          </p>
-        )}
+        {error}
       </CardContent>
     </Card>
   );
