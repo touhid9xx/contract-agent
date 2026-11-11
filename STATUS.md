@@ -4345,8 +4345,23 @@ measure its failure rate directly — was written as `tests/test_zz_flake_probe.
 So "about one statement in a thousand" rests on the contention probe, not on a measured per-run
 rate for that specific test. The structural argument does not need it: the probe showed the
 shared connection and the fault, and the old body demonstrably did the unsafe thing. The probe
-and repeat-driver scripts live in `.agent-cache/`, which is gitignored — reproducible on the
-machine that ran them, not from the repo.
+and repeat-driver scripts ~~live in `.agent-cache/`, which is gitignored — reproducible on the
+machine that ran them, not from the repo.~~ **Amended by `D10-87`**: both scripts were deleted,
+and the conclusion they carried was false when it was written — see below.
+
+**Amended by `D10-87`: neither experiment needed the script that has since been deleted.**
+`.agent-cache/` is gitignored (`.gitignore:25`), so nothing in it was ever in the repo, and
+`probe_staticpool_threads.py` and `repeat_test.py` are both gone — a reader who follows this
+sentence looking for them finds nothing. But "reproducible on the machine that ran them, not
+from the repo" does not follow, and is false: the engine recipe is committed at
+`backend/tests/conftest.py:140-144`, and a probe rebuilt from it alone reproduced both halves.
+Two simultaneous connections from `StaticPool` hand back the **same** `sqlite3.Connection`
+(`is` → `True`, and a row committed in one thread reads back as `1` from another), and
+concurrent use of that connection faulted **5 times in 15,966 statements — 0.31 per 1,000**,
+as `InterfaceError: (sqlite3.InterfaceError) bad parameter or other API misuse` on `INSERT`. A
+30-round in-process driver rebuilt around `tests/test_escalation_scanner.py:528` passed
+**30/30 rounds, 0 failures**. The figures in `D10-30` stand; only the claim that the repo
+cannot re-derive them does not.
 
 ## The account routes have a caller ✅ (`D10-31` — provisioning stops being a hand-written request)
 

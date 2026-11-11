@@ -3032,6 +3032,10 @@ entry and its `STATUS.md` counterpart**; the backend suite was re-run here becau
 changed, and the commit gate result for it is recorded in the follow-up `docs(status)` commit,
 not back-dated into this one.
 
+*(Both scripts named above are gone, and neither figure ever depended on them: `D10-87` rebuilt
+each from committed sources and re-measured, and added `InterfaceError` to the exception classes
+`conftest.py` names.)*
+
 ### D10-31 — The account routes get a screen, and provisioning stops being a hand-written request
 
 The four `/auth/users` routes were the last ones only `curl` had reached. That was not a
@@ -6873,3 +6877,59 @@ the added lines, `D10-` headings contiguous through `D10-86`. The two amended ce
 exception and are named rather than rounded away: they were 363 and 381 columns at `HEAD` and are
 404 and 422 now, because this slice inserts a strike and a pointer into table cells that were
 already wider than the rest of the file keeps.
+
+### D10-87 — The probe was deleted, and the repo could always rebuild it
+
+`D10-30` ended a "what is not proven" paragraph by saying its probe and repeat-driver scripts
+"live in `.agent-cache/`, which is gitignored — reproducible on the machine that ran them, not
+from the repo". `D10-86` struck four clauses of the same family and deliberately left this one,
+recording that the specs it cited did not answer it. This entry answers it, and the answer is
+that the clause was never true — not even on the machine that ran it — because both scripts are
+**gone**. `Test-Path` on `.agent-cache/probe_staticpool_threads.py` and
+`.agent-cache/repeat_test.py` returns `False`, and `.gitignore:25` holds `.agent-cache/`, so
+neither file was ever in the repo in the first place.
+
+**The conclusion drawn from that was the mistake.** "Not from the repo" treated the *script* as
+the evidence, when the evidence is the *experiment*, and the experiment is fixed by two committed
+facts: `backend/tests/conftest.py:140-144` commits the engine recipe (`:memory:`,
+`check_same_thread: False`, `StaticPool`) and `:129-141` commits the claim it demonstrates. A
+probe rebuilt from those lines alone — no cache directory, no prior file — reproduced both halves.
+
+**What the rebuild measured.** Two simultaneous `engine.connect()` calls hand back the *same*
+`sqlite3.Connection`: `is` comparison `True`, and the semantic check agrees, a row committed on
+one thread reading back as `1` from another, which is only possible if the connection (and so the
+`/memory:` database) is shared. Concurrent use of that one connection faulted **5 times in
+15,966 statements — 0.31 per 1,000**, each one `InterfaceError: (sqlite3.InterfaceError) bad
+parameter or other API misuse` on `INSERT`. A
+thirty-round in-process driver rebuilt around `tests/test_escalation_scanner.py:528` passed
+**30/30 rounds, 0 failures**. Both figures come out of the repo; neither needs a cache file.
+
+**A wrong reading of my own, corrected before it reached this entry.** The first identity probe
+printed `same=False`, which would have contradicted `D10-30`'s "identical connection object ids".
+It was an artifact: `id(conn.connection.dbapi_connection)` was read off a temporary that could be
+freed, and the two threads' connects were separated by a `close()`. Holding the references and
+asking `is`, then asking the semantic question — is a row written on one thread visible from the
+other — gave `True` and `1` on repeated runs. The original claim is corroborated, not overturned;
+only the reproducibility clause falls.
+
+**One committed claim was incomplete, so the docstring changed.** `conftest.py` named
+`OperationalError`/`SystemError` as the classes concurrent use raises. The class that actually
+appeared was `InterfaceError`, so the docstring now lists all three and cites the measured rate.
+This is the slice's only code change: a comment, no behaviour, no test.
+
+**What this record does not claim.** (1) **It does not re-derive the A/B control.**
+`D10-30`'s other limit — the *old* test body was never run under the driver, so no per-run failure
+rate exists for that test — is untouched by anything here. (2) **The rate is not the same
+number, and does not contradict the old one.** "Roughly one statement in a thousand" described
+the original contention workload; 0.31 per 1,000 describes this one, and both are low enough to
+look like flakiness, which is the only property the argument uses. (3) **`D10-30`'s figures
+were not re-derived, and the suite has grown since.** 840 collected, 825 passed, 15 skipped
+described the tree that wrote them; this tree measures 900 collected, 885 passed, 15 skipped, 0
+failures. That is 60 more tests and the same 15 skips, not a disagreement — the figures are cited
+as historical, and no claim here rests on either count.
+
+**Gates.** The backend suite runs green over the changed docstring — 900 collected, 885 passed, 15
+skipped (the opt-in MySQL integration tests, which skip without `MYSQL_TEST_URL`), 0 failures,
+counted from JUnit rather than from a truncated terminal summary. The ledger invariants are
+rechecked: no `CR`, one trailing `LF`, every added prose line under 100 columns, an even count of
+strikethrough markers on the added lines, `D10-` headings contiguous through `D10-87`.

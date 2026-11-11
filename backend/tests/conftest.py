@@ -130,9 +130,12 @@ def db_engine() -> Iterator[Engine]:
     per test — and also what makes every session hand out the *same* DBAPI
     connection. So a test may use the database from a worker thread, or from the
     test thread, but not from both at once: concurrent use of one ``sqlite3``
-    connection raises ``OperationalError``/``SystemError`` at a rate low enough to
-    look like flakiness. ``test_escalation_scanner`` is the one test that starts a
-    worker thread, and it waits on an event and reads the rows only after joining.
+    connection raises ``OperationalError``, ``SystemError`` or ``InterfaceError``
+    at a rate low enough to look like flakiness (measured at ~0.3 per 1,000
+    statements in ``D10-87``; the first two were listed here, the third was the
+    one that actually appeared). ``test_escalation_scanner`` is the one test that
+    starts a worker thread, and it waits on an event and reads the rows only
+    after joining.
     """
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",
