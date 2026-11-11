@@ -540,9 +540,12 @@ have caught later. **No schema change, no migration (`0006`)**; nothing was writ
 something reads the log and ~~**nothing in this stack reads it**~~ — **amended by `D10-40`, not
 deleted:** something does for a deployment that sets `ATTENTION_ALERT_TO`, and nothing does for the
 default install, which is why the gap is narrowed and not closed rather than closed and not
-credited; the obvious next step, an HTTP route serving the same report, is **blocked rather than
+credited; the obvious next step, an HTTP route serving the same report, is ~~**blocked rather than
 skipped** on who may see counts that `dead_letter_count`, `undelivered_counts` and
-`fields_for_reseal` deliberately read **across tenants**. Gap 25 and gap 5 are untouched.
+`fields_for_reseal` deliberately read **across tenants**~~ **built, for the two counts a tenant can
+act on, by `D10-79`** — a second reader beside those three functions rather than a narrowing of
+them, which leaves the parks out on purpose. Gap 25 and gap 5 are untouched, and neither ever
+depended on this ruling: gap 25 is a deployment default and gap 5 a consumer.
 
 **Then the verdict gets somewhere to go** (`D10-40`, one commit: `feat(backend)` `d9530b5`):
 `D10-39` named its own missing link, and the recorded next step — an HTTP route serving the same
@@ -568,9 +571,12 @@ SMTP block, so a deployment with both mistakes is told "you have no relay" first
 log-only. The gate ran green on this tree — `ruff check`, `ruff format --check` (107 files), `mypy app`
 strict (62 files), `bandit` exit 0, `pytest -q` **888 tests, 0 failures, 15 skipped** (13 MySQL, 1
 symlink, 1 Kafka). **No schema change, no migration (`0006`).** The honest limit: the remembered
-verdict is **process memory**, so a restart while a finding stands re-announces it once — repaired by
-a table (`0007`), declined until a restarting worker is observed to be noisy; and the blocked route is
-no less blocked, because this sidesteps the cross-tenant question rather than answering it.
+verdict is **process memory**, so a restart while a finding stands re-announces it once — repaired
+by a table (`0007`), declined until a restarting worker is observed to be noisy; and the blocked
+route is ~~no less blocked, because this sidesteps the cross-tenant question rather than answering
+it.~~ **Amended by `D10-79`:** the route exists now (`GET /api/v1/attention`, admin only, two
+counts), and it sidesteps nothing — it answers the tenant's half of the question with a *second*
+reader scoped from the principal, leaving the three cross-tenant queries untouched.
 
 **Then the runner learns the alias** (`D10-41`, one commit: `test(web)` `8f65fbf`): `D10-37` closed
 the frontend's test gap with one spec, for the one pure module that happened to import relatively, and
@@ -5092,12 +5098,15 @@ both files were restored and confirmed byte-identical by SHA-256.
   deleted:** something now does read it — `app/workers/attention_alerts.py` mails the operator when the
   verdict *changes* (`d9530b5`) — but only in a deployment that sets `ATTENTION_ALERT_TO`. The
   sentence survives intact for the default install, and that is the install the claim was about.
-- **The obvious next step is blocked, not skipped.** An HTTP route serving this same report cannot be
-  written without deciding who may see counts that `dead_letter_count`, `undelivered_counts` and
+- ~~**The obvious next step is blocked, not skipped.** An HTTP route serving this same report cannot
+  be written without deciding who may see counts that `dead_letter_count`, `undelivered_counts` and
   `fields_for_reseal` deliberately read **across tenants** — each docstring says scoping them to one
-  tenant would be "actively misleading". Tenant-scoping the route contradicts three written decisions;
-  serving it unscoped leaks other tenants' counts and their field primary keys. That is an owner
-  decision.
+  tenant would be "actively misleading". Tenant-scoping the route contradicts three written
+  decisions; serving it unscoped leaks other tenants' counts and their field primary keys. That is
+  an owner decision.~~ **Amended by `D10-79`, not deleted:** the step was taken, and the fork above
+  was a false binary — a *second* reader scoped from the principal leaves all three operator
+  functions untouched. `GET /api/v1/attention` serves two counts, admin only, and reports no park
+  count. No screen calls it yet.
 - **Gap 25 is unchanged.** A default stack still parks every event; what changed is that the check now
   says so without shouting, and runs on a timer.
 - **Gap 5 is untouched.** The `contract.ingested` consumer is still blocked on the same owner decision.
@@ -5119,14 +5128,17 @@ an autouse fixture had a `yield` with no teardown.
 
 `D10-39` named its own missing link and left it open on purpose: the attention verdict was a log line,
 nothing in this stack read the log, and the recorded next step was an HTTP route serving the same
-report. Reading the three queries that feed that report, the step is **blocked rather than unbuilt** —
-`dead_letter_count`, `undelivered_counts` and `fields_for_reseal` each say in their own docstring that
-tenant-scoping them would be *actively misleading*, because a relay problem is not a tenant's and a CLI
-operator has a connection rather than a principal, while a route answers a *tenant* principal. An
-operator's question cannot be asked with a customer's credentials. So this slice changes the
-**recipient** instead: a person on the operations side, at an address the deployment configures. No
-principal is impersonated, no count has to be scoped, and the three cross-tenant queries are left
-exactly as they are.
+report. Reading the three queries that feed that report, the step is ~~**blocked rather than
+unbuilt**~~ **unbuilt and not obviously buildable** — `dead_letter_count`, `undelivered_counts` and
+`fields_for_reseal` each say in their own docstring that tenant-scoping them would be *actively
+misleading*, because a relay problem is not a tenant's and a CLI operator has a connection rather
+than a principal, while a route answers a *tenant* principal. An operator's question cannot be asked
+with a customer's credentials. So this slice changes the **recipient** instead: a person on the
+operations side, at an address the deployment configures. No principal is impersonated, no count has
+to be scoped, and the three cross-tenant queries are left exactly as they are. **Amended by
+`D10-79`:** they are still left exactly as they are, and there is now also a route — a *second*
+reader scoped from the principal, answering the tenant's question rather than the operator's. The
+diagnosis above survives; the conclusion that no route could exist does not.
 
 | Change | Detail |
 | --- | --- |
@@ -5174,9 +5186,13 @@ this address at the pager's mail gateway, which is what mail gateways are for.
   `D10-39`, and `build_attention_alerter` returns `None` rather than a refusing stand-in because an
   unset address is a legitimate configuration and not a misconfiguration. Gap 22 is therefore narrowed
   **for deployments that configure it** and not at all for those that do not.
-- **The blocked route is no less blocked.** This addresses a person instead of a principal, which
-  *sidesteps* the cross-tenant question rather than answering it. The owner decision it needs —
-  who may see counts read across tenants — is exactly where `D10-39` left it.
+- ~~**The blocked route is no less blocked.** This addresses a person instead of a principal, which
+  *sidesteps* the cross-tenant question rather than answering it. The owner decision it needs — who
+  may see counts read across tenants — is exactly where `D10-39` left it.~~ **Amended by `D10-79`,
+  not deleted:** the route now exists (`GET /api/v1/attention`, admin only, two counts), so what
+  this bullet protected — that an *operator alert* is not a *tenant route* — is now carried by two
+  separate readers rather than by the absence of one. The owner decision it named was never taken:
+  it turned out not to be needed once the question was split in two.
 - **Gap 25 is unchanged, and gap 5 is untouched.** A default stack still parks every event.
 - **No schema change.** `alembic` head stays `0006`.
 
@@ -5661,13 +5677,18 @@ per tick. What that does **not** change: ~~nothing in this stack reads the log~~
 `D10-40`, not deleted:** a deployment that sets `ATTENTION_ALERT_TO` is mailed when the verdict
 changes (`d9530b5`), so for that deployment something does read it; the default install still sends
 nothing anywhere — so gap 22 is narrowed and not closed, and the obvious next step — an HTTP route
-serving the same report — is blocked on an owner decision about counts that three repository
-functions read **across tenants**, which the route cannot scope without contradicting them. `D10-40`
-sidesteps that question by addressing an operator rather than a principal; it does not answer it.
-**`D10-48` does not touch this block, and the record should say so before anyone reads a green socket
-as progress on it.** The smoke journey proves the API as *wired* works across a process boundary; it
-does not rule on whether cross-tenant attention counts may be surfaced to an operator, so gap 22 and
-gap 25 stay exactly as blocked as the paragraph above says. The alternative that was taken instead was
+serving the same report — is ~~blocked on an owner decision about counts that three repository
+functions read **across tenants**, which the route cannot scope without contradicting them~~ **built
+by `D10-79` as a second reader, which needed no ruling because it narrows none of those three
+functions**. `D10-40` sidesteps the question by addressing an operator rather than a principal;
+`D10-79` then answered the tenant's half of it. **`D10-48` does not touch this block, and the record
+should say so before anyone reads a green socket as progress on it.** The smoke journey proves the
+API as *wired* works across a process boundary; it does not rule on whether cross-tenant attention
+counts may be surfaced to an operator, so gap 22 and gap 25 stay exactly as ~~blocked~~
+**unaddressed by that journey** as the paragraph above says. **Amended by `D10-79`:** gap 25 was
+never blocked on the cross-tenant question and grouping it here was wrong — it is a deployment
+default (`EVENT_TRANSPORT=none` parks every event) that no route addresses; and gap 22's route now
+exists for the two counts a tenant can act on. The alternative that was taken instead was
 deliberately the one needing no ruling — a way to test the server, not a new route on it.
 
 - `app/db/models/` — every table in the flow now has a writer: `Contract`

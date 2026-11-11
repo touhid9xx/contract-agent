@@ -3716,13 +3716,17 @@ this rare, and recorded here rather than hidden.
 
 **What this deliberately does not do, and what the next step would cost.** It does not deliver
 anything. A log line reaches a person only if something reads the log, and **nothing in this stack
-reads it**. Gap 22 is narrowed, not closed. The obvious next step is blocked rather than skipped: an
-HTTP route serving this same report cannot be written without deciding who may see counts that
-`dead_letter_count`, `undelivered_counts` and `fields_for_reseal` deliberately read **across tenants**
-— each of their docstrings says that scoping them to one tenant would be "actively misleading".
-Tenant-scoping the route contradicts three written decisions; serving it unscoped leaks other
-tenants' counts and their field primary keys. That is an owner decision, not a patch. No schema
-change and no migration: `alembic` head stays `0006`.
+reads it**. Gap 22 is narrowed, not closed. ~~The obvious next step is blocked rather than skipped:
+an HTTP route serving this same report cannot be written without deciding who may see counts that
+`dead_letter_count`, `undelivered_counts` and `fields_for_reseal` deliberately read **across
+tenants** — each of their docstrings says that scoping them to one tenant would be "actively
+misleading". Tenant-scoping the route contradicts three written decisions; serving it unscoped leaks
+other tenants' counts and their field primary keys. That is an owner decision, not a patch.~~
+**Amended by `D10-79`, not deleted:** the route was written, and the fork above was a false binary.
+Those three docstrings are arguments about the *operator's* board — the reader with no principal —
+and they stay true of it; a tenant asking about **their own** rows is a reader they never described.
+`D10-79` added that second reader beside them and left the operator queries byte-identical. No
+schema change and no migration: `alembic` head stays `0006`.
 
 The feature landed as `feat(backend)` `2572f53`; this record is written from the code and the
 measurements taken on that tree, and the `STATUS.md` regions it names were amended by the follow-up
@@ -3732,24 +3736,36 @@ and `D10-38` used.
 ### D10-40 — The person who runs the deployment is a recipient, not a principal
 
 `D10-39` left one link open and named it: the attention verdict was a log line, and nothing in this
-stack reads the log. The recorded next step was an HTTP route serving the same report. On reading the
-three queries that feed it, that step is not unbuilt — it is **blocked**, and the block is a decision
-about who may ask the question rather than about how to render an answer.
+stack reads the log. The recorded next step was an HTTP route serving the same report. ~~On reading
+the three queries that feed it, that step is not unbuilt — it is **blocked**, and the block is a
+decision about who may ask the question rather than about how to render an answer.~~ **Amended by
+`D10-79`, not deleted:** the step was not blocked, it was built — a tenant-scoped *second* reader
+beside the three operator queries rather than a narrowing of them. What survives from this paragraph
+is the diagnosis, which `D10-79` keeps: the route must not answer an operator's question with a
+customer's credentials.
 
-**Why the route cannot be written, stated precisely.** `dead_letter_count`, `undelivered_counts` and
+**~~Why the route cannot be written~~ Why *the operator's* route cannot be written, stated
+precisely.** `dead_letter_count`, `undelivered_counts` and
 `fields_for_reseal` each say in their own docstring that tenant-scoping them would be *actively
 misleading*: parked events belong to every tenant and a relay problem is not a tenant's; a CLI operator
 has a database connection, not a principal, so there is no tenant to scope to. They are **operator**
 queries. A route authenticates a **tenant** principal. The mismatch is therefore not a scoping bug to
 work around — the route would be answering an operator's question with a customer's credentials.
-Scoping it contradicts three written decisions; serving it unscoped hands one tenant another tenant's
-counts and field primary keys. That stays an owner decision, and this record does not make it.
+Scoping it contradicts three written decisions; serving it unscoped hands one tenant another
+tenant's counts and field primary keys. ~~That stays an owner decision, and this record does not
+make it.~~ **Amended by `D10-79`:** the choice was never between those two. A *second* reader over
+the same tables, scoped from the principal, in new functions that leave these three untouched, is
+neither branch of the fork — and it is what `D10-79` built. The owner decision this record declined
+was whether to *narrow an operator query*; that one is still not taken, and still not needed.
 
 **So the message goes to a person instead of a principal**, and the tenant question is never reached.
 The recipient is `ATTENTION_ALERT_TO` — deployment configuration, like `SMTP_HOST`, not customer data —
 so no principal is impersonated, no count has to be scoped, and the three cross-tenant queries are left
-exactly as they are. This *sidesteps* gap 22's obstacle rather than removing it, and the distinction is
-kept in the prose rather than smoothed over.
+exactly as they are. ~~This *sidesteps* gap 22's obstacle rather than removing it, and the
+distinction is kept in the prose rather than smoothed over.~~ **Amended by `D10-79`, not deleted:**
+sidestepping is what this record did; `D10-79` then removed the obstacle for two of the three counts
+by adding the reader this record assumed could not exist. The distinction this sentence protects is
+still the right one — an operator alert is not a tenant route — it just stopped being the last word.
 
 **It alerts on a change of verdict, never on the verdict itself.** At the default five-minute interval a
 standing finding is 288 messages a day, which is a mailbox filter by Thursday — and an alarm nobody
@@ -3827,9 +3843,13 @@ same reason `D10-39` declined row-level park classification — it is not worth 
 thinnest data this system has until a restarting worker is actually observed to be noisy. (2) The
 default install is unchanged and still log-only: the alert reaches a person only when the deployment
 sets the address, so gap 22 is narrowed for deployments that configure it and not at all for those that
-do not. (3) The blocked route is no less blocked. This addresses a person instead of a principal, which
-sidesteps the cross-tenant question rather than answering it. No schema change and no migration:
-`alembic` head stays `0006`.
+do not. (3) ~~The blocked route is no less blocked. This addresses a person instead of a principal,
+which sidesteps the cross-tenant question rather than answering it.~~ **Amended by `D10-79`, not
+deleted:** a route now exists — `GET /api/v1/attention`, admin only, two counts — as a *second*
+reader scoped from the principal, beside the three operator queries and narrowing none of them. What
+this limit was protecting, that an *operator alert* is not a *tenant route*, is now carried by two
+readers instead of by the absence of one. No schema change and no migration: `alembic` head stays
+`0006`.
 
 The feature landed as `feat(backend)` `d9530b5`; this record is written from the code and the
 measurements taken on that tree, and the `STATUS.md` regions it names were amended by the follow-up
@@ -6352,3 +6372,82 @@ once before either file was opened for writing, and both re-read after the write
 the only changed region is the one intended.
 
 Landed as `docs(status)`.
+
+### D10-79 — A tenant's attention board is a second question, not the operator's narrowed
+
+`D10-39` and `D10-40` both recorded the same next step and both called it **blocked**: an HTTP route
+serving the attention report, refused because `dead_letter_count`, `undelivered_counts` and
+`fields_for_reseal` read **across tenants** on purpose, and a route answers a *tenant* principal.
+Each record then put the same fork: scope those three (contradicting three written decisions) or
+serve them unscoped (handing one organisation another's counts and field primary keys). Both
+concluded "owner decision, not a patch".
+
+**The fork was a false binary, and that is this record's actual subject.** Those three docstrings
+are arguments about the *operator's* board — the reader with no principal, whose job is to describe
+every tenant at once. A tenant asking about **their own** rows is a different question, and not a
+reader the docstrings ever describe, because it did not exist when they were written. So nothing had
+to be narrowed: a **second reader** was added beside the first. `undelivered_counts_for_tenant` and
+`fields_for_reseal_for_tenant` are new functions; `undelivered_counts`, `fields_for_reseal` and
+`dead_letter_count` are byte-identical, `doctor` still exits on the same numbers, and the watch
+still logs the same line. This follows `D10-58` (one fact, many places) in the opposite direction:
+two readers, each with a docstring naming the question it answers, beats one function whose
+behaviour depends on who called it.
+
+**Two counts, not three.** `outbox_parked` is deliberately absent from the tenant reading. A parked
+event is a relay fault attributable to the deployment: the tenant cannot cause it and cannot fix it,
+so a count on their board produces a support ticket about somebody else's misconfigured transport.
+`D10-39` reached the same conclusion from the other side, explaining parks away under
+`EVENT_TRANSPORT=none` rather than alarming on them. The two counts that remain are the two a tenant
+can act on from screens they already have — a `failed`/`suppressed` notification is retried from
+their queue, and a plaintext field value is sealed from their own data.
+
+**Admin only.** The row-level detail is a list of field primary keys. Those are harmless in
+themselves — an admin of that tenant can already open every one of them in the review queue — but
+`unsealed_field_values` is a statement about the deployment's encryption hygiene rather than about a
+customer, and it is not a viewer's business. The narrowest role that can act on the answer gets it.
+
+**What the route cannot leak.** It takes no tenant from the request: no query parameter, no body
+field, no header. `principal.tenant_id` is resolved from the bearer token and a database read in
+`app.api.deps.get_current_principal`, so the only tenant a caller can ask about is the one they
+authenticated as. `backend/tests/test_attention_route.py` pins that from both sides rather than one:
+each organisation holds rows of both kinds, and the assertions include a *busier* other tenant (a
+clean board beside a dirty one would pass a route that simply counted the table) and the *reverse*
+direction. It also pins that `?tenant_id=` is ignored rather than honoured, which is the difference
+between a scoping bug and an IDOR.
+
+**One predicate, three consumers.** The `is_sealed` scan moved into `_unsealed_ids` so the operator
+reading and the tenant reading cannot eventually disagree about the same database — the day a column
+is added to `PII_COLUMNS`, two copies of that comprehension would be two answers to "is this row
+sealed?". `is_sealed` is shape-based, so neither reading needs `ENCRYPTION_KEY`, which is a property
+`D10-39` claimed in prose and this record keeps in code.
+
+**The fork was measured, not just argued.** `frozen` + `slots` on the new record, and a
+`TenantAttentionReport` that is *not* a field-for-field copy of `AttentionReport`: it has no
+`outbox_parked` and no `event_transport`. A shared record with three fields blanked for this reader
+would make "this tenant has no parks" and "we do not report parks to tenants" the same value — the
+confusion `D10-39` spent a section avoiding on the operator side.
+
+**Gates.** `pytest -q` → **900 tests, 0 failures, 0 errors, 15 skipped**, counted from the JUnit XML
+(888 before this slice, +12). The new file is `backend/tests/test_attention_route.py`, 12 tests. It
+was mutation-tested three ways on the committed tree, each caught: removing the tenant predicate
+from `undelivered_counts_for_tenant` failed three tests; replacing the predicate in
+`fields_for_reseal_for_tenant` with a tautology failed three, including a raw-id leak; adding an
+`outbox_parked` key to `AttentionView` failed two on the exact-dictionary comparison. The first
+draft used `FieldName.COMPANY`, which does not exist, and was corrected to `ADDRESS` before the
+first run.
+
+**What this record does not claim.** (1) **No screen calls it.** `frontend/src` contains no
+reference to `attention` at all — there is no `api.ts` client function and no UI, so today the route
+is reachable by an authenticated `curl` and by nothing else. That is half a product slice and is
+stated here rather than implied away by the word "delivered". (2) **The park residue is not narrowed
+for tenants** — it was excluded by decision, so a tenant still cannot see that their sends are
+parked, and `D10-39`'s operator reading remains the only reader of that count. (3) **Gap 25 is
+untouched and was never blocked on this ruling.** It is a deployment-default question:
+`EVENT_TRANSPORT=none` makes the relay park every event. No route addresses it and no cross-tenant
+ruling touches it; the earlier gap lists that grouped it with gap 22 as "blocked on the same
+decision" were wrong about that, and this record corrects them rather than repeating the grouping.
+(4) **Two roles were not surveyed**: the route is admin-only by argument, not by measurement of what
+an operator needs.
+
+No schema change, no migration: `alembic` head stays `0006`. The route writes nothing, takes no
+lock, and commits nothing.
