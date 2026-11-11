@@ -6933,3 +6933,42 @@ skipped (the opt-in MySQL integration tests, which skip without `MYSQL_TEST_URL`
 counted from JUnit rather than from a truncated terminal summary. The ledger invariants are
 rechecked: no `CR`, one trailing `LF`, every added prose line under 100 columns, an even count of
 strikethrough markers on the added lines, `D10-` headings contiguous through `D10-87`.
+
+### D10-88 — The compose header's reason held for Redis and had not for Ollama since F7
+
+`docker-compose.yml`'s header closed its Kafka note with *"No Redis/Ollama service is defined yet
+because no code talks to either; they arrive with the milestones that use them."* One reason, two
+subjects — and the reason was only ever true for one of them.
+
+**Redis.** Still accurate. `app/core/readiness.py` records that nothing in `backend/app` uses it;
+`D2-03` chose a row lease over a Redis lock for the outbox; and the login throttle's counters are
+rows in `login_attempts`, not counters in a cache (`D10-16`). No service, and no code that would
+reach one.
+
+**Ollama.** False as of F7. `app/workers/extractors.py:282` defines `OllamaExtractor`, which posts
+to `/api/generate` with `format: "json"` and `temperature: 0` and raises
+`ExtractionUnavailableError` rather than guessing when the model is silent; `build_extractor`
+(`:356`) selects it whenever `EXTRACTION_BACKEND=ollama`; `Settings.ollama_base_url` is declared at
+`app/core/config.py:121` and `OLLAMA_BASE_URL` is documented at `.env.example:53`. Code talks to
+Ollama. And the milestone that uses it — F7 — has already landed, so the header's second clause,
+*"they arrive with the milestones that use them"*, names an arrival that never happened for Ollama:
+the milestone arrived, the service did not.
+
+**What is actually missing is the service,** which is the distinction `gap 17` draws in `STATUS.md`
+and the header erased. `EXTRACTION_BACKEND=pattern` is what runs, not because nothing here can
+speak to a model, but because nothing here serves one — and `pattern` stays the default because it
+is the backend whose behaviour this repository can prove. The header now says exactly that.
+
+**What this record does not claim.** (1) **No behaviour changed** — one comment in one deployment
+file; no code, test, dependency, schema or migration, and `alembic` head stays `0006`. (2) **It does
+not close `gap 17`.** Defining an Ollama service is deployment configuration, and a service that no
+test exercises and no readiness probe covers would be the unverifiable milestone `D7-03` rejected;
+that is the owner's call, not a doc fix's. (3) **It does not claim a model has ever answered.** No
+live Ollama has been reached by this tree, before or after this commit.
+
+**Gates.** The F5 table row that recorded the header as "corrected" is struck in place and pointed
+at this entry, so the two places that carried the claim now agree — that row is a table line, not
+prose, and striking it in place rather than reflowing it keeps the diff to the clause that was
+wrong. The corrected compose comment stays under 100 columns per line. The ledger invariants are
+rechecked: no `CR`, one trailing `LF`, every added prose line under 100 columns, an even count of
+strikethrough markers on the added lines, `D10-` headings contiguous through `D10-88`.

@@ -1639,7 +1639,7 @@ whether it could serve, and parked rows nothing could un-park.
 | Operator CLI | `app/cli.py` — `python -m app.cli outbox-replay [--list \| --dry-run \| --ids N,N]`, exit `EXIT_OK` / `EXIT_NO_MATCH`, structlog (redacted) output. Injectable settings/session factory mirroring `create_app` |
 | Replay repo | `app/db/repositories/outbox.py` — `dead_lettered`, `replay_dead_lettered`, `DeadLetterReplay`, `DEFAULT_REPLAY_LIMIT`. Module-level (not `OutboxRepository` methods): replay has no worker identity and no lease. Only `failed` rows are touched; `attempts` resets; `next_attempt_at` floored to the stored second (the D2-06 lesson) |
 | Config | `app/core/config.py` — `readiness_timeout_seconds` (`gt=0, le=30`, default 5); `.env.example` documents it |
-| Compose | `docker-compose.yml` — header comment corrected (F5 landed, Redis/Ollama still unused). The `api` healthcheck **stays on `/health`** with a comment saying why: it drives `restart: unless-stopped`, so readiness there would restart a healthy API whenever MySQL blips |
+| Compose | `docker-compose.yml` — header comment corrected (F5 landed, ~~Redis/Ollama still unused~~ **amended by F7, `D10-88`**). The `api` healthcheck **stays on `/health`** with a comment saying why: it drives `restart: unless-stopped`, so readiness there would restart a healthy API whenever MySQL blips |
 | Tests | `backend/tests/test_readiness.py` (15 cases), `backend/tests/test_outbox_replay.py` (13 cases) |
 
 ### Verification actually run (F5)
@@ -1674,6 +1674,19 @@ it proves the *verdict logic*: fail-closed on a dead dependency, `timeout` under
 wedged one, the 503 body shape, `not_configured` omission, and that no driver text
 reaches the response. It does **not** prove a real broker or a real outage behaves
 the same — same caveat as F4's, for the same reason (no broker service).
+
+**Amended by `D10-88`: the compose header's reason was true for one of its two subjects and had
+been false for the other since F7.** The F5 row above recorded that header as "corrected", and what
+it said was *"No Redis/Ollama service is defined yet because no code talks to either; they arrive
+with the milestones that use them."* Redis half — still true: `app/core/readiness.py` records that
+nothing in `backend/app` uses it, and the login throttle's counters are rows in `login_attempts`.
+Ollama half — false since F7 committed `OllamaExtractor` (`app/workers/extractors.py:282`) posting
+to `/api/generate`, `build_extractor` selecting it on `EXTRACTION_BACKEND=ollama` (`:356`), and
+`Settings.ollama_base_url` (`app/core/config.py:121`) with `OLLAMA_BASE_URL` documented at
+`.env.example:53`. So what Ollama lacks is the **service**, not the code — precisely the
+distinction `gap 17` draws and the header erased. The header now says that, and names `pattern` as
+what runs until a service is defined. One comment in one deployment file: no code, test, dependency
+or schema changed.
 
 ## F6 — Contract ingestion + first real outbox producer ✅
 
