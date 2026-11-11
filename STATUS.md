@@ -3648,15 +3648,16 @@ a hook finally ran and passed.
     false when it was written and stayed false until `D10-78` struck it here, which is
     why it is struck rather than deleted:** the mock is `demo/backend` and
     `demo/frontend` is its only consumer — no file under `frontend/src` imports it.
-    Eight of the nine screens in `frontend/src/app/[locale]` import `@/lib/api`, the
-    real client (`contracts`, `contracts/[id]`, `review`, `agent`, `escalations`,
-    `notifications`, `users`, `login`), and the ninth, the home screen, reads `/health`
-    through `HealthStatus`, which imports `probeHealth` from the same module. No v1
-    router is `TestClient`-only (`D10-29` recorded that at the signed inventory). What
-    survives is the limit that was always the real one: **no browser has ever rendered
-    one of these screens**, so every screen test is a DOM the suite built. The F8 and F9
-    verification paragraphs above still say these routes had only `TestClient`; those
-    are dated records of those slices and are left as written.
+    Nine of the ten screens in `frontend/src/app/[locale]` import `@/lib/api`, the real client
+    (`contracts`, `contracts/[id]`, `review`, `agent`, `escalations`, `notifications`, `users`,
+    `login`, `attention`), and the tenth, the home screen, reads `/health` through `HealthStatus`,
+    which imports `probeHealth` from the same module. **Amended by `D10-80`, not deleted:** this
+    said *eight of the nine* until `D10-80` added the attention board, which imports the same module
+    for `attention.read`. No v1 router is `TestClient`-only (`D10-29` recorded that at the signed
+    inventory). What survives is the limit that was always the real one: **no browser has ever
+    rendered one of these screens**, so every screen test is a DOM the suite built. The F8 and F9
+    verification paragraphs above still say these routes had only `TestClient`; those are dated
+    records of those slices and are left as written.
 16. ~~**The review queue paginates by `limit` only.**~~ — **closed by `c90423b`.**
     `awaiting_review()` takes an `after=ReviewCursor` keyset and the route accepts
     `?cursor=` / returns `next_cursor`, so a backlog longer than the 500-row cap is
@@ -5106,7 +5107,9 @@ both files were restored and confirmed byte-identical by SHA-256.
   an owner decision.~~ **Amended by `D10-79`, not deleted:** the step was taken, and the fork above
   was a false binary — a *second* reader scoped from the principal leaves all three operator
   functions untouched. `GET /api/v1/attention` serves two counts, admin only, and reports no park
-  count. No screen calls it yet.
+  count. ~~No screen calls it yet.~~ **Amended by `D10-80`:** `/[locale]/attention` reads it now —
+  admin-gated in the client as well as the server, read-only, linked from the home screen. What
+  survives from the struck half is the shape it named: still two counts, still no park.
 - **Gap 25 is unchanged.** A default stack still parks every event; what changed is that the check now
   says so without shouting, and runs on a timer.
 - **Gap 5 is untouched.** The `contract.ingested` consumer is still blocked on the same owner decision.
@@ -5549,7 +5552,8 @@ the tree had outgrown.** No figure above moves: 10 screens, 25 sites, 96 keys, 4
 both catalogue directions. What changes is `README.md`'s "what is still missing" list, which
 said **no CI** and **7 of the 9 web screens have no test**. Both were false — CI is seven jobs
 (`python-static`, `backend-tests`, `mysql-integration`, `frontend`, `demo-frontend`, `hygiene`,
-`gate`) and 21 runs, 20 green, the one red on `6c02f66`; and all nine screens have a spec. The
+`gate`) and 21 runs, 20 green, the one red on `6c02f66`; and all nine screens have a spec (ten since
+`D10-80` added the attention board, spec and all). The
 screen sentence was true for exactly the commit that wrote it (`e165ae8`, two specs, 9 − 2 = 7)
 and false from `dd41c04` onward, which landed the third — 37 commits before this one. The Kafka
 clause survives and is not struck: no broker in `docker-compose.yml`, no consumer in `backend/`.

@@ -5106,11 +5106,15 @@ component test** — home.
 ### D10-57 — The ninth screen test: the screen that reads no tenant data
 
 The **home** page is the ninth and last locale screen to get a component test, so
-`frontend/src/app/[locale]` has **nine of nine** and the set is closed. It is also the smallest
-subject in the chain and the one that had waited longest, because it is the only screen whose
-rules are not about data at all: it performs **no query**, which is why its spec deliberately
-supplies **no `QueryClientProvider`** — providing one would hide a screen that began reading
-tenant data without saying so.
+`frontend/src/app/[locale]` has **nine of nine** ~~and the set is closed~~. **Amended by `D10-80`,
+not deleted:** nine of nine was true of the nine that existed, and the *closure* was the claim that
+expired — `D10-80` added a tenth screen, the attention board, with its spec in the same commit. The
+count is now **ten of ten**, and the rule this sentence was really about is unchanged and still
+guarded: `frontend/src/app/screens.test.ts` fails the suite when a screen ships without a spec. It
+is also the smallest subject in the chain and the one that had waited longest, because it is the
+only screen whose rules are not about data at all: it performs **no query**, which is why its spec
+deliberately supplies **no `QueryClientProvider`** — providing one would hide a screen that began
+reading tenant data without saying so.
 
 **One question, and only one.** The liveness line asks `/health` and nothing else, and the spec
 asserts that single probe in all four states (checking, ok, down, and signed in) plus the sentence
@@ -6436,18 +6440,87 @@ from `undelivered_counts_for_tenant` failed three tests; replacing the predicate
 draft used `FieldName.COMPANY`, which does not exist, and was corrected to `ADDRESS` before the
 first run.
 
-**What this record does not claim.** (1) **No screen calls it.** `frontend/src` contains no
+**What this record does not claim.** (1) ~~**No screen calls it.** `frontend/src` contains no
 reference to `attention` at all — there is no `api.ts` client function and no UI, so today the route
 is reachable by an authenticated `curl` and by nothing else. That is half a product slice and is
-stated here rather than implied away by the word "delivered". (2) **The park residue is not narrowed
-for tenants** — it was excluded by decision, so a tenant still cannot see that their sends are
-parked, and `D10-39`'s operator reading remains the only reader of that count. (3) **Gap 25 is
-untouched and was never blocked on this ruling.** It is a deployment-default question:
-`EVENT_TRANSPORT=none` makes the relay park every event. No route addresses it and no cross-tenant
-ruling touches it; the earlier gap lists that grouped it with gap 22 as "blocked on the same
-decision" were wrong about that, and this record corrects them rather than repeating the grouping.
-(4) **Two roles were not surveyed**: the route is admin-only by argument, not by measurement of what
-an operator needs.
+stated here rather than implied away by the word "delivered".~~ **Amended by `D10-80`, not
+deleted:** the other half was then built — `/[locale]/attention` reads the route through
+`attention.read`, is admin-gated in the client as well as the server, and is linked from the home
+screen. What survives from this clause is the reason it was written: naming a half-slice is what
+made the second one visible. (2) **The park residue is not narrowed for tenants** — it was excluded
+by decision, so a tenant still cannot see that their sends are parked, and `D10-39`'s operator
+reading remains the only reader of that count. (3) **Gap 25 is untouched and was never blocked on
+this ruling.** It is a deployment-default question: `EVENT_TRANSPORT=none` makes the relay park
+every event. No route addresses it and no cross-tenant ruling touches it; the earlier gap lists that
+grouped it with gap 22 as "blocked on the same decision" were wrong about that, and this record
+corrects them rather than repeating the grouping. (4) **Two roles were not surveyed**: the route is
+admin-only by argument, not by measurement of what an operator needs.
 
 No schema change, no migration: `alembic` head stays `0006`. The route writes nothing, takes no
 lock, and commits nothing.
+
+### D10-80 — A route with no caller is half a slice, and the screen says so on itself
+
+`D10-79` landed `GET /api/v1/attention` and then wrote the limit down instead of smoothing it over:
+*no screen calls it*, so the route was reachable by an authenticated `curl` and by nothing else.
+That was honest and it was still half a product slice. This record is the other half —
+`frontend/src/app/[locale]/attention/page.tsx`, linked from the home screen, reading the route
+through a new `attention.read` in `frontend/src/lib/api.ts`.
+
+**The client declines the question the server would refuse.** The server is admin-only and
+`backend/tests/test_attention_route.py` earns the 403 from an operator principal. The screen is
+gated the same way at a different layer — `enabled: isAdmin` on the query — so an operator's browser
+does not ask and is not told no. That is not redundancy for its own sake: the two assertions are
+different claims. The server test proves an operator *cannot* read another tenant's board; the
+screen test proves a non-admin session makes **zero** API calls, which is the only way to state that
+the refusal is never leaned on. The second cannot be written from `TestClient`, because it starts
+where the first one ends.
+
+**Read-only, and it says what to do instead.** The board offers no action. Both counts are cleared
+on screens that already exist — a `failed` or `suppressed` notification is retried from the
+notification queue, and an unsealed field value is re-sealed or revealed from the review queue — so
+the page links out and claims no write it does not have. That follows `D10-79`'s argument for why
+these two counts and not the third: a number a reader cannot act on is a support ticket, whichever
+screen renders it.
+
+**The verdict is read, never recomputed.** `needs_attention` comes off the wire. A draft that
+derived it from the three counts would have been a second implementation of the server's rule, free
+to disagree with it the first time the rule changed — the failure `frontend/src/lib/refusals.ts`
+exists to prevent in the other direction. `field_scan_truncated` is rendered *beside* the count it
+qualifies, so a truncated scan cannot read as a small number and a clean board. Both are pinned by
+test: a board with three failed notifications and the flag `false` must render calm, and the
+truncation marker is asserted present and absent.
+
+**Ids, never values.** The row detail is field primary keys, and the screen renders them as links
+into the review queue and nothing more — no value is fetched, decrypted or shown. The route's
+`AttentionView` has no `outbox_parked` key and the screen has no park line; the absence is asserted
+from both sides rather than left to review — `"outbox_parked" in report === false` in `api.test.ts`,
+and the exact seven-key comparison in the route suite. A screen is the easiest place in a stack to
+reintroduce a field a decision removed.
+
+**A sentence that contradicted the decision beside it.** The first draft of the operator's refusal
+hint read *"Two of its counts are statements about this deployment rather than about a customer."*
+The deployment-scoped count — parked events — is precisely the one `D10-79` kept off this board, so
+the hint described a board nobody had built. Nothing failed; the catalogue parsed, both locales
+agreed, the tests passed. It was caught by reading the copy against the decision and corrected to
+name the work an administrator clears. `D10-59` said a comment is a claim; this is the same defect
+one layer out, in product copy.
+
+**Gates.** `npx vitest run` → **352 tests in 18 files, 0 failures**, measured on this tree;
+`backend/tests/test_attention_route.py` unchanged and the backend suite re-counted from the JUnit
+XML at **900 tests, 0 failures, 0 errors, 15 skipped**. No backend file, no schema change, no
+migration: `alembic` head stays `0006`. The screen added 14 tests and the client 3.
+
+**What this record does not claim.** (1) **No browser has run it.** Every assertion is a DOM the
+suite built; `jsdom` proves the wiring, not the rendering. (2) **The mutation evidence is uneven,
+and one gap is admitted rather than closed.** Flipping `needs_attention` to a recomputed `> 0` was
+caught by **one** test, not the two predicted, and the reason is a defect in this slice's own spec:
+the case titled "renders the catalogue in Bengali" only exercises a clean board, so it cannot
+distinguish the two branch conditions it appears to cover. The title was tightened; the coverage was
+not added. (3) **One write reported failure and had landed.** Two `EBUSY` responses on the catalogue
+files were false — the JSON was correct, verified by reading it back. Earlier in this project the
+same error class failed the other way, which is why neither the error nor the success was trusted.
+(4) **The home screen's own copy moved with it** — `home.body` said administrators "get a sixth"
+link, which this screen made false in both catalogues before either commit.
+
+No source file outside `frontend/` changed.
