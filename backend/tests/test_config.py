@@ -248,3 +248,49 @@ def test_the_scheduler_batch_and_interval_are_bounded() -> None:
     settings = Settings(app_env="development")
     assert settings.notification_batch_size == 50
     assert settings.notification_poll_interval_seconds == 5.0
+
+
+def test_a_hosted_agent_backend_is_not_representable() -> None:
+    """The product LLM is local by rule, so a cloud backend cannot even be named.
+
+    ``AgentBackend`` is a closed literal rather than a free string: there is no
+    configuration that adds a hosted provider, so "no cloud LLM in the product"
+    is enforced by the type instead of by review.
+    """
+    with pytest.raises(ValidationError, match="agent_backend"):
+        # The ignore is the point: a type checker refuses this call, which is
+        # exactly the guarantee being tested at runtime.
+        Settings(app_env="development", agent_backend="openai")  # type: ignore[arg-type]
+
+
+def test_a_remote_ollama_endpoint_must_be_tls() -> None:
+    """The feature vector is personal data even with no identifier in it.
+
+    A plaintext hop to a remote model would let whoever sits on the network see
+    who is being contacted about which contract, so a deployable environment
+    refuses the shape at boot instead of trusting the deployer to remember.
+    """
+    with pytest.raises(ValidationError, match="OLLAMA_BASE_URL must be https"):
+        make_production(
+            agent_backend="ollama",
+            ollama_base_url="http://gpu.example.com:11434",
+        )
+
+
+def test_a_loopback_ollama_endpoint_may_be_plain_http() -> None:
+    """A sidecar on the same host is not crossing a network, so http is allowed."""
+    settings = make_production(
+        agent_backend="ollama",
+        ollama_base_url="http://127.0.0.1:11434",
+    )
+
+    assert settings.agent_backend == "ollama"
+
+
+def test_a_tls_remote_ollama_endpoint_is_accepted() -> None:
+    settings = make_production(
+        agent_backend="ollama",
+        ollama_base_url="https://gpu.example.com:11434",
+    )
+
+    assert settings.ollama_base_url == "https://gpu.example.com:11434"

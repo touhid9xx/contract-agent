@@ -13,6 +13,7 @@ import ssl
 from functools import lru_cache
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -33,6 +34,13 @@ ExtractionBackend = Literal["pattern", "ollama"]
 #: adapter does: a transport is never named here ahead of the code that
 #: implements it, which is why there is still no ``sms`` or ``voice`` member.
 NotificationTransport = Literal["none", "smtp"]
+#: Which selector answers "which channel should we contact this customer on".
+#: ``deterministic`` is the F9 contact policy and the default: it decides, and the
+#: row records that it did. ``ollama`` adds the local model *on top of* it, as an
+#: advisor that may only choose among the channels the policy already permitted
+#: (P2-D). A hosted model is not a member — "no cloud LLM" is a non-negotiable, so
+#: ``AGENT_BACKEND=openai`` is a start-up ``ValidationError``, not a code path.
+AgentBackend = Literal["deterministic", "ollama"]
 
 #: The value shipped in .env.example. Never valid in staging/production.
 #: Not a credential: production validation below refuses to start when it is
@@ -163,6 +171,39 @@ class Settings(BaseSettings):
     #: Upper bound on the document text handed to a backend, in characters.
     extraction_max_document_chars: int = Field(default=20_000, gt=0, le=200_000)
 
+    # --- agent advisory (P2-D) -------------------------------------------
+    #: Selects the channel chooser. See :data:`AgentBackend`: the deterministic
+    #: policy always runs first, and it alone decides *whether* a customer may be
+    #: contacted at all. The model can only rank what the policy permitted.
+    agent_backend: AgentBackend = "deterministic"
+    #: Local model the advisor asks. Pinned by tag, not by digest: the tag is what
+    #: ``ollama pull`` in ``docker-compose.yml`` produces, and an unpinned name
+    #: would let a re-pull change a decision nobody reviewed.
+    agent_model: str = "qwen2:7b"
+    #: Second model, tried **once** and only after the primary fails to answer at
+    #: all (refused connection, timeout, non-JSON body). A shape failure is
+    #: repaired against the same model instead: the small model is not better at
+    #: reading the schema, and switching models mid-repair would make
+    #: ``schema_repair_attempts`` describe two experiments at once.
+    #: ``None`` disables the second attempt.
+    agent_fallback_model: str | None = "qwen2:1.5b"
+    #: Ceiling on one completion. Generous because ``qwen2:7b`` on CPU is slow and
+    #: a timeout is a review item; the API request this runs inside is already
+    #: bounded by the client. Alerting on p95 latency is P2-J's job, not this
+    #: bound's, which only has to stop a wedged socket from holding a worker.
+    agent_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
+    #: Shape repairs allowed before the answer is abandoned. Three matches the
+    #: spec's repair loop; each attempt is counted in
+    #: ``agent_decisions.schema_repair_attempts`` so a model that always needs
+    #: three is visible in the data rather than in a log.
+    agent_repair_max: int = Field(default=3, ge=0, le=10)
+    #: Floor on the model's **self-reported** confidence. Below it the answer is
+    #: still recorded — discarding it would leave no evidence — but the decision
+    #: is flagged ``needs_review``, which blocks dispatch until a person clears it.
+    #: 0.6 is deliberately not the extraction threshold (0.8): the two numbers
+    #: bound different quantities, and reusing one would imply they are comparable.
+    agent_min_confidence: float = Field(default=0.6, gt=0, le=1)
+
     # --- contract documents (gap 12) -------------------------------------
     #: Where ingested document bytes are kept.
     #:
@@ -276,6 +317,20 @@ class Settings(BaseSettings):
     #: the window it measures is fourteen *days*, so a finer sweep would only add
     #: load without finding anything sooner.
     escalation_scan_poll_interval_seconds: float = Field(default=300.0, gt=0, le=3600)
+    #: Where a *newly raised* escalation is mailed. Empty means log-only, which stays
+    #: the default for the same reason :attr:`attention_alert_to` is empty by default:
+    #: this is deployment configuration, not customer data, and a deployment that has
+    #: not named a person to receive it should not silently believe one exists.
+    #:
+    #: The recipient is the person who runs the deployment, never the customer and
+    #: never a tenant principal. What raises an escalation is precisely that the
+    #: *customer* could not be reached, so the party who can act is the operator.
+    #: The alert therefore reads none of the contact policy — no consent, no quiet
+    #: hours, no template — because none of those gates govern mailing ourselves.
+    #:
+    #: It travels the one transport ``NOTIFICATION_TRANSPORT`` already names, so a
+    #: deployment has one relay to configure and one credential to rotate.
+    escalation_alert_to: str = ""
 
     # --- smtp transport --------------------------------------------------
     # Read only when ``notification_transport == "smtp"``. ``smtp_host`` is the
@@ -468,6 +523,25 @@ class Settings(BaseSettings):
                     "configure the SMTP block, or unset ATTENTION_ALERT_TO."
                 )
 
+        # The same two ways to be wrong as the attention address above, refused for
+        # the same reason: an address with no relay behind it reads to an operator as
+        # "a person is being told" while the first escalation goes nowhere — and the
+        # first escalation is exactly when that belief costs a customer.
+        if self.escalation_alert_to:
+            if not _is_plausible_address(self.escalation_alert_to):
+                raise ValueError(
+                    "ESCALATION_ALERT_TO must be an e-mail address when set; got "
+                    f"{self.escalation_alert_to!r}. Leave it empty to keep raised "
+                    "escalations in the queue and the log only."
+                )
+            if self.notification_transport != "smtp":
+                raise ValueError(
+                    "ESCALATION_ALERT_TO is set but NOTIFICATION_TRANSPORT is "
+                    f"{self.notification_transport!r}, so there is no transport to "
+                    "send the alert with. Set NOTIFICATION_TRANSPORT=smtp and "
+                    "configure the SMTP block, or unset ESCALATION_ALERT_TO."
+                )
+
         # A malformed key is worse than a missing one: it fails at the first
         # encrypt rather than at start-up, which is a write path, not a boot.
         # Empty stays legal here because the API process never stores field
@@ -572,6 +646,22 @@ class Settings(BaseSettings):
                 "resolves against each process's working directory, so the API, the "
                 "workers and the CLI would disagree about where documents live."
             )
+        # The product LLM is local by rule, and the feature vector it receives is
+        # personal data even when no identifier is in it: a model reached over a
+        # plaintext hop hands a third party the ability to observe who is being
+        # contacted about which contract. Loopback is fine (a sidecar on the same
+        # host); anything else must be TLS. This refuses a *shape* that would send
+        # it in the clear rather than trusting the deployer to remember.
+        if self.agent_backend == "ollama":
+            host = urlsplit(self.ollama_base_url).hostname or ""
+            is_local = host in _LOOPBACK_HOSTS
+            if not is_local and urlsplit(self.ollama_base_url).scheme != "https":
+                raise ValueError(
+                    "OLLAMA_BASE_URL must be https (or loopback) in "
+                    f"{self.app_env} when AGENT_BACKEND=ollama; got "
+                    f"{self.ollama_base_url!r}. The feature vector and every "
+                    "completion would otherwise cross the network unencrypted."
+                )
 
     # --- derived values --------------------------------------------------
     @property

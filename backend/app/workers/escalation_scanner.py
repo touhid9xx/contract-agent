@@ -53,6 +53,7 @@ from __future__ import annotations
 import signal
 import threading
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from types import FrameType
@@ -62,6 +63,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
+from app.core.metrics import ESCALATION_EMAIL_FAILED_TOTAL, ESCALATIONS_TOTAL
 from app.db.base import truncate_to_second, utc_now
 from app.db.enums import ContractStatus
 from app.db.models import Contract
@@ -74,6 +76,11 @@ from app.db.repositories.audit import (
 from app.db.repositories.escalations import EscalationRepository, claim_silent_contracts
 from app.db.session import build_engine, build_session_factory, session_scope
 from app.workers.escalation import EscalationRefusedError, refusal_to_raise, sla_deadline
+from app.workers.escalation_alerts import (
+    EscalationAlerter,
+    RaisedEscalation,
+    build_escalation_alerter,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -110,9 +117,15 @@ class EscalationScanner:
         settings: Settings,
         batch_size: int | None = None,
         poll_interval_seconds: float | None = None,
+        alerter: EscalationAlerter | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._settings = settings
+        # ``None`` means "decide from settings", not "never alert": a deployment that
+        # set ESCALATION_ALERT_TO gets its alert without the entry point having to
+        # remember to pass one. A caller wanting silence passes a no-op alerter,
+        # which is a decision the class can log, rather than leaving it unset.
+        self._alerter = build_escalation_alerter(settings) if alerter is None else alerter
         self._batch_size = settings.escalation_scan_batch_size if batch_size is None else batch_size
         self._poll_interval = (
             settings.escalation_scan_poll_interval_seconds
@@ -132,6 +145,7 @@ class EscalationScanner:
             poll_interval_seconds=self._poll_interval,
             no_response_days=self._settings.escalation_no_response_days,
             sla_hours=self._settings.escalation_sla_hours,
+            alerting=self._alerter is not None,
         )
 
         while not stop.is_set():
@@ -164,14 +178,66 @@ class EscalationScanner:
         cutoff = now - timedelta(days=self._settings.escalation_no_response_days)
         deadline = truncate_to_second(sla_deadline(now, hours=self._settings.escalation_sla_hours))
 
+        raised: list[RaisedEscalation] = []
+        refused: list[str] = []
         with session_scope(self._session_factory) as session:
             contracts = claim_silent_contracts(session, cutoff=cutoff, limit=self._batch_size)
-            opened = 0
-            refused: list[str] = []
             for contract in contracts:
-                if self._escalate(session, contract, deadline=deadline, refused=refused):
-                    opened += 1
-            return ScanResult(candidates=len(contracts), opened=opened, refused=tuple(refused))
+                opened = self._escalate(session, contract, deadline=deadline, refused=refused)
+                if opened is not None:
+                    raised.append(opened)
+            result = ScanResult(
+                candidates=len(contracts),
+                opened=len(raised),
+                refused=tuple(refused),
+            )
+
+        # Counted after the commit, not inside the transaction. A batch that rolls
+        # back would otherwise leave its escalations in the series, and the graph
+        # would report work that no queue holds.
+        if raised:
+            ESCALATIONS_TOTAL.inc(len(raised), status="opened")
+        if refused:
+            ESCALATIONS_TOTAL.inc(len(refused), status="refused")
+
+        # Outside the transaction, deliberately. ``session_scope`` has committed by
+        # the time control arrives here, so a slow or refusing relay cannot hold row
+        # locks over the batch it just wrote and cannot roll back an escalation that
+        # already exists. The alert reports a fact; it does not establish one.
+        self._alert(raised)
+        return result
+
+    def _alert(self, raised: Sequence[RaisedEscalation]) -> None:
+        """Tell the operator about a batch this scan opened. Never raises.
+
+        An exception here would make :meth:`run_forever` log a failed tick and
+        imply the pass wrote nothing, when in fact it wrote every escalation in
+        ``raised``. A refused relay therefore costs one counter and one log line,
+        and the queue stays the authority on what happened.
+        """
+        if not raised:
+            return
+        if self._alerter is None:
+            # Not an error: a deployment may deliberately run log-only. Saying so
+            # once per opening batch keeps "no alert address" visible in the log
+            # rather than reading as a silent, wired-up success.
+            log.warning(
+                "escalation_alert_not_configured",
+                opened=len(raised),
+                effect="set ESCALATION_ALERT_TO to mail a person",
+            )
+            return
+        try:
+            self._alerter.raised(raised)
+        except Exception:
+            ESCALATION_EMAIL_FAILED_TOTAL.inc()
+            log.exception(
+                "escalation_alert_failed",
+                opened=len(raised),
+                effect="the escalations are committed and remain in the queue",
+            )
+        else:
+            log.info("escalation_alert_sent", opened=len(raised))
 
     def _escalate(
         self,
@@ -180,8 +246,12 @@ class EscalationScanner:
         *,
         deadline: datetime,
         refused: list[str],
-    ) -> bool:
-        """Open one escalation for ``contract``. Returns whether it was opened.
+    ) -> RaisedEscalation | None:
+        """Open one escalation for ``contract``. Returns the row it opened.
+
+        ``None`` means the policy refused this contract, which the claim query is
+        meant to make unreachable. What comes back is what the alert lists, so the
+        alert cannot name an escalation that was not written.
 
         The tenant comes **from the row**, exactly as
         :meth:`~app.workers.notification_scheduler.NotificationScheduler._dispatch_locked`
@@ -214,7 +284,7 @@ class EscalationScanner:
                 code=exc.code,
                 effect="skipped; the claim query and the policy disagree",
             )
-            return False
+            return None
 
         correlation_id = str(uuid.uuid4())
         escalation = escalations.create(
@@ -246,7 +316,12 @@ class EscalationScanner:
             tenant_id=str(tenant_id),
             sla_hours=self._settings.escalation_sla_hours,
         )
-        return True
+        return RaisedEscalation(
+            tenant_id=tenant_id,
+            contract_id=contract.id,
+            escalation_id=escalation.id,
+            sla_deadline=deadline,
+        )
 
 
 def main() -> int:

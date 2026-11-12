@@ -26,6 +26,7 @@ from app.api.v1.auth import router as auth_router
 from app.api.v1.contracts import router as contracts_router
 from app.api.v1.escalations import router as escalations_router
 from app.api.v1.health import router as health_router
+from app.api.v1.metrics import router as metrics_router
 from app.api.v1.notifications import router as notifications_router
 from app.api.v1.review import router as review_router
 from app.core.config import Settings, get_settings
@@ -180,6 +181,7 @@ def create_app(
     # Probes sit outside the versioned surface on purpose: an orchestrator must
     # not have to track an API version to ask whether the process is alive.
     app.include_router(health_router)
+    app.include_router(metrics_router)
     # Everything that is actual API lives under the configured prefix, which is
     # also what the frontend proxies and what `frontend/src/lib/api.ts` assumes.
     app.include_router(auth_router, prefix=app_settings.api_v1_prefix)

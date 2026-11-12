@@ -40,6 +40,7 @@ from typing import Protocol
 from sqlalchemy.orm import Session
 
 from app.core.crypto import FieldCipher
+from app.core.metrics import EXTRACTION_CONFIDENCE, EXTRACTIONS_TOTAL
 from app.db.enums import FieldName, FieldStatus
 from app.db.models import Contract, ExtractedField
 from app.db.repositories.fields import ExtractedFieldRepository
@@ -301,6 +302,10 @@ def extract_contract(
             )
             updated += 1
         found.append(candidate.field_name.value)
+
+    EXTRACTIONS_TOTAL.inc(status="ok")
+    for candidate in chosen:
+        EXTRACTION_CONFIDENCE.observe(float(candidate.confidence))
 
     return ExtractionOutcome(
         contract_id=contract.id,

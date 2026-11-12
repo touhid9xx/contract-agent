@@ -159,6 +159,13 @@ services:
     <<: *worker
     # Gap 15's trigger. Without it, a contract could sit unanswered for a year
     # with nothing in the codebase noticing.
+    #
+    # It also reports what it opens: once per pass that raised anything, and only
+    # if ESCALATION_ALERT_TO names an operator address, one mail saying so. Unset,
+    # this stays log-only, which is the default — the escalations are still written
+    # and still appear in the queue, they simply reach nobody who is not looking.
+    # The alert is sent after the commit, so a refusing relay costs a counter and
+    # never an escalation.
     command:
       - python
       - -m

@@ -54,9 +54,11 @@ from app.db.models import AuditLog, Contract, CustomerResponse, Escalation, Noti
 from app.db.repositories.escalations import EscalationRepository
 from app.db.session import session_scope
 from app.workers.dispatch import notification_idempotency_key
+from app.workers.escalation_alerts import RaisedEscalation
 from app.workers.escalation_scanner import EscalationScanner, ScanResult
 
-#: ``DECISIONS.md`` Q2, and the default of ``Settings.escalation_sla_hours``.
+#: ``DECISIONS.md`` Q2 fixes the SLA at 48h, and the default of
+#: ``Settings.escalation_sla_hours``.
 SLA_HOURS = 48
 #: Matches the default of ``Settings.escalation_no_response_days``.
 NO_RESPONSE_DAYS = 14
@@ -604,7 +606,7 @@ def test_a_refusal_does_not_abort_the_rest_of_the_batch(
             *,
             deadline: datetime,
             refused: list[str],
-        ) -> bool:
+        ) -> RaisedEscalation | None:
             if contract.id == refused_contract.id and not self._raced:
                 self._raced = True
                 EscalationRepository(session, refused_contract.tenant_id).create(

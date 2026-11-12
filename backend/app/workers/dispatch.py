@@ -62,6 +62,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.core.config import Settings
 from app.core.crypto import FieldCipher
+from app.core.metrics import NOTIFICATIONS_SENT_TOTAL
 from app.db.enums import Channel, NotificationStatus
 from app.db.models import Contract, ExtractedField, Notification
 from app.workers.decision import (
@@ -659,10 +660,12 @@ def dispatch_notification(
             if notification.attempts >= settings.notification_retry_max
             else NotificationStatus.PENDING
         )
+        NOTIFICATIONS_SENT_TOTAL.inc(channel=notification.channel, status="failed")
         return DispatchOutcome(sent=False, error=str(exc))
 
     notification.status = NotificationStatus.SENT
     notification.sent_at = now_utc
     notification.provider_message_id = provider_message_id
     notification.last_error = None
+    NOTIFICATIONS_SENT_TOTAL.inc(channel=notification.channel, status="sent")
     return DispatchOutcome(sent=True)

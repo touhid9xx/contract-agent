@@ -6971,4 +6971,155 @@ at this entry, so the two places that carried the claim now agree — that row i
 prose, and striking it in place rather than reflowing it keeps the diff to the clause that was
 wrong. The corrected compose comment stays under 100 columns per line. The ledger invariants are
 rechecked: no `CR`, one trailing `LF`, every added prose line under 100 columns, an even count of
-strikethrough markers on the added lines, `D10-` headings contiguous through `D10-88`.
+strikethrough markers on the added lines, `D10-` headings contiguous through `D10-89`.
+
+### D10-89 — The channel advisor may re-point a permitted decision, never widen it
+
+**Context.** The agent milestone asks for a model that picks the channel. The policy slice (`D9-05`,
+gap 19) deliberately shipped without one: it selects deterministically and sets `needs_review=False`
+unconditionally. `agent_backend` named a chooser that no code path asked for an answer from.
+
+**Decision.** `app/workers/advisory.py` adds a *post-policy* advisor. `permitted_channels` runs
+first and unchanged; only when it returns a non-empty set is the model asked, and it may choose
+only from that set. `app/agents/prompts/` carries the prompt as data — `registry.json` plus
+`advisory_channel_v1.txt` — so a version bump is a file edit rather than a deploy. The route asks
+for an advisor through `advisor_for`, which returns `None` unless `AGENT_BACKEND=ollama`, so the
+default `deterministic` path behaves exactly as before. Transport mirrors the existing
+`OllamaExtractor`: `/api/generate`, `format=json`, temperature 0, and the same `ollama_base_url`
+setting with its TLS-or-loopback rule.
+
+**Why it is shaped this way.** (1) *The policy stays the authority.* The model can re-point inside
+the permitted set and can add `needs_review`; it can never widen the set, and an answer naming an
+unpermitted channel keeps the policy channel and flags the row. (2) *Every failure keeps the
+decision and flags it.* Transport error, invalid JSON past `agent_repair_max`, a missing prompt, an
+open breaker or a full queue all leave the policy channel in place and set `needs_review=True`,
+which `dispatch.py:500` already refuses with `NEEDS_REVIEW` — so the safe fallback is "no contact",
+never "send email instead". (3) *Nothing identifiable leaves the process.* The payload is six keys
+— `age_bucket` (withheld by default), `has_email`, `has_phone`, `contract_value_bucket`,
+`days_to_expiry`, `permitted_channels` — wrapped in `<user_input>` tags, and `ChannelAdvisory` is
+built `extra="forbid"` so an injected extra key cannot masquerade as a valid answer. (4) *A queued
+model call is backpressure, not a failure:* the per-replica semaphore (5 slots, 5s wait) returning
+empty keeps the decision, flags review, and deliberately does **not** touch the breaker, so ordinary
+traffic cannot open it and suppress advice that would work a second later.
+
+**Blocked alternatives.** A hosted model is unrepresentable rather than discouraged: `AgentBackend`
+is a closed literal, so `AGENT_BACKEND=openai` is a startup `ValidationError`. Falling back to email
+when the model is unsure is refused for `D10-88`'s reason applied to a new caller. Letting the model
+decide eligibility (rather than re-pointing within it) would put consent behind a probabilistic
+judgement. A Redis lock was not used for the concurrency cap: a per-process semaphore is enough to
+protect the shared model queue and needs no distributed state.
+
+**Limits.** No MLflow logging: the audit trail is the `agent_decisions` row (prompt version, model,
+tokens, latency, repair count) and nothing is sent to MLflow. No `PROMPT_AB_SPLIT` A/B; the registry
+pins one version per prompt name. No golden-scenario review gate before a model or prompt change.
+**No live model has ever answered:** `AGENT_BACKEND` defaults to `deterministic`, no Ollama service
+is defined (`D10-88`), and the only advisor this code has met is a test double — gap 17 is
+unchanged. The retry prompt carries the schema error text, which can quote the model's own invalid
+output; it cannot quote customer data, because none is sent. The semaphore is in-process, so the
+real ceiling is 5×N replicas rather than 5.
+
+**Gates.** `backend/tests/test_advisory.py` (19 tests) pins the six-key payload, the bounded repair
+loop, the breaker, the unpermitted-channel refusal, the transport-failure fallback, and the
+queue-full path's effect on the breaker. `tests/test_config.py` gains cases showing a hosted backend
+is not representable and a remote `OLLAMA_BASE_URL` must be TLS. The dispatch refusal for a flagged
+decision was already pinned at `tests/test_notifications.py:561-569`.
+
+### D10-90 — Metrics are a dependency-free registry whose labels cannot hold PII
+
+**Context.** P2-J asks for Prometheus metrics. Neither `prometheus_client` nor
+`prometheus-fastapi-instrumentator` is installed, and the text exposition format is small enough
+that adding a dependency (and a version to pin, audit and keep current) buys little.
+
+**Decision.** `app/core/metrics.py` implements `Counter`, `Gauge` and `Histogram` plus `render()`
+for the 0.0.4 text format: no third-party code, no background thread, no network. `GET /metrics`
+sits outside `/api/v1` beside `/health` (a scrape path is an infrastructure contract, not a versioned
+product API), is unauthenticated like every Prometheus target, and is hidden from OpenAPI.
+
+The label rule is the security decision, not a formatting preference. `LABEL_VALUE_RE` is
+`[a-z][a-z0-9_.-]{0,31}`: no `@`, no `+`, no whitespace, and a leading letter is required, so an
+e-mail, a phone number, a date or a bare amount cannot be expressed as a label *at all*. A violation
+raises `LabelValueError` naming only the label and the rule — never the offending value, because an
+exception message is a log line and the value may be the PII the guard exists to stop.
+
+Three families are wired where the work already happens: `extractions_total{status}` and
+`extraction_confidence_histogram` in `extract_contract`, `notifications_sent_total{channel,status}`
+in `dispatch_notification`.
+
+**What this deliberately does not do.** Only 3 of the spec's ~13 families exist. Declaring the other
+ten so they read `0` forever would be the placeholder logic the spec forbids in production paths, so
+`escalations_total`, `agent_decisions_total`, `voice_calls_total`, `ollama_requests_total`,
+`ollama_latency_seconds`, `agent_schema_repair_total`, `ollama_circuit_breaker_state`,
+`kafka_consumer_lag`, `worker_replicas`, `outbox_pending_count` and `redis_connections_active` are
+absent rather than hollow. Consequently no alert rule can be written yet, and `extractions_total`
+records only `status="ok"` — extractor failures still propagate as exceptions, so the
+`HighExtractionFailureRate` rule would never fire. `notifications_sent_total` counts *attempts* by
+this attempt's outcome: a quiet-hours deferral is not counted, so `sent + failed` is not "attempts".
+The registry is per-process; the `worker_replicas` gauge cannot be derived from inside one replica.
+No Prometheus rules, Grafana dashboards, alert routing, or OpenTelemetry/Jaeger traces are added
+here either.
+
+**Gates.** `backend/tests/test_metrics.py` (21 tests) pins the text shape, cumulative buckets,
+`+Inf`, `_sum`/`_count`, the PII guard (e-mail, dates and bare numbers refused; message value-free),
+label-set mismatch, and the endpoint's status/media type/OpenAPI absence. It also feeds every
+`Channel` and `NotificationStatus` member through `NOTIFICATIONS_SENT_TOTAL`, so renaming an enum
+member to something a label cannot hold fails in CI instead of raising at 03:00 inside a send.
+`python -m pytest tests/test_metrics.py` -> 21 passed; the five suites covering the instrumented
+files -> 147 passed; `python -m mypy app` -> no issues in 68 files.
+
+### D10-91 — A raised escalation mails the operator, after the commit, and carries no customer data
+
+**Context.** `EscalationScanner` wrote escalations nobody was told about. `app/workers/escalation.py`
+says so itself: "This slice writes no background job, so nothing flips
+`EscalationStatus.SLA_BREACHED` on its own", and the queue reports `overdue` only to a person who
+opens the screen. The spec's P2-G asks for an "escalation email alert" and P2-J records the rule
+`EscalationEmailFailed: increase(escalation_email_failed_total[1h]) > 0`. An escalation is raised
+precisely when the customer could not be reached, so an alert that reaches nobody is the one failure
+mode with no second chance.
+
+**Decision.** `app/workers/escalation_alerts.py` mirrors `attention_alerts.py`: an
+`EscalationAlerter` protocol with one `raised(escalations)` call, an `SmtpEscalationAlerter` built on
+the `deliver()` seam `SmtpSender` already exposes for operator mail, and `build_escalation_alerter`
+returning `None` when `ESCALATION_ALERT_TO` is empty. `EscalationScanner.__init__` takes
+`alerter=None`, which means "decide from settings" rather than "never alert", so a deployment that
+set the address gets its alert without the entry point passing anything.
+
+Four properties are deliberate:
+
+- **The alert is sent after `session_scope` commits, never inside it.** A slow or refusing relay must
+  not hold row locks across a batch it just wrote, and must not be able to roll back an escalation
+  that already exists. `_escalate` therefore returns the row it opened (`RaisedEscalation`) instead
+  of `True`, so the alert can only name escalations that were actually written.
+- **One message per pass, not one per escalation.** A pass may open `ESCALATION_SCAN_BATCH_SIZE`
+  rows; fifty mails would bury each other and the operator would act on none. Same reasoning as
+  `D10-40`'s "alerts fire on the verdict changing, not on the finding standing".
+- **The message carries ids and a deadline, and no customer value of any kind.** No name, phone,
+  e-mail, address or DOB. Mail is not a channel this project treats as safe for customer PII, and
+  the recipient is the deployment's operator — so no consent, quiet-hours, suppression or template
+  gate applies. Those gates govern contacting the *customer*; this is us telling ourselves.
+- **A failed alert never raises out of the tick.** The escalations are committed and remain in the
+  queue; an exception would make `run_forever` log a failed pass and imply nothing was written when
+  everything was. A refusal costs one `ESCALATION_EMAIL_FAILED_TOTAL` increment and one log line.
+
+`ESCALATION_ALERT_TO` is refused at start-up when it is malformed, or when it is set with
+`NOTIFICATION_TRANSPORT` that is not `smtp` — the same two failure modes `ATTENTION_ALERT_TO`
+already refuses, and for the same reason: an address with no relay behind it reads as "a person is
+being told". `ESCALATIONS_TOTAL{status}` is incremented **after** the commit too, so a rolled-back
+batch cannot leave escalations in the series that no queue holds.
+
+**What this deliberately does not do.** Nothing alerts on a *breach*. Making that stateless is
+impossible — an overdue row stays overdue, so without a "last told" memory every pass would re-alert
+forever — and storing one would contradict the recorded decision that `overdue` is derived and never
+written. Breach alerting therefore still needs either a state table or an acceptance of repetition,
+and is left open rather than guessed at. This also does nothing about the `SLA_BREACHED` enum value,
+which remains unreachable; about the inbound direction (a customer's STOP still has no way in, so
+`do_not_contact` can only be set by an operator); about retrying a failed alert; about per-tenant
+routing or per-tenant alert preferences; and about deduplicating an alert across replicas — two
+scanner replicas each build their own alerter and each mail what their own pass opened.
+
+**Gates.** `backend/tests/test_escalation_alerts.py` (14 tests) pins the batch-not-per-row shape, a
+quiet pass telling nobody, the refusing-relay case (escalation survives, `run_once` still reports
+`opened=1`, counter advances), an unconfigured address building no alerter, the message naming ids
+and containing no customer value, the UTC deadline rendering, and both start-up refusals.
+`python -m pytest tests/test_escalation_alerts.py tests/test_escalation_scanner.py
+tests/test_escalations.py` -> 91 passed; full suite -> 958 passed, 15 skipped; `python -m mypy app`
+-> no issues in 69 files.

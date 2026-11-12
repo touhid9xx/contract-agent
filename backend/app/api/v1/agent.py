@@ -7,6 +7,11 @@ Four routes, and one rule that shapes the first two:
   the review screens, and therefore the first thing in the repo that could put a
   customer back in front of the pipeline. Re-running it is how a contract gets a
   new recommendation: it **appends**, it never edits.
+
+  The policy runs first and alone decides eligibility. Only when it has already
+  produced a permitted channel — and only on a deployment with ``AGENT_BACKEND=ollama``
+  — does the local model get to re-point that choice, and it may only pick from the
+  channels the policy offered (``app.workers.advisory``, D10-88).
 * ``GET /agent/decisions`` — read the stored decisions, newest first.
 * ``POST /agent/decisions/{contract_id}/override`` — a person replaces the channel
   the policy chose, choosing another channel those same rules permit.
@@ -49,7 +54,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
-from app.api.deps import get_request_session, require_roles
+from app.api.deps import app_settings, get_request_session, require_roles
+from app.core.config import Settings
 from app.core.middleware import correlation_id_or_new
 from app.core.principal import Principal
 from app.db.base import as_utc
@@ -66,6 +72,13 @@ from app.db.repositories.agent import (
     MAX_DECISION_HISTORY_LIMIT,
 )
 from app.db.repositories.audit import ACTOR_USER, AUDIT_ENTITY_DECISION
+from app.workers.advisory import (
+    ChannelAdvisor,
+    CircuitBreaker,
+    advise_decision,
+    build_advisor,
+    default_breaker,
+)
 from app.workers.decision import (
     REFUSAL_CHANNEL_NOT_PERMITTED,
     DecisionRefusedError,
@@ -93,10 +106,13 @@ class AgentDecisionView(BaseModel):
     confidence: float
     reasoning: str
     needs_review: bool
-    #: Which policy produced this row. Named so a decision made under an older rule
-    #: set can be told apart from one made today.
+    #: Which ruleset produced this row, and whether a model advised on it. Named so a
+    #: decision made under an older rule set can be told apart from one made today.
     prompt_version: str
-    #: ``deterministic`` for this slice: no model was consulted (D9-02).
+    #: ``deterministic`` unless ``AGENT_BACKEND=ollama``, in which case the grounded
+    #: decision was re-pointed by that local model and the model name is recorded
+    #: here. Never a hosted model: config refuses any other backend, and the model is
+    #: advisory only — it cannot widen the channels consent permits (D9-02, D10-88).
     llm_model: str
     correlation_id: str
     created_at: datetime
@@ -258,6 +274,19 @@ def list_decisions(
     return AgentDecisionListResponse(items=items, count=len(items), contract_id=contract_id)
 
 
+def advisor_for(settings: Settings = Depends(app_settings)) -> ChannelAdvisor | None:
+    """The model client, or ``None`` when this deployment has no model.
+
+    ``None`` is the whole of the deterministic default's safety: with no advisor there
+    is no call to make, so ``AGENT_BACKEND=deterministic`` has no path to a model even
+    by accident. ``app.core.config`` already refuses any backend other than a local
+    one, so a hosted model is unrepresentable rather than merely discouraged.
+    """
+    if settings.agent_backend != "ollama":
+        return None
+    return build_advisor(settings)
+
+
 @router.post(
     "/decisions",
     response_model=AgentDecisionView,
@@ -269,6 +298,9 @@ def decide_channel(
     payload: AgentDecisionRequest,
     principal: Principal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
     session: Session = Depends(get_request_session),
+    settings: Settings = Depends(app_settings),
+    advisor: ChannelAdvisor | None = Depends(advisor_for),
+    breaker: CircuitBreaker = Depends(default_breaker),
 ) -> AgentDecisionView:
     """Run the channel policy and append the decision.
 
@@ -300,6 +332,21 @@ def decide_channel(
         )
         raise refusal(exc) from None
 
+    if advisor is not None:
+        # Advisory only, and strictly after the policy: ``build_decision`` has already
+        # proved this contract is contactable and chosen a permitted channel. The model
+        # may re-point that choice among the channels consent already allows. It cannot
+        # widen the set, and every failure path leaves ``needs_review`` set so
+        # ``dispatch`` refuses the row (D9-02, spec §7).
+        decision = advise_decision(
+            decision,
+            contract,
+            fields,
+            settings=settings,
+            advisor=advisor,
+            breaker=breaker,
+        )
+
     repository = AgentDecisionRepository(session, principal.tenant_id)
     # Counted before the row is added, so the first decision records 0 and a re-run
     # records the history it is being appended to. This is what makes "re-rolled
@@ -317,6 +364,8 @@ def decide_channel(
         channel=stored.channel.value,
         confidence=float(stored.confidence),
         policy=stored.prompt_version,
+        model=stored.llm_model,
+        needs_review=stored.needs_review,
         rerun_count=stored.rerun_count,
     )
     return _view(stored)
