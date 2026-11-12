@@ -6432,8 +6432,16 @@ right on a customer's contracts". No LLM backend is measured (gap 17 stands, so 
 only backend ever scored). Confidence *calibration* is not measured either: this says whether
 the extractor finds the right value, not whether a 0.8-confidence value is right 80 % of the
 time, so the threshold itself remains unvalidated. Eight documents is small, and only `.txt`
-files are scored — no PDF flows through this path. `.github/workflows/ci.yml` does not run the
-command, so the gate is available rather than enforced. This corpus measures **extraction
+files are scored — no PDF flows through this path. ~~`.github/workflows/ci.yml` does not run the
+command, so the gate is available rather than enforced.~~ **Corrected in place (`D10-94`), and it
+contradicted the sentence above it in that same entry:** no workflow names the *command*, but the
+gate does run in CI — `test_the_committed_corpus_meets_the_gate` asserts
+`measured.meets(DEFAULT_MIN_F1)` over this corpus with `PatternExtractor`, and `ci.yml` runs
+`pytest`. Both routes read the same `DEFAULT_MIN_F1`, so the floor cannot drift between them.
+Whether a red suite *blocks a merge* is branch protection rather than YAML, and `main` had none
+when `D10-75` measured it, so nothing blocks a merge there at all. The residue that is real: the
+per-field report and exit `7` are printed only for someone who runs the command, and only the
+`pattern` backend is ever scored. This corpus measures **extraction
 fields**, not the agent's channel decisions: the golden-scenario review gate the agent milestone
 still lacks (above, D10-89) is a different thing and is still absent.
 

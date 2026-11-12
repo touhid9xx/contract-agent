@@ -7349,9 +7349,23 @@ regressions, which is what it is for: 0.919 says extraction did not get worse, n
 canned payloads. Confidence **calibration** is untouched: this measures whether the extractor
 finds the right value, not whether a 0.8-confidence value is right 80 % of the time, so the
 threshold itself remains unvalidated. Eight documents is small — one document moves F1 by about
-0.02 — and `.txt` only: no PDF flows through the scoring path. `.github/workflows/ci.yml` does
+0.02 — and `.txt` only: no PDF flows through the scoring path. ~~`.github/workflows/ci.yml` does
 **not** run the command, so the gate is one a build chooses to enforce rather than one that
-already blocks a merge.
+already blocks a merge.~~ **Corrected in place, because that sentence contradicted the next
+paragraph's own "a regression reddens the tests as well as the command":** the only thing it got
+right is that no workflow *names the command*. The gate itself does run in CI. `ci.yml`'s
+`backend tests` job runs `python -m pytest -m "not integration"`, which collects
+`test_the_committed_corpus_meets_the_gate`, and that test asserts `measured.meets(DEFAULT_MIN_F1)`
+over the committed corpus with `PatternExtractor`. The test and the CLI's `--min-f1` default read
+the *same* `DEFAULT_MIN_F1` constant, so the floor cannot drift between the two routes, and a
+regex regression fails the suite CI already runs. Its *conclusion* was wrong for a second reason:
+"blocks a merge" is a property of branch protection, not of a YAML step. Per `D10-75`, `main`
+reported `"protected": false` with required checks `"off"`, so no job in this repository blocks a
+merge — extraction gate or otherwise — and editing the workflow would not change that. What
+survives as the honest residue: CI never produces the per-field report or exit `7`, so the
+readable form of the verdict exists only for whoever runs the command, and only
+`EXTRACTION_BACKEND=pattern` is ever scored, because the test constructs `PatternExtractor`
+directly rather than `build_extractor(settings)` — `ollama` stays unmeasured (gap 17).
 
 **Gates.** New: `backend/tests/test_extraction_eval.py` (28 — the precision/recall/F1 arithmetic
 including a false positive, a never-produced field, and a pooled-vs-averaged case where
