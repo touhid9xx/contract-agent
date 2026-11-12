@@ -1991,7 +1991,7 @@ factory stayed where D10-04 put them; this is the addition that entry predicted.
 | Envelope | Sender, recipient, a constant `SUBJECT`, `Message-ID` and `X-Idempotency-Key`. The body is a placeholder naming the contract reference and carries **no extracted value** — the counterparty and the dates stay in the database |
 | Message-ID | `sha256(idempotency_key)@<sender domain>`, **not** `email.utils.make_msgid`. At-least-once delivery is only survivable if the re-send is byte-identical in the field a provider de-duplicates on; a random id would make the retry a different message |
 | Timeout | `SMTP_TIMEOUT_SECONDS` (default 10, `gt=0, le=60`) reaches `smtplib` as the socket timeout, so connect, TLS, auth and `DATA` share one ceiling. It is a correctness bound: the send runs *inside* the transaction holding the row's `FOR UPDATE` lock |
-| Refusals | `sms` and `voice` are **refused, not substituted** — a voice reminder must not arrive as an e-mail. The refusal is a `SenderError`, so the row spends its retry budget and parks `failed` where an operator sees it |
+| Refusals | `sms` and `voice` are **refused, not substituted** — a voice reminder must not arrive as an e-mail. The refusal is a `SenderError`, so the row spends its retry budget and parks `failed` where an operator sees it. Since D10-92 this describes `SmtpSender` alone: an SMS row is carried by `TextbeeSender` when `SMS_TRANSPORT=textbee`, and refused by the composer before any contact read when no adapter claims the channel |
 | Redaction | Relay error text passes through `redact_text` before it can reach `Notification.last_error`, because `GET /notifications` renders that column to viewers who cannot see contact values elsewhere |
 | TLS | `starttls(context=...)` receives a **verifying** context from `build_ssl_context`. `SMTP_CA_BUNDLE` replaces the trust store; no bundle means the system store. `None` resolves to `ssl.create_default_context()`, so no argument ever means "skip checks" — `smtplib`'s own default for `context=None` is `CERT_NONE`, which is what gap 24 was |
 | Settings | `SMTP_HOST` required, `SMTP_FROM` shape-checked (a display name is refused), username/password both-or-neither, `SMTP_CA_BUNDLE` must be a file `ssl` can actually load, a bundle with `SMTP_STARTTLS=false` is refused (a CA never consulted would read as "TLS on"), and `SMTP_STARTTLS=false` is refused in staging/production. All seven are boot errors, so a half-configured relay fails at start-up rather than at the first send inside the row lock |
@@ -6295,6 +6295,38 @@ across replicas. And the inbound direction is still absent: a customer's STOP ha
 
 Gates: `pytest tests/test_escalation_alerts.py` -> 14 new tests; with the scanner and escalation
 suites -> 91 passed; full suite -> 958 passed, 15 skipped; `mypy app` -> no issues in 69 files.
+
+### P2-E (part 1) — the SMS transport, behind a switch production refuses
+
+`Notification` has carried an `sms` member since F10 with no adapter behind it: `build_sender` handed
+back a transport that refused the channel on purpose. This slice adds `TextbeeSender` (an HTTP
+adapter over a fake-able `HttpTransport`, so no dependency was added), a second switch
+`SMS_TRANSPORT=none|textbee`, and `RoutingSender`, which composes one delegate per channel.
+
+The load-bearing change is in `dispatch.py`: `MessageSender.available: bool` became
+`channels: frozenset[Channel]`. A single flag answers "is *a* transport configured", which stops
+being the same question once a deployment can hold a relay and no gateway; policy now refuses a
+channel no adapter claims **before** the recipient is decrypted, so an undeliverable channel cannot
+cost a PII read. A gateway id, when it sends one, is stored in `Notification.provider_message_id`;
+a body the parser cannot read still reads as sent, because a retry after an accepted send would be a
+second message to a real person. A follow-up fix in the same slice: the failure text named
+`URLError.reason`'s type, which is usually `str`, so a DNS failure was stored as
+`"SMS delivery failed: str"`; it now names exception types (`URLError (gaierror)`), and the same
+defect in the advisor's unreachable path (D10-89) was fixed too.
+
+**Not done, and not faked:** no live gateway has ever been contacted — every test drives a fake
+transport, so "works against api.textbee.dev" is untested. There is still **no inbound direction**:
+no delivery receipt, no reply parsing, no STOP webhook, so `do_not_contact` remains operator-only.
+`SMS_TRANSPORT=textbee` is **refused at start-up in staging and production** until that route exists
+— a message a customer cannot stop is unsolicited — and development stays open only so the adapter
+is exercisable. The body therefore carries no opt-out instruction: promising a reply nothing can
+read would be worse than saying nothing. One device id serves the whole deployment, there is no
+per-tenant routing, and `SMS_TIMEOUT_SECONDS` is the only bound on a call made while holding the
+row's lock.
+
+Gates: `pytest tests/test_sms_sender.py` -> 28 passed; the four suites covering the refactor -> 127
+passed; full suite -> 986 tests, 971 passed, 15 skipped, 0 failed; `mypy app` -> no issues in 69
+files; `ruff check` / `ruff format --check` -> clean.
 
 ## Non-negotiable reminders
 

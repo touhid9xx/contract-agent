@@ -70,8 +70,8 @@ class RecordingSender:
         self.sent: list[OutgoingMessage] = []
 
     @property
-    def available(self) -> bool:
-        return True
+    def channels(self) -> frozenset[Channel]:
+        return frozenset({Channel.EMAIL})
 
     def send(self, message: OutgoingMessage) -> str | None:
         self.sent.append(message)
@@ -85,8 +85,8 @@ class FailingSender:
         self.calls = 0
 
     @property
-    def available(self) -> bool:
-        return True
+    def channels(self) -> frozenset[Channel]:
+        return frozenset({Channel.EMAIL})
 
     def send(self, message: OutgoingMessage) -> str | None:
         self.calls += 1

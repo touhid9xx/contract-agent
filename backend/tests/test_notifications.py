@@ -1161,8 +1161,8 @@ class RecordingSender:
         self.sent: list[OutgoingMessage] = []
 
     @property
-    def available(self) -> bool:
-        return True
+    def channels(self) -> frozenset[Channel]:
+        return frozenset({Channel.EMAIL})
 
     def send(self, message: OutgoingMessage) -> str | None:
         self.sent.append(message)
@@ -1173,8 +1173,8 @@ class FailingSender:
     """A transport that was reached and refused the message."""
 
     @property
-    def available(self) -> bool:
-        return True
+    def channels(self) -> frozenset[Channel]:
+        return frozenset({Channel.EMAIL})
 
     def send(self, message: OutgoingMessage) -> str | None:
         raise SenderError("smtp: 421 try again later")

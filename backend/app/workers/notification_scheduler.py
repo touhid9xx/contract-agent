@@ -156,12 +156,17 @@ class NotificationScheduler:
     def run_once(self) -> int:
         """One tick: dispatch up to ``batch_size`` rows, returning how many sent.
 
-        Returns early when no transport is configured. That is not just an
+        Returns early when *no* transport is configured at all. That is not just an
         optimisation: every row would refuse ``SENDER_UNAVAILABLE``, and because the
         head of the queue is claimed first, a single tick would log the same refusal
         for the same row hundreds of times and never touch another row.
+
+        A deployment with only some channels configured is deliberately *not* an
+        early return. ``sender.channels`` is per channel, so a due SMS with no gateway
+        still gets its own refused tick and its own ``last_error``; skipping the whole
+        loop because e-mail works would leave that row pending with no explanation.
         """
-        if not self._sender.available:
+        if not self._sender.channels:
             log.debug(
                 "notification_scheduler_no_transport",
                 sender=type(self._sender).__name__,
@@ -195,9 +200,9 @@ class NotificationScheduler:
             batch_size=self._batch_size,
             poll_interval_seconds=self._poll_interval,
             sender=type(self._sender).__name__,
-            transport_available=self._sender.available,
+            transport_channels=sorted(channel.value for channel in self._sender.channels),
         )
-        if not self._sender.available:
+        if not self._sender.channels:
             # Said once here rather than every tick: pending rows will not move on
             # their own until an operator configures a transport, and that is the
             # single most useful thing this log can tell them.

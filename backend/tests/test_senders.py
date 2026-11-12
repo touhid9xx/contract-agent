@@ -39,6 +39,7 @@ from app.workers.dispatch import (
 )
 from app.workers.senders import (
     SUBJECT,
+    RoutingSender,
     SmtpSender,
     build_sender,
     build_ssl_context,
@@ -143,7 +144,9 @@ def test_the_default_transport_refuses_and_names_the_setting_it_read() -> None:
     sender: MessageSender = build_sender(Settings(app_env="test", log_json=False))
 
     assert isinstance(sender, UnavailableSender)
-    assert sender.available is False
+    # No channels rather than "a transport is off": that is the fact the policy asks
+    # about, and it is what makes every channel refuse before a recipient is read.
+    assert sender.channels == frozenset()
     with pytest.raises(SenderError) as raised:
         sender.send(message())
     # The operator reading a 409 or a stored error learns which value to change,
@@ -154,8 +157,10 @@ def test_the_default_transport_refuses_and_names_the_setting_it_read() -> None:
 def test_the_smtp_setting_selects_the_smtp_sender() -> None:
     sender = build_sender(smtp_settings())
 
-    assert isinstance(sender, SmtpSender)
-    assert sender.available is True
+    assert isinstance(sender, RoutingSender)
+    # The router is the composition root now that the channels have separate
+    # switches: a relay with no gateway must still deliver e-mail.
+    assert sender.channels == frozenset({Channel.EMAIL})
 
 
 def test_building_the_sender_opens_no_connection(monkeypatch: pytest.MonkeyPatch) -> None:

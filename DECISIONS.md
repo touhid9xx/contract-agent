@@ -7123,3 +7123,69 @@ and containing no customer value, the UTC deadline rendering, and both start-up 
 `python -m pytest tests/test_escalation_alerts.py tests/test_escalation_scanner.py
 tests/test_escalations.py` -> 91 passed; full suite -> 958 passed, 15 skipped; `python -m mypy app`
 -> no issues in 69 files.
+
+### D10-92 — SMS gets its own switch, its own adapter, and a refusal in production
+
+**Context.** P2-E asks for SMS and for opt-out. `Notification` has carried an `sms` member since
+F10 and both `D10-04` and the SMTP slice refused it on purpose, because there was no gateway — the
+`senders.py` docstring said, in as many words, "deliberately **not** here: SMS and voice". Two
+things blocked changing that. The first was shape: `MessageSender.available: bool` answers "is a
+transport configured", which is the wrong question once a deployment can hold a relay and no
+gateway. A `True` there lets a row be attempted and then refused *inside* the adapter, after the
+recipient has been decrypted — i.e. the one place a PII read should not happen.
+
+**Decision.** Three parts.
+
+- `MessageSender.channels: frozenset[Channel]` replaces `available`. `dispatch_notification` asks
+  whether this **row's** channel is in the set and refuses `SENDER_UNAVAILABLE` *before* the
+  contact value is decrypted, so an undeliverable channel cannot even cost a read of customer PII.
+- `TextbeeSender` implements `sms` over a fake-able `HttpTransport = Callable[[Request, float],
+  bytes]`, following the `urlopen` seam `advisory.py` already uses; no dependency was added. The
+  gateway's message id lands in `Notification.provider_message_id`. A body the parser cannot read
+  yields `None` and still counts as **sent**, because a retry after a send the gateway accepted is
+  a second message to a real person — the same acknowledgement rule as the outbox relay.
+- `SMS_TRANSPORT: none | textbee` is a **second switch**, not a third `NotificationTransport`
+  member. One enum would have to enumerate the combinations (relay only, gateway only, both,
+  neither) that the two independent transports actually take, and `RoutingSender` already composes
+  them per channel and reports the union as `channels`.
+
+Four properties are deliberate:
+
+- **No "reply STOP" in the body.** The obvious line was in the first draft and was removed: nothing
+  in this build reads an inbound reply, so telling a customer they can stop would be a promise the
+  system cannot keep.
+- **`SMS_TRANSPORT=textbee` is refused in staging and production** until an inbound route exists. A
+  message nobody can opt out of is an unsolicited one, not a smaller notification. Development
+  stays open so the adapter is exercisable.
+- **https unless loopback, in every environment.** Stricter than the `OLLAMA_BASE_URL` rule on
+  purpose: that one guards a feature vector, while this request body carries the customer's number
+  and the header carries the key.
+- **No gateway text reaches `last_error`.** An HTTP failure records the status code; a transport
+  failure records exception *types*. Gateway prose routinely quotes the rejected recipient.
+
+**A defect this slice introduced, then fixed.** The first version named
+`type(getattr(exc, "reason", exc)).__name__`, intending "URLError ⇒ URLError". But `URLError.reason`
+is usually a plain **`str`**, so a DNS failure was stored as `"SMS delivery failed: str"` — it named
+the wrapper's payload, not the cause, and told an operator nothing. `_failure_name` now names the
+raised exception and appends a nested exception's type (`URLError (gaierror)`); only types cross
+that boundary. `test_a_nested_cause_is_named_by_type_and_never_by_its_text` pins both halves. The
+identical defect existed in `advisory.py`'s unreachable-model path, written in `D10-89`, and is
+fixed there too.
+
+**What this deliberately does not do.** No live gateway has ever been contacted: every test drives a
+fake transport, exactly as `test_senders.py` drives a fake `smtplib`, so "works against
+api.textbee.dev" is untested. There is still **no inbound direction** — no delivery receipt is
+parsed, no reply is read, no STOP webhook exists — so `do_not_contact` can still only be set by an
+operator or the CSV import.
+`test_sms_is_refused_outside_development_until_a_reply_can_be_read` is the test to delete when that
+route lands, and its refusal is a placeholder rather than a behaviour worth keeping. Also open: one
+device id for the whole deployment (no per-tenant routing), no retry distinct from the
+notification's own backoff, no handling of gateway rate limiting, and `SMS_TIMEOUT_SECONDS` is the
+only bound on a call made while holding the row lock.
+
+**Gates.** `backend/tests/test_sms_sender.py` (28 tests) pins the request shape (device route,
+API-key header, timeout, URL normalisation), a body carrying no extracted value, the recipient and
+key never appearing in an error message or a `repr`, the channel refusal, id parsing (including an
+unparseable body still reading as sent), routing composition, and the start-up refusals. Full suite
+**986 tests: 971 passed, 15 skipped, 0 failed** (was 958/943 — the +28 is this file);
+`mypy app` -> no issues in 69 files; `ruff check` and `ruff format --check` -> clean.

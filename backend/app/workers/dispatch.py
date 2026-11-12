@@ -244,15 +244,21 @@ class OutgoingMessage:
 class MessageSender(Protocol):
     """A transport that can deliver one message.
 
-    ``available`` exists so the policy can refuse *before* the recipient is read.
+    ``channels`` exists so the policy can refuse *before* the recipient is read.
     Without it a dispatch against an unconfigured transport would still pull the
     contact value into memory to build a message it then refuses to send, and
     "read only what you are about to send" is cheaper to hold than to audit.
+
+    It is a **set of channels rather than one boolean** because a deployment can
+    legitimately have e-mail configured and SMS not. A single flag would answer
+    "a transport exists" while the row's own channel could not be delivered, and
+    the refusal would arrive one step too late — after the phone number had been
+    decrypted to build a message that was never going to leave.
     """
 
     @property
-    def available(self) -> bool:
-        """Whether :meth:`send` can succeed at all on this deployment."""
+    def channels(self) -> frozenset[Channel]:
+        """The channels this transport can deliver on this deployment."""
         ...
 
     def send(self, message: OutgoingMessage) -> str | None:
@@ -280,8 +286,9 @@ class UnavailableSender:
         self._reason = reason
 
     @property
-    def available(self) -> bool:
-        return False
+    def channels(self) -> frozenset[Channel]:
+        """Empty: there is nothing this stand-in could ever deliver on."""
+        return frozenset()
 
     def send(self, message: OutgoingMessage) -> str | None:
         raise SenderUnavailableError(self._reason)
@@ -628,10 +635,12 @@ def dispatch_notification(
         notification.scheduled_at = opens
         return DispatchOutcome(sent=False, deferred_until=opens)
 
-    if not sender.available:
+    if notification.channel not in sender.channels:
         raise DispatchRefusedError(
             REFUSAL_SENDER_UNAVAILABLE,
-            "No notification transport is configured, so the message cannot be sent",
+            f"No transport is configured for {notification.channel.value} notifications, "
+            "so the message cannot be sent",
+            details={"channel": notification.channel.value},
         )
 
     try:

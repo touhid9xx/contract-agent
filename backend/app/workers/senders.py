@@ -33,12 +33,21 @@ Four properties this adapter is built around:
    certificate — see :func:`build_ssl_context`. Encryption without that check
    protects a conversation with whoever is in the middle of it.
 
-What is deliberately **not** here: SMS and voice. There is no gateway to send them
-through, so :meth:`SmtpSender.send` refuses any non-e-mail channel rather than
-delivering, say, a ``voice`` reminder as an e-mail. The refusal is a
-:class:`~app.workers.dispatch.SenderError`, which the policy records as a failed
-attempt: the row spends its retry budget and parks ``failed`` where an operator
-sees it, instead of a channel quietly changing on the way out.
+One adapter per channel, each refusing the others. :class:`SmtpSender` implements
+e-mail, :class:`TextbeeSender` implements SMS, and ``voice`` has no adapter at all
+— there is no gateway to send it through. A transport therefore refuses a channel
+it does not implement rather than delivering, say, a ``voice`` reminder as an
+e-mail. The refusal is a :class:`~app.workers.dispatch.SenderError`, which the
+policy records as a failed attempt: the row spends its retry budget and parks
+``failed`` where an operator sees it, instead of a channel quietly changing on the
+way out.
+
+:class:`RoutingSender` is how the two compose: it holds one delegate per channel
+and reports the union as its :attr:`~RoutingSender.channels`, so a deployment with
+a relay and no gateway (or the reverse) declares exactly what it can deliver and
+:func:`~app.workers.dispatch.dispatch_notification` can refuse the rest *before*
+reading a contact value. That set, not a single "is a transport configured" flag,
+is the thing the policy asks.
 
 Content is also not here yet, beyond a placeholder body: ``template`` names the
 milestone and D10-06 defers real rendering until there is a template table. What
@@ -50,11 +59,14 @@ product copy.
 from __future__ import annotations
 
 import hashlib
+import json
 import smtplib
 import ssl
-from collections.abc import Callable
+import urllib.error
+import urllib.request
+from collections.abc import Callable, Mapping
 from email.message import EmailMessage
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 from app.core.config import Settings
 from app.core.logging import redact_text
@@ -68,11 +80,15 @@ from app.workers.dispatch import (
 
 __all__ = [
     "SUBJECT",
+    "HttpTransport",
+    "RoutingSender",
     "SmtpClient",
     "SmtpSender",
+    "TextbeeSender",
     "build_sender",
     "build_ssl_context",
     "create_smtp_sender",
+    "create_textbee_sender",
     "open_smtp_client",
 ]
 
@@ -156,8 +172,8 @@ class SmtpSender:
         self._domain = sender_address.rpartition("@")[2] or "localhost"
 
     @property
-    def available(self) -> bool:
-        """Always ``True``.
+    def channels(self) -> frozenset[Channel]:
+        """E-mail only, and always: this transport implements no other channel.
 
         An instance of this class only exists when ``NOTIFICATION_TRANSPORT=smtp``
         and the relay's host, sender and credentials have already passed start-up
@@ -165,7 +181,7 @@ class SmtpSender:
         that the object was constructed. Whether a *particular* relay is talking
         to us right now is a per-send question, and that is what ``send`` reports.
         """
-        return True
+        return frozenset({Channel.EMAIL})
 
     def send(self, message: OutgoingMessage) -> str | None:
         """Deliver one message, returning the Message-ID we minted for it.
@@ -249,6 +265,196 @@ class SmtpSender:
         return f"<{digest}@{self._domain}>"
 
 
+#: The body of an SMS reminder.
+#:
+#: Same rule as ``_BODY``: no extracted value crosses the channel, because the
+#: recipient already knows which contract they hold. It is shorter because the
+#: channel is.
+#:
+#: It carries **no opt-out instruction, deliberately**. "Reply STOP to stop these
+#: messages" is the usual wording and it is absent because nothing this build ships
+#: reads an inbound reply: printing it would be a promise to the customer that the
+#: system cannot keep, which is worse than saying nothing. That is also why
+#: ``config`` refuses ``SMS_TRANSPORT=textbee`` outside development — see
+#: ``Settings._reject_insecure_production_defaults``.
+_SMS_BODY = "Reminder: contract {contract_id} with us is approaching its expiry date."
+
+
+class HttpTransport(Protocol):
+    """The one HTTP call this module makes.
+
+    Narrowed to a protocol for the same reason :class:`SmtpClient` is: the real send
+    path — URL, headers, body and the gateway's reply — is exercised against a fake,
+    so no test needs a gateway account or a socket.
+    """
+
+    def __call__(self, request: urllib.request.Request, timeout: float) -> bytes: ...
+
+
+class TextbeeSender:
+    """Delivers one SMS per textbee gateway call.
+
+    One request per message, like the SMTP adapter's one conversation per message,
+    and for the same reason: the scheduler sends one row per tick while holding that
+    row's lock, so a pooled connection would mostly hold sockets open against a
+    gateway that has already dropped them.
+
+    Nothing about the recipient is written into an error. ``Notification.last_error``
+    is rendered by ``GET /notifications`` to any viewer, and a gateway's refusal
+    routinely quotes the number it rejected — the same leak :func:`_describe` scrubs
+    for e-mail.
+    """
+
+    def __init__(
+        self,
+        transport: HttpTransport,
+        *,
+        api_key: str,
+        device_id: str,
+        base_url: str,
+        timeout_seconds: float,
+    ) -> None:
+        self._transport = transport
+        self._api_key = api_key
+        self._device_id = device_id
+        self._base_url = base_url.rstrip("/")
+        self._timeout = timeout_seconds
+
+    def __repr__(self) -> str:
+        # The API key is a credential and must not reach a log line through an
+        # accidental repr, which is the same reason the SMTP password never does.
+        return f"TextbeeSender(base_url={self._base_url!r}, device_id={self._device_id!r})"
+
+    @property
+    def channels(self) -> frozenset[Channel]:
+        """SMS only: this transport has no way to deliver anything else."""
+        return frozenset({Channel.SMS})
+
+    def send(self, message: OutgoingMessage) -> str | None:
+        """Deliver one SMS, returning the gateway's id when it supplies one."""
+        if message.channel is not Channel.SMS:
+            raise SenderError(
+                f"the SMS transport cannot deliver channel={message.channel.value}; "
+                "sms is the only channel it implements"
+            )
+
+        body = {
+            "recipients": [message.recipient],
+            "message": _SMS_BODY.format(contract_id=message.contract_id),
+        }
+        # The scheme is fixed by settings and the host is operator configuration
+        # validated at start-up (https, or loopback); bandit flags a non-literal URL.
+        request = urllib.request.Request(  # noqa: S310  # nosec B310
+            f"{self._base_url}/api/v1/gateway/devices/{self._device_id}/send-sms",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json", "x-api-key": self._api_key},
+            method="POST",
+        )
+        try:
+            raw = self._transport(request, self._timeout)
+        except urllib.error.HTTPError as exc:
+            # The status code is the actionable part and is all this carries: the
+            # body is gateway prose that routinely quotes the rejected recipient.
+            raise SenderError(f"SMS delivery failed (HTTP {exc.code})") from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise SenderError(f"SMS delivery failed: {_failure_name(exc)}") from exc
+        return _sms_provider_id(raw)
+
+
+def _sms_provider_id(raw: bytes) -> str | None:
+    """The gateway's message id, or ``None`` when it does not name one.
+
+    Absent is **not** a failure: the row is marked sent because the call returned
+    normally, the same acknowledgement rule the outbox relay uses. A body this
+    parser cannot read must not turn an accepted send into a failed attempt, because
+    the retry would be a second message to a real person.
+    """
+    try:
+        parsed: Any = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    data = parsed.get("data") if isinstance(parsed, dict) else None
+    for candidate in (data, parsed):
+        if isinstance(candidate, dict):
+            for key in ("id", "messageId", "message_id"):
+                value = candidate.get(key)
+                if isinstance(value, str) and value:
+                    return value
+    return None
+
+
+class RoutingSender:
+    """Delivers each message on whichever transport implements its channel.
+
+    Composition rather than a second switch: a deployment may have a relay and a
+    gateway at once, and the channel already on the row says which one applies.
+    :attr:`channels` is the union of what the delegates implement, and that is what
+    lets ``dispatch_notification`` refuse an undeliverable channel *before* the
+    contact value is read.
+    """
+
+    def __init__(self, senders: Mapping[Channel, MessageSender]) -> None:
+        self._senders = dict(senders)
+
+    def __repr__(self) -> str:
+        return f"RoutingSender(channels={[c.value for c in sorted(self._senders)]})"
+
+    @property
+    def channels(self) -> frozenset[Channel]:
+        """Every channel at least one delegate implements."""
+        return frozenset(self._senders)
+
+    def send(self, message: OutgoingMessage) -> str | None:
+        """Delegate to the transport for ``message.channel``.
+
+        A missing delegate raises rather than returning quietly: the policy has
+        already refused this case by asking :attr:`channels`, and this branch exists
+        so a future caller that skips that check still fails visibly instead of
+        reporting a send that never happened.
+        """
+        sender = self._senders.get(message.channel)
+        if sender is None:
+            raise SenderError(f"no transport implements channel={message.channel.value}")
+        return sender.send(message)
+
+
+def create_textbee_sender(settings: Settings) -> TextbeeSender:
+    """Build the SMS sender for the configured gateway."""
+    return TextbeeSender(
+        _urlopen_transport,
+        api_key=settings.textbee_api_key,
+        device_id=settings.textbee_device_id,
+        base_url=settings.textbee_base_url,
+        timeout_seconds=settings.sms_timeout_seconds,
+    )
+
+
+def _urlopen_transport(request: urllib.request.Request, timeout: float) -> bytes:
+    """The real HTTP call, isolated so a test can substitute one."""
+    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310  # nosec B310
+        # ``urlopen`` is typed ``Any``, so its ``read()`` is too. Naming the shape we
+        # rely on keeps ``Any`` from reaching a ``bytes`` return: a gateway that ever
+        # answered with something else fails here, loudly, rather than downstream.
+        return bytes(response.read())
+
+
+def _failure_name(exc: BaseException) -> str:
+    """The name of what went wrong, for a message that may not quote the gateway.
+
+    ``URLError`` hides its detail behind ``.reason``, which is either an exception
+    (``socket.gaierror``, an ``ssl.SSLError``) or the string smtplib/urllib got
+    from the socket layer. Naming ``.reason`` directly is worse than useless —
+    ``type("...").__name__`` is ``"str"``, which tells an operator nothing — so
+    the raised exception is named first, and a nested exception's type is added
+    after it. Only *types* cross this boundary: a type name cannot carry a
+    recipient, which is the one thing this text may never do.
+    """
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, BaseException):
+        return f"{type(exc).__name__} ({type(reason).__name__})"
+    return type(exc).__name__
+
+
 def _describe(exc: BaseException) -> str:
     """A failure message that is safe to store on the row.
 
@@ -319,13 +525,26 @@ def create_smtp_sender(settings: Settings) -> SmtpSender:
 
 
 def build_sender(settings: Settings) -> MessageSender:
-    """Select the transport named by ``NOTIFICATION_TRANSPORT``.
+    """Select the transport(s) the settings name, one per channel.
 
-    The two-branch body is total over ``NotificationTransport``; an unknown value
-    cannot reach here because settings validation rejects it at start-up. The
-    stand-in names the setting it read, so an operator reading a 409 or a row's
-    ``last_error`` learns which value to change.
+    Two independent switches, because the channels are independent: a deployment may
+    hold a CSIRT-blessed relay and no gateway, or a gateway and no relay, and either
+    way the other channel must refuse rather than silently send nothing.
+
+    When neither switch names a transport the stand-in is returned with a reason
+    naming *both* settings, so an operator reading a 409 or a row's ``last_error``
+    learns every value to change, not just the first.
     """
+    by_channel: dict[Channel, MessageSender] = {}
     if settings.notification_transport == "smtp":
-        return create_smtp_sender(settings)
-    return UnavailableSender(reason=f"NOTIFICATION_TRANSPORT={settings.notification_transport}")
+        by_channel[Channel.EMAIL] = create_smtp_sender(settings)
+    if settings.sms_transport == "textbee":
+        by_channel[Channel.SMS] = create_textbee_sender(settings)
+    if not by_channel:
+        return UnavailableSender(
+            reason=(
+                f"NOTIFICATION_TRANSPORT={settings.notification_transport} and "
+                f"SMS_TRANSPORT={settings.sms_transport}"
+            )
+        )
+    return RoutingSender(by_channel)

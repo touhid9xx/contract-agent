@@ -326,9 +326,8 @@ class OllamaAdvisor:
                 f"ollama returned HTTP {exc.code} for model {model}"
             ) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            reason = getattr(exc, "reason", exc)
             raise AdvisoryUnavailableError(
-                f"ollama unreachable for model {model}: {type(reason).__name__}"
+                f"ollama unreachable for model {model}: {_failure_name(exc)}"
             ) from exc
 
         try:
@@ -728,6 +727,21 @@ def _extract_json_object(content: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise ValueError("the answer is not a JSON object")
     return parsed
+
+
+def _failure_name(exc: BaseException) -> str:
+    """The name of what went wrong when the call never reached the model.
+
+    ``URLError`` puts the detail in ``.reason``, which is either an exception
+    (``socket.gaierror``) or the string the socket layer produced. Naming
+    ``.reason`` directly yields ``"str"`` — no use to whoever reads the log — so
+    the raised exception is named first and a nested exception's type is appended.
+    Only types are reported, never the accompanying text.
+    """
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, BaseException):
+        return f"{type(exc).__name__} ({type(reason).__name__})"
+    return type(exc).__name__
 
 
 def _describe(exc: BaseException) -> str:

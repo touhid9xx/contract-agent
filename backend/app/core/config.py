@@ -27,13 +27,20 @@ EventTransport = Literal["none", "kafka"]
 #: cannot reach. There is deliberately no cloud member: "no cloud LLM" is a
 #: non-negotiable, so it is unrepresentable rather than merely discouraged.
 ExtractionBackend = Literal["pattern", "ollama"]
-#: Transport a notification is sent through. ``none`` keeps the refusing
-#: stand-in, so a dispatch records an attempt and fails visibly instead of
-#: pretending a message left the building. ``smtp`` selects
-#: :class:`~app.workers.senders.SmtpSender`, and it exists only because that
-#: adapter does: a transport is never named here ahead of the code that
-#: implements it, which is why there is still no ``sms`` or ``voice`` member.
+#: Transport e-mail is sent through. ``none`` keeps the refusing stand-in, so a
+#: dispatch records an attempt and fails visibly instead of pretending a message
+#: left the building. ``smtp`` selects :class:`~app.workers.senders.SmtpSender`,
+#: and it exists only because that adapter does: a transport is never named here
+#: ahead of the code that implements it, which is why there is still no ``voice``
+#: member.
 NotificationTransport = Literal["none", "smtp"]
+#: Transport SMS is sent through, and a **second switch rather than a third
+#: ``NotificationTransport`` member**. The two channels are independently
+#: deployable — a relay with no gateway, a gateway with no relay — so one setting
+#: could not describe both without inventing a precedence rule nobody asked for.
+#: ``textbee`` selects :class:`~app.workers.senders.TextbeeSender`; as above, the
+#: name exists only because the adapter does.
+SmsTransport = Literal["none", "textbee"]
 #: Which selector answers "which channel should we contact this customer on".
 #: ``deterministic`` is the F9 contact policy and the default: it decides, and the
 #: row records that it did. ``ollama`` adds the local model *on top of* it, as an
@@ -379,6 +386,23 @@ class Settings(BaseSettings):
     #: switching verification off.
     smtp_ca_bundle: str = ""
 
+    # --- sms -------------------------------------------------------------
+    #: Read only when ``sms_transport == "textbee"``. Its own switch rather than a
+    #: ``NotificationTransport`` member; see the type alias above.
+    sms_transport: SmsTransport = "none"
+    #: The gateway credential. Never logged and never returned, and kept out of
+    #: ``TextbeeSender.__repr__`` for the same reason ``smtp_password`` is.
+    textbee_api_key: str = ""
+    #: Which gateway device sends. It is a path segment of the request URL, so a
+    #: wrong value is a 404 at the first send unless start-up refuses it.
+    textbee_device_id: str = ""
+    #: The gateway origin. Checked below to be https unless loopback: the request
+    #: body carries the customer's phone number and the header carries the key.
+    textbee_base_url: str = "https://api.textbee.dev"
+    #: Upper bound on ONE gateway call, for the same correctness reason as
+    #: ``smtp_timeout_seconds``: the scheduler sends while holding the row lock.
+    sms_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+
     # --- http ------------------------------------------------------------
     cors_origins: str = "http://localhost:3000"
 
@@ -599,7 +623,52 @@ class Settings(BaseSettings):
         # 512 KiB per lane -- and a model validator for it would be unreachable
         # code (see ``test_security`` for the guard on that arithmetic).
 
+        # The SMS transport's requirements, checked at boot for the same reason
+        # SMTP's are: a missing key or device would otherwise surface at the first
+        # send, which the scheduler performs *inside* the row lock.
+        if self.sms_transport == "textbee":
+            if not self.textbee_api_key.strip():
+                raise ValueError("TEXTBEE_API_KEY must be set when SMS_TRANSPORT=textbee")
+            if not self.textbee_device_id.strip():
+                raise ValueError(
+                    "TEXTBEE_DEVICE_ID must be set when SMS_TRANSPORT=textbee; it is a "
+                    "segment of the gateway URL, so a wrong value is a 404 at the first "
+                    "send rather than an error here"
+                )
+            # Stricter than the OLLAMA_BASE_URL rule on purpose. That one guards a
+            # feature vector; this request carries a customer's phone number in the
+            # body *and* a credential in a header, so a plaintext hop is refused in
+            # every environment. Loopback stays allowed so a local double can be
+            # pointed at without a certificate.
+            url = urlsplit(self.textbee_base_url)
+            host = url.hostname or ""
+            if not host:
+                raise ValueError(
+                    "TEXTBEE_BASE_URL must be an absolute URL when "
+                    f"SMS_TRANSPORT=textbee; got {self.textbee_base_url!r}"
+                )
+            if host not in _LOOPBACK_HOSTS and url.scheme != "https":
+                raise ValueError(
+                    "TEXTBEE_BASE_URL must be https (or loopback) when "
+                    f"SMS_TRANSPORT=textbee; got {self.textbee_base_url!r}. The "
+                    "recipient number and the API key would otherwise cross the "
+                    "network unencrypted."
+                )
+
         if self.app_env in {"staging", "production"}:
+            # Refused rather than merely documented, because the cost of being wrong
+            # is a message to a real person that they cannot stop. An SMS with no
+            # opt-out route is not a smaller notification, it is an unsolicited one:
+            # the recipient cannot withdraw consent and this build cannot hear them
+            # if they try. Development stays open so the adapter can be exercised
+            # against a local double.
+            if self.sms_transport == "textbee":
+                raise ValueError(
+                    "SMS_TRANSPORT=textbee is not available in "
+                    f"{self.app_env} yet: no inbound route reads a reply, so a "
+                    "customer could not withdraw consent by asking and nothing would "
+                    "honour it. Use development until that route exists."
+                )
             self._reject_insecure_production_defaults()
 
         return self
