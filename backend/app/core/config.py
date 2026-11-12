@@ -354,6 +354,26 @@ class Settings(BaseSettings):
     #: deployment has one relay to configure and one credential to rotate.
     escalation_alert_to: str = ""
 
+    # --- reminder planning ----------------------------------------------
+    # The daily scan. Everything above *consumes* a notification row: the
+    # scheduler claims due rows, the dispatcher sends one, the escalation scanner
+    # measures silence after one. Until this worker existed nothing wrote those
+    # rows except a client calling ``POST /api/v1/notifications`` per contract, so
+    # "remind 60/30/14 days before expiry" was a promise the deployment had to keep
+    # by hand. These two settings are the whole knob surface of the clock.
+    #: Contracts the planner leases per query. Unlike the escalation scanner this
+    #: bounds one *query*, not one transaction — see
+    #: :meth:`app.workers.reminder_planner.ReminderPlanner.run_once` for why the
+    #: planner's lease is over the contract rather than over the row it writes.
+    reminder_scan_batch_size: int = Field(default=50, gt=0, le=1000)
+    #: How long the planner waits between passes. Five minutes, matching the other
+    #: two scanners: the milestones it measures are measured in *days*, so a finer
+    #: sweep would add load without finding anything sooner. It is deliberately not
+    #: a "once a day at 09:00" setting — a deployment that starts at noon still gets
+    #: its reminders, and a tick missed to a restart is retried a few minutes later
+    #: rather than a day later.
+    reminder_scan_poll_interval_seconds: float = Field(default=300.0, gt=0, le=3600)
+
     # --- smtp transport --------------------------------------------------
     # Read only when ``notification_transport == "smtp"``. ``smtp_host`` is the
     # one field with no usable default: every other setting below has a sane

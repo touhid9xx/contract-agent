@@ -285,6 +285,26 @@ ESCALATIONS_TOTAL: Final = _declare(
     )
 )
 
+#: One tick of the reminder planner, counted per contract it considered.
+#:
+#: ``outcome`` is one of ``planned`` (a notification row was written),
+#: ``already_planned`` (the slot for this milestone already existed, so the tick was
+#: a no-op — the healthy steady state, and the number that should dominate) or
+#: ``refused`` (policy declined; the reason is in the log line and never in the
+#: label, because refusal codes are bounded but ``details`` are not).
+#:
+#: This is the series an operator needs to answer the only question the planner
+#: raises: "is the daily scan actually planning anything?" A planner that is running
+#: and finding nothing looks identical to a planner that is not running, unless
+#: something counts the ticks.
+REMINDER_PLANS_TOTAL: Final = _declare(
+    Counter(
+        "reminder_plans_total",
+        "Contracts the reminder planner considered, by outcome.",
+        ("outcome",),
+    )
+)
+
 # Named ``..._total`` rather than ``escalation_alerts_total{status="failed"}`` so the
 # alert rule the spec records -- ``increase(escalation_email_failed_total[1h]) > 0``
 # -- works verbatim, with no query to rewrite on the day someone writes the rule.

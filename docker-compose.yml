@@ -155,6 +155,22 @@ services:
       - -m
       - app.workers.notification_scheduler
 
+  planner:
+    <<: *worker
+    # The clock. `scheduler` below claims a notification row and sends it, but until
+    # this service existed nothing *wrote* one except a client calling
+    # POST /notifications by hand, once per contract — so the 60/30/14 promise was
+    # kept manually or not at all. It scans for contracts entering a milestone,
+    # reuses the stored decision when one exists (never overwriting an operator's
+    # correction), derives a channel only when there is none, and writes the row.
+    # Quiet by design: a tick that plans nothing logs at debug, because "nothing is
+    # due today" is the normal case and warning on it would train an operator to
+    # ignore the column.
+    command:
+      - python
+      - -m
+      - app.workers.reminder_planner
+
   scanner:
     <<: *worker
     # Gap 15's trigger. Without it, a contract could sit unanswered for a year

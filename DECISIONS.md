@@ -7488,3 +7488,87 @@ say nothing about the contract's date. Only `end_date` is promoted, for the reas
 inverted-interval case is reachable through review and no `422` will catch it. Nothing here ran
 against MySQL, and no LLM backend is involved, so the pattern extractor is the only producer of a
 promotable date that was exercised.
+
+### D10-97 — The reminder loop had every part except a clock
+
+`build_notification` plans a milestone, `POST /api/v1/notifications` writes the row,
+`NotificationScheduler` claims the due ones, `dispatch_notification` sends one, and
+`EscalationScanner` measures silence from `sent_at`. The only producer of a `notifications` row
+was that route — one HTTP call per contract, per milestone — so "remind 60, 30 and 14 days before
+expiry" was a promise the deployment kept by hand or not at all. `docker-compose.yml` already ran
+the four *consumers* as services and nothing ran a producer: a tenant could extract, review,
+consent and decide every contract in the book and still never be reminded. Every test stayed green
+because the tests call `build_notification` directly — the same shape of hole `D10-96` closed one
+layer up, and in the same direction: the pipeline was complete except for the thing that starts it.
+
+**The fix is a daily scan, not a delayed message.** `app/workers/reminder_planner.py` composes
+what already existed instead of reimplementing it: `milestone_for` picks the most urgent *already
+due* milestone, `build_notification` applies every gate, `build_decision` supplies a channel only
+when no decision exists, and `NotificationRepository.create` writes the row. A stored decision
+wins even when today's policy would choose differently, because the latest row may be an
+operator's correction and a scan is not entitled to overwrite one. Nothing sleeps until a
+deadline: a deployment that was down for a week catches up on the next tick, and the message
+bodies name the expiry date rather than the days remaining, so a late send is still true. Quiet
+hours are not consulted here at all — they defer a *send*, and that remains the scheduler's
+decision at dispatch time; a plan made at 03:00 is not a message sent at 03:00.
+
+**Idempotency is enforced twice, deliberately.** `find_slot` answers "is this milestone already
+planned" before anything is written, so a second tick is a no-op; `create`'s unique constraint is
+the guarantee, and an `IntegrityError` at that boundary is counted as `already_planned` rather
+than allowed to roll back every other contract in the page. The read is an optimisation and the
+constraint is the truth, which is the only order in which both can be kept.
+
+**Progress comes from the id cursor, not from the predicate.** A refused contract — pipeline
+blocked on an unapproved field, no consent — matches the claim query on every tick until a person
+acts, so a batch smaller than that blocked set would starve every contract behind it while the
+tick reported itself healthy. Each page is claimed `id > cursor` and a partial page wraps the
+lease back to zero. That is the one respect in which this differs from `claim_silent_contracts`,
+where a raised escalation stops matching and the predicate alone is enough. Two tests pin the
+fairness rather than the query: a blocked contract cannot starve the queue, and a cursored drain
+covers a table larger than one page.
+
+**No audit row, because the notification is the record.** The escalation scanner writes one
+because it changes a contract's status; this changes nothing a person can see except that a
+reminder is now scheduled, and `notifications` already answers who was contacted, when, on which
+channel and from which decision. An audit entry per planned reminder would duplicate a queryable
+table and would have to be kept in step with it.
+
+**Mutation testing found dead code and a test that proved nothing.** Both are recorded rather
+than smoothed over, because the second one is the interesting failure:
+
+- The decision append used to sit under `if stored is None:`. Disabling that guard changed no
+  behaviour: when the condition is false the appended row *is* the loaded one, already persistent
+  in the session, so `add` appends nothing. It read like protection and was dead code, so it was
+  removed with a comment saying why the line is unconditional — not restored and defended.
+- `test_a_once_derived_decision_is_not_derived_again` passed for the wrong reason. It took two
+  ticks at the same instant and asserted one decision row, and the second tick stops at
+  `find_slot` because that milestone is already occupied — so it never reaches the append, and
+  the count would have stayed at one even if the planner had re-derived and discarded a fresh
+  decision. It now ticks eleven days later, when a tighter milestone is due and its slot is
+  empty. Making the derivation unconditional turns that test red, along with
+  `test_a_stored_decision_outranks_a_fresh_derivation`, which is the check the first version was
+  assumed to provide and did not.
+
+`REMINDABLE_CONTRACT_STATUSES` deliberately duplicates the scanner's `SCANNABLE_CONTRACT_STATUSES`
+— a repository must not import another repository's business set — and the duplication is made
+safe by a test asserting the two sets are equal, which is what the docstring had promised before
+that test existed. The claim query itself is an unscoped `SELECT … LIMIT` lease like
+`claim_silent_contracts`, because the scan is a system actor reading across tenants and each
+contract is then planned inside its own tenant's session.
+
+**Gates.** `test_reminder_planner.py` -> 37 tests. Full suite -> **1116 tests, 1101 passed, 15
+skipped, 0 failed** counted from the JUnit XML (+37); `mypy app` -> no issues in 73 files;
+`ruff check` / `ruff format --check` -> clean over 131 files; `smoke_journey.py` -> 108 checks;
+`pre-commit run --all-files` -> 19 hooks, 18 passed and 1 skipped; `pre-commit --hook-stage
+manual` -> 4 hooks passed, `gitleaks` included. The Compose service was added and the YAML
+parsed, but the image was **not built and the planner was never started as a process** here; the
+worker was exercised only through `run_once`/`drain` in tests.
+
+**Limits.** SQLite only — no MySQL run, so the `SKIP LOCKED`-free lease and the unique constraint
+are proven only under SQLite's locking. No live email or SMS gateway, and no LLM backend: the
+advisory is deliberately not consulted on an unattended tick, so a deployment wanting the model's
+opinion still needs the route. `reminder_sent` is never written, so milestone advancement is
+inferred from existing notification rows rather than recorded on the contract. The planner polls
+and holds no durable cursor: a restart re-reads the window from the beginning, which is safe
+(planning is idempotent) but can delay the tail of a very large book under frequent restarts.
+Nothing here schedules a future date, so "send at 09:00 local" is still the scheduler's job.

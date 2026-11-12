@@ -3880,7 +3880,7 @@ slice makes those sentences narrower instead of deleting them.
 
 | Area | What changed, and why |
 | --- | --- |
-| `scheduler` and `scanner` services | `python -m app.workers.notification_scheduler` and `…escalation_scanner`, on the same image as `api` — one `Dockerfile.backend`, five processes, differing only in `command`. |
+| `scheduler` and `scanner` services | `python -m app.workers.notification_scheduler` and `…escalation_scanner`, on the same image as `api` — one `Dockerfile.backend`, five processes, differing only in `command` — six as of `D10-97`, which added `planner`. |
 | One `x-worker` anchor | Three near-identical service blocks are exactly where a `read_only: true` or a `no-new-privileges` line goes missing in one of them. `relay` was moved onto the anchor too, so all three worker processes are now defined by the same block. |
 | `healthcheck: disable: true` | **The defect this slice found.** `Dockerfile.backend`'s `HEALTHCHECK` probes `http://127.0.0.1:8000/health`, which only uvicorn answers. Every worker inherits it from the image, so `relay` has reported **unhealthy** for its entire life while working correctly — and any `depends_on: condition: service_healthy` pointing at it would have deadlocked. The API keeps its liveness probe; the workers switch theirs off explicitly rather than health-checking a port nothing listens on. |
 | `make logs` | It followed `api` only, and was missing from `make help` besides. With five services that hides a crash-looping worker from the first command an operator reaches for. It now follows everything; `make logs S=api` narrows it. |
@@ -6503,6 +6503,42 @@ counted from the JUnit XML; `mypy app` -> no issues in 72 files; `ruff check` /
 `pre-commit run --all-files` -> 19 hooks, 18 passed and 1 skipped; `pre-commit --hook-stage
 manual` -> 4 hooks passed, `gitleaks` included. Not measured: MySQL, any LLM backend, and an
 inverted start/end pair produced by a correction, which no `422` will catch.
+
+### The reminder pipeline had no clock (`D10-97`)
+
+Every part of the promise existed and none of it ran on its own. `build_notification` could plan a
+milestone, `POST /api/v1/notifications` wrote the row, the scheduler claimed it, the dispatcher
+sent it, the escalation scanner measured silence from it — but the only thing that ever *wrote* a
+notification was an HTTP call a person made, once per contract per milestone. So "remind 60, 30 and
+14 days before expiry" was kept by hand or not at all, and `docker-compose.yml` ran the four
+consumers as services while running no producer. The suite was green because the tests call
+`build_notification` directly — the same way it was green while an approved `end_date` never
+reached the column the scan reads (`D10-96`).
+
+`backend/app/workers/reminder_planner.py` is the clock: a daily scan that claims contracts entering
+a milestone, reuses a stored decision when one exists (an operator's correction outranks today's
+policy), derives one only when nobody has chosen, and writes the row through the existing
+`NotificationRepository`. Refusals — blocked pipeline, no consent, needs review — are counted per
+code and logged at debug, because a correctly configured deployment is *supposed* to refuse those
+contracts on every tick until a person acts; the claim is cursored by id so a large blocked set
+cannot starve the queue behind it. It writes no audit row: the notification is the record. It is
+also now a Compose service (`planner`), because a worker nothing starts is the hole restated.
+
+Two mutation-testing findings are recorded rather than tidied away. The decision append sat under
+`if stored is None:`, which was **dead code** — with a stored decision the appended row *is* the
+loaded one, already persistent, so `add` appends nothing — and it was removed. And
+`test_a_once_derived_decision_is_not_derived_again` **proved nothing**: its second tick
+short-circuits at `find_slot` on the already-occupied milestone and never reaches the append, so
+the count stayed at one even with the planner mutated to re-derive every time. It now ticks eleven
+days later, when a tighter milestone is due and its slot is empty, and that mutation turns it red.
+
+Gates: `test_reminder_planner.py` -> 37; full suite -> **1116 tests, 1101 passed, 15 skipped, 0
+failed** from the JUnit XML; `mypy app` -> no issues in 73 files; `ruff check` / `ruff format
+--check` -> clean over 131 files; `smoke_journey.py` -> 108 checks; `pre-commit run --all-files`
+-> 19 hooks, 18 passed and 1 skipped; `pre-commit --hook-stage manual` -> 4 hooks passed,
+`gitleaks` included. Not measured: MySQL, a live gateway, any LLM backend, and the Compose service
+itself — the YAML parses and the service is defined, but the image was not built and the planner
+never ran as a process.
 
 ## Non-negotiable reminders
 

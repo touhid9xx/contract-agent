@@ -54,6 +54,25 @@ CONSENT_FLAG_COLUMNS = (
 DEFAULT_CONTRACT_PAGE_LIMIT = 50
 MAX_CONTRACT_PAGE_LIMIT = 200
 
+#: Contract states the reminder planner may plan a send *from*.
+#:
+#: Deliberately identical to :data:`app.db.repositories.escalations.
+#: SCANNABLE_CONTRACT_STATUSES`, and duplicated rather than imported for the reason
+#: that module already gives: a repository must not import another repository's
+#: business set, because the two would then always move together even on the day one
+#: of them should not. They answer different questions — "may this contract receive a
+#: reminder?" versus "may this contract be escalated?" — and today's answer happens to
+#: be the same pair. ``test_reminder_planner.py`` asserts the two tuples are equal, so
+#: a divergence is a failing test rather than a silent one.
+#:
+#: ``escalated`` is absent for the reason D10-20 records: an operator resolving an
+#: escalation by hand deliberately leaves the contract in that state, and a clock
+#: that kept sending reminders afterwards would undo a person's decision.
+REMINDABLE_CONTRACT_STATUSES: tuple[ContractStatus, ...] = (
+    ContractStatus.ACTIVE,
+    ContractStatus.REMINDER_SENT,
+)
+
 
 class ContractRepository(TenantScopedRepository[Contract]):
     """Tenant-scoped access to the contracts of one organisation."""
@@ -218,3 +237,78 @@ def apply_consent(
         return False
     contract.consent_updated_at = now or utc_now()
     return True
+
+
+def claim_reminder_candidates(
+    session: Session,
+    *,
+    earliest_end_date: date,
+    latest_end_date: date,
+    after_id: int = 0,
+    limit: int,
+) -> list[Contract]:
+    """Lease the contracts whose expiry could be reminded today, **unscoped**.
+
+    The tenant predicate is absent on purpose. The reminder planner is the system
+    actor — it has a database connection and a clock, not a principal — so a
+    tenant-scoped query could not see the contracts it exists to find. Keeping the
+    bypass in this one named function, next to ``contract_for_operator``, is what
+    keeps the exceptions to tenant scoping countable; the *write* it enables is
+    still tenant-scoped, because the planner builds its repositories from each
+    row's own ``tenant_id``.
+
+    The predicate is ``status IN (...) AND end_date BETWEEN ? AND ?`` — exactly the
+    shape ``ix_contracts_scan`` was declared for (see the comment on the model),
+    which is why the window is expressed as bounds rather than as the date
+    arithmetic that decides a milestone. The policy stays in
+    :func:`app.workers.dispatch.milestone_for`; this query only has to be a
+    **superset** of what that function would schedule, because a row this query
+    over-selects costs one refused plan, while a row it under-selects is a reminder
+    nobody ever sends.
+
+    Two deliberate filters:
+
+    ``do_not_contact``
+        Removed here rather than in the worker. It cannot change with the clock —
+        only a person or an inbound STOP can set it — so leaving it in would make
+        the same rows occupy the batch on every tick forever. The remaining consent
+        questions are *not* filtered: they are re-answered each tick by the policy,
+        because approving a field or recording consent is what makes a blocked
+        contract plannable.
+
+    ``end_date IS NOT NULL``
+        A contract with no end date has no milestone. ``build_notification`` would
+        refuse it as ``MISSING_END_DATE``, but it would do so on every tick, so the
+        scan does not ask.
+
+    ``FOR UPDATE SKIP LOCKED`` (a no-op on SQLite) is what makes two planner
+    replicas safe: they lease disjoint rows rather than both planning the same
+    contract. It is a lease over the *contract*, not over the notification, so the
+    unique constraint on the slot remains the last line of defence rather than the
+    first.
+
+    ``after_id`` exists because the reminder planner must be able to prove progress.
+    A contract that is *refused* every tick — pipeline blocked, no consent — keeps
+    matching this predicate, so ordering by urgency alone would let a batch-sized
+    block of permanently-blocked contracts starve every contract behind them
+    forever, and the tick would still look healthy. See
+    :class:`app.workers.reminder_planner.ReminderPlanner` for how the cursor is
+    advanced.
+    """
+    if limit <= 0:
+        return []
+    statement = (
+        select(Contract)
+        .where(
+            Contract.status.in_(REMINDABLE_CONTRACT_STATUSES),
+            Contract.do_not_contact.is_(False),
+            Contract.end_date.is_not(None),
+            Contract.end_date >= earliest_end_date,
+            Contract.end_date <= latest_end_date,
+            Contract.id > after_id,
+        )
+        .order_by(Contract.id)
+        .limit(limit)
+        .with_for_update(skip_locked=True, of=Contract)
+    )
+    return list(session.execute(statement).scalars())
