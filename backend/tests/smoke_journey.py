@@ -37,8 +37,8 @@ From the repository root::
 
 Exit code 0 means every step passed. Non-zero means a step failed; the failing
 step and the response body are printed. Nothing is left behind: the database,
-the document store and the encryption key live in a temporary directory that is
-removed on success.
+the document store and the keys live in a temporary directory that is removed on
+success.
 """
 
 from __future__ import annotations
@@ -46,6 +46,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import secrets
 import shutil
 import socket
 import sys
@@ -152,12 +153,20 @@ def build_database(path: Path) -> tuple[Engine, sessionmaker[Session]]:
     return engine, build_session_factory(engine)
 
 
-def build_settings(database_url: str, documents_dir: Path, key: str) -> Settings:
+def build_settings(database_url: str, documents_dir: Path, key: str, index_key: str) -> Settings:
     """A runnable configuration that needs no external service.
 
     ``argon2_*`` is lowered for the same reason ``conftest.py`` lowers it: the
     code path is identical and only the work is smaller. The transports stay at
     their shipped defaults, so nothing here can reach a broker or a mail server.
+
+    ``contact_blind_index_key`` is not a convenience for the test: it is part of
+    the configuration an operator who wants inbound ``STOP`` handling has to
+    supply, and ``cli extract`` refuses to run without it rather than store
+    contact values no reply could ever find. Leaving it out here made this journey
+    drive a deployment the CLI has already decided not to serve — the extract step
+    failed on a real CI runner while the pytest suite stayed green, because this
+    script is not collected by pytest.
     """
     return Settings(
         app_env="test",
@@ -168,6 +177,7 @@ def build_settings(database_url: str, documents_dir: Path, key: str) -> Settings
         argon2_parallelism=1,
         database_url=database_url,
         encryption_key=key,
+        contact_blind_index_key=index_key,
         document_store_path=str(documents_dir),
         event_transport="none",
         notification_transport="none",
@@ -618,6 +628,7 @@ def main() -> int:
             f"sqlite+pysqlite:///{database_path}",
             documents_dir,
             Fernet.generate_key().decode(),
+            secrets.token_urlsafe(32),
         )
 
         port = free_port()

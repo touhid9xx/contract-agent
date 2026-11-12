@@ -7374,3 +7374,64 @@ CLI exit codes plus an assertion that the command opens no session). The corpus 
 that suite too, so a regression reddens the tests as well as the command. Full suite **1070
 tests: 1055 passed, 15 skipped, 0 failed** (was 1042/1027); `mypy app` -> no issues in 72 files;
 `ruff check` and `ruff format --check` -> clean over 133 files.
+### D10-95 — CI caught the two gates a green local run does not cover
+
+The five commits pushed as `a8add6c..ed6bd4a` were green locally: 1070 tests (1055 passed, 15
+skipped, 0 failed) counted from the JUnit XML rather than the truncated console summary,
+`mypy` clean over 72 files, `ruff check` and `ruff format --check` clean over 133 files. The
+first CI run on that push (`43216315105`) was **red**: four jobs passed — demo frontend,
+frontend, python static, and the MySQL 8.4 integration job — and two failed, `backend tests
+(pytest, sqlite)` at the `smoke journey` step and `hygiene + secret scan` at the `gitleaks`
+step. The `CI gate` job that failed as well is a rollup, not a third cause.
+
+**The smoke journey was broken by `D10-93`, correctly.** `smoke_journey.py` is a script, not a
+test module, so `python -m pytest` neither collects nor proves anything about it — the suite can
+be fully green while the thing `docker compose up` is supposed to serve is broken. `cli extract`
+now refuses to run without `CONTACT_BLIND_INDEX_KEY` rather than write contact values no inbound
+`STOP` could ever find, and the journey's `build_settings` supplied no such key. The refusal was
+right; the journey was an operator configuration that no longer exists. Fixed by generating an
+index key beside the already-generated Fernet key (`secrets.token_urlsafe(32)`), so no literal
+is introduced and nothing has to be stored, and the journey now drives the new path end to end
+on a real socket: extraction writes digests, and the review step recomputes one. 108 checks
+pass.
+
+**The secret scan had never run locally, and the log that said otherwise was true.** The
+`gitleaks` hook is `stages: [manual]`; `pre-commit run --all-files` skips manual-stage hooks, so
+the previously recorded "19 hooks: 18 passed, 1 skipped" was accurate and silently incomplete.
+Only `--hook-stage manual`, which is what `ci.yml` calls, executes it. Two findings, both in
+`e0857f5`, both `generic-api-key` in `backend/tests/test_blind_index.py`: line 35 (a
+32-character hex blind-index key) and line 126 (a Fernet key). Neither is a credential — the
+tests need *a* key of the documented shape, never that key — but a scanner cannot know that from
+entropy, and a scanner taught to ignore a test directory stops being a gate. Fixed the way the
+rest of the suite already does it: the blind-index fixture became deliberately low-entropy
+descriptive text (the `test_document_text.py` / `test_review.py` convention) and the Fernet key
+is generated. The pinned golden digest moved `c4aa08…3245` -> `cc9236…e317` because the *key*
+changed, not the construction, and the test says so.
+
+**The values are still in published history, and that was accepted deliberately.** Removing
+them from `HEAD` cannot remove them from `e0857f5`, and rewriting a pushed commit would
+invalidate every `Landed as` SHA this ledger cites. So the two findings are accepted by
+fingerprint in a new `.gitleaksignore`: one commit, one file, one rule, two lines, with the
+reason written beside them and an instruction not to add entries to quiet a new finding.
+`gitleaks detect` over 197 commits now reports no leaks, and `pre-commit run gitleaks
+--all-files --hook-stage manual` passes.
+
+**Why this is worth a record rather than a fix commit.** The design was not wrong; the
+definition of "gates green" was. Two of the checks CI runs were absent from the local set — one
+because pytest does not collect a script, one because a manual-stage hook is skipped by the
+default invocation — and both absences were invisible in a green summary. The correction is a
+practice, not a patch: `smoke_journey.py` is part of "the gates" for any change to the CLI, the
+settings or the review path, and `gitleaks` is run with `--hook-stage manual` before any commit
+that touches keys, fixtures or configuration.
+
+**Gates.** `smoke_journey.py` -> 108 checks passed; `gitleaks` (image `v8.18.4`, the hook's
+own) -> no leaks over 197 commits; full suite -> **1070 tests, 1055 passed, 15 skipped, 0
+failed**; `mypy app` -> no issues in 72 files; `ruff check` / `ruff format --check` -> clean over
+133 files.
+
+**Limits.** The `gitleaks` hook needs Docker, so it cannot run where Docker is not installed —
+the same limit `D1-03` records for the hook itself. The `.gitleaksignore` fingerprints name a
+line in a commit that will never change, so they cannot rot into a false pass; if they ever stop
+matching they are redundant, not evidence of a clean scan. Nothing here revalidated the rest of
+CI: the four green jobs were green on the previous commit, and this slice changed no frontend,
+no migration and no MySQL-touching code.

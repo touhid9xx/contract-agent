@@ -6450,6 +6450,29 @@ failed**; `mypy app` -> no issues in 72 files; `ruff check` / `ruff format --che
 133 files; `python -m app.cli evaluate-extraction --golden tests/golden/extraction/manifest.json`
 -> F1 0.919, exit 0.
 
+### CI caught what a green local suite could not (`D10-95`)
+
+The push that landed P2-E (part 2), P2-B and the two ledgers was green locally and **red in CI**:
+two of the checks CI runs were missing from the local set, for two different structural reasons,
+and neither absence showed up in a green summary.
+
+- `smoke_journey.py` is a script, so `pytest` never collects it. `cli extract` now refuses to run
+  without `CONTACT_BLIND_INDEX_KEY` (`D10-93`) and the journey's settings supplied none, so it
+  drove a configuration the CLI had already decided not to serve. It now generates an index key
+  beside the Fernet key; 108 checks pass.
+- The `gitleaks` hook is `stages: [manual]`, so `pre-commit run --all-files` skips it — the
+  recorded "18 passed, 1 skipped" was true and incomplete. It found two `generic-api-key` findings
+  in `backend/tests/test_blind_index.py` (`e0857f5`), both test fixtures with credential-shaped
+  entropy. Both were replaced (low-entropy text; a generated Fernet key), the pinned golden digest
+  moved with the key, and the two historical findings are accepted by fingerprint in
+  `.gitleaksignore`.
+
+What follows from it is a practice, not a patch: any change to the CLI, the settings or the review
+path owes a `smoke_journey.py` run, and `pre-commit run gitleaks --all-files --hook-stage manual`
+belongs to the gate for commits touching keys, fixtures or configuration. Gates after the fix:
+smoke journey 108 checks; gitleaks clean over 197 commits; suite **1070 tests, 1055 passed, 15
+skipped, 0 failed**; `mypy app` clean over 72 files; ruff clean over 133 files.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

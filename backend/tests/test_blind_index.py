@@ -17,6 +17,7 @@ here pins a property that, if it changed, would silently stop that lookup:
 from __future__ import annotations
 
 import pytest
+from cryptography.fernet import Fernet
 from pydantic import ValidationError
 
 from app.core.blind_index import (
@@ -30,9 +31,13 @@ from app.core.config import MIN_BLIND_INDEX_KEY_LENGTH, Settings
 from app.db.enums import FieldName
 from app.workers.extraction import normalize_value
 
-#: A key of exactly the documented shape (32+ printable characters). Not a
-#: credential: it never leaves the test process.
-KEY = "0123456789abcdef0123456789abcdef"
+#: A key of the documented shape (32+ printable characters) with deliberately *low*
+#: entropy. That is not laziness: a high-entropy literal here is indistinguishable
+#: from a leaked credential to a secret scanner (``gitleaks`` read the previous
+#: value as ``generic-api-key``), and a scanner told to ignore one file stops being
+#: a gate. Same convention as ``test_document_text.py`` and ``test_review.py``. Not
+#: a credential: it never leaves the test process.
+KEY = "blind-index-test-key-not-a-credential"
 INDEX = ContactBlindIndex(KEY)
 
 PHONE = "+442079460958"
@@ -53,8 +58,13 @@ def test_the_golden_digest_is_stable() -> None:
     raise: it would quietly orphan the indexes of rows extracted before the
     change, so opt-outs recorded before it would stop being findable. Pinning the
     value turns that into a failing test.
+
+    The key is test material, so what is pinned is the construction *for that key*:
+    ``hmac.new(key, normalised_value, sha256)``. Replacing a high-entropy fixture
+    with a low-entropy one changes this digest without weakening the pin — any
+    change to the construction itself still lands here.
     """
-    assert INDEX.digest(PHONE) == "c4aa08716e6ee297eb59464b1fd03d909f9c57b7c4a1f389e4a7a4384b143245"
+    assert INDEX.digest(PHONE) == "cc923693a592611c6bac818dbbd7a81374514944f64981c48be0942cc0e2e317"
 
 
 def test_the_digest_is_a_sha256_hex_digest() -> None:
@@ -123,7 +133,10 @@ def test_the_key_is_not_derived_from_the_encryption_key() -> None:
     """
     settings = Settings(
         app_env="test",
-        encryption_key="Q2hhbmdlTWUtMzJCeXRlc0tleUZvckZlcm5ldE5vdyE=",
+        # Generated rather than written out: the value is irrelevant to what this
+        # test proves (only that a real encryption key present changes nothing),
+        # and a literal Fernet key is exactly the shape a secret scanner flags.
+        encryption_key=Fernet.generate_key().decode(),
     )
     with pytest.raises(MissingBlindIndexKeyError):
         build_blind_index(settings)

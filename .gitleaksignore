@@ -1,0 +1,16 @@
+# Accepted findings for `gitleaks detect`.
+#
+# Two test fixtures introduced in e0857f5 -- a blind-index key and a Fernet key
+# written out as literals in backend/tests/test_blind_index.py -- had the shape
+# (length, entropy) of a credential, so the `generic-api-key` rule flagged them.
+# Neither is one: no service, store or row they could unlock is reachable with
+# them, and the tests only need *a* key of the documented length, never that key.
+# A later commit replaced both with generated / deliberately low-entropy values,
+# so nothing written from now on contains them. Accepting these two historical
+# findings beats rewriting published history, which DECISIONS.md cites by SHA.
+#
+# Scope: one commit, one file, one rule, two lines. Each line names the exact
+# fingerprint. Do not add entries here to quiet a new finding -- fix the finding,
+# or write down why it is not one, the way this file does.
+e0857f547ce59a1c2eac061ae5fee6bfb9b619a5:backend/tests/test_blind_index.py:generic-api-key:35
+e0857f547ce59a1c2eac061ae5fee6bfb9b619a5:backend/tests/test_blind_index.py:generic-api-key:126
