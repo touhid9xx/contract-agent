@@ -6399,6 +6399,49 @@ with a test proving the other half boots); full suite -> **1042 tests, 1027 pass
 failed**; `mypy app` -> no issues in 71 files; `ruff check` / `ruff format --check` -> clean over 130
 files.
 
+### P2-B — extraction quality, measured instead of assumed
+
+`EXTRACTION_REVIEW_THRESHOLD` decides which extracted values may reach a customer without a
+person looking, and "F1 ≥ 0.85" was an acceptance criterion with no measurement behind it. This
+slice adds both halves: `app/workers/extraction_eval.py` (pooled precision/recall/F1 per field,
+micro-averaged over counts), a golden corpus of eight documents with hand-written expected
+values, and `python -m app.cli evaluate-extraction --golden … --min-f1 …`, which opens no
+database, writes nothing, and exits `7` (`EXIT_BELOW_GATE`) when the pooled F1 misses the floor.
+
+The score is what **would be stored**, not what a regex emitted: `best_per_field` and
+`normalize_value` are applied first, so a document saying `24/06/2025` and an expectation of
+`2025-06-24` are one value. A corpus that cannot be used is refused rather than half-read — a
+malformed manifest, an unknown field name, a blank or unnormalizable expectation, an empty
+document, or a `file` that escapes the corpus directory — because silently dropped expectations
+produce a number that looks like a measurement and is not one.
+
+**The first run found real bugs.** F1 was 0.841, below the gate: `start_date` recall 0.625,
+`end_date` 0.75 and `contract_value` 7/8, because `starts on …` and `commences` were not date
+label forms and a lease's `Annual rent:` was not a value label. Fixed in `extractors.py` with
+anchored forms (`end(?:s|ing|ed)`, never `end\w*`, so "endorsement" is not an end-date). F1 is
+now **0.919** over 34 matched / 5 missed / 1 wrong, with `address` and `dob` reported as
+`unreachable` — gap 17 as a number rather than a note.
+
+Two results are pinned rather than fixed, and both are deliberate: `03/04/2026 (3 April 2026)`
+is dropped rather than guessed at, and the water company's own email address in document 06 is
+counted as the false positive it is.
+
+**Not done, and not faked:** the corpus was written by the same hand as the regexes it scores,
+so this is a regression net and not an accuracy claim — 0.919 means "not worse", never "92 %
+right on a customer's contracts". No LLM backend is measured (gap 17 stands, so `pattern` is the
+only backend ever scored). Confidence *calibration* is not measured either: this says whether
+the extractor finds the right value, not whether a 0.8-confidence value is right 80 % of the
+time, so the threshold itself remains unvalidated. Eight documents is small, and only `.txt`
+files are scored — no PDF flows through this path. `.github/workflows/ci.yml` does not run the
+command, so the gate is available rather than enforced. This corpus measures **extraction
+fields**, not the agent's channel decisions: the golden-scenario review gate the agent milestone
+still lacks (above, D10-89) is a different thing and is still absent.
+
+Gates: `test_extraction_eval.py` -> 28; full suite -> **1070 tests, 1055 passed, 15 skipped, 0
+failed**; `mypy app` -> no issues in 72 files; `ruff check` / `ruff format --check` -> clean over
+133 files; `python -m app.cli evaluate-extraction --golden tests/golden/extraction/manifest.json`
+-> F1 0.919, exit 0.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

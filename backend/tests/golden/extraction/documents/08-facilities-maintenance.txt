@@ -1,0 +1,11 @@
+BRIGHTWELL FACILITIES
+Maintenance contract
+
+Start date: 2025-09-01
+End date: 2026-08-31
+
+Site address: 220 Ashfield Road, Manchester M14 5TQ
+Site manager email: site.manager@brightwell.example.test
+Site manager phone: 0161 496 0777
+
+Contract value £ 36,750.00

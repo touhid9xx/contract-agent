@@ -13,6 +13,7 @@ Run from ``backend/``::
     python -m app.cli backfill-blind-index --dry-run
     python -m app.cli backfill-blind-index
     python -m app.cli doctor
+    python -m app.cli evaluate-extraction --golden tests/golden/extraction/manifest.json
     python -m app.cli create-admin --tenant-slug acme --tenant-name Acme --email ops@acme.test
 
 Why a command rather than an HTTP endpoint: republishing parked events is a
@@ -105,6 +106,12 @@ from app.workers.extraction import (
     extract_contract,
     normalize_value,
 )
+from app.workers.extraction_eval import (
+    DEFAULT_MIN_F1,
+    EvaluationRefusedError,
+    load_golden_corpus,
+    score_corpus,
+)
 from app.workers.extractors import build_extractor
 
 log = structlog.get_logger(__name__)
@@ -144,6 +151,13 @@ EXIT_ATTENTION = 5
 #: on purpose: silently reusing the existing account would leave the caller believing
 #: it had just set that account's password, which it did not do and must not.
 EXIT_EXISTS = 6
+#: ``evaluate-extraction`` measured an F1 below the requested gate. Its own code
+#: rather than ``EXIT_ATTENTION``, for the reason ``EXIT_EXISTS`` has one: a script
+#: has to tell "a database has rows that need a person" from "the extractor no
+#: longer meets the quality bar", because the second one blocks a release and the
+#: first one does not. Both are non-zero, so a caller that only cares about
+#: pass/fail can ignore the distinction.
+EXIT_BELOW_GATE = 7
 
 #: The two columns on :class:`~app.db.models.ExtractedField` that hold PII, and so
 #: must be sealed, are named once in :data:`app.core.attention.PII_COLUMNS` — not
@@ -325,6 +339,22 @@ def _ids_arg(value: str) -> list[int]:
         ) from exc
 
 
+def _f1_arg(value: str) -> float:
+    """Parse ``--min-f1`` and refuse a threshold outside ``0.0-1.0``.
+
+    Not a cosmetic check: F1 lives in ``0.0-1.0``, so ``--min-f1 85`` (a percentage
+    typed by habit) would fail every run while looking like a legitimate gate, and
+    an operator would read the failure as "extraction got worse".
+    """
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected a number between 0.0 and 1.0") from exc
+    if not 0.0 <= parsed <= 1.0:
+        raise argparse.ArgumentTypeError("expected a number between 0.0 and 1.0")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the operator CLI parser."""
     parser = argparse.ArgumentParser(
@@ -486,6 +516,38 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     doctor.set_defaults(handler=_doctor)
+
+    evaluate = commands.add_parser(
+        "evaluate-extraction",
+        help="score the configured extraction backend against a golden corpus",
+        description=(
+            "Read a manifest of documents whose correct field values are written "
+            "down, run the backend named by EXTRACTION_BACKEND over them, and report "
+            "precision, recall and F1 per field plus a pooled total. Exits non-zero "
+            "when the pooled F1 is below --min-f1. Needs no database and writes "
+            "nothing: it is the measurement that sets the review threshold's "
+            "meaning, not a repair."
+        ),
+    )
+    evaluate.add_argument(
+        "--golden",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help=(
+            "manifest JSON listing the corpus documents and their expected values. "
+            "Document paths inside it are resolved next to the manifest, so a corpus "
+            "is one directory that can be committed or moved as a unit"
+        ),
+    )
+    evaluate.add_argument(
+        "--min-f1",
+        type=_f1_arg,
+        default=DEFAULT_MIN_F1,
+        metavar="F",
+        help=(f"pooled F1 the run must reach, between 0.0 and 1.0 (default: {DEFAULT_MIN_F1})"),
+    )
+    evaluate.set_defaults(handler=_evaluate_extraction)
 
     consent = commands.add_parser(
         "consent-import",
@@ -1107,6 +1169,97 @@ def _doctor(
 
     log.info("doctor_clean", **report.as_dict())
     return EXIT_OK
+
+
+def _evaluate_extraction(
+    args: argparse.Namespace,
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+) -> int:
+    """``evaluate-extraction``: measure the extractor instead of trusting it.
+
+    Extraction quality was the one claim in this system with no number behind it.
+    ``PatternExtractor`` carries hand-written confidence constants, the review
+    threshold decides which of its values may reach a customer without a person
+    looking, and until now nothing produced a precision or recall figure for either
+    — so a regex tweak could make extraction worse and every gate would stay green.
+    The F1 target was a sentence, not a check.
+
+    What this command is: the measurement, and the check built on it. It reads a
+    corpus whose correct answers are written down, runs the backend the deployment
+    is actually configured with (``EXTRACTION_BACKEND``), and pools the outcomes
+    into per-field and total precision/recall/F1. Below ``--min-f1`` it exits
+    :data:`EXIT_BELOW_GATE`, so a regex regression fails a build rather than
+    quietly degrading the review queue.
+
+    What it is **not**: proof the product extracts well from *customers'* contracts.
+    The corpus in ``tests/golden/extraction`` was written by the same hand as the
+    regexes it scores, which makes it a regression net and not an honest accuracy
+    claim — a corpus that the extractor already handles is the easy half. An
+    operator measuring a real portfolio points ``--golden`` at their own labelled
+    documents, and *that* number is the one worth quoting. ``--min-f1`` is a floor
+    to fail against, never evidence that the floor is met.
+
+    It opens no session and writes nothing — but it does take ``session_factory``,
+    because every handler in this module has one shape and the dispatcher does not
+    special-case commands. ``EXTRACTION_BACKEND=ollama`` will contact the configured
+    local model; the pattern backend, which the test suite pins, contacts nothing.
+    """
+    manifest = Path(args.golden)
+    min_f1 = float(args.min_f1)
+
+    try:
+        corpus = load_golden_corpus(manifest)
+    except EvaluationRefusedError as exc:
+        log.error("extraction_eval_refused", manifest=manifest.name, reason=str(exc))
+        return EXIT_FAILED
+
+    try:
+        report = score_corpus(corpus, build_extractor(settings))
+    except ExtractionUnavailableError as exc:
+        # A configured backend that cannot answer is the operator's problem and not
+        # a quality result: saying "below gate" here would blame the regexes for a
+        # model that was never reached.
+        log.error(
+            "extraction_eval_backend_unavailable",
+            backend=settings.extraction_backend,
+            reason=str(exc),
+        )
+        return EXIT_FAILED
+
+    for score in report.scores:
+        # Every field, including the ones that scored nothing at all: a row reading
+        # ``expected=0 predicted=0`` is the evidence that a field is dead, which is
+        # exactly what a reader needs to decide whether the gap is known.
+        log.info("extraction_eval_field", **score.as_dict())
+
+    if report.unreachable:
+        log.warning(
+            "extraction_eval_unreachable_fields",
+            fields=[name.value for name in report.unreachable],
+            hint=(
+                "the corpus states these fields and the backend never produced one; "
+                "those documents will always cost a person a read"
+            ),
+        )
+
+    if report.discarded:
+        log.warning(
+            "extraction_eval_values_discarded",
+            discarded=report.discarded,
+            hint=(
+                "candidates whose value could not be normalized, so the write path "
+                "would drop them too; counted as neither a hit nor a miss"
+            ),
+        )
+
+    summary = report.as_dict()
+    if report.meets(min_f1):
+        log.info("extraction_eval", min_f1=min_f1, **summary)
+        return EXIT_OK
+
+    log.error("extraction_eval_below_gate", min_f1=min_f1, **summary)
+    return EXIT_BELOW_GATE
 
 
 def _consent_import(

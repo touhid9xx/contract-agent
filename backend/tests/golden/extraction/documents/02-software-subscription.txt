@@ -1,0 +1,12 @@
+NORTHWIND SOFTWARE LTD
+Order form and subscription terms
+
+Order number: NW/SUB/2025/1185
+
+The subscription commences 14/03/2025 and runs until the expiry date
+13/03/2026. Support is included at no extra cost.
+
+Billing email: accounts@brightline.example.test
+Support desk: support@northwind.example.test
+
+Annual contract value 24,000.00 GBP, invoiced on signature.

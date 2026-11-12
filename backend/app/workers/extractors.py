@@ -47,10 +47,21 @@ DEFAULT_MODEL_CONFIDENCE = 0.6
 
 #: Label windows: a value next to one of these words is trusted more than a bare
 #: match, because the label is what says *which* date it is.
-_START_LABELS = re.compile(r"(?i)\b(?:start(?:ing)?|commencement|effective)\s*(?:date|from)?\b")
+#:
+#: The verb forms are here because the golden corpus
+#: (``tests/golden/extraction``) measured them missing: "this agreement **starts
+#: on** 2025-02-01" and "the subscription **commences** 14/03/2025" are the shapes
+#: contracts are actually written in, and a label set of nouns only found 5 of 8
+#: start dates. Every form is anchored — ``end(?:s|ing|ed)``, not ``end\w*`` — so
+#: "endorsement" and "end-user" do not become end-date labels.
+_START_LABELS = re.compile(
+    r"(?i)\b(?:start(?:s|ing|ed)?|commenc(?:es|ing|ed|ement)|begin(?:s|ning)?|effective)"
+    r"\s*(?:date|on|from|at)?\b"
+)
 _END_LABELS = re.compile(
-    r"(?i)\b(?:end|expiry|expiration|renewal|termination|matur\w*)\s*date\b"
-    r"|\bvalid\s+until\b"
+    r"(?i)\b(?:end(?:s|ing|ed)?|expir(?:y|es|ing|ed|ation)|renewal|termination|matur\w*)"
+    r"\s*(?:date|on|at)?\b"
+    r"|\bvalid\s+(?:until|to)\b"
 )
 _EMAIL_LABELS = re.compile(r"(?i)\be-?mail\b")
 _PHONE_LABELS = re.compile(r"(?i)\b(?:phone|tel|telephone|mobile|cell)\b")
@@ -63,9 +74,14 @@ _PHONE = re.compile(r"\+?\d[\d\s().\-]{6,}\d")
 _DATE_LIKE = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}$|^\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4}$")
 _AMOUNT_LIKE = re.compile(r"^\d{1,3}(?:[,\s]\d{3})+(?:\.\d{1,2})?$|^\d+\.\d{1,2}$")
 
+#: ``rent`` joined this list the same way: a lease is a contract, the money it is
+#: about is the rent, and the golden corpus scored the field 7/8 without it. The
+#: neighbouring "service charge" is deliberately *not* a label — it is a second
+#: amount beside the value, and a regex that grabs whichever comes first would be
+#: picking by document layout.
 _VALUE = re.compile(
     r"(?i)\b(?:contract|total|annual|monthly)\s+value\b"
-    r"|\b(?:value|fee|fees|price|amount)\b"
+    r"|\b(?:value|fee|fees|price|amount|rent)\b"
 )
 
 _DMY = re.compile(r"^(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{4})$")

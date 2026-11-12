@@ -52,6 +52,7 @@ __all__ = [
     "ExtractionOutcome",
     "ExtractionUnavailableError",
     "FieldCandidate",
+    "best_per_field",
     "extract_contract",
     "normalize_value",
 ]
@@ -216,12 +217,18 @@ def _status_for(confidence: float, threshold: float) -> FieldStatus:
     return FieldStatus.AUTO_ACCEPTED if confidence >= threshold else FieldStatus.PENDING_REVIEW
 
 
-def _best_per_field(candidates: Sequence[FieldCandidate]) -> list[FieldCandidate]:
+def best_per_field(candidates: Sequence[FieldCandidate]) -> list[FieldCandidate]:
     """One candidate per field: the most confident, ties keeping the first.
 
     A backend that finds two email addresses would otherwise have the row
     overwritten by whichever came last, which is a coin flip. The result is
     ordered by ``FieldName`` so a run is byte-for-byte reproducible.
+
+    Public because it is the *rule*, not an implementation detail: the write path
+    below applies it, and :mod:`app.workers.extraction_eval` applies the same rule
+    so its score describes the values that would be **stored** rather than the
+    candidates a regex happened to emit. A second copy of "which value wins" is
+    how a measurement drifts away from the thing it claims to measure.
     """
     best: dict[FieldName, FieldCandidate] = {}
     for candidate in candidates:
@@ -255,7 +262,7 @@ def extract_contract(
     failure rather than a class of rows that quietly cannot be opted out of.
     """
     repository = ExtractedFieldRepository(session, contract.tenant_id)
-    chosen = _best_per_field(extractor.extract(document_text))
+    chosen = best_per_field(extractor.extract(document_text))
     existing = {row.field_name: row for row in repository.for_contract(contract.id)}
 
     created = 0

@@ -1,0 +1,91 @@
+{
+  "documents": [
+    {
+      "name": "club-membership",
+      "file": "documents/01-club-membership.txt",
+      "expected": {
+        "email": "Priya.Raman@example.test",
+        "phone": "+44 20 7946 0132",
+        "start_date": "2025-02-01",
+        "end_date": "2026-01-31",
+        "contract_value": "1,248.00"
+      }
+    },
+    {
+      "name": "software-subscription",
+      "file": "documents/02-software-subscription.txt",
+      "expected": {
+        "email": "accounts@brightline.example.test",
+        "start_date": "2025-03-14",
+        "end_date": "2026-03-13",
+        "contract_value": "24,000.00"
+      }
+    },
+    {
+      "name": "consultancy-nda",
+      "file": "documents/03-consultancy-nda.txt",
+      "expected": {
+        "email": "j.halvorsen@greenfield-consulting.example.test",
+        "phone": "07700 900123",
+        "address": "14 Fenwick Row, Leeds LS1 4AB",
+        "dob": "1979-11-02",
+        "start_date": "2025-05-06",
+        "end_date": "2026-05-05",
+        "contract_value": "62,400.00"
+      }
+    },
+    {
+      "name": "lease-summary",
+      "file": "documents/04-lease-summary.txt",
+      "expected": {
+        "email": "facilities@marlowfinch.example.test",
+        "address": "Unit 7, Kestrel Business Park, Bristol BS2 0QF",
+        "start_date": "2025-04-01",
+        "end_date": "2028-03-31",
+        "contract_value": "84,000"
+      }
+    },
+    {
+      "name": "staffing-agreement",
+      "file": "documents/05-staffing-agreement.txt",
+      "expected": {
+        "phone": "020.7946.0955",
+        "start_date": "2025-07-14",
+        "end_date": "2026-04-03",
+        "contract_value": "1,150.00"
+      }
+    },
+    {
+      "name": "utility-notice",
+      "file": "documents/06-utility-notice.txt",
+      "expected": {
+        "start_date": "2025-06-01",
+        "end_date": "2025-07-31",
+        "contract_value": "2,340.00"
+      }
+    },
+    {
+      "name": "translation-services",
+      "file": "documents/07-translation-services.txt",
+      "expected": {
+        "email": "pm@linguabridge.example.test",
+        "phone": "+1.415.555.0134",
+        "start_date": "2025-10-01",
+        "end_date": "2026-09-30",
+        "contract_value": "18,500.00"
+      }
+    },
+    {
+      "name": "facilities-maintenance",
+      "file": "documents/08-facilities-maintenance.txt",
+      "expected": {
+        "email": "site.manager@brightwell.example.test",
+        "address": "220 Ashfield Road, Manchester M14 5TQ",
+        "phone": "0161 496 0777",
+        "start_date": "2025-09-01",
+        "end_date": "2026-08-31",
+        "contract_value": "36,750.00"
+      }
+    }
+  ]
+}

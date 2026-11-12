@@ -7289,3 +7289,74 @@ placeholder turned out to name a real property, so it was renamed, narrowed to t
 actually describes, and paired with a test proving that a deployment which both sends and listens
 boots outside development. Full suite **1042 tests: 1027 passed, 15 skipped, 0 failed**; `mypy app`
 -> no issues in 71 files; `ruff check` and `ruff format --check` -> clean over 130 files.
+
+### D10-94 — Extraction quality gets a number, and the number is a regression net
+
+`EXTRACTION_REVIEW_THRESHOLD` (0.8) is the most consequential constant in the system and had
+never been measured: a value at or above it may skip human review and reach a customer, and a
+value below it is a hard stop. It was chosen by reading the confidences in `extractors.py` and
+reasoning about them. P2-B's acceptance criterion — F1 ≥ 0.85 — was likewise a sentence in the
+spec with nothing behind it, so a regex change could make extraction worse and leave every gate
+green.
+
+**The corpus.** Eight documents in `tests/golden/extraction/documents/` plus a `manifest.json`
+whose `expected` is the value the pipeline should *store*, not every string of that shape.
+Utility notice 06 contains `billing@wessexwater.example.test` — the water company's own address
+— so its entry states no `email`, and predicting one is a false positive. The README says this
+and a test pins it: copying every email-shaped string into `expected` would score a correct
+extractor as wrong and reward a greedy regex.
+
+**The score is what would be stored.** `score_corpus` applies `best_per_field` (one candidate
+per field, the most confident) and `normalize_value` before comparing, so `24/06/2025` and an
+expectation of `2025-06-24` are one value because `normalize_value` says so. That required
+making `_best_per_field` public as `best_per_field`: scoring every regex emission rather than
+the row the write path would keep measures a pipeline that does not exist. A candidate no
+normalizer accepts is counted as `discarded` rather than as a miss, so a corpus of unusable text
+is visible instead of reading as zero recall. The headline is a **micro** average over pooled
+counts, not the mean of per-field F1s: `email` is stated by six documents and `address` by three,
+and a macro average would let the second weigh as much as the first.
+
+**The corpus is refused rather than half-read.** A malformed manifest, an unknown field name, a
+blank expectation, a duplicate document name, an empty document, and a `file` that escapes the
+corpus directory — including via a symlink, which resolving before the containment check is what
+catches — all raise `EvaluationRefusedError` at load, and no message repeats the value. An
+expectation that could never match anything would depress the score forever: a number that looks
+like a measurement and is not one.
+
+**It found real bugs on its first run.** F1 was **0.841**, under the gate: `start_date` recall
+0.625, `end_date` 0.75, `contract_value` 7/8. The cause was label coverage, not logic — `starts
+on …` and `commences` were not date label forms, and a lease's `Annual rent:` was not a value
+label. Fixed in `extractors.py` with deliberately **anchored** forms (`end(?:s|ing|ed)`, never
+`end\w*`, so "endorsement" does not become an end-date). F1 is now **0.919** over 34 matched /
+5 missed / 1 wrong, and `unreachable` names `address` (3) and `dob` (1) — gap 17 as a number
+instead of a note.
+
+Two results are pinned rather than fixed, and both are deliberate. `03/04/2026 (3 April 2026)`
+is legible to a person and ambiguous to a locale-blind regex, so it is dropped and the test says
+so; and the water company's email is counted as the false positive it is.
+
+**The gate.** `python -m app.cli evaluate-extraction --golden … --min-f1 …` reads no database,
+writes nothing, and exits `0` at or above the floor, `7` below it (`EXIT_BELOW_GATE`, its own
+code so a script can tell "release blocked" from "attention needed"), and `1` for a corpus it
+cannot use or a backend that cannot answer — "the model is down" must not read as "this
+extractor scores 0.4".
+
+**What this deliberately does not do.** The corpus was written by the same hand as the regexes
+it scores, so a green gate is **weak evidence about the real world** and strong evidence about
+regressions, which is what it is for: 0.919 says extraction did not get worse, never that it is
+92 % right on a customer's contracts. No LLM backend has been measured — gap 17 stands, so
+`EXTRACTION_BACKEND=pattern` is still the only backend scored and `OllamaExtractor` has met only
+canned payloads. Confidence **calibration** is untouched: this measures whether the extractor
+finds the right value, not whether a 0.8-confidence value is right 80 % of the time, so the
+threshold itself remains unvalidated. Eight documents is small — one document moves F1 by about
+0.02 — and `.txt` only: no PDF flows through the scoring path. `.github/workflows/ci.yml` does
+**not** run the command, so the gate is one a build chooses to enforce rather than one that
+already blocks a merge.
+
+**Gates.** New: `backend/tests/test_extraction_eval.py` (28 — the precision/recall/F1 arithmetic
+including a false positive, a never-produced field, and a pooled-vs-averaged case where
+`8/9 > 0.8`; every load refusal with no PII echoed; the loop and gate boundaries; and the three
+CLI exit codes plus an assertion that the command opens no session). The corpus is scored inside
+that suite too, so a regression reddens the tests as well as the command. Full suite **1070
+tests: 1055 passed, 15 skipped, 0 failed** (was 1042/1027); `mypy app` -> no issues in 72 files;
+`ruff check` and `ruff format --check` -> clean over 133 files.

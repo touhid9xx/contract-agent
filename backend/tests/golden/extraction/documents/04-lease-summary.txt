@@ -1,0 +1,11 @@
+HARBOUR PROPERTIES
+Summary of lease terms
+
+Property: Unit 7, Kestrel Business Park, Bristol BS2 0QF
+Tenant: Marlow & Finch Ltd
+Tenant email address: facilities@marlowfinch.example.test
+
+Term start: 2025-04-01
+Lease end date: 2028-03-31
+Annual rent: £ 84,000
+Service charge: £ 6,200 per year, reviewed each April.
