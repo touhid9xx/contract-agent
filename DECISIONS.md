@@ -7435,3 +7435,56 @@ line in a commit that will never change, so they cannot rot into a false pass; i
 matching they are redundant, not evidence of a clean scan. Nothing here revalidated the rest of
 CI: the four green jobs were green on the previous commit, and this slice changed no frontend,
 no migration and no MySQL-touching code.
+
+### D10-96 — An approved end date has to reach the column the scan reads
+
+Approving or correcting an extracted `end_date` never wrote `Contract.end_date`. The daily scan
+plans every milestone from that column — `ix_contracts_scan` indexes it — and refuses
+`MISSING_END_DATE` when it is empty, so review moved the field and the reminder pipeline kept
+seeing a contract with no end date. For a contract ingested from a *document* that date exists
+only as an extracted field: the upload route accepts `end_date` as an ingestion parameter and
+offers no second chance to supply it later. Extraction therefore found the date, a reviewer
+approved it, and the product's central promise stayed unreachable for precisely the flow `P2-A`
+was built for. The suite was fully green throughout, because the test factories hand `end_date`
+straight to `Contract`; nothing exercised the document path end to end.
+
+**The fix is one write, and it is placed where a failure cannot corrupt the contract.** A new
+`PROMOTED_FIELD = FieldName.END_DATE` in `app/api/v1/review.py` marks the single field whose
+decision also moves the *contract* row. `_apply_correction` now returns the normalized plaintext
+it stored — after that call it exists nowhere, since both columns are ciphertext — and
+`_decided_end_date` uses that string for an edit or reads the same string back out of the sealed
+`normalized_value` column for an accept. The date is resolved *before* the contract is touched,
+so a token that will not decrypt leaves the field decided and the contract exactly as it was,
+rather than raising inside the route after a write. Both rows commit in one transaction, and the
+new date rides in the field's own audit snapshot as `contract_end_date` before/after: one
+decision, one row, the way `escalation.opened` already records the contract status it set.
+
+**Only `end_date`, and no re-check against `start_date`, both deliberate.** `start_date` is
+extracted and reviewed too, but nothing reads it — the scan plans from `end_date` alone — and a
+column written for symmetry is a column no consumer validates, so promoting it would only bump
+the contract's version. A promoted date is also *not* re-validated against `Contract.start_date`:
+`ContractCreateRequest._check_date_order` guards ingestion *input*, and review is not input, so
+blocking a reviewer on a stale field they were not editing would be a worse trade than an
+inverted pair the detail screen shows plainly. That is recorded as a limit, not as correct
+behaviour.
+
+**The tests were proved to bite rather than assumed to.** Temporarily replacing the promotion
+with a no-op turned exactly the five promotion assertions red and left the four negatives green —
+correct, because the negatives assert that nothing was promoted. The override was reverted in the
+same turn. Writing them also surfaced a real defect in the test helper: `set_raw_value` is an
+`UPDATE`, so it moves the row's optimistic-lock version, and the undecryptable-token test was
+sending a stale version and testing the lock instead of the decision. The end-to-end case asks
+`build_notification` the question the scheduler asks — it refuses `MISSING_END_DATE` before the
+approval and plans `T-60` after it — which is the only assertion that joins the two halves.
+
+**Gates.** Full suite -> **1079 tests, 1064 passed, 15 skipped, 0 failed** counted from the JUnit
+XML (+9); focused (`test_review.py`, `test_notifications.py`, `test_contract_fields.py`) -> 111
+passed; `mypy app` -> no issues in 72 files; `ruff check` / `ruff format --check` -> clean over
+129 files; `smoke_journey.py` -> 108 checks; `pre-commit run --all-files` -> 19 hooks, 18 passed
+and 1 skipped; `pre-commit --hook-stage manual` -> 4 hooks passed, `gitleaks` included.
+
+**Limits.** Promotion happens on approve and edit only, never on reject or mark-unreadable: those
+say nothing about the contract's date. Only `end_date` is promoted, for the reason above. The
+inverted-interval case is reachable through review and no `422` will catch it. Nothing here ran
+against MySQL, and no LLM backend is involved, so the pattern extractor is the only producer of a
+promotable date that was exercised.

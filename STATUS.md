@@ -6473,6 +6473,37 @@ belongs to the gate for commits touching keys, fixtures or configuration. Gates 
 smoke journey 108 checks; gitleaks clean over 197 commits; suite **1070 tests, 1055 passed, 15
 skipped, 0 failed**; `mypy app` clean over 72 files; ruff clean over 133 files.
 
+### A document contract could be extracted, reviewed, and still never reminded (`D10-96`)
+
+Approving an extracted `end_date` moved the field and nothing else. The daily scan plans every
+milestone from `Contract.end_date` and refuses `MISSING_END_DATE` while it is empty — and for a
+document-ingested contract that date exists *only* as an extracted field, because the upload
+route takes `end_date` as an ingestion query parameter and never offers it again. The one flow
+`P2-A` was built for could therefore find the date, get a person to approve it, and still be
+unable to schedule a single reminder. Nothing caught it because the suite was green: the test
+factories hand `end_date` straight to `Contract`, so no test walked the document path to a
+milestone.
+
+Review now promotes that one field. `PROMOTED_FIELD = FieldName.END_DATE` in
+`backend/app/api/v1/review.py`, on approve or edit only, in the field's own transaction and its
+own audit row (`contract_end_date` before/after, so the trail stays one row per decision). The
+date is resolved *before* the contract is touched, so a value that will not decrypt leaves the
+field decided and the contract exactly as it was instead of raising after a write. `start_date`
+is deliberately not promoted — nothing reads it — and a promoted date is not re-checked against
+`start_date`, which is recorded as a limit rather than as correct behaviour.
+
+The nine new tests were proved to bite rather than assumed to: with the promotion replaced by a
+no-op, exactly the five promotion assertions went red and the four negatives stayed green. The
+end-to-end one asks `build_notification` the question the scheduler asks — refused before the
+approval, `T-60` after it — and is the assertion the hole would have failed.
+
+Gates: `test_review.py` -> 9 new; full suite -> **1079 tests, 1064 passed, 15 skipped, 0 failed**
+counted from the JUnit XML; `mypy app` -> no issues in 72 files; `ruff check` /
+`ruff format --check` -> clean over 129 files; `smoke_journey.py` -> 108 checks;
+`pre-commit run --all-files` -> 19 hooks, 18 passed and 1 skipped; `pre-commit --hook-stage
+manual` -> 4 hooks passed, `gitleaks` included. Not measured: MySQL, any LLM backend, and an
+inverted start/end pair produced by a correction, which no `422` will catch.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

@@ -173,8 +173,10 @@ class ContractCreateRequest(BaseModel):
 
         Both dates stay optional: a contract ingested before its dates are known
         is legitimate, and the daily scan simply skips it until ``end_date``
-        exists. An *inverted* pair is never legitimate — it would silently never
-        match any reminder window, which is worse than a 422.
+        exists — which, for a document, is when a reviewer approves the extracted
+        ``end_date`` field (``app.api.v1.review``). An *inverted* pair is never
+        legitimate: it would silently never match any reminder window, which is
+        worse than a 422.
         """
         if self.start_date and self.end_date and self.end_date < self.start_date:
             raise ValueError("end_date must not be before start_date")

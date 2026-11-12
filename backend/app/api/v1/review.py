@@ -18,13 +18,25 @@ Three routes, and each one exists to answer a question the F7 work left open:
   are why the value is not in the queue listing and why revealing is an action
   rather than a read.
 
-Deliberate limits, recorded in ``DECISIONS.md`` (D8-01…D8-05):
+One of those routes has a second effect that its response never spells out, and it is
+the reason a document-ingested contract can be reminded at all: approving or
+correcting an ``end_date`` also writes that date onto ``Contract.end_date``. See
+``PROMOTED_FIELD`` for why that column, and only that one, is written twice.
+
+Deliberate limits, recorded in ``DECISIONS.md`` (D8-01…D8-05, D10-96):
 
 * Review does not emit an outbox event. It writes ``AuditLog`` instead, which is
   what the Phase-0 timeline mocked; the event belongs to the slice that first
   consumes it, not this one.
 * A corrected value keeps the extractor's confidence, because the score describes
   the extraction and not the correction.
+* Only ``end_date`` is promoted to the contract row. ``start_date`` is extracted and
+  reviewed too, but nothing reads it — the daily scan plans from ``end_date`` alone —
+  and a column written for symmetry is a column no consumer validates.
+* A promoted date is not re-checked against ``Contract.start_date``. Ingestion refuses
+  an end date before its start date at *input*; a review decision is not input
+  metadata, and blocking a reviewer on a stale field they are not editing would be a
+  worse trade than an inverted pair the detail screen shows plainly.
 """
 
 from __future__ import annotations
@@ -91,6 +103,22 @@ _DECISION_REASON: dict[ReviewAction, str] = {
     "reject": "value rejected by reviewer",
     "mark_unreadable": "document marked unreadable by reviewer",
 }
+
+#: The one field whose approval also writes the *contract*, not just the field.
+#:
+#: ``build_notification`` plans a milestone from ``Contract.end_date`` — the scanned
+#: column ``ix_contracts_scan`` indexes — and refuses ``MISSING_END_DATE`` when it is
+#: empty. For a contract ingested from a document, that date is only ever an extracted
+#: field: the upload route accepts it as an ingestion *parameter*, so a caller who
+#: omits it has no second chance to supply it. Until this write existed, extraction
+#: produced the date, a reviewer approved it, and the reminder pipeline still saw a
+#: contract with no end date and refused every milestone — the product's central
+#: promise, quietly unreachable for the one flow P2-A was built for. Every test passed
+#: because tests hand ``end_date`` straight to the contract factory.
+#:
+#: ``start_date`` is deliberately *not* in this set: nothing reads it (see the module
+#: docstring), so promoting it would bump the contract's version for no consumer.
+PROMOTED_FIELD = FieldName.END_DATE
 
 REVIEWED_ACTION = "field.reviewed"
 REVEALED_ACTION = "field.value_revealed"
@@ -322,6 +350,11 @@ def review_field(
     A field belonging to another tenant is answered 404, not 403 — the repository
     returns ``None`` outside this tenant, so the route cannot confirm which field
     ids exist (IDOR/BOLA).
+
+    Approving or correcting an ``end_date`` commits two rows, not one: the field and
+    its contract. ``Contract.end_date`` is what the daily scan plans from, so a review
+    queue that only moved the field would hand back an approved date the reminder
+    pipeline could never read (D10-96).
     """
     threshold = settings.extraction_review_threshold
     repository = ExtractedFieldRepository(session, principal.tenant_id)
@@ -347,17 +380,36 @@ def review_field(
         )
 
     before = _state(field)
+    #: Whether this decision may also move the *contract* row. Approval only: rejecting
+    #: or marking an extraction unreadable says nothing about the contract's own date.
+    promote = field.field_name is PROMOTED_FIELD and (
+        _DECISION_STATUS[payload.action] is FieldStatus.APPROVED
+    )
+    if promote:
+        before["contract_end_date"] = _iso_date(contract.end_date)
     try:
+        normalized: str | None = None
         if payload.action == "edit":
-            _apply_correction(field, payload, cipher_or_503(settings), settings)
+            normalized = _apply_correction(field, payload, cipher_or_503(settings), settings)
         field.status = _DECISION_STATUS[payload.action]
         field.reviewed_by = principal.user_id
         field.reviewed_at = utc_now()
         field.review_reason = payload.reason or _DECISION_REASON[payload.action]
+        if promote:
+            # Resolved before the contract row is touched, so a value that will not
+            # decrypt leaves the field decided and the contract exactly as it was.
+            asserted = _decided_end_date(field, normalized, cipher_or_503(settings))
+            if asserted is not None:
+                contract.end_date = asserted
         # Flush before the snapshot so ``after`` records the version the write
         # produced, not the one it replaced.
         session.flush()
         after = _state(field)
+        if promote:
+            # One event, one row: the contract's new date rides in the field's own
+            # snapshot rather than doubling the trail with a second entry, exactly as
+            # ``escalation.opened`` records the contract status it set.
+            after["contract_end_date"] = _iso_date(contract.end_date)
         AuditLogRepository(session, principal.tenant_id).record(
             correlation_id=correlation_id_or_new(),
             actor_type=ACTOR_USER,
@@ -394,13 +446,65 @@ def review_field(
     return ReviewDecisionResponse(item=decided, blocking=remaining)
 
 
+def _iso_date(value: date | None) -> str | None:
+    """A date as the audit snapshot stores it, or ``None`` for "no date"."""
+    return value.isoformat() if value is not None else None
+
+
+def _decided_end_date(
+    field: ExtractedField,
+    normalized: str | None,
+    cipher: FieldCipher,
+) -> date | None:
+    """The end date this approval is asserting, or ``None`` when it asserts none.
+
+    ``normalized`` is the plaintext :func:`_apply_correction` just stored for an
+    ``edit``. For an ``accept`` the reviewer is approving a value nobody typed in this
+    request, so the same string is read back out of the sealed ``normalized_value``
+    column — which is why an approval needs the cipher exactly as a correction does.
+
+    An unreadable or unparseable stored value returns ``None`` and logs, rather than
+    failing the decision: the row is still a legitimate review decision, and the repair
+    for a value that will not decrypt is ``reseal-fields``, not a reviewer's opinion.
+    Neither branch logs the value or the token.
+    """
+    if normalized is not None:
+        text = normalized
+    else:
+        token = field.normalized_value or field.raw_value
+        if not token:
+            return None
+        try:
+            text = cipher.decrypt(token)
+        except DecryptionError:
+            logger.warning(
+                "end_date_not_promoted_undecryptable",
+                field_id=field.id,
+                contract_id=field.contract_id,
+            )
+            return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        logger.warning(
+            "end_date_not_promoted_unparseable",
+            field_id=field.id,
+            contract_id=field.contract_id,
+        )
+        return None
+
+
 def _apply_correction(
     field: ExtractedField,
     payload: ReviewDecisionRequest,
     cipher: FieldCipher,
     settings: Settings,
-) -> None:
+) -> str:
     """Store a reviewer-supplied value, normalized and encrypted like an extracted one.
+
+    Returns the normalized *plaintext*, which exists nowhere else after this call: both
+    columns are ciphertext by the time it returns, and the caller needs the comparable
+    form to promote an approved end date onto the contract.
 
     The value is normalized for the field it belongs to, not stored as typed: a
     correction that ends up as an unparseable phone number would pass review and then
@@ -453,6 +557,7 @@ def _apply_correction(
     field.raw_value = cipher.encrypt(raw)
     field.normalized_value = cipher.encrypt(normalized)
     field.blind_index = digest
+    return normalized
 
 
 @router.post(

@@ -19,7 +19,8 @@ from __future__ import annotations
 import base64
 import json
 from collections.abc import Callable, Iterator
-from datetime import date, datetime
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -31,10 +32,16 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.blind_index import ContactBlindIndex
 from app.core.config import Settings
 from app.core.crypto import FieldCipher
-from app.db.enums import FieldName, FieldStatus, UserRole
+from app.db.base import utc_now
+from app.db.enums import Channel, FieldName, FieldStatus, UserRole
 from app.db.models import AuditLog, Contract, ExtractedField, Tenant, User
 from app.db.session import session_scope
 from app.main import create_app
+from app.workers.dispatch import (
+    REFUSAL_MISSING_END_DATE,
+    DispatchRefusedError,
+    build_notification,
+)
 
 LOGIN_PATH = "/api/v1/auth/login"
 QUEUE_PATH = "/api/v1/review/queue"
@@ -124,6 +131,31 @@ def contract(session_factory: sessionmaker[Session], tenant: Tenant) -> Contract
         return row
 
 
+@pytest.fixture
+def undated_contract(session_factory: sessionmaker[Session], tenant: Tenant) -> Contract:
+    """A contract shaped the way ``POST /contracts/document`` leaves one: no end date.
+
+    The fixture above ships a date, because most of this file only needs a contract
+    to hang a field on. Promotion is about the rows that have *none*: the upload
+    route takes ``end_date`` as an ingestion parameter, so a caller who omits it has
+    no second chance to supply one, and the document's own date then exists only as
+    an extracted field.
+
+    Email consent is on record so the end-to-end test at the bottom of this file can
+    put the same question to the reminder planner that the scheduler puts to it.
+    """
+    with session_scope(session_factory) as session:
+        row = Contract(
+            tenant_id=tenant.id,
+            customer_ref="A. Rahman",
+            end_date=None,
+            consent_email=True,
+        )
+        session.add(row)
+        session.flush()
+        return row
+
+
 # --- helpers --------------------------------------------------------------
 def add_field(
     session_factory: sessionmaker[Session],
@@ -174,6 +206,19 @@ def set_raw_value(session_factory: sessionmaker[Session], field_id: int, token: 
         row = session.get(ExtractedField, field_id)
         assert row is not None
         row.raw_value = token
+
+
+def load_contract(session_factory: sessionmaker[Session], contract_id: int) -> Contract:
+    """Re-read a contract through a fresh session.
+
+    Assertions about the end date have to come from the database rather than the
+    object a route mutated: the question is what was *stored*, and the in-request
+    instance could show an assignment that was never committed.
+    """
+    with session_scope(session_factory) as session:
+        row = session.get(Contract, contract_id)
+        assert row is not None
+        return row
 
 
 def audit_rows(session_factory: sessionmaker[Session]) -> list[AuditLog]:
@@ -1261,3 +1306,316 @@ def test_a_field_of_another_tenant_cannot_be_revealed(
 
 def test_revealing_requires_a_token(secured_client: TestClient, contract: Contract) -> None:
     assert secured_client.post(REVEAL_PATH.format(field_id=1)).status_code == 401
+
+
+# --- approving an end date writes the contract too (D10-96) ----------------
+#
+# ``Contract.end_date`` is what the reminder planner reads: ``build_notification``
+# computes every milestone from that column and refuses ``MISSING_END_DATE`` when it
+# is empty. For a contract uploaded as a document the date arrives as an extracted
+# field instead, so before D10-96 the whole product promise was unreachable: a
+# reviewer approved the date, and the pipeline still saw nothing to remind about.
+#
+# These tests fail against that build. The factories in this file hand ``end_date``
+# straight to ``Contract``, so nothing else in the suite ever exercised the seam.
+
+END_EXTRACTED = date(2026, 3, 31)
+END_CORRECTED = date(2026, 5, 4)
+
+
+@dataclass(frozen=True, slots=True)
+class _PlannedSend:
+    """The two attributes :func:`build_notification` reads off a decision.
+
+    A stub rather than an ``AgentDecision`` row: the planner takes ``Any`` on
+    purpose, because the policy needs a channel and a review flag and nothing else.
+    A DB row here would add three imports and a session to a test about review.
+    """
+
+    channel: Channel = Channel.EMAIL
+    needs_review: bool = False
+
+
+def test_accepting_an_end_date_writes_it_onto_the_contract(
+    sealed_client: TestClient,
+    undated_contract: Contract,
+    cipher: FieldCipher,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    field_id = add_field(
+        session_factory,
+        undated_contract,
+        cipher,
+        field_name=FieldName.END_DATE,
+        value=END_EXTRACTED.isoformat(),
+    )
+    headers = auth(sealed_client, tenant, make_user)
+
+    response = sealed_client.patch(
+        FIELD_PATH.format(field_id=field_id),
+        json={"action": "accept", "version": 1},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert load_contract(session_factory, undated_contract.id).end_date == END_EXTRACTED
+    # The response echoes the promoted date, so a reviewer sees the same value the
+    # scan will read rather than a field that only *looks* approved.
+    assert response.json()["item"]["end_date"] == END_EXTRACTED.isoformat()
+
+
+def test_accepting_an_end_date_replaces_a_date_the_contract_already_had(
+    sealed_client: TestClient,
+    contract: Contract,
+    cipher: FieldCipher,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    """A guessed ingestion parameter loses to the date a person approved.
+
+    ``contract`` carries 2026-01-01. The document says 2026-03-31, and the reviewer
+    agreeing with the document has to be able to correct the guess.
+    """
+    field_id = add_field(
+        session_factory,
+        contract,
+        cipher,
+        field_name=FieldName.END_DATE,
+        value=END_EXTRACTED.isoformat(),
+    )
+    headers = auth(sealed_client, tenant, make_user)
+
+    response = sealed_client.patch(
+        FIELD_PATH.format(field_id=field_id),
+        json={"action": "accept", "version": 1},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert load_contract(session_factory, contract.id).end_date == END_EXTRACTED
+
+
+def test_a_correction_promotes_the_corrected_date_not_the_extracted_one(
+    sealed_client: TestClient,
+    undated_contract: Contract,
+    cipher: FieldCipher,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    field_id = add_field(
+        session_factory,
+        undated_contract,
+        cipher,
+        field_name=FieldName.END_DATE,
+        value=END_EXTRACTED.isoformat(),
+    )
+    headers = auth(sealed_client, tenant, make_user)
+
+    response = sealed_client.patch(
+        FIELD_PATH.format(field_id=field_id),
+        json={"action": "edit", "version": 1, "value": END_CORRECTED.isoformat()},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    # The contract takes what the reviewer typed, not what the regex found.
+    assert load_contract(session_factory, undated_contract.id).end_date == END_CORRECTED
+    stored = load_field(session_factory, field_id)
+    assert stored.normalized_value is not None
+    assert cipher.decrypt(stored.normalized_value) == END_CORRECTED.isoformat()
+
+
+@pytest.mark.parametrize("action", ["reject", "mark_unreadable"])
+def test_a_decision_that_is_not_an_approval_leaves_the_contract_alone(
+    action: str,
+    sealed_client: TestClient,
+    contract: Contract,
+    cipher: FieldCipher,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    field_id = add_field(
+        session_factory,
+        contract,
+        cipher,
+        field_name=FieldName.END_DATE,
+        value=END_EXTRACTED.isoformat(),
+    )
+    headers = auth(sealed_client, tenant, make_user)
+
+    response = sealed_client.patch(
+        FIELD_PATH.format(field_id=field_id),
+        json={"action": action, "version": 1},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert load_contract(session_factory, contract.id).end_date == date(2026, 1, 1)
+    row = audit_rows(session_factory)[0]
+    # Nothing was promoted, so the snapshot carries no contract keys at all — a
+    # reviewer saying "this is not the end date" must not move the date either way.
+    assert "contract_end_date" not in json.loads(row.after_state or "{}")
+
+
+def test_approving_a_start_date_does_not_touch_the_contract(
+    sealed_client: TestClient,
+    contract: Contract,
+    cipher: FieldCipher,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    """Only ``end_date`` is promoted, and that is a decision, not an oversight.
+
+    A start date has no column to land in, and inferring one from the other would
+    invent a fact the document may not contain.
+    """
+    field_id = add_field(
+        session_factory,
+        contract,
+        cipher,
+        field_name=FieldName.START_DATE,
+        value="2025-01-01",
+    )
+    headers = auth(sealed_client, tenant, make_user)
+
+    response = sealed_client.patch(
+        FIELD_PATH.format(field_id=field_id),
+        json={"action": "accept", "version": 1},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert load_contract(session_factory, contract.id).end_date == date(2026, 1, 1)
+    row = audit_rows(session_factory)[0]
+    assert "contract_end_date" not in json.loads(row.after_state or "{}")
+
+
+def test_an_end_date_that_will_not_decrypt_is_still_decided(
+    sealed_client: TestClient,
+    undated_contract: Contract,
+    cipher: FieldCipher,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    """A rotated ``ENCRYPTION_KEY`` must not leave the reviewer stuck.
+
+    The row was sealed under a key this deployment no longer holds. The decision is
+    worth recording — a human did look at it — but nothing can be promoted, and the
+    route must say so by leaving the date alone rather than by raising.
+    """
+    field_id = add_field(
+        session_factory,
+        undated_contract,
+        cipher,
+        field_name=FieldName.END_DATE,
+        value=None,
+    )
+    foreign = FieldCipher(Fernet.generate_key().decode()).encrypt(END_EXTRACTED.isoformat())
+    set_raw_value(session_factory, field_id, foreign)
+    # ``set_raw_value`` is an UPDATE, so it moves the row's optimistic-lock version;
+    # sending a stale one here would test the version check instead of the decision.
+    version = load_field(session_factory, field_id).version
+    headers = auth(sealed_client, tenant, make_user)
+
+    response = sealed_client.patch(
+        FIELD_PATH.format(field_id=field_id),
+        json={"action": "accept", "version": version},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert load_field(session_factory, field_id).status is FieldStatus.APPROVED
+    assert load_contract(session_factory, undated_contract.id).end_date is None
+    assert foreign not in response.text
+
+
+def test_the_promoted_date_is_recorded_in_the_field_audit_row(
+    sealed_client: TestClient,
+    undated_contract: Contract,
+    cipher: FieldCipher,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    """One row, not two: promoting is part of the decision, not a second action.
+
+    The date itself is not PII, and it is the fact an operator investigating a wrong
+    reminder needs, so it belongs in the snapshot beside the field's own state.
+    """
+    field_id = add_field(
+        session_factory,
+        undated_contract,
+        cipher,
+        field_name=FieldName.END_DATE,
+        value=END_EXTRACTED.isoformat(),
+    )
+    headers = auth(sealed_client, tenant, make_user)
+
+    sealed_client.patch(
+        FIELD_PATH.format(field_id=field_id),
+        json={"action": "accept", "version": 1},
+        headers=headers,
+    )
+
+    rows = audit_rows(session_factory)
+    assert len(rows) == 1
+    before = json.loads(rows[0].before_state or "{}")
+    after = json.loads(rows[0].after_state or "{}")
+    assert before["contract_end_date"] is None
+    assert after["contract_end_date"] == END_EXTRACTED.isoformat()
+    assert after["status"] == FieldStatus.APPROVED.value
+
+
+def test_an_approved_end_date_unblocks_the_reminder_pipeline(
+    sealed_client: TestClient,
+    undated_contract: Contract,
+    cipher: FieldCipher,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    settings: Settings,
+    tenant: Tenant,
+) -> None:
+    """The assertion that would have caught the hole: the planner, end to end.
+
+    Approving the field and then asking ``build_notification`` the question the
+    scheduler asks is the only way to see that the two halves join up — a test of
+    the route alone passes while the product refuses every milestone.
+    """
+    end = utc_now().date() + timedelta(days=40)
+    field_id = add_field(
+        session_factory,
+        undated_contract,
+        cipher,
+        field_name=FieldName.END_DATE,
+        value=end.isoformat(),
+    )
+    decision = _PlannedSend()
+
+    with pytest.raises(DispatchRefusedError) as refused:
+        build_notification(undated_contract, decision, now=utc_now(), settings=settings)
+    assert refused.value.code == REFUSAL_MISSING_END_DATE
+
+    headers = auth(sealed_client, tenant, make_user)
+    decided = sealed_client.patch(
+        FIELD_PATH.format(field_id=field_id),
+        json={"action": "accept", "version": 1},
+        headers=headers,
+    )
+    assert decided.status_code == 200, decided.text
+
+    notification = build_notification(
+        load_contract(session_factory, undated_contract.id),
+        decision,
+        now=utc_now(),
+        settings=settings,
+        fields=[load_field(session_factory, field_id)],
+    )
+    assert notification.template == "T-60"
+    assert notification.scheduled_date == end - timedelta(days=60)
