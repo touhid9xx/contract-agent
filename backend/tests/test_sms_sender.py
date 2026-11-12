@@ -13,9 +13,9 @@ Three properties get most of the attention here:
   value leaks out of.
 * the **API key never leaves in a repr**. It is a credential, and a log line is
   where a credential ends up by accident.
-* the body carries **no opt-out promise**. Nothing this build ships reads a reply,
-  so telling a customer to "reply STOP" would be a sentence the system cannot
-  honour — see ``senders._SMS_BODY``.
+* the body carries **no opt-out promise**. Whether a reply can be read depends on
+  ``INBOUND_TRANSPORT``, and a static template cannot know that, so "reply STOP"
+  would be a sentence some deployments cannot honour — see ``senders._SMS_BODY``.
 """
 
 from __future__ import annotations
@@ -381,13 +381,67 @@ def test_a_gateway_url_with_no_host_is_refused() -> None:
         sms_settings(textbee_base_url="not-a-url")
 
 
-@pytest.mark.parametrize("env", ["staging", "production"])
-def test_sms_is_refused_outside_development_until_a_reply_can_be_read(env: str) -> None:
-    """A message a customer cannot stop is an unsolicited one.
+#: The smallest staging-shaped settings dict: everything production validation insists
+#: on, so an override can be the only variable under test.
+STAGING_SHAPE: dict[str, Any] = {
+    "app_env": "staging",
+    "secret_key": "a" * 40,
+    "cors_origins": "https://app.example.test",
+    "document_store_path": "/var/lib/contract-agent/documents",
+    # ``MINIMAL_ENV`` disables JSON logs, which staging refuses — ``None`` means
+    # "decide from app_env", the same default a real deployment gets.
+    "log_json": None,
+}
 
-    The adapter is real and tested, but no inbound route reads a reply yet, so the
-    transport is unrepresentable in a deployed environment rather than merely
-    discouraged. This test is the one to delete when that route lands.
+
+@pytest.mark.parametrize("env", ["staging", "production"])
+def test_sms_without_an_inbound_route_is_refused_outside_development(env: str) -> None:
+    """Sending to a customer the deployment cannot hear is what is refused.
+
+    Not "SMS is a development toy": the condition is the actual precondition, that
+    this deployment can read the reply. So the switch alone is still refused in a
+    deployed environment, and the message names the setting that would let it through
+    rather than reading as "SMS is unavailable".
     """
-    with pytest.raises(ValueError, match="not available in"):
+    with pytest.raises(ValueError, match="INBOUND_TRANSPORT=textbee"):
         sms_settings(app_env=env)
+
+
+def test_sms_with_an_inbound_route_is_allowed_outside_development() -> None:
+    """The other half of the refusal: a deployment that also listens must boot.
+
+    Without this the rule could keep refusing everything and every other test here
+    would still pass — the pair is the point. Staging rather than production because
+    the check runs identically for both and staging is the harder claim to fake.
+    """
+    settings = sms_settings(
+        **STAGING_SHAPE,
+        inbound_transport="textbee",
+        inbound_webhook_secret="s" * 32,
+        contact_blind_index_key="b" * 32,
+    )
+
+    assert settings.sms_transport == "textbee"
+    assert settings.inbound_transport == "textbee"
+
+
+@pytest.mark.parametrize(
+    ("override", "named"),
+    [
+        ({"inbound_webhook_secret": ""}, "INBOUND_WEBHOOK_SECRET"),
+        ({"inbound_webhook_secret": "too-short"}, "INBOUND_WEBHOOK_SECRET"),
+        (
+            {"inbound_webhook_secret": "s" * 32, "contact_blind_index_key": None},
+            "CONTACT_BLIND_INDEX_KEY",
+        ),
+    ],
+)
+def test_inbound_without_both_halves_is_refused(override: dict[str, Any], named: str) -> None:
+    """A gateway that looks like it listens while every STOP lands nowhere.
+
+    Each half is load-bearing: the secret decides whether a body came from the
+    gateway at all, and the index decides whether a real reply can find its contract.
+    Missing either is a start-up refusal, not a 400 discovered during an incident.
+    """
+    with pytest.raises(ValueError, match=named):
+        sms_settings(**STAGING_SHAPE, inbound_transport="textbee", **override)

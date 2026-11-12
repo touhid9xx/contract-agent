@@ -195,15 +195,21 @@ def test_no_refusal_carries_the_document_into_its_message() -> None:
 
 @pytest.fixture
 def store_settings(settings: Settings, tmp_path: Path) -> Settings:
-    """Settings that can seal and read a document, rooted in the test's own directory.
+    """Settings that can seal, read and index a document, in the test's own directory.
 
     A key every run would otherwise have to invent, and a store path that is
     absolute because production refuses a relative one (``DOCUMENT_STORE_PATH``) —
     the CLI resolves the store from these two fields and nothing else.
+
+    ``CONTACT_BLIND_INDEX_KEY`` is required by ``cli extract`` rather than optional:
+    extraction is the only path that turns a document into contact values, and a
+    value stored without its digest cannot be found by an inbound STOP. The CLI
+    therefore refuses to extract at all rather than write rows nobody can look up.
     """
     return settings.model_copy(
         update={
             "encryption_key": Fernet.generate_key().decode("ascii"),
+            "contact_blind_index_key": "document-text-test-index-key-012345",
             "document_store_path": str(tmp_path / "documents"),
         }
     )

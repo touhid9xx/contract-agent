@@ -41,6 +41,11 @@ NotificationTransport = Literal["none", "smtp"]
 #: ``textbee`` selects :class:`~app.workers.senders.TextbeeSender`; as above, the
 #: name exists only because the adapter does.
 SmsTransport = Literal["none", "textbee"]
+#: Which selector answers "is there a route that *reads* a customer's reply".
+#: A third independent switch, because sending and hearing are separate capabilities:
+#: ``SMS_TRANSPORT=textbee`` with ``INBOUND_TRANSPORT=none`` is a deployment that talks
+#: and cannot listen. The name exists only because :mod:`app.api.v1.inbound` does.
+InboundTransport = Literal["none", "textbee"]
 #: Which selector answers "which channel should we contact this customer on".
 #: ``deterministic`` is the F9 contact policy and the default: it decides, and the
 #: row records that it did. ``ollama`` adds the local model *on top of* it, as an
@@ -60,6 +65,16 @@ MIN_PRODUCTION_SECRET_LENGTH = 32
 #: place" and "`reseal-fields` has rewritten every row" — and every decrypt walks
 #: the list, so an unbounded one would be an unbounded cost on the send path.
 MAX_RETIRED_ENCRYPTION_KEYS = 4
+#: Shortest ``CONTACT_BLIND_INDEX_KEY`` accepted. It lives here rather than in
+#: :mod:`app.core.blind_index` because that module imports ``Settings`` from this one,
+#: so the dependency only runs downhill: the floor is validated at boot and enforced
+#: again (independently) by ``ContactBlindIndex.__init__`` at the point of use.
+MIN_BLIND_INDEX_KEY_LENGTH = 32
+#: Shortest ``INBOUND_WEBHOOK_SECRET`` accepted. The secret is the only thing between
+#: an internet-facing endpoint and anyone who can guess a phone number, and a wrong
+#: guess is answered by the same 202 a right one gets — so an attacker learns nothing
+#: per attempt and the only cost of guessing is the length of this value.
+MIN_INBOUND_SECRET_LENGTH = 32
 _VALID_LOG_LEVELS = frozenset({"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"})
 #: Hosts considered non-public. Used to *detect* a development origin, never to bind.
 _LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "0.0.0.0", "::1")  # nosec B104
@@ -403,6 +418,26 @@ class Settings(BaseSettings):
     #: ``smtp_timeout_seconds``: the scheduler sends while holding the row lock.
     sms_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
 
+    # --- inbound ---------------------------------------------------------
+    #: Whether this deployment can read a reply. ``none`` is the default and the only
+    #: honest one for a build that has never been registered with a gateway.
+    inbound_transport: InboundTransport = "none"
+    #: The shared secret the gateway signs webhook bodies with. This is the *only*
+    #: thing standing between an internet-facing endpoint and anyone who can guess a
+    #: phone number, so it is required whenever inbound is enabled and never defaulted.
+    inbound_webhook_secret: str = ""
+    #: The key behind :mod:`app.core.blind_index`, which turns a normalized contact
+    #: value into a searchable digest. Deliberately **not** derived from
+    #: ``encryption_key``: that one is rotated (it has a retired-key ring) and a
+    #: rotation would silently change every digest, which would make every stored
+    #: opt-out unreachable at once. Separate key, separate lifetime.
+    #:
+    #: ``None`` and ``""`` are deliberately *different*: unset means "this deployment
+    #: has no inbound lookup", which is honest and legal, while an empty string is
+    #: refused by the validator below because it almost always means an environment
+    #: variable the operator believes holds a key.
+    contact_blind_index_key: str | None = None
+
     # --- http ------------------------------------------------------------
     cors_origins: str = "http://localhost:3000"
 
@@ -415,6 +450,37 @@ class Settings(BaseSettings):
             allowed = ", ".join(sorted(_VALID_LOG_LEVELS))
             raise ValueError(f"LOG_LEVEL must be one of {allowed}; got {value!r}")
         return level
+
+    @field_validator("contact_blind_index_key")
+    @classmethod
+    def _check_blind_index_key(cls, value: str | None) -> str | None:
+        """Refuse a configured-but-unusable key; leave the default alone.
+
+        Because this runs only for values that were actually supplied, absence keeps
+        meaning "no inbound lookup" while a blank value is an error. Collapsing the two
+        would let a deployment whose environment variable is empty look configured and
+        then store no index at all — the exact silent state this module refuses.
+
+        The floor lives here as well as in ``ContactBlindIndex.__init__``: refusing at
+        boot names the variable, whereas refusing at construction happens inside a
+        request or a worker tick and reaches the operator as a 503.
+        """
+        if value is None:
+            return None
+        key = value.strip()
+        if not key:
+            raise ValueError(
+                "CONTACT_BLIND_INDEX_KEY is set but empty; unset it to run without an "
+                "inbound lookup, or give it real key material"
+            )
+        if len(key) < MIN_BLIND_INDEX_KEY_LENGTH:
+            raise ValueError(
+                "CONTACT_BLIND_INDEX_KEY must be at least "
+                f"{MIN_BLIND_INDEX_KEY_LENGTH} characters; it is key material for a "
+                "deterministic index, not a password, and a short key makes the "
+                "stored digests reversible by enumerating phone numbers offline"
+            )
+        return key
 
     @field_validator("api_v1_prefix")
     @classmethod
@@ -655,6 +721,38 @@ class Settings(BaseSettings):
                     "network unencrypted."
                 )
 
+        # ``CONTACT_BLIND_INDEX_KEY``'s shape is checked by
+        # :meth:`_check_blind_index_key` above, which runs only when the variable is
+        # actually present. Checking it again here would have to answer "absent" and
+        # "blank" the same way, and they are not the same deployment.
+
+        # Inbound is the only feature that makes a reminder SMS stoppable, so enabling
+        # it requires both halves. Refusing a half-configured gateway is what stops a
+        # deployment that looks like it listens while every STOP lands nowhere.
+        if self.inbound_transport == "textbee":
+            secret = self.inbound_webhook_secret.strip()
+            if not secret:
+                raise ValueError(
+                    "INBOUND_WEBHOOK_SECRET must be set when INBOUND_TRANSPORT=textbee: "
+                    "the endpoint is reachable by anyone who can reach the app, and the "
+                    "signature is the only thing that distinguishes the gateway from a "
+                    "stranger who guessed a phone number"
+                )
+            if len(secret) < MIN_INBOUND_SECRET_LENGTH:
+                raise ValueError(
+                    "INBOUND_WEBHOOK_SECRET must be at least "
+                    f"{MIN_INBOUND_SECRET_LENGTH} characters; it is the signing key for "
+                    "every inbound webhook"
+                )
+            if not self.contact_blind_index_key:
+                raise ValueError(
+                    "CONTACT_BLIND_INDEX_KEY must be set when INBOUND_TRANSPORT=textbee: "
+                    "an inbound reply carries a phone number and nothing else, and "
+                    "contact values are stored as ciphertext under a random IV, so "
+                    "without the index there is no way to find the contract it means. "
+                    "The route would accept every STOP and honour none of them."
+                )
+
         if self.app_env in {"staging", "production"}:
             # Refused rather than merely documented, because the cost of being wrong
             # is a message to a real person that they cannot stop. An SMS with no
@@ -662,12 +760,19 @@ class Settings(BaseSettings):
             # the recipient cannot withdraw consent and this build cannot hear them
             # if they try. Development stays open so the adapter can be exercised
             # against a local double.
-            if self.sms_transport == "textbee":
+            #
+            # Narrowed, not removed: the refusal used to be unconditional outside
+            # development because no inbound route existed at all. One does now, so the
+            # condition is the *actual* precondition — that this deployment can read a
+            # reply. Sending without listening is still refused, which is what the
+            # original rule was protecting.
+            if self.sms_transport == "textbee" and self.inbound_transport != "textbee":
                 raise ValueError(
                     "SMS_TRANSPORT=textbee is not available in "
-                    f"{self.app_env} yet: no inbound route reads a reply, so a "
-                    "customer could not withdraw consent by asking and nothing would "
-                    "honour it. Use development until that route exists."
+                    f"{self.app_env} without INBOUND_TRANSPORT=textbee: a customer "
+                    "could not withdraw consent by asking and nothing would honour "
+                    "it, which makes the reminder an unsolicited message rather than "
+                    "a smaller one. Configure inbound, or use development."
                 )
             self._reject_insecure_production_defaults()
 

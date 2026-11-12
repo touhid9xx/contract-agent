@@ -297,6 +297,18 @@ ESCALATION_EMAIL_FAILED_TOTAL: Final = _declare(
     )
 )
 
+# Split by outcome rather than only counting opt-outs, because the *interesting*
+# number is not how many customers said stop -- it is ``unmatched``. A reply we cannot
+# tie to a contract means somebody asked us to stop and we could not find them to
+# honour it, and a series stuck above zero is the only signal that will exist for it.
+SMS_INBOUND_TOTAL: Final = _declare(
+    Counter(
+        "sms_inbound_total",
+        "Inbound SMS webhook calls, by outcome.",
+        ("outcome",),
+    )
+)
+
 
 def render() -> str:
     """Return the whole registry in Prometheus text exposition format."""

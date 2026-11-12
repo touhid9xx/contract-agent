@@ -6290,8 +6290,9 @@ never written, so this needs a state table and is left open rather than guessed 
 `EscalationStatus.SLA_BREACHED` therefore remains unreachable, and the queue still reports lateness
 only to a person who opens it. A failed alert is counted and logged, never retried. There is no
 per-tenant routing. Two scanner replicas each mail what their own pass opened; nothing deduplicates
-across replicas. And the inbound direction is still absent: a customer's STOP has no way in, so
-`do_not_contact` can only be set by an operator or the CSV import.
+across replicas. ~~And the inbound direction is still absent: a customer's STOP has no way in, so
+`do_not_contact` can only be set by an operator or the CSV import.~~ **Closed by D10-93:** a signed
+STOP webhook withdraws consent from the customer's own phone where `INBOUND_TRANSPORT=textbee`.
 
 Gates: `pytest tests/test_escalation_alerts.py` -> 14 new tests; with the scanner and escalation
 suites -> 91 passed; full suite -> 958 passed, 15 skipped; `mypy app` -> no issues in 69 files.
@@ -6315,18 +6316,88 @@ second message to a real person. A follow-up fix in the same slice: the failure 
 defect in the advisor's unreachable path (D10-89) was fixed too.
 
 **Not done, and not faked:** no live gateway has ever been contacted — every test drives a fake
-transport, so "works against api.textbee.dev" is untested. There is still **no inbound direction**:
-no delivery receipt, no reply parsing, no STOP webhook, so `do_not_contact` remains operator-only.
-`SMS_TRANSPORT=textbee` is **refused at start-up in staging and production** until that route exists
-— a message a customer cannot stop is unsolicited — and development stays open only so the adapter
-is exercisable. The body therefore carries no opt-out instruction: promising a reply nothing can
-read would be worse than saying nothing. One device id serves the whole deployment, there is no
+transport, so "works against api.textbee.dev" is untested. ~~There is still **no inbound direction**:
+no delivery receipt, no reply parsing, no STOP webhook, so `do_not_contact` remains operator-only.~~
+**D10-93 adds the STOP webhook** (delivery receipts and reply parsing are still absent, and so are
+`START` and `HELP`), so `do_not_contact` is now reachable from a customer's own phone where inbound is
+configured.
+`SMS_TRANSPORT=textbee` is **refused at start-up in staging and production** ~~until that route
+exists~~ **unless `INBOUND_TRANSPORT=textbee` is also set** — a message a customer cannot stop is
+unsolicited — and development stays open only so the adapter is exercisable. The body therefore
+carries no opt-out instruction: ~~promising a reply nothing can read~~ **a static template cannot know
+whether this deployment listens, so the promise would be unkeepable wherever it does not** — worse
+than saying nothing. One device id serves the whole deployment, there is no
 per-tenant routing, and `SMS_TIMEOUT_SECONDS` is the only bound on a call made while holding the
 row's lock.
 
 Gates: `pytest tests/test_sms_sender.py` -> 28 passed; the four suites covering the refactor -> 127
 passed; full suite -> 986 tests, 971 passed, 15 skipped, 0 failed; `mypy app` -> no issues in 69
 files; `ruff check` / `ruff format --check` -> clean.
+
+### P2-E (part 2) — inbound STOP: the first route with no account behind it
+
+The platform could speak and not listen: `do_not_contact` was settable only by an operator or
+`consent-import`, because a customer's `STOP` had nowhere to arrive. This slice adds that direction —
+`POST /api/v1/inbound/sms` — and the piece that made it possible at all.
+
+**A number could not be found.** Contact values are Fernet ciphertext under a random IV, so the same
+phone number encrypts to different bytes every time and no `WHERE value = :number` can exist.
+`ExtractedField.blind_index` (migration `0007_contact_blind_index`, nullable, indexed) holds a keyed
+HMAC-SHA256 over the *normalised* value — the same `normalize_value` output the extractor already
+stores — and `contracts_for_contact` puts the digest, never the plaintext, into the WHERE clause.
+`CONTACT_BLIND_INDEX_KEY` is deliberately **not derived from `ENCRYPTION_KEY`**: that key is rotated
+(it has a retired-key ring), and a derivation would change every digest at once, orphaning every
+stored opt-out in one step with nothing raised. `cli backfill-blind-index` fills digests that predate
+the column, and fills **only** `blind_index IS NULL` — recomputing live ones would let a rotated key
+rewrite live indexes one batch at a time.
+
+`extract_contract` and `review._apply_correction` take the index as a **required** argument, not a
+default, because a default is a silent path that stores a contact value no `STOP` could ever find.
+`cli extract` therefore refuses to run without `CONTACT_BLIND_INDEX_KEY`; review recomputes a
+corrected number's digest, so an edit cannot leave an opt-out both unfindable and mis-suppressing.
+
+The route itself: `X-Signature` is `hex(HMAC-SHA256(secret, raw body))` compared with
+`hmac.compare_digest`, failing closed on an unset secret, a missing header or a mismatch; the body is
+capped at 8 KiB before the signature can be checked, because that check needs the body to exist; the
+payload model has no `tenant` and no `contract` field; only a bare keyword (`STOP`, `STOPALL`,
+`UNSUBSCRIBE`, `CANCEL`, `END`, `QUIT`, `OPT OUT`, `OPTOUT`, tolerating `"STOP."`) withdraws consent;
+every accepted outcome returns the same `202`, so a hit and a miss are indistinguishable to the
+caller. All matching contracts are suppressed in one transaction — a shared line is one act, not
+several — each with its own tenant-stamped audit row (`ACTOR_CUSTOMER`,
+`ACTION_CONSENT_OPTED_OUT`) naming ids and flags and never the number.
+`sms_inbound_total{outcome}` splits by outcome because the figure that matters is `unmatched`, the
+opt-outs we failed to honour.
+
+One defect in it was found by reading the function back **after** the gates had already gone green:
+the two signatures were compared as text, and `hmac.compare_digest` raises `TypeError` on a `str`
+holding a non-ASCII character. Header values are latin-1 decoded, so one high byte in `X-Signature`
+turned a forged signature into an unhandled 500 on the one route strangers can reach. Both sides are
+compared as bytes now. `test_a_signature_that_is_not_ascii_is_refused_rather_than_crashing` pins it.
+
+**Not done, and not faked:** no live gateway has ever posted here — every test signs its own body with
+a fake secret, so "the real gateway's signature matches" is untested. Only `STOP` is understood: no
+`START`, no `HELP`, no free text, no delivery receipts. Replay safety is **state**, not `smsId` —
+`apply_consent` writes only on an actual change, so a duplicate is a no-op and no idempotency table
+exists because no message is stored at all. Nothing bounds how many signed requests a holder of the
+gateway secret can make, and the 8 KiB cap is the only size gate. Because
+`blind_index_or_503` resolves as a dependency *before* the handler, a deployment that sends SMS but
+has no index key answers `503` where an unconfigured one answers `404` — pinned by
+`test_without_a_gateway_the_endpoint_does_not_exist`, whose docstring says so. Rotating
+`CONTACT_BLIND_INDEX_KEY` has no supported story beyond "backfill fills NULLs"; a real rotation needs
+a new column or a rewrite pass. And `backfill-blind-index` has never run against a deployment's data,
+only SQLite. This route is also the one place tenant is not derived from a principal — there is no
+account here — so it is derived from the row the number matched, never from the request.
+
+Operationally: `alembic upgrade head` adds the column, `CONTACT_BLIND_INDEX_KEY` becomes required for
+`cli extract`, and `backfill-blind-index` has to run before `INBOUND_TRANSPORT=textbee` is switched on
+or existing numbers are simply unfindable. Deployments that never set the key are unaffected except
+that `cli extract` now refuses rather than quietly storing no digests.
+
+Gates: `test_blind_index.py` -> 15; `test_blind_index_backfill.py` -> 16; `test_inbound.py` -> 16;
+`test_sms_sender.py` -> 32 (the refusal D10-92 called a placeholder was renamed, narrowed and paired
+with a test proving the other half boots); full suite -> **1042 tests, 1027 passed, 15 skipped, 0
+failed**; `mypy app` -> no issues in 71 files; `ruff check` / `ruff format --check` -> clean over 130
+files.
 
 ## Non-negotiable reminders
 

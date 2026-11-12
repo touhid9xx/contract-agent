@@ -272,11 +272,14 @@ class SmtpSender:
 #: channel is.
 #:
 #: It carries **no opt-out instruction, deliberately**. "Reply STOP to stop these
-#: messages" is the usual wording and it is absent because nothing this build ships
-#: reads an inbound reply: printing it would be a promise to the customer that the
-#: system cannot keep, which is worse than saying nothing. That is also why
-#: ``config`` refuses ``SMS_TRANSPORT=textbee`` outside development — see
-#: ``Settings._reject_insecure_production_defaults``.
+#: messages" is the usual wording and it is absent because this template cannot know
+#: whether the deployment can read the reply: ``INBOUND_TRANSPORT=none`` is legal and
+#: is the default, so in that configuration the sentence would promise an opt-out that
+#: lands nowhere — worse than saying nothing. The body is static for the same reason:
+#: wording it per configuration would mean two messages, two tests, and a send path
+#: that decides what to say. ``app.api.v1.inbound`` does honour STOP where the route is
+#: configured, and ``Settings._reject_insecure_production_defaults`` refuses to send
+#: outside development unless it is.
 _SMS_BODY = "Reminder: contract {contract_id} with us is approaching its expiry date."
 
 

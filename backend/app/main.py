@@ -26,6 +26,7 @@ from app.api.v1.auth import router as auth_router
 from app.api.v1.contracts import router as contracts_router
 from app.api.v1.escalations import router as escalations_router
 from app.api.v1.health import router as health_router
+from app.api.v1.inbound import router as inbound_router
 from app.api.v1.metrics import router as metrics_router
 from app.api.v1.notifications import router as notifications_router
 from app.api.v1.review import router as review_router
@@ -191,6 +192,12 @@ def create_app(
     app.include_router(notifications_router, prefix=app_settings.api_v1_prefix)
     app.include_router(escalations_router, prefix=app_settings.api_v1_prefix)
     app.include_router(attention_router, prefix=app_settings.api_v1_prefix)
+    # The only route with no principal: a customer answering a text has no account to
+    # authenticate with, so it authenticates the *relay* instead. Mounted inside the
+    # versioned prefix anyway, because it is our API surface even though its caller is
+    # a gateway -- and it answers 404 when no inbound transport is configured, so a
+    # deployment without SMS has no endpoint to find here.
+    app.include_router(inbound_router, prefix=app_settings.api_v1_prefix)
 
     @app.get("/", include_in_schema=False)
     async def root() -> dict[str, Any]:

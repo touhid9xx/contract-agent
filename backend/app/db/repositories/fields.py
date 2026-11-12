@@ -31,6 +31,7 @@ from typing import Any
 from sqlalchemy import ColumnElement, and_, or_, select
 from sqlalchemy.orm import Session
 
+from app.core.blind_index import CONTACT_FIELD_NAMES
 from app.db.enums import FieldName, FieldStatus
 from app.db.models import Contract, ExtractedField
 from app.db.repositories.base import TenantScopedRepository
@@ -43,6 +44,11 @@ MAX_REVIEW_QUEUE_LIMIT = 500
 #: How many field rows one ``reseal-fields`` run rewrites. Bounded like every other
 #: operator batch, so a mistake cannot rewrite an unbounded table in one transaction.
 DEFAULT_RESEAL_LIMIT = 500
+
+#: How many contact rows one ``backfill-blind-index`` run repairs. Bounded for the
+#: same reason: the column it writes is derived from ciphertext, so a wrong key or a
+#: wrong normalisation would rewrite every digest in the table in one transaction.
+DEFAULT_BLIND_INDEX_BACKFILL_LIMIT = 500
 
 #: A cursor is a page marker, not a capability: it is opaque so callers do not
 #: start parsing it, but it carries no secret and needs no signature. Everything
@@ -206,18 +212,27 @@ class ExtractedFieldRepository(TenantScopedRepository[ExtractedField]):
         source_document: str | None = None,
         source_page: int | None = None,
         source_line: int | None = None,
+        blind_index: str | None = None,
     ) -> ExtractedField:
         """Add one extracted field.
 
         ``raw_value`` arrives already encrypted: encryption happens in the
         extraction stage, which refuses to run without a key, so there is no code
         path that could reach this method with plaintext.
+
+        ``blind_index`` is the same value's keyed digest, for contact fields only
+        (:func:`app.core.blind_index.contact_digest` decides which). It is optional
+        here rather than required because a non-contact field legitimately has none —
+        but a caller that forgets it for an email or a phone produces a row the
+        opt-out path cannot find, which is why the two callers that exist both compute
+        it from the field name rather than deciding for themselves.
         """
         field = ExtractedField(
             contract_id=contract_id,
             field_name=field_name,
             raw_value=raw_value,
             normalized_value=normalized_value,
+            blind_index=blind_index,
             confidence=confidence,
             status=status,
             source_document=source_document,
@@ -236,6 +251,7 @@ class ExtractedFieldRepository(TenantScopedRepository[ExtractedField]):
         status: FieldStatus,
         source_page: int | None = None,
         source_line: int | None = None,
+        blind_index: str | None = None,
     ) -> ExtractedField:
         """Replace the value and score of an existing field row.
 
@@ -243,9 +259,16 @@ class ExtractedFieldRepository(TenantScopedRepository[ExtractedField]):
         a stale copy of the row loses the race with a 409 rather than silently
         overwriting the newer value — the same contract as the review endpoint
         that follows.
+
+        ``blind_index`` is rewritten alongside ``normalized_value`` and never left
+        alone: an index that still points at the *previous* number is worse than no
+        index, because a lookup would match the old value with full confidence. The
+        two travel together in this method so a caller cannot update one and skip the
+        other by forgetting an argument.
         """
         field.raw_value = raw_value
         field.normalized_value = normalized_value
+        field.blind_index = blind_index
         field.confidence = confidence
         field.status = status
         field.source_page = source_page
@@ -312,6 +335,106 @@ def fields_for_reseal_for_tenant(
     )
     if field_ids is not None:
         stmt = stmt.where(ExtractedField.id.in_(list(field_ids)))
+    return list(session.execute(stmt).scalars())
+
+
+#: How many contracts one inbound reply may suppress in a single pass.
+#:
+#: Bounded because the caller is an internet-facing webhook and an unbounded
+#: ``UPDATE`` behind it is a denial-of-service primitive, not because 100 is a
+#: meaningful customer number. The bound is also a *safety* claim, and the honest one
+#: is narrow: a number shared by more contracts than this is a switchboard, where a
+#: bare STOP is ambiguous anyway (whose employee is it?), so stopping at the cap and
+#: reporting it is better than guessing on the hundred-and-first. Exceeding it is
+#: logged as ``opt_out_truncated`` rather than silently finishing.
+MAX_OPT_OUT_CONTRACTS = 100
+
+
+def fields_needing_blind_index(
+    session: Session,
+    *,
+    field_ids: Sequence[int] | None = None,
+    limit: int = DEFAULT_BLIND_INDEX_BACKFILL_LIMIT,
+) -> list[ExtractedField]:
+    """Contact rows whose ``blind_index`` is still ``NULL``, **unscoped**.
+
+    The repair set for ``python -m app.cli backfill-blind-index``, which is the step
+    migration ``0007`` promises. Rows written before the column existed carry no
+    digest, and until one is computed an inbound STOP cannot find them — so this is
+    not tidying, it is the difference between honouring an opt-out and not.
+
+    The predicate is ``IS NULL`` rather than "recompute every contact row" so the
+    command converges: a second run over a repaired database examines nothing, which
+    is what makes it safe to run from a cron or to re-run after an interruption.
+    Recomputing rows that already have a digest would also mean a rotated key
+    silently rewrites live digests one batch at a time, which is exactly the failure
+    the separate key exists to avoid.
+
+    Unscoped for the reason :func:`fields_for_reseal` gives: this runs from a shell
+    with a connection and no principal, and scoping it to one organisation would
+    report success while leaving the others unindexed. Contact names only, so the
+    permanent ``NULL`` on a date column is not counted as a defect.
+
+    Ordered by id, so a bounded run takes a stable prefix and the next run resumes
+    where this one stopped.
+    """
+    stmt = (
+        select(ExtractedField)
+        .where(
+            ExtractedField.field_name.in_(tuple(CONTACT_FIELD_NAMES)),
+            ExtractedField.blind_index.is_(None),
+        )
+        .order_by(ExtractedField.id.asc())
+        .limit(limit)
+    )
+    if field_ids is not None:
+        stmt = stmt.where(ExtractedField.id.in_(list(field_ids)))
+    return list(session.execute(stmt).scalars())
+
+
+def contracts_for_contact(
+    session: Session,
+    *,
+    field_name: FieldName,
+    blind_index: str,
+    limit: int = MAX_OPT_OUT_CONTRACTS,
+) -> list[Contract]:
+    """Find every contract whose contact field has this digest, **across tenants**.
+
+    This is the third audited exception to tenant scoping, and the only one reachable
+    from an unauthenticated request. ``dead_lettered`` and ``contract_for_operator``
+    exist because a CLI has no principal; this one exists because the *customer* has
+    no principal either. Someone replying STOP from a phone has no tenant to name and
+    cannot be asked for one — the whole point of an opt-out is that it must work
+    without cooperation. So the lookup is deliberately global and the tenant comes
+    from whatever rows it finds.
+
+    Widening the *read* does not widen the *write*: each contract returned carries its
+    own ``tenant_id``, which is what the caller builds its repositories and its audit
+    rows from. The same argument as ``contract_for_operator``, and the reason this is
+    one named function instead of an unscoped ``select`` at the call site — the
+    exceptions have to stay countable.
+
+    **Status is not part of the predicate, deliberately.** A pending-review or even
+    rejected contact field still matches. The reasoning is one-sided: the data quality
+    of our extraction is our problem, while suppression is the fail-safe direction. If
+    a low-confidence number matches a STOP, honouring it can only *withhold* a message
+    we might have sent; ignoring it would keep texting someone who asked us to stop.
+    Between a false suppression and an unwanted text, the false suppression wins.
+
+    Ordered by id so the cap takes a stable prefix, and returning a list rather than a
+    lazy result so the caller sees a snapshot it can reason about after the commit.
+    """
+    stmt = (
+        select(Contract)
+        .join(ExtractedField, ExtractedField.contract_id == Contract.id)
+        .where(
+            ExtractedField.field_name == field_name,
+            ExtractedField.blind_index == blind_index,
+        )
+        .order_by(Contract.id.asc())
+        .limit(limit)
+    )
     return list(session.execute(stmt).scalars())
 
 

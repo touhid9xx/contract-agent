@@ -39,6 +39,7 @@ from typing import Protocol
 
 from sqlalchemy.orm import Session
 
+from app.core.blind_index import ContactBlindIndex, contact_digest
 from app.core.crypto import FieldCipher
 from app.core.metrics import EXTRACTION_CONFIDENCE, EXTRACTIONS_TOTAL
 from app.db.enums import FieldName, FieldStatus
@@ -237,6 +238,7 @@ def extract_contract(
     *,
     extractor: DocumentExtractor,
     cipher: FieldCipher,
+    contact_index: ContactBlindIndex,
     review_threshold: float,
 ) -> ExtractionOutcome:
     """Extract fields from ``document_text`` into ``contract``'s rows.
@@ -245,6 +247,12 @@ def extract_contract(
     the CLI decides when to commit. The tenant is taken from the *contract*, not
     from an argument: there is no parameter through which a caller could write
     one tenant's fields onto another tenant's contract.
+
+    ``contact_index`` is a required keyword argument for the same reason ``cipher``
+    is: a defaulted ``None`` would give every caller a branch that silently skips the
+    column, and a contact field written without a digest is one an inbound STOP can
+    never reach. Requiring it makes "this deployment cannot index contacts" a startup
+    failure rather than a class of rows that quietly cannot be opted out of.
     """
     repository = ExtractedFieldRepository(session, contract.tenant_id)
     chosen = _best_per_field(extractor.extract(document_text))
@@ -277,6 +285,10 @@ def extract_contract(
         # key, so no write path can reach storage with plaintext in either column.
         raw_value = cipher.encrypt(candidate.value.strip())
         sealed_normalized = cipher.encrypt(normalized)
+        # The digest is computed from the *normalized* form, before sealing, so it is
+        # the one comparable thing about a value that is otherwise only ciphertext.
+        # ``normalized`` is not retained: it exists in this scope for these two calls.
+        digest = contact_digest(contact_index, candidate.field_name, normalized)
 
         if row is None:
             existing[candidate.field_name] = repository.create(
@@ -284,6 +296,7 @@ def extract_contract(
                 field_name=candidate.field_name,
                 raw_value=raw_value,
                 normalized_value=sealed_normalized,
+                blind_index=digest,
                 confidence=confidence,
                 status=status,
                 source_page=candidate.source_page,
@@ -295,6 +308,7 @@ def extract_contract(
                 row,
                 raw_value=raw_value,
                 normalized_value=sealed_normalized,
+                blind_index=digest,
                 confidence=confidence,
                 status=status,
                 source_page=candidate.source_page,

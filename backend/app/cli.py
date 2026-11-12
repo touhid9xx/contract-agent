@@ -10,6 +10,8 @@ Run from ``backend/``::
     python -m app.cli reseal-fields
     python -m app.cli consent-import --file consent.csv --dry-run
     python -m app.cli consent-import --file consent.csv
+    python -m app.cli backfill-blind-index --dry-run
+    python -m app.cli backfill-blind-index
     python -m app.cli doctor
     python -m app.cli create-admin --tenant-slug acme --tenant-name Acme --email ops@acme.test
 
@@ -48,6 +50,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.orm.exc import StaleDataError
 
 from app.core.attention import PII_COLUMNS, attention_report
+from app.core.blind_index import MissingBlindIndexKeyError, build_blind_index
 from app.core.config import Settings, get_settings
 from app.core.crypto import (
     DecryptionError,
@@ -78,7 +81,12 @@ from app.db.repositories.contracts import (
     consent_state,
     contract_for_operator,
 )
-from app.db.repositories.fields import DEFAULT_RESEAL_LIMIT, fields_for_reseal
+from app.db.repositories.fields import (
+    DEFAULT_BLIND_INDEX_BACKFILL_LIMIT,
+    DEFAULT_RESEAL_LIMIT,
+    fields_for_reseal,
+    fields_needing_blind_index,
+)
 from app.db.repositories.outbox import (
     DEFAULT_REPLAY_LIMIT,
     DeadLetterReplay,
@@ -92,7 +100,11 @@ from app.db.repositories.users import (
     normalize_email,
 )
 from app.db.session import build_engine, build_session_factory, session_scope
-from app.workers.extraction import ExtractionUnavailableError, extract_contract
+from app.workers.extraction import (
+    ExtractionUnavailableError,
+    extract_contract,
+    normalize_value,
+)
 from app.workers.extractors import build_extractor
 
 log = structlog.get_logger(__name__)
@@ -418,6 +430,40 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reseal.set_defaults(handler=_reseal_fields)
 
+    backfill = commands.add_parser(
+        "backfill-blind-index",
+        help="compute the contact blind index for rows that predate it",
+        description=(
+            "Contact field values are encrypted with a random IV, so a phone "
+            "number cannot be looked up. The keyed digest in 'blind_index' is what "
+            "makes an inbound STOP resolvable to a contract; rows written before "
+            "that column existed have none, so this fills them in. Idempotent: a "
+            "second run examines nothing. Contact fields only."
+        ),
+    )
+    backfill.add_argument(
+        "--ids",
+        type=_ids_arg,
+        default=None,
+        metavar="N[,N...]",
+        help="backfill only these field ids (default: every row, up to --limit)",
+    )
+    backfill.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_BLIND_INDEX_BACKFILL_LIMIT,
+        metavar="N",
+        help=(
+            f"maximum rows to examine in one run (default: {DEFAULT_BLIND_INDEX_BACKFILL_LIMIT})"
+        ),
+    )
+    backfill.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report how many rows would be indexed without writing anything",
+    )
+    backfill.set_defaults(handler=_backfill_blind_index)
+
     doctor = commands.add_parser(
         "doctor",
         help="report rows that need a human and are otherwise silent",
@@ -663,6 +709,16 @@ def _extract(
         log.error("extract_refused_without_encryption_key", error=str(exc))
         return EXIT_FAILED
 
+    # Refuse for the same reason ``cipher`` is refused above rather than storing
+    # fields with no digest: an unindexed contact value is one an inbound STOP can
+    # never find, and "the customer asked us to stop and we could not locate them"
+    # is not a state to discover during an incident.
+    try:
+        contact_index = build_blind_index(settings)
+    except MissingBlindIndexKeyError as exc:
+        log.error("extract_refused_without_blind_index_key", error=str(exc))
+        return EXIT_FAILED
+
     extractor = build_extractor(settings)
 
     with session_scope(session_factory) as session:
@@ -711,6 +767,7 @@ def _extract(
                 text,
                 extractor=extractor,
                 cipher=cipher,
+                contact_index=contact_index,
                 review_threshold=settings.extraction_review_threshold,
             )
         except ExtractionUnavailableError as exc:
@@ -858,6 +915,118 @@ def _reseal_fields(
     if unreadable:
         log.error(
             "reseal_left_values_unreadable",
+            unreadable=unreadable,
+            hint=(
+                "check that ENCRYPTION_KEY is the key these rows were sealed with, "
+                "and that ENCRYPTION_KEY_PREVIOUS still carries any older one"
+            ),
+        )
+        return EXIT_UNREADABLE
+
+    return EXIT_OK
+
+
+def _backfill_blind_index(
+    args: argparse.Namespace,
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+) -> int:
+    """``backfill-blind-index``: make rows written before ``0007`` findable.
+
+    Two encrypted columns sit between an inbound STOP and the contract it belongs to:
+    the phone number on the row and the number the customer typed. Because the value
+    column is Fernet under a random IV, comparing them is impossible; the keyed digest
+    in ``blind_index`` is the only thing that makes the pair meet. Rows written before
+    that column existed carry ``NULL``, so they are invisible to the opt-out path —
+    the gateway would accept the STOP and nothing would happen.
+
+    What it distinguishes, all by shape rather than by guessing:
+
+    - **indexed** — the digest was computed. For a contact field this is the only
+      success.
+    - **not normalisable / no value** — discarded, reported, and left alone. A phone
+      column holding ``"n/a"`` cannot be indexed, and inventing a digest for it would
+      make one row match many.
+    - **sealed but unreadable** — reported, never written, and the run exits
+      :data:`EXIT_UNREADABLE`. This is what a wrong ``ENCRYPTION_KEY`` looks like, and
+      carrying on would replace correct digests with a different key's output.
+
+    Nothing here logs a value or a digest: a field ``id`` identifies the row to the
+    operator without putting PII — or a stable pseudonym for it — in the log stream.
+    """
+    field_ids: list[int] | None = args.ids
+    # Explicit ids replace the limit rather than being filtered by it, as in
+    # ``reseal-fields`` and ``outbox-replay``: silently dropping some of the
+    # requested rows would look like success.
+    limit = len(field_ids) if field_ids is not None else int(args.limit)
+    dry_run = bool(args.dry_run)
+
+    try:
+        cipher = build_cipher(settings)
+    except MissingEncryptionKeyError as exc:
+        log.error("backfill_refused_without_encryption_key", error=str(exc))
+        return EXIT_FAILED
+
+    try:
+        index = build_blind_index(settings)
+    except MissingBlindIndexKeyError as exc:
+        log.error("backfill_refused_without_blind_index_key", error=str(exc))
+        return EXIT_FAILED
+
+    indexed = 0
+    discarded = 0
+    unreadable = 0
+    changed: list[int] = []
+
+    with session_scope(session_factory) as session:
+        rows = fields_needing_blind_index(session, field_ids=field_ids, limit=limit)
+        for field in rows:
+            # ``normalized_value`` first: the digest is defined over the normalized
+            # form, and re-normalising the stored one is idempotent by construction.
+            stored = field.normalized_value or field.raw_value
+            if stored is None:
+                discarded += 1
+                log.warning("backfill_row_without_value", field_id=field.id)
+                continue
+            try:
+                plaintext = cipher.decrypt(str(stored)) if is_sealed(str(stored)) else str(stored)
+            except DecryptionError:
+                unreadable += 1
+                log.warning("backfill_value_unreadable", field_id=field.id)
+                continue
+            try:
+                normalized = normalize_value(field.field_name, plaintext)
+                digest = index.digest(normalized)
+            except ValueError:
+                discarded += 1
+                log.warning("backfill_value_not_normalisable", field_id=field.id)
+                continue
+            if not dry_run:
+                field.blind_index = digest
+            indexed += 1
+            changed.append(field.id)
+
+    log.info(
+        "blind_index_backfilled",
+        dry_run=dry_run,
+        examined=len(rows),
+        indexed=indexed,
+        discarded=discarded,
+        unreadable=unreadable,
+        field_ids=changed,
+    )
+
+    if field_ids is not None:
+        missing = sorted(set(field_ids) - {field.id for field in rows})
+        if missing:
+            # Same reasoning as ``outbox-replay``: a wrong id usually means the
+            # operator read a different database, not that the row is fine.
+            log.warning("backfill_ids_not_found", ids=missing)
+            return EXIT_NO_MATCH
+
+    if unreadable:
+        log.error(
+            "backfill_left_values_unindexed",
             unreadable=unreadable,
             hint=(
                 "check that ENCRYPTION_KEY is the key these rows were sealed with, "

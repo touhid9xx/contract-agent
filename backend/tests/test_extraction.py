@@ -21,10 +21,12 @@ from cryptography.fernet import Fernet
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.blind_index import ContactBlindIndex
 from app.core.config import Settings
 from app.core.crypto import FieldCipher
 from app.db.enums import FieldName, FieldStatus, UserRole
 from app.db.models import Contract, ExtractedField, Tenant
+from app.db.repositories.fields import contracts_for_contact
 from app.workers.extraction import (
     ExtractionUnavailableError,
     FieldCandidate,
@@ -36,6 +38,10 @@ from app.workers.extractors import OllamaExtractor, PatternExtractor, build_extr
 
 #: The shipped default, named here so a change to it is visible in the tests.
 THRESHOLD = 0.8
+
+#: ``extract_contract`` takes the index as a required argument, so the tests need one
+#: even when they are not about indexing. Same key length the settings floor enforces.
+CONTACT_INDEX = ContactBlindIndex("test-contact-index-key-0123456789")
 
 DOCUMENT = """Service Agreement
 
@@ -95,6 +101,7 @@ def run(
     *,
     document: str = DOCUMENT,
     threshold: float = THRESHOLD,
+    contact_index: ContactBlindIndex = CONTACT_INDEX,
 ) -> Any:
     return extract_contract(
         session,
@@ -102,6 +109,7 @@ def run(
         document,
         extractor=extractor,
         cipher=cipher,
+        contact_index=contact_index,
         review_threshold=threshold,
     )
 
@@ -626,6 +634,42 @@ def test_a_model_score_is_honoured_but_bounded(monkeypatch: pytest.MonkeyPatch) 
     found = ollama().extract("text")
 
     assert found[0].confidence == 1.0
+
+
+def test_a_contact_field_is_stored_with_a_digest_that_can_find_it_again(
+    db_session: Session,
+    contract: Contract,
+    cipher: FieldCipher,
+) -> None:
+    # The digest is the only way an inbound STOP can ever locate this row: both value
+    # columns are Fernet ciphertext under a random IV, so a phone number is not
+    # searchable. If extraction stops writing it, opt-out silently stops working.
+    run(db_session, contract, PatternExtractor(), cipher)
+
+    row = field_rows(db_session, contract)[FieldName.EMAIL]
+    assert row.blind_index == CONTACT_INDEX.digest(
+        normalize_value(FieldName.EMAIL, "a.rahman@example.test")
+    )
+    assert [
+        c.id
+        for c in contracts_for_contact(
+            db_session,
+            field_name=FieldName.EMAIL,
+            blind_index=row.blind_index or "",
+        )
+    ] == [contract.id]
+
+
+def test_a_non_contact_field_is_stored_without_a_digest(
+    db_session: Session,
+    contract: Contract,
+    cipher: FieldCipher,
+) -> None:
+    # NULL here means "not a contact", not "missing". Dates are never looked up, and
+    # an index on them would be a searchable copy of a value we encrypt.
+    run(db_session, contract, PatternExtractor(), cipher)
+
+    assert field_rows(db_session, contract)[FieldName.START_DATE].blind_index is None
 
 
 def test_the_admin_role_is_not_a_writer_of_fields() -> None:

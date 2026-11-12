@@ -30,6 +30,7 @@ from app.db.models import AuditLog
 from app.db.repositories.base import TenantScopedRepository
 
 __all__ = [
+    "ACTION_CONSENT_OPTED_OUT",
     "ACTION_CONSENT_UPDATED",
     "ACTION_ESCALATION_ASSIGNED",
     "ACTION_ESCALATION_CLAIMED",
@@ -40,6 +41,7 @@ __all__ = [
     "ACTION_USER_CREDENTIAL_CHANGED",
     "ACTION_USER_CREDENTIAL_RESET",
     "ACTION_USER_UPDATED",
+    "ACTOR_CUSTOMER",
     "ACTOR_SYSTEM",
     "ACTOR_USER",
     "ACTOR_WORKER",
@@ -87,6 +89,17 @@ ACTOR_SYSTEM = "system"
 #: escalated needs to see that no human raised it.
 ACTOR_WORKER = "worker"
 
+#: ``AuditLog.actor_type`` value for **the customer**, acting through an inbound reply.
+#:
+#: A fourth value for the same reason ``worker`` was a third. The other three all name
+#: somebody inside the deployment — a user at a keyboard, a command somebody ran, a
+#: process on a clock — and none of them is the person who actually said "stop". The
+#: inbound webhook is a relay, not a cause: recording ``system`` would make "did the
+#: customer withdraw consent, or did an operator on their behalf?" unanswerable, and
+#: that is precisely the question an opt-out log is for. It is also the one actor type
+#: whose action is not reviewable after the fact, so the row has to say who it was.
+ACTOR_CUSTOMER = "customer"
+
 #: ``AuditLog.entity`` for user rows.
 #:
 #: ``create-admin`` writes here because it is the one path that mints an account
@@ -109,6 +122,15 @@ AUDIT_ENTITY_USER = "users"
 #: changed this customer's consent" a single query; a per-path action name would
 #: answer it in two, and the second one would be the one nobody remembered.
 ACTION_CONSENT_UPDATED = "contract.consent_updated"
+
+#: ``AuditLog.action`` for a customer withdrawing consent by replying to a reminder.
+#:
+#: Deliberately *not* :data:`ACTION_CONSENT_UPDATED`, even though it changes the same
+#: column. The two answer different questions: ``consent_updated`` says what the
+#: organisation decided to record about this customer, while this one says the customer
+#: spoke. Collapsing them would hide the only evidence that a message was ever sent to
+#: somebody who then asked us to stop — which is the fact a complaint turns on.
+ACTION_CONSENT_OPTED_OUT = "contract.opted_out"
 
 #: ``AuditLog.action`` for an operator account being created by ``create-admin``.
 ACTION_USER_CREATED = "user.created"

@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.core.blind_index import ContactBlindIndex
 from app.core.config import Settings
 from app.core.crypto import FieldCipher
 from app.db.enums import FieldName, FieldStatus, UserRole
@@ -44,6 +45,10 @@ REVEAL_PATH = "/api/v1/review/{field_id}/reveal"
 PASSWORD = "correct-horse-battery-staple"  # nosec B105
 EMAIL = "ops@acme.test"
 PLAINTEXT = "a.rahman@example.test"
+
+#: Key material for the contact blind index in tests that correct a contact value.
+#: Not derived from the encryption key, because the two have different lifetimes.
+BLIND_INDEX_KEY = "review-test-contact-index-key-01"
 
 #: The shipped review threshold (``EXTRACTION_REVIEW_THRESHOLD``), named here so a
 #: change to the default is visible rather than silently baked into an assertion.
@@ -67,11 +72,40 @@ def secured_client(
     encryption_key: str,
     session_factory: sessionmaker[Session],
 ) -> Iterator[TestClient]:
-    """A client whose app has ``ENCRYPTION_KEY`` configured.
+    """A client whose app has both keys configured.
 
     ``Settings`` is copied rather than mutated: the plain ``client`` fixture (no
     key) is what proves the 503 path below, so the two configurations have to
     coexist in one test module.
+
+    ``CONTACT_BLIND_INDEX_KEY`` is here because correcting an email or a phone
+    number recomputes its digest — a correction that left a stale digest would
+    leave the customer's STOP suppressing the value they no longer have.
+    """
+    app = create_app(
+        settings.model_copy(
+            update={
+                "encryption_key": encryption_key,
+                "contact_blind_index_key": BLIND_INDEX_KEY,
+            }
+        ),
+        session_factory=session_factory,
+    )
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def sealed_client(
+    settings: Settings,
+    encryption_key: str,
+    session_factory: sessionmaker[Session],
+) -> Iterator[TestClient]:
+    """A client that can seal values but has no inbound contact lookup.
+
+    This is a legal deployment shape, not a broken one: with no inbound SMS there
+    is nothing to look a digest up by. Such a deployment must still be able to
+    review a date, which is what ``sealed_client`` exists to prove.
     """
     app = create_app(
         settings.model_copy(update={"encryption_key": encryption_key}),
@@ -763,6 +797,106 @@ def test_an_unparseable_correction_is_refused_and_changes_nothing(
     assert stored.status is FieldStatus.PENDING_REVIEW
     assert stored.normalized_value is not None
     assert cipher.decrypt(stored.normalized_value) == "+442079460958"
+    assert stored.version == 1
+    assert audit_rows(session_factory) == []
+
+
+def test_a_contact_correction_is_findable_by_its_new_value(
+    secured_client: TestClient,
+    contract: Contract,
+    cipher: FieldCipher,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    """The digest follows the corrected value, so a STOP for the new number matches.
+
+    Quiet failure is what this prevents: with a stale digest the correction looks
+    saved, the customer's opt-out keeps matching the number they no longer own, and
+    an inbound STOP from the new one finds nothing.
+    """
+    field_id = add_field(
+        session_factory, contract, cipher, field_name=FieldName.PHONE, value="+442079460958"
+    )
+    headers = auth(secured_client, tenant, make_user)
+
+    response = secured_client.patch(
+        FIELD_PATH.format(field_id=field_id),
+        json={"action": "edit", "version": 1, "value": "+44 20 7946 1234"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    stored = load_field(session_factory, field_id)
+    assert stored.blind_index == ContactBlindIndex(BLIND_INDEX_KEY).digest("+442079461234")
+    # The digest is of the normalized form, not of what was typed.
+    assert stored.blind_index != ContactBlindIndex(BLIND_INDEX_KEY).digest("+44 20 7946 1234")
+
+
+def test_correcting_a_date_needs_no_contact_index(
+    sealed_client: TestClient,
+    contract: Contract,
+    cipher: FieldCipher,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    """A deployment with no inbound SMS must still be able to review a date.
+
+    The review queue is the gate that unblocks every notification, so coupling a
+    date correction to a key that only matters for inbound replies would be an
+    availability bug dressed up as a security rule.
+    """
+    field_id = add_field(
+        session_factory,
+        contract,
+        cipher,
+        field_name=FieldName.START_DATE,
+        value="2025-01-01",
+        confidence=0.3,
+    )
+    headers = auth(sealed_client, tenant, make_user)
+
+    response = sealed_client.patch(
+        FIELD_PATH.format(field_id=field_id),
+        json={"action": "edit", "version": 1, "value": "2026-03-01"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    stored = load_field(session_factory, field_id)
+    assert cipher.decrypt(stored.normalized_value or "") == "2026-03-01"
+    # A date cannot arrive as an inbound reply, so it carries no digest at all.
+    assert stored.blind_index is None
+
+
+def test_correcting_a_contact_value_without_an_index_key_changes_nothing(
+    sealed_client: TestClient,
+    contract: Contract,
+    cipher: FieldCipher,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    """No key means no digest, and a contact value without one cannot be found.
+
+    Storing it anyway would look like success while an inbound STOP for that
+    address matched nothing, so the correction is refused whole — including the
+    two columns that would otherwise have been written.
+    """
+    field_id = add_field(session_factory, contract, cipher, value="wrong@example.test")
+    headers = auth(sealed_client, tenant, make_user)
+
+    response = sealed_client.patch(
+        FIELD_PATH.format(field_id=field_id),
+        json={"action": "edit", "version": 1, "value": "right@example.test"},
+        headers=headers,
+    )
+
+    assert response.status_code == 503
+    stored = load_field(session_factory, field_id)
+    assert cipher.decrypt(stored.normalized_value or "") == "wrong@example.test"
+    assert stored.status is FieldStatus.PENDING_REVIEW
     assert stored.version == 1
     assert audit_rows(session_factory) == []
 

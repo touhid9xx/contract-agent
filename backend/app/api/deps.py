@@ -27,6 +27,11 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.core.blind_index import (
+    ContactBlindIndex,
+    MissingBlindIndexKeyError,
+    build_blind_index,
+)
 from app.core.config import Settings
 from app.core.crypto import FieldCipher, MissingEncryptionKeyError, build_cipher
 from app.core.documents import DocumentStore, build_document_store
@@ -78,6 +83,30 @@ def cipher_or_503(settings: Settings = Depends(app_settings)) -> FieldCipher:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Encrypted data cannot be stored or read: ENCRYPTION_KEY is not configured",
+        ) from None
+
+
+def blind_index_or_503(
+    settings: Settings = Depends(app_settings),
+) -> ContactBlindIndex:
+    """The configured contact blind index, or a 503 naming the missing variable.
+
+    Same shape and same reason as :func:`cipher_or_503`, and deliberately a separate
+    dependency because the two keys are independent: an installation can seal values
+    perfectly well while being unable to match a contact, and a request that needs one
+    must not be told the other is missing.
+
+    Two routes need it — ``review`` recomputes the digest when a reviewer corrects a
+    phone number or an email, and ``inbound`` computes the digest of the number a
+    customer texted from. A shared dependency is what stops the two from answering
+    differently for the same misconfiguration.
+    """
+    try:
+        return build_blind_index(settings)
+    except MissingBlindIndexKeyError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=("Contact values cannot be matched: CONTACT_BLIND_INDEX_KEY is not configured"),
         ) from None
 
 

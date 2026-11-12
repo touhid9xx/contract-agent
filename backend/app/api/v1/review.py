@@ -39,8 +39,15 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
-from app.api.deps import app_settings, cipher_or_503, get_request_session, require_roles
+from app.api.deps import (
+    app_settings,
+    blind_index_or_503,
+    cipher_or_503,
+    get_request_session,
+    require_roles,
+)
 from app.api.v1.contracts import ExtractedFieldSummary, field_summary
+from app.core.blind_index import contact_digest, is_contact_field
 from app.core.config import Settings
 from app.core.crypto import DecryptionError, FieldCipher
 from app.core.middleware import correlation_id_or_new
@@ -342,7 +349,7 @@ def review_field(
     before = _state(field)
     try:
         if payload.action == "edit":
-            _apply_correction(field, payload, cipher_or_503(settings))
+            _apply_correction(field, payload, cipher_or_503(settings), settings)
         field.status = _DECISION_STATUS[payload.action]
         field.reviewed_by = principal.user_id
         field.reviewed_at = utc_now()
@@ -388,7 +395,10 @@ def review_field(
 
 
 def _apply_correction(
-    field: ExtractedField, payload: ReviewDecisionRequest, cipher: FieldCipher
+    field: ExtractedField,
+    payload: ReviewDecisionRequest,
+    cipher: FieldCipher,
+    settings: Settings,
 ) -> None:
     """Store a reviewer-supplied value, normalized and encrypted like an extracted one.
 
@@ -400,6 +410,22 @@ def _apply_correction(
     was; ``normalized_value`` became one when the plaintext copy of the same email
     address turned out to be the contradiction of the "no raw PII at rest" rule that
     F7's encryption was supposed to close.
+
+    The digest in ``blind_index`` is computed from the normalized form for the reason
+    :mod:`app.core.blind_index` gives: it is the only comparable thing left about a
+    value stored as ciphertext under a random IV, and a corrected number whose digest
+    still pointed at the old one would make an inbound STOP both miss and mis-suppress.
+
+    The index key is resolved *last*, and only for a contact field, for two reasons
+    that are both about which error the reviewer sees:
+
+    - Normalization runs first, so an unparseable value is a 422 about the value. If
+      the key were resolved by the caller it would already have answered 503, and a
+      reviewer who typed a bad phone number would be told the service is unavailable.
+    - A date has no inbound reply, so it needs no index. Requiring
+      ``CONTACT_BLIND_INDEX_KEY`` to accept a corrected end date would make the review
+      queue — the gate that unblocks every notification — unusable in a deployment
+      that never configured inbound SMS.
     """
     raw = (payload.value or "").strip()
     try:
@@ -411,8 +437,22 @@ def _apply_correction(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"The value is not a valid {field.field_name.value}",
         ) from None
+    # A correction is a *new value*, so the old digest would now point at a number the
+    # customer no longer owns — and a STOP from the corrected number would miss this
+    # row while a STOP from the old one would wrongly suppress it. Recomputing here is
+    # not tidiness: it is the third write path for these two columns and the only one
+    # a human drives.
+    #
+    # Resolved *before* the row is touched, so a missing key cannot leave a correction
+    # applied to two columns and absent from the third.
+    digest = (
+        contact_digest(blind_index_or_503(settings), field.field_name, normalized)
+        if is_contact_field(field.field_name)
+        else None
+    )
     field.raw_value = cipher.encrypt(raw)
     field.normalized_value = cipher.encrypt(normalized)
+    field.blind_index = digest
 
 
 @router.post(

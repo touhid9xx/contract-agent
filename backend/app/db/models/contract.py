@@ -174,6 +174,16 @@ class ExtractedField(Base, TimestampMixin):
     field_name: Mapped[FieldName] = mapped_column(enum_column(FieldName, length=20), nullable=False)
     raw_value: Mapped[str | None] = mapped_column(Text, nullable=True)
     normalized_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Keyed deterministic digest of ``normalized_value``, for contact fields only —
+    #: see :mod:`app.core.blind_index`. It exists because both value columns above are
+    #: ciphertext under a random IV, so equality over them matches nothing: without
+    #: this column there is no way to answer "which contract holds this number", and
+    #: an inbound STOP has nothing but a number to go on.
+    #:
+    #: ``None`` has two meanings and they are both honest: the field is not a contact
+    #: (a date needs no index), or the row predates this column. The second is why
+    #: ``python -m app.cli backfill-blind-index`` exists rather than being implied.
+    blind_index: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     #: ``NUMERIC(4,3)`` = 0.000-1.000. Calibrated per field, never one global score.
     confidence: Mapped[float] = mapped_column(Numeric(4, 3), nullable=False, default=0.0)
     status: Mapped[FieldStatus] = mapped_column(
