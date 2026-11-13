@@ -6717,6 +6717,10 @@ case ran rather than being collected and skipped. `ruff check` passes, `ruff for
 133 files already formatted, `mypy` is clean in 74 files, `bandit` is clean beyond the annotated
 `nosec` on `config.py:80`. Not measured anywhere: a live gateway.
 
+The slice landed as `db8ce0f`, and CI run `43444592307` is green on it: seven of seven jobs,
+including the real-socket smoke journey, the MySQL 8.4 suite that treats a skip as a failure,
+and the `CI gate`. The local `smoke_journey.py` was not re-run for this slice, so CI measured it.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.
