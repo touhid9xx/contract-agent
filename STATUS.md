@@ -6928,6 +6928,20 @@ The 1204 tests counted above are again two suites: CI runs `-m "not integration"
 `-m integration` as separate jobs, so no single job's number matches this record —
 `D10-103` has the sentence that explains the difference.
 
+And the tip needed one more commit. CI run `43496324741` on `a22a939`, this section's
+close record, failed `backend tests (pytest, sqlite)` with `OSError: [Errno 98] Address
+already in use` — from this slice's own test, not from the listener. `assert_port_is_free`
+bound a bare socket, but the module sets `SO_REUSEADDR` off Windows, so on Linux the probe
+was refused for as long as a just-served connection sat in `TIME_WAIT`: it measured the
+kernel's linger timer, not the listener's lifetime, and the same code had passed minutes
+earlier. `f1f6f53` binds through `MetricsServer.start` instead, which is no weaker: a
+listener left open is refused either way, and `test_a_taken_port_is_fatal_and_names_the_setting`
+pins that on the same path. The mechanism was measured on linux 3.13.18 — a bare bind to a
+just-served port is refused with errno 98 while the `SO_REUSEADDR` bind is accepted — and the
+file passed its 24 tests eight times in a row on both platforms. CI run `43502605579` is green
+on `f1f6f53`, seven of seven jobs, so the tip is green; but the paragraph above names a run on
+`1a78196`, and this is the run that covers the code the branch now ends on.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

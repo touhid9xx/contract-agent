@@ -8294,11 +8294,12 @@ fight a long-running planner for the port.
 **Gates.** `backend/tests/test_metrics_server.py` (24 tests) pins the body byte-identical to
 `render()` from the live registry, `200` with `metrics.CONTENT_TYPE`, `/metrics?x=1` still routing,
 `404` with a fixed body on any other path, `501` on `POST` from the base class, `port=0` yielding
-`None` and starting no thread, a second bind raising, `stop()` releasing the port for a plain
-`bind()`, `start` refusing `0`/`-1`/`65536` by setting name, the refusal naming the worker, a blank
-host refused when `Settings` loads, the header carrying no interpreter version, the access line
-reaching the logger and never `stderr`, and the six-worker wiring — an AST check over each `main`
-that also pins the label, plus a check that importing a worker opens no listener.
+`None` and starting no thread, a second bind raising, `stop()` releasing the port for
+~~a plain `bind()`~~ a listener that binds the way the module binds, `start` refusing
+`0`/`-1`/`65536` by setting name, the refusal naming the worker, a blank host refused when
+`Settings` loads, the header carrying no interpreter version, the access line reaching the logger
+and never `stderr`, and the six-worker wiring — an AST check over each `main` that also pins the
+label, plus a check that importing a worker opens no listener.
 
 Measured on this tree: `pytest` collected 1204 tests — 1189 passed, 15 skipped, 0 failed, 0 errors,
 from the JUnit XML — up exactly 24. `ruff check` passes, `ruff format --check` finds 135 files
@@ -8320,3 +8321,13 @@ of their own, so two of the six serve a declared-but-empty registry: a listener 
 counter, not a number. Nothing tests whether a Prometheus rule fires; absence-versus-zero is
 asserted at the exposition level only, and no scrape configuration, dashboard or alert route is
 added — the six ports exist for an operator who configures them.
+
+**Amended by the fix that followed, not deleted.** The first green run was on `1a78196`; the close
+commit `a22a939` then failed `backend tests (pytest, sqlite)` in run `43496324741`, because one
+assertion in this slice's own test bound a bare socket. The module sets `SO_REUSEADDR` off Windows,
+so on Linux that probe was refused for as long as a just-served connection sat in `TIME_WAIT` — it
+measured the kernel's linger timer, not the listener's lifetime, and the same code had passed
+minutes earlier. `f1f6f53` binds through `MetricsServer.start` instead; a port held by a live
+listener is still refused either way, so the assertion lost no strength. Measured on linux 3.13.18,
+and repeated eight times on both platforms. CI run `43502605579` is green on `f1f6f53`, seven of
+seven jobs.
