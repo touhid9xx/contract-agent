@@ -26,7 +26,9 @@ regression net: it fails when extraction gets worse. It is **not** an accuracy c
 about customers' contracts. For that, label your own documents in this format and
 point `--golden` at the manifest; the number you get is the one worth quoting.
 
-`address` and `dob` are stated on purpose even though the pattern backend cannot
-reach them — a corpus that only asks for what the code already does measures
-nothing. They show up in the report as unreachable fields with recall 0, which is
-gap 17 as a number rather than as a note.
+`address` and `dob` are stated on purpose. Until `D10-106` the pattern backend could
+not reach them, and a corpus that only asks for what the code already does measures
+nothing: they showed up in the report as unreachable fields with recall 0, which was
+gap 17 as a number rather than as a note. Both are readable now, from the labelled
+forms these documents use — 3 of 3 addresses, 1 of 1 date of birth — and the corpus
+still asks for them, which is what keeps a rule that stops working visible.

@@ -7338,7 +7338,9 @@ on …` and `commences` were not date label forms, and a lease's `Annual rent:` 
 label. Fixed in `extractors.py` with deliberately **anchored** forms (`end(?:s|ing|ed)`, never
 `end\w*`, so "endorsement" does not become an end-date). F1 is now **0.919** over 34 matched /
 5 missed / 1 wrong, and `unreachable` names `address` (3) and `dob` (1) — gap 17 as a number
-instead of a note.
+instead of a note. **Superseded by `D10-106`:** 0.974 over 38 matched / 1 missed / 1 wrong,
+`unreachable` empty, address 3/3 and dob 1/1. The number above is kept because it is what
+this slice measured.
 
 Two results are pinned rather than fixed, and both are deliberate. `03/04/2026 (3 April 2026)`
 is legible to a person and ambiguous to a locale-blind regex, so it is dropped and the test says
@@ -7353,10 +7355,11 @@ extractor scores 0.4".
 **What this deliberately does not do.** The corpus was written by the same hand as the regexes
 it scores, so a green gate is **weak evidence about the real world** and strong evidence about
 regressions, which is what it is for: 0.919 says extraction did not get worse, never that it is
-92 % right on a customer's contracts. No LLM backend has been measured — gap 17 stands, so
-`EXTRACTION_BACKEND=pattern` is still the only backend scored and `OllamaExtractor` has met only
-canned payloads. Confidence **calibration** is untouched: this measures whether the extractor
-finds the right value, not whether a 0.8-confidence value is right 80 % of the time, so the
+92 % right on a customer's contracts. No LLM backend has been measured — no model has ever
+answered, so `EXTRACTION_BACKEND=pattern` is still the only backend scored and `OllamaExtractor`
+has met only canned payloads. Confidence **calibration** is untouched: this measures whether
+the extractor finds the right value, not whether a 0.8-confidence value is right 80 % of the
+time, so the
 threshold itself remains unvalidated. Eight documents is small — one document moves F1 by about
 0.02 — and `.txt` only: no PDF flows through the scoring path. ~~`.github/workflows/ci.yml` does
 **not** run the command, so the gate is one a build chooses to enforce rather than one that
@@ -8163,3 +8166,66 @@ not change that. Nothing here reads the mail the way a person does: the caveat a
 are asserted by substring, so a paragraph containing the right words in an unreadable order
 still passes. A threshold above one and `_UNPROBEABLE`'s honesty remain as `D10-104` left them.
 And no relay was contacted: the paragraph is proved composed, not delivered.
+
+### D10-106 — The default extractor read five of seven field types, and the report said so out loud
+
+`address` and `dob` had no rule in `PatternExtractor`. Every evaluation run named them, in
+`unreachable` — gap 17 as a number rather than a note — and the property's own docstring said why:
+those two score a structural zero, and no amount of corpus size moves them. The golden corpus stated
+both on purpose, so the shape of the miss was measured rather than guessed. What was missing was the
+rules, and no contract that carries only a postal address could produce a usable field.
+
+**Decision.** Two finders, built from the machinery already there. `_ADDRESS_LABELS` and
+`_DOB_LABELS` are anchored to the start of a line, like every existing label table, so "Tenant email
+address:" cannot be read as a postal address by a `\baddress\b` that never looks left. `_DATE_SHAPE`
+became a named constant, because three finders now need the same date alternation and a second
+silent copy is how two rules drift apart.
+
+Two guards, both because the label cannot tell us enough. `_find_address` refuses any value
+containing `@` — that is the email column wearing an address label — and anything shorter than
+`_MIN_ADDRESS_CHARS`, so "Address: N/A" is not a field. `_find_dob` returns nothing for
+`03/04/1979`, through the `_to_iso` contract that already refused ambiguous slash dates: with the
+corpus's other documents day-first, reading this one month-first would invent a birthday.
+
+Confidences sit deliberately below the labelled email's 0.95: address 0.9, dob 0.95 for the ISO
+shape and 0.85 for the rest, because both ends of an address are inferred and only one dob shape is
+unambiguous. All three are above `extraction_review_threshold` (0.8), so a contract carrying an
+address does not park in the review queue over a field nothing downstream consumes.
+
+**Measured, because the point was to move a number.** Pooled F1 **0.919 → 0.974**: 34 matched / 5
+missed / 1 wrong became 38 / 1 / 1, `unreachable` is now empty, address is 3/3 and dob 1/1. The
+corpus was not edited to achieve this, and the one remaining miss and one false positive are the two
+`D10-94` pinned rather than fixed.
+
+**The gate had to be split, not weakened.** Dropping phones from the real backend now scores
+**0.904** — above the 0.85 floor — because closing gap 17 put four more true positives in the
+denominator. The old test asserted that a missing channel falls below the gate, and after this slice
+it would have gone green on a genuine regression. So it was split rather than relaxed:
+`test_a_channel_that_stops_being_extracted_moves_the_score` asserts the narrowing (0.974 → 0.904,
+phone missed 5), and `test_losing_both_contact_channels_falls_below_the_gate` keeps the floor
+meaningful at **0.818** with neither contact channel, which is what the floor is about.
+`test_the_corpus_no_longer_names_a_field_the_pattern_backend_cannot_reach` also pins `expected` at 3
+and 1 and recall at 1.0 for both fields, because an empty corpus section would clear `unreachable`
+just as well and prove nothing.
+
+**Verification.** Eight new rule cases in `backend/tests/test_extraction.py`: labelled address,
+prose without a colon, a placeholder, an email under an address label, and each dob shape. Both
+guards were proved load-bearing by mutation — removing the `@`-and-length guard and the ambiguity
+guard failed exactly the three cases that name them, each message showing the real defect — and the
+file was then restored byte-exact with `git status` clean.
+
+**Gates: measured on this tree.** `pytest` over `backend/tests` collected **1180 tests — 1165
+passed, 15 skipped, 0 failed, 0 errors**, from the JUnit XML, up exactly nine from 1171.
+`ruff check` passed, `ruff format --check` found 133 files already formatted, `mypy` reported no
+issues in 74 source files, `bandit` is clean beyond the annotated `nosec` on `config.py:80`, and
+`python -m app.cli evaluate-extraction --golden tests/golden/extraction/manifest.json` exits 0 with
+pooled F1 **0.974**.
+
+**Limits.** The corpus was written by the same hand as the regexes, so 0.974 is a regression net and
+not an accuracy claim. Both fields are read only when a label starts a line and the value sits on
+that same line: an address written as prose, or with its value on the line below, still yields
+nothing, and a "3 April 1979" dob shape is still missed — that is the case the `ollama` backend
+exists for, and it still has no compose service and has never been run against a live model
+(`D7-03`). An address is read to the end of its line, so a trailing clause becomes part of the
+value. A postal address is now read and reviewable; it is still not a delivery channel, and neither
+dispatch nor escalation consults it.

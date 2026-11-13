@@ -1744,7 +1744,7 @@ and `pending_review`.
 | --- | --- |
 | Policy module | `app/workers/extraction.py` — `extract_contract(session, contract, text, *, extractor, cipher, review_threshold)`. `cipher` and `extractor` are **required keyword arguments**, so there is no branch that stores a value in the clear and no branch that silently skips encryption. Tenant comes from `contract.tenant_id`, not from a parameter, so a caller cannot write one tenant's fields onto another's contract (D7-01, D7-04) |
 | Review gate | `_status_for` maps confidence ≥ `EXTRACTION_REVIEW_THRESHOLD` to `auto_accepted` and everything below to `pending_review`; `approved` is unreachable from this module. Re-runs skip rows in `approved`/`rejected`/`unreadable` and report the count as `skipped_reviewed` instead of overwriting a person's decision (D7-04) |
-| Backends | `app/workers/extractors.py` — `PatternExtractor` (default: deterministic offline regexes for 5 of 7 field types; an ambiguous `03/04/2025` is dropped rather than guessed) and `OllamaExtractor` (opt-in: `/api/generate`, `format:"json"`, `temperature:0`, errors never echo the document or the endpoint). `build_extractor` is total over the literal, and the two backends are alternatives, never merged (D7-02, D7-03) |
+| Backends | `app/workers/extractors.py` — `PatternExtractor` (default: deterministic offline regexes for all seven field types (`D10-106`); an ambiguous `03/04/2025` is dropped rather than guessed) and `OllamaExtractor` (opt-in: `/api/generate`, `format:"json"`, `temperature:0`, errors never echo the document or the endpoint). `build_extractor` is total over the literal, and the two backends are alternatives, never merged (D7-02, D7-03) |
 | Config | `ExtractionBackend = Literal["pattern", "ollama"]` — a cloud backend is not a member, so `EXTRACTION_BACKEND=openai` is a start-up `ValidationError` rather than a code path (D7-02). `EXTRACTION_MODEL`, `_TIMEOUT_SECONDS`, `_REVIEW_THRESHOLD` (0.8, matching what the Phase-0 review UI renders) and `_MAX_DOCUMENT_CHARS` are bounded; a **present but malformed** `ENCRYPTION_KEY` fails at boot, while an empty one stays legal because the API process never stores field values |
 | Crypto | `app/core/crypto.py` — `FieldCipher` over Fernet (AES-CBC + HMAC-SHA256, so tampering fails loudly); `build_cipher` raises `MissingEncryptionKeyError` on an empty key; `DecryptionError` never carries the token. `cryptography` is already a runtime dependency (PyMySQL needs it), so the import is unconditional (D7-01) |
 | Repository | `app/db/repositories/fields.py` — `ExtractedFieldRepository.for_contract/create/overwrite`; the upsert keeps `uq_extracted_fields_contract_field` intact, and the overwrite *policy* stays in the worker, not here |
@@ -3690,13 +3690,19 @@ above read "passed" because a hook finally ran and passed.
     trustworthy "how stale is the backlog" reading. Building it also surfaced and
     fixed a `NUMERIC(4, 3)` precision defect in `confidence` that no test had
     covered before.
-17. **The default `pattern` backend reaches 5 of the 7 field types.** Email, phone,
-    `start_date`, `end_date` and `contract_value` have regexes; `address` and
-    `dob` are reachable only through the opt-in `ollama` backend, which has no
-    compose service and has never been run against a live model. So the default
-    path — the one the verification above actually exercises — cannot produce a
-    reviewable address, and a contract whose only contact detail is a postal
-    address yields nothing usable (D7-03).
+17. ~~**The default `pattern` backend reaches 5 of the 7 field types.**~~ — **closed by
+    `D10-106` for the labelled case, and narrowed rather than closed overall.** The struck
+    sentence was true until `D10-106` and is kept because it was: email, phone,
+    `start_date`, `end_date` and `contract_value` had regexes, and `address` and `dob`
+    were reachable only through the opt-in `ollama` backend. Both have rules now, so the
+    default path reads all seven types and neither is `unreachable` in the report —
+    address 3/3, dob 1/1, pooled F1 0.919 → 0.974. What stands is the *shape* of the
+    evidence rather than the count: an address and a date of birth are read only when a
+    label named them at the start of a line, so an address written as prose, with no
+    label, or with its value on the line below it still yields nothing — and `ollama`
+    still has no compose service and has never been run against a live model (D7-03).
+    A postal address is now read and reviewable; it is still not a delivery channel,
+    which is a channel decision (`test_agent_decisions.py`), not an extraction one.
 18. **Consent has no UI. ~~and no import path~~** F9's flags default to `false`, so
     **every contract that existed before `0002` became un-contactable** —
     fail-closed and correct, but resolvable only through
@@ -6236,8 +6242,9 @@ per-replica semaphore of 5, and provenance on every row (`prompt_version`, `llm_
 latency, repair count). `AGENT_BACKEND=deterministic` is the default, so `/agent/decisions` behaves
 exactly as before until an operator asks for advice.
 
-What it does **not** add: a model that has ever answered. **Gap 17 is unchanged** — no Ollama
-service is defined (D10-88), and the only advisor this code has met is a test double. An advisory
+What it does **not** add: a model that has ever answered. **Gap 17's service half is
+unchanged** — no Ollama service is defined (D10-88), and the only advisor this code has met
+is a test double. An advisory
 row reports `prompt_version=advisory_channel_v1`; a deterministic row still reports
 `policy.channel.1`, so the two are distinguishable in the API response. Also still missing from the
 agent milestone: MLflow logging, `PROMPT_AB_SPLIT` A/B, and a golden-scenario review gate.
@@ -6421,30 +6428,32 @@ produce a number that looks like a measurement and is not one.
 label forms and a lease's `Annual rent:` was not a value label. Fixed in `extractors.py` with
 anchored forms (`end(?:s|ing|ed)`, never `end\w*`, so "endorsement" is not an end-date). F1 is
 now **0.919** over 34 matched / 5 missed / 1 wrong, with `address` and `dob` reported as
-`unreachable` — gap 17 as a number rather than a note.
+`unreachable` — gap 17 as a number rather than a note. **Superseded by `D10-106`, which
+gave those two fields rules:** 0.974 over 38 matched / 1 missed / 1 wrong, `unreachable`
+empty, address 3/3 and dob 1/1. `0.919` is kept above because it is the number *this*
+slice measured.
 
 Two results are pinned rather than fixed, and both are deliberate: `03/04/2026 (3 April 2026)`
 is dropped rather than guessed at, and the water company's own email address in document 06 is
 counted as the false positive it is.
 
-**Not done, and not faked:** the corpus was written by the same hand as the regexes it scores,
-so this is a regression net and not an accuracy claim — 0.919 means "not worse", never "92 %
-right on a customer's contracts". No LLM backend is measured (gap 17 stands, so `pattern` is the
-only backend ever scored). Confidence *calibration* is not measured either: this says whether
-the extractor finds the right value, not whether a 0.8-confidence value is right 80 % of the
-time, so the threshold itself remains unvalidated. Eight documents is small, and only `.txt`
-files are scored — no PDF flows through this path. ~~`.github/workflows/ci.yml` does not run the
-command, so the gate is available rather than enforced.~~ **Corrected in place (`D10-94`), and it
-contradicted the sentence above it in that same entry:** no workflow names the *command*, but the
-gate does run in CI — `test_the_committed_corpus_meets_the_gate` asserts
-`measured.meets(DEFAULT_MIN_F1)` over this corpus with `PatternExtractor`, and `ci.yml` runs
-`pytest`. Both routes read the same `DEFAULT_MIN_F1`, so the floor cannot drift between them.
-Whether a red suite *blocks a merge* is branch protection rather than YAML, and `main` had none
-when `D10-75` measured it, so nothing blocks a merge there at all. The residue that is real: the
-per-field report and exit `7` are printed only for someone who runs the command, and only the
-`pattern` backend is ever scored. This corpus measures **extraction
-fields**, not the agent's channel decisions: the golden-scenario review gate the agent milestone
-still lacks (above, D10-89) is a different thing and is still absent.
+**Not done, and not faked:** the corpus was written by the same hand as the regexes it scores, so
+this is a regression net and not an accuracy claim — 0.919 means "not worse", never "92 % right on a
+customer's contracts". No LLM backend is measured (no model has answered, so `pattern` is the only
+backend ever scored). Confidence *calibration* is not measured either: this says whether the
+extractor finds the right value, not whether a 0.8-confidence value is right 80 % of the time, so
+the threshold itself remains unvalidated. Eight documents is small, and only `.txt` files are scored
+— no PDF flows through this path. ~~`.github/workflows/ci.yml` does not run the command, so the gate
+is available rather than enforced.~~ **Corrected in place (`D10-94`), and it contradicted the
+sentence above it in that same entry:** no workflow names the *command*, but the gate does run in CI
+— `test_the_committed_corpus_meets_the_gate` asserts `measured.meets(DEFAULT_MIN_F1)` over this
+corpus with `PatternExtractor`, and `ci.yml` runs `pytest`. Both routes read the same
+`DEFAULT_MIN_F1`, so the floor cannot drift between them. Whether a red suite *blocks a merge* is
+branch protection rather than YAML, and `main` had none when `D10-75` measured it, so nothing blocks
+a merge there at all. The residue that is real: the per-field report and exit `7` are printed only
+for someone who runs the command, and only the `pattern` backend is ever scored. This corpus
+measures **extraction fields**, not the agent's channel decisions: the golden-scenario review gate
+the agent milestone still lacks (above, D10-89) is a different thing and is still absent.
 
 Gates: `test_extraction_eval.py` -> 28; full suite -> **1070 tests, 1055 passed, 15 skipped, 0
 failed**; `mypy app` -> no issues in 72 files; `ruff check` / `ruff format --check` -> clean over
@@ -6828,6 +6837,36 @@ have succeeded. The gate job does not exist until its dependencies finish, so th
 six jobs in flight and seven at the end. The 1171 tests counted above are again two suites: CI
 runs `-m "not integration"` and `-m integration` as separate jobs, so no single job's number
 matches the record — `D10-103` has the sentence that explains the difference.
+
+### P2-B (part 2) — the default extractor reads all seven field types (`D10-106`)
+
+Gap 17 is closed for the labelled case. `PatternExtractor` had no rule for `address` or `dob`, so
+both were reported `unreachable` on every run, and the corpus kept them so the miss stayed measured
+rather than becoming a note. `_ADDRESS_LABELS` and `_DOB_LABELS` are line-anchored like every other
+label table, which is what stops "Tenant email address:" being read as a postal address;
+`_DATE_SHAPE` is now one constant shared by three finders. `_find_address` refuses a value
+containing `@` or shorter than `_MIN_ADDRESS_CHARS`, so "Address: N/A" is not a field, and
+`_find_dob` drops `03/04/1979` rather than choosing a birthday through `_to_iso`.
+
+Measured: pooled F1 **0.919 → 0.974** — 38 matched / 1 missed / 1 wrong, was 34/5/1 — with address
+3/3, dob 1/1 and `unreachable` empty. Confidences are 0.9 for address and 0.95/0.85 for dob: below
+the labelled email's 0.95 because both ends of an address are inferred, and above the 0.8 threshold
+so an address does not park in review over a field nothing downstream reads.
+
+The corpus gate was split rather than weakened. With gap 17 closed, dropping phones scores 0.904,
+which clears the 0.85 floor, so a regression in the phone channel would no longer have failed the
+old pooled test. The narrowing is asserted on its own now, and the floor is kept meaningful by a
+case that drops both contact channels and scores 0.818, below it.
+
+Gates: **measured on this tree.** `pytest` collected 1180 tests — 1165 passed, 15 skipped, 0 failed,
+0 errors, from the JUnit XML — up exactly nine from 1171. `ruff check` passes, `ruff format --check`
+finds 133 files already formatted, `mypy` is clean in 74 files, `bandit` is clean beyond the
+annotated `nosec` on `config.py:80`, and `evaluate-extraction` exits 0 at pooled F1 0.974.
+
+Still out of reach: a label and its value on different lines, a "3 April 1979" shape, an address
+whose trailing clause is part of the value, and any claim that 0.974 is accuracy rather than a
+regression net — the corpus shares an author with the regexes. No live model has answered anything
+(`D7-03`).
 
 ## Non-negotiable reminders
 
