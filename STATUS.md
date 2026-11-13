@@ -6783,6 +6783,10 @@ format --check` finds 133 files already formatted, `mypy` is clean in 74 files. 
 reach: a threshold above one, `_UNPROBEABLE`'s honesty, `_CLEARED_HEADLINE`, and any statement
 about whether a sentence reads correctly.
 
+The slice landed as `30db728`, and CI run `43462862482` is green on it: seven of seven jobs,
+including the real-socket smoke journey, the MySQL 8.4 suite that treats a skip as a failure, and
+the `CI gate`. The 1168 above is both suites together, as `D10-103`'s paragraph explains.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.
