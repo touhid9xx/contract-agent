@@ -7970,3 +7970,66 @@ rather than a checked property. Bool probing assumes the calm value is the non-r
 guard still constrains the headline against the verdict and says nothing about whether a sentence
 reads correctly, which is `D10-100`'s and `D10-101`'s limit and is untouched here.
 `_CLEARED_HEADLINE` remains uncovered and no test reads the mail the way a person does.
+
+### D10-103 — The rot guard knew one shape at a time and only half the rule
+
+**The defect.** `D10-102` made the guard refuse what it could not perturb, but it still moved
+**one field at a time**. A term joining two fields — `field_scan_truncated and fields_scanned`,
+the shape `_record`'s own "the count is a floor" warning invites — raises the verdict while
+leaving every single-field reading calm, and the guard passed on it.
+
+**Measured, not argued.** That conjunction was added to `needs_attention` and the attention
+suites run. `test_attention_alerts.py` stayed **green**: the guard written to catch an unnamed
+reason did not. `test_attention_watch.py` caught it, in
+`test_a_full_scan_page_warns_that_the_count_is_a_floor` — a case written to pin the *order of
+two log lines*. That is coverage by luck, and it evaporates the moment the conjunction joins two
+fields nobody logs.
+
+**The fix: walk one field and then two, and attribute the raise.** The guard now iterates
+`itertools.combinations` at arity 1 and arity 2 over the same steps the probe already computed.
+A raise is attributed by removal: a member is held to the phrase table only if the verdict falls
+back when that member alone is returned to calm; if the raise survives, the member is a
+companion. Without that rule every raising pair would demand a sentence for
+`unsealed_field_ids`, which rides along behind the count it belongs to, and the table would grow
+until it named every field — at which point it says nothing. Against the same mutant the guard
+now fails, and says why: `fields_scanned + field_scan_truncated raises the verdict and needs
+fields_scanned to do it`.
+**A second defect, found by asking what else carries the rule.** `TenantAttentionReport` has its
+own `needs_attention`, deliberately narrower — no park count, because a relay is not a tenant's
+to fix (`D10-39`) — and **no test compared the two**. Measured: `or self.field_scan_truncated`
+added to the tenant class alone, and the whole attention suite stayed green. The tenant's board
+would have raised on a truncated scan while the operator's mail called the same reading clear —
+a product decision a board ticket would plausibly make, and one nothing would have objected to.
+
+**The fix for that: the board and the mail answer the same question the same way.** A new case
+walks the *shared* fields at arity 1 and 2 and asserts the two verdicts agree. It asserts the
+subset relation field by field first, so a report that stops sharing a field name fails instead
+of comparing nothing. It sidesteps the disagreement that is legitimate: with the park count left
+calm and the bus on, both records describe the same board, so counts may still differ between
+readers while the rule does not. Under the tenant mutant this is the **only** failing test in
+the suite.
+**Two cases prove the walk is not an empty loop.** One asserts that the fields raising the
+verdict alone are exactly the tabulated ones, that at least one pair raises, and that at least
+one raising pair survives a member's removal — so both branches of the attribution rule are
+taken by the report as it stands, rather than one of them being dead code inside a passing test.
+
+**Gates: measured on this tree.** `pytest` over `backend/tests` collected **1167 tests — 1152
+passed, 15 skipped, 0 failed, 0 errors**, counted from the JUnit XML. The suite stood at 1165
+before this entry and two cases were added, which is the arithmetic that shows they ran rather
+than being collected and skipped. `ruff check` passed, `ruff format --check` found 133 files
+already formatted, `mypy` reported no issues in 74 source files. `git diff -- backend/app` is
+**empty**: one test file, no application code, so the green run that covers the shipped
+application still covers it.
+**Limits.** Arity three, with no pair among the three raising, is still unseen — measured, not
+assumed: a `field_scan_truncated and fields_scanned and unsealed_field_ids` mutant left all four
+attention suites green. A threshold above one is out of reach of a fixed step, which `D10-102`
+already recorded and this entry does not change. `_UNPROBEABLE` can still silence the guard, and
+its honesty remains a written sentence. The agreement case compares the *rule*, not the counts,
+which legitimately differ between the two readers. `_CLEARED_HEADLINE` remains uncovered, no
+test reads the mail the way a person does, and none of this says whether a sentence reads
+correctly.
+
+**A defect in the apply script, caught by its own re-read.** `rewrap` joins its lines with
+`splitlines()`, which drops the trailing newline, so the first `--write` appended this entry
+and then failed its own check that both files end with exactly one newline — after writing.
+The check turned a malformed file into a two-line repair, and that repair added this paragraph.

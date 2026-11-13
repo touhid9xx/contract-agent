@@ -6721,6 +6721,36 @@ The slice landed as `db8ce0f`, and CI run `43444592307` is green on it: seven of
 including the real-socket smoke journey, the MySQL 8.4 suite that treats a skip as a failure,
 and the `CI gate`. The local `smoke_journey.py` was not re-run for this slice, so CI measured it.
 
+### The guard knew one field at a time, and half the rule (`D10-103`)
+
+`D10-102`'s probe moved one field at a time. A term joining two fields — `field_scan_truncated
+and fields_scanned`, the shape `_record`'s "the count is a floor" warning invites — raises the
+verdict while every single-field reading stays calm, and the guard passed on it. Measured: under
+that mutant `test_attention_alerts.py` stayed green, and `test_attention_watch.py` caught it in
+a case written to order two log lines. Coverage by luck.
+
+The walk is now arity 1 and then arity 2, with the raise attributed by removal: a member is held
+to the phrase table only if the verdict falls back when that member alone goes calm. Companions
+— the id tuple behind the count — are not reasons, and tabulating them would drain the table of
+meaning. A second case asserts the walk is not an empty loop: the fields that raise alone are
+exactly the tabulated ones, at least one pair raises, and at least one pair survives a member's
+removal, so both branches run against the report as it stands.
+
+The other half was found by asking what else carries the rule. `TenantAttentionReport` has its
+own `needs_attention` — narrower by design, no park count — and no test compared the two. Adding
+a finding to the tenant class alone left every suite green: the board would have raised on a
+truncated scan while the operator's mail called that reading clear. The new case walks the
+shared fields and requires the two verdicts to agree, asserting the shared-field relation first
+so it fails rather than comparing nothing. Under that mutant it is the only failing test.
+
+No application code changes: `git diff -- backend/app` is empty. One test file.
+
+Gates: **measured on this tree.** `pytest` collected 1167 tests — 1152 passed, 15 skipped, 0
+failed, 0 errors, counted from the JUnit XML — up exactly two from the 1165 before this slice.
+`ruff check` passes, `ruff format --check` finds 133 files already formatted, `mypy` is clean in
+74 files. Not measured anywhere: a live gateway. Still unseen: a raise needing three fields
+together, measured green under such a mutant.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

@@ -33,15 +33,19 @@ not to a private copy.
 
 One thing about the text is asserted **structurally** rather than by quoting it: the
 raised headline must name every state that can raise the verdict, and the states are
-taken from ``needs_attention`` itself rather than from a remembered list. ``D10-99``
-added a fourth finding to the report and left the prose naming three; nothing failed,
-because the counts were right, the log line was right, and only the sentence above
-them described a smaller board than the operator was looking at.
+taken from ``needs_attention`` itself rather than from a remembered list. The walk is
+over one field and then two — a term joining two fields raises nothing on its own — and
+over both records that carry the rule, because the tenant's board and the operator's
+mail were free to disagree about the same findings (``D10-103``). ``D10-99`` added a
+fourth finding to the report and left the prose naming three; nothing failed, because
+the counts were right, the log line was right, and only the sentence above them
+described a smaller board than the operator was looking at.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import itertools
 import logging
 from email.message import EmailMessage
 from typing import Any
@@ -51,7 +55,7 @@ import structlog
 from sqlalchemy.orm import Session, sessionmaker
 from structlog.testing import capture_logs
 
-from app.core.attention import AttentionReport
+from app.core.attention import AttentionReport, TenantAttentionReport
 from app.core.config import Settings
 from app.db.enums import ContractStatus
 from app.db.models import Contract, ExtractedField, Tenant
@@ -526,14 +530,44 @@ def _raised(field: dataclasses.Field[Any], value: Any) -> Any:
     )
 
 
+def _steps(calm: AttentionReport) -> dict[str, Any]:
+    """Every field this probe may move, holding the value one step from calm."""
+    steps: dict[str, Any] = {}
+    for field in dataclasses.fields(AttentionReport):
+        if field.name in _UNPROBEABLE:
+            continue
+        steps[field.name] = _raised(field, getattr(calm, field.name))
+    return steps
+
+
+def _verdict(calm: AttentionReport, steps: dict[str, Any], names: tuple[str, ...]) -> bool:
+    """The verdict with exactly ``names`` moved and every other field left as it was."""
+    return dataclasses.replace(calm, **{name: steps[name] for name in names}).needs_attention
+
+
 def test_no_state_raises_the_verdict_without_a_sentence_in_the_headline() -> None:
     """What makes the table exhaustive instead of a snapshot of today.
 
-    Every field is perturbed on its own against a calm baseline. Any that flips the
-    verdict must be tabulated — and the previous test then requires its phrase to be in
-    the prose. So adding a fifth finding to ``needs_attention`` fails here until
-    somebody writes a sentence for it, which is exactly the step ``D10-99`` skipped by
-    hand and the reason a golden string would not have been enough.
+    Every field is perturbed on its own against a calm baseline, and then every *pair*
+    of fields together. Any raise that follows must be tabulated — and the previous test
+    then requires its phrase to be in the prose — so adding a fifth finding to
+    ``needs_attention`` fails here until somebody writes a sentence for it, which is
+    exactly the step ``D10-99`` skipped by hand and the reason a golden string would
+    not have been enough.
+
+    The pair pass is not decoration. ``D10-102``'s probe moved one field at a time, and
+    a term like ``field_scan_truncated and fields_scanned`` — which ``_record``'s own
+    "the count is a floor" warning invites — raises the verdict while leaving every
+    single-field reading calm. The guard passed on it; only ``test_attention_watch``
+    noticed, in a test written to order two log lines. That is coverage by luck, and it
+    evaporates the day the conjunction joins two fields nobody logs.
+
+    Pairs are attributed rather than blamed wholesale: a member is held to the phrase
+    table only if the raise *depends* on it, which is asked by removing it and
+    re-reading. ``unsealed_field_ids`` rides along behind the count it belongs to and
+    can never raise alone; demanding a sentence for it would push whoever trips this
+    guard toward tabulating everything, and a table with every field in it has stopped
+    saying anything.
 
     The perturbation is chosen by type rather than by "is it an ``int``", because the
     earlier filter admitted only integers and would have walked past a boolean or a
@@ -542,17 +576,104 @@ def test_no_state_raises_the_verdict_without_a_sentence_in_the_headline() -> Non
     the smallest reading that differs at all.
     """
     calm = _calm()
+    assert calm.needs_attention is False, (
+        "the baseline must raise nothing, or removing a field from a combination could "
+        "not tell which one the verdict was reading"
+    )
+    steps = _steps(calm)
 
-    for field in dataclasses.fields(AttentionReport):
-        if field.name in _UNPROBEABLE:
-            continue
-        value = getattr(calm, field.name)
-        raised = dataclasses.replace(calm, **{field.name: _raised(field, value)})
-        if not raised.needs_attention:
-            continue
-        assert field.name in _HEADLINE_PHRASES, (
-            f"{field.name} raises the verdict, so the raised headline must name it"
-        )
+    for size in (1, 2):
+        for combination in itertools.combinations(tuple(steps), size):
+            if not _verdict(calm, steps, combination):
+                continue
+            for member in combination:
+                rest = tuple(name for name in combination if name != member)
+                if _verdict(calm, steps, rest):
+                    continue  # the raise stands without it, so it is a companion
+                assert member in _HEADLINE_PHRASES, (
+                    f"{' + '.join(combination)} raises the verdict and needs {member} "
+                    "to do it, so the raised headline must name it"
+                )
+
+
+def _calm_board() -> TenantAttentionReport:
+    """The tenant board's calm reading: the shared fields, with nothing on them."""
+    return TenantAttentionReport(
+        notifications_failed=0,
+        notifications_suppressed=0,
+        escalations_overdue=0,
+        unsealed_field_values=0,
+        unsealed_field_ids=(),
+        fields_scanned=0,
+        field_scan_truncated=False,
+    )
+
+
+def test_the_board_and_the_mail_apply_the_same_rule_to_the_same_findings() -> None:
+    """Two records carry ``needs_attention``, and the probe above guarded one of them.
+
+    ``TenantAttentionReport`` is deliberately not a copy of ``AttentionReport`` — it has
+    no park count, because a relay is not a tenant's to fix (``D10-39``) — but the rule
+    it applies to the fields it does carry is the operator's rule, count for count. No
+    test compared the two, so "the board is clear" and "the mail says clear" were free
+    to diverge: a finding added to the tenant class alone would have left every suite
+    green while the operator's mail stayed silent about a row the tenant was told to
+    work, which is ``D10-99``'s disagreement with the sides swapped.
+
+    Walked over the shared fields rather than compared by reading the two bodies, so the
+    day the reports stop sharing a field name this fails instead of comparing nothing.
+    ``AttentionReport`` is asked with its park count left calm and its bus on, which is
+    the only reading where the two are claiming to describe the same board.
+    """
+    calm = _calm()
+    board = _calm_board()
+    steps = _steps(calm)
+
+    shared = {field.name for field in dataclasses.fields(TenantAttentionReport)}
+    assert shared <= {field.name for field in dataclasses.fields(AttentionReport)}, (
+        "the board carries a field the operator report does not, so the walk would skip it"
+    )
+    assert board.needs_attention is False, "the board's baseline must raise nothing either"
+
+    for size in (1, 2):
+        for combination in itertools.combinations(tuple(steps), size):
+            if not set(combination) <= shared:
+                continue
+            moved = {name: steps[name] for name in combination}
+            mail = dataclasses.replace(calm, **moved).needs_attention
+            shown = dataclasses.replace(board, **moved).needs_attention
+            assert mail == shown, (
+                f"{' + '.join(combination)} leaves the mail saying {mail} and the board "
+                f"saying {shown}"
+            )
+
+
+def test_the_combinations_this_guard_walks_are_real_and_of_both_kinds() -> None:
+    """A loop is only worth its lines if the space it walks is not empty.
+
+    Two ways the test above could pass while proving nothing: the pair space could hold
+    no raise at all, and every raise it does find could be attributable without the
+    companion branch ever being taken — leaving half of its rule unread. Both are
+    asserted here against the report as it stands, so a report that stops producing
+    either fails loudly instead of quietly narrowing the guard.
+    """
+    calm = _calm()
+    steps = _steps(calm)
+
+    singles = {name for name in steps if _verdict(calm, steps, (name,))}
+    pairs = [
+        pair for pair in itertools.combinations(tuple(steps), 2) if _verdict(calm, steps, pair)
+    ]
+
+    assert singles == set(_HEADLINE_PHRASES), (
+        "the fields that raise the verdict alone are exactly the tabulated ones"
+    )
+    assert pairs, "no two-field reading raises, so the pair pass walks an empty space"
+    assert any(
+        _verdict(calm, steps, tuple(name for name in pair if name != member))
+        for pair in pairs
+        for member in pair
+    ), "every raising pair collapses when a member goes: the companion branch is dead"
 
 
 def test_the_two_tables_answer_to_the_report_and_not_to_each_other() -> None:
