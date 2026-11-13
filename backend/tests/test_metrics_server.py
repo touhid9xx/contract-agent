@@ -139,13 +139,18 @@ def request(
 
 
 def assert_port_is_free(port: int) -> None:
-    """Bind the port directly, without ``SO_REUSEADDR``, and give it straight back.
+    """A fresh listener takes the port back, which is what a restart needs.
 
-    Stricter than rebinding through the module: a listener that was shut down but
-    whose socket was left open still fails this.
+    Deliberately *not* a bare ``socket.bind()``. The module sets ``SO_REUSEADDR``
+    off Windows, so a probe without it is refused for as long as a just-served
+    connection sits in ``TIME_WAIT``. That measures the kernel's linger timer, not
+    the listener's lifetime, and it made this assertion pass or fail by timing:
+    ``CI`` failed on it while the same commit had passed minutes earlier. Binding
+    the way the module binds is no weaker — ``SO_REUSEADDR`` still refuses a
+    listener that was left open, which is the failure this is guarding against.
     """
-    with contextlib.closing(socket.socket()) as probe:
-        probe.bind(("127.0.0.1", port))
+    server = MetricsServer.start("127.0.0.1", port, worker="probe")
+    server.stop()
 
 
 # --- the listener ----------------------------------------------------------
