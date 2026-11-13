@@ -6685,6 +6685,38 @@ passes all 108 checks over a real socket, `pre-commit --all-files` passes 18 of 
 skipped for want of files, and CI run `43428893725` is green on `a30bca3` — all seven jobs,
 including the MySQL 8.4 integration suite and the `CI gate`. Not measured anywhere: a live gateway.
 
+### A guard that skipped what it could not probe reported the gap as coverage (`D10-102`)
+
+`D10-100`'s rot guard walked every field of `AttentionReport` and skipped the ones that were not
+`int` — silently. Four reasons were added to measure it: a `bool` flag, a `tuple[str, ...]`, a
+`str`, and an `int` control. The control was caught and **all three others escaped**, so a new
+boolean finding — the likeliest shape for a reason — could have been added with nothing objecting
+while the headline went on naming four of them.
+
+The probe now perturbs by type: flip a `bool`, increment an `int`, grow a `tuple`. A type it cannot
+perturb is refused rather than skipped, unless the field is named in `_UNPROBEABLE` with a reason.
+That table has one entry, `event_transport`, because `needs_attention` reads `bus_disabled` and
+never the string. Nine of the ten fields are probed; five flip the verdict and are tabulated, four
+leave it alone — a division that is now written down instead of implied.
+
+A second case answers the tables back to the report: every key in `_HEADLINE_PHRASES` and
+`_UNPROBEABLE` must name a real field, the two must be disjoint, and every reason must be non-empty.
+The probe itself cannot check any of that, because it only ever looks a field up.
+
+No application code changes. `git diff -- backend/app` is empty; this slice is one test file.
+
+The mutation run also exposed a defect in its own verification. The first version did its file I/O
+as text and checked the restore with `read_text() == original`, which normalises newlines and so
+could not see that `write_text` had rewritten `attention.py` from LF to CRLF. `git status` caught it
+— a modified file with an empty diff — not the script. The run was rewritten in bytes, and every
+figure here comes from that version.
+
+Gates: **measured on this tree.** `pytest` collected 1165 tests — 1150 passed, 15 skipped, 0 failed,
+0 errors, counted from the JUnit XML — up exactly one from the 1164 before this slice, so the new
+case ran rather than being collected and skipped. `ruff check` passes, `ruff format --check` finds
+133 files already formatted, `mypy` is clean in 74 files, `bandit` is clean beyond the annotated
+`nosec` on `config.py:80`. Not measured anywhere: a live gateway.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

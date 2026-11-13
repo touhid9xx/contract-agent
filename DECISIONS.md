@@ -7902,3 +7902,71 @@ a second place that has to be edited when the rule changes, and its table-driven
 (`_HEADLINE_PHRASES`) does not cover it. `_CLEARED_HEADLINE` remains uncovered, and no test here
 reads the mail the way a person does; it pins what the message is allowed to claim, not that an
 operator is convinced.
+
+### D10-102 — The rot guard skipped whatever it could not probe, and the silence read as coverage
+
+**The defect.** `D10-100`'s guard walked `dataclasses.fields(AttentionReport)` and then skipped
+every field that was not an `int`. That `continue` is invisible: the guard asserts nothing about
+what it declined to examine, so nothing fails when it declines. Its coverage was therefore a
+function of which *types* happened to be on the report the day it was written, and `D10-100`
+recorded exactly that shape — "a future tuple count that *could* would escape this probe." It was
+worse than one missing type.
+
+**Measured, not argued.** Four reasons were added to `AttentionReport` and OR'd into
+`needs_attention`, one at a time: a `bool` flag, a `tuple[str, ...]`, a `str`, and an `int` control.
+Against the `D10-100` guard the control was caught and **all three others escaped**. The boolean is
+the serious one, because a flag is the likeliest shape for a new reason — "the relay is stalled" is
+not a count — so a fifth finding could have arrived with no test objecting while the headline went
+on naming four.
+
+**The fix: probe by type, and make declining a declaration.** `_raised(field, value)` returns a
+value one step away from the calm reading: `not value` for a `bool`, `value + 1` for an `int`,
+`(*value, 1)` for a `tuple`. `bool` is checked before `int` because `True` *is* an `int` and
+`True + 1` is `2`, a number a flag can never hold, whereas flipping it is what "this is now the
+other way" means. A type with no "further" value is **refused rather than skipped**: `_raised`
+raises unless the field is named in `_UNPROBEABLE` with a reason, so a new field of an unprobed
+type fails the guard until somebody writes down why it cannot raise.
+
+**`_UNPROBEABLE` holds one entry, and it is a real one.** `event_transport` is the string naming the
+transport; `needs_attention` reads `bus_disabled` and never it, so no value of the string moves the
+verdict, and the field is on the report so a log line can explain a reading. That is the whole of
+the remaining blind spot, and it is now a sentence in the source instead of a type test that hid
+itself.
+
+**The scope is stated rather than implied.** Nine of the ten fields are perturbed. Five flip the
+verdict and are tabulated; four do not — `fields_scanned`, `field_scan_truncated`, `bus_disabled`
+and `unsealed_field_ids`. Before this entry that arithmetic existed only in the author's head.
+
+**The second case answers the tables back to the report.**
+`test_the_two_tables_answer_to_the_report_and_not_to_each_other` asserts that every
+`_HEADLINE_PHRASES` key and every `_UNPROBEABLE` key names a real field, that the two sets are
+disjoint — they are opposite verdicts on the same field, so a field in both would let the guard
+agree with itself whatever that field did — and that every reason is non-empty. The probe cannot
+catch any of it, because the probe only ever looks a field up; it never asks whether the table it
+looks in is about the report it holds.
+
+**A restore check that could not see what it was checking.** The first version of the mutation run
+did its file I/O as text and verified the restore with `Path.read_text() == original`. On Windows
+`write_text` turns every `\n` into CRLF and `read_text` normalises it back on the way in, so the
+comparison was between two normalised strings: it reported success while `attention.py` had gone
+from 372 LF and no CRLF to 372 CRLF. `git status` marked the file modified while `git diff` showed
+nothing, because `.gitattributes` pins `eol=lf` and git normalises — that mismatch is what caught
+it, not the script. Every figure above is from the rewritten version, which does its I/O in bytes
+and asserts the restore is byte-identical.
+
+**Gates: measured on this tree.** `pytest` over `backend/tests` collected **1165 tests — 1150
+passed, 15 skipped, 0 failed, 0 errors**, counted from the JUnit XML. The suite stood at 1164 before
+this entry and one case was added, which is the arithmetic that shows it ran rather than being
+collected and skipped. `ruff check` passed, `ruff format --check` found 133 files already
+formatted, `mypy` reported no issues in 74 source files, and `bandit` reported nothing beyond the
+annotated `nosec` on `config.py:80`. `git diff -- backend/app` is **empty**: this slice changes no
+application code, so the green run that covers the shipped application still covers it.
+
+**Limits.** The probe finds reasons reachable in **one step** from `_calm()`: one that appears only
+at value two, or only when two fields are raised together, or on a field already at its maximum, is
+still unseen. `_UNPROBEABLE` can silence the guard, and the test only refuses an *empty* reason —
+it cannot tell a true reason from a plausible one, so that table's honesty is a written sentence
+rather than a checked property. Bool probing assumes the calm value is the non-raising one. The
+guard still constrains the headline against the verdict and says nothing about whether a sentence
+reads correctly, which is `D10-100`'s and `D10-101`'s limit and is untouched here.
+`_CLEARED_HEADLINE` remains uncovered and no test reads the mail the way a person does.

@@ -481,32 +481,100 @@ def test_the_headline_names_each_reason_the_body_may_then_count() -> None:
         assert phrase in headline, f"the raised headline never mentions {name}"
 
 
+#: The fields this probe declines to raise, each with the reason it cannot be one.
+#:
+#: It exists because the first version of the guard below filtered on type — "not an
+#: ``int``, skip it" — and a filter is invisible. A reason of any other type would have
+#: been passed over without a word, so ``needs_attention`` could have grown a boolean or
+#: a tuple finding that nothing ever compared against the prose. That is ``D10-100``'s
+#: own stated limit, and it is one line away from being real (``D10-102``).
+#:
+#: Declining to probe a field is now a written decision with a reason attached, and the
+#: probe refuses to skip anything that is not listed here.
+_UNPROBEABLE: dict[str, str] = {
+    "event_transport": (
+        "needs_attention reads bus_disabled, never this string, so no value of it "
+        "changes the verdict; it is on the report so a log line can explain a reading"
+    ),
+}
+
+
+def _raised(field: dataclasses.Field[Any], value: Any) -> Any:
+    """A value of ``field`` one step further than the calm reading holds.
+
+    ``bool`` is tested before ``int`` because ``True`` *is* an ``int``: ``True + 1``
+    would be ``2``, which a flag can never hold, while flipping it is what "this is now
+    the other way" means. A tuple grows by one element for the same reason — the probe
+    only asks whether the verdict moved, so the element's own value is a placeholder
+    rather than data.
+
+    Anything else is refused rather than skipped, and that refusal is the whole point:
+    a field whose type has no "further" value now fails this guard until somebody either
+    declares it in ``_UNPROBEABLE`` with a reason or tabulates it because it can raise.
+    An unprobeable type is a question to answer, not a silence to inherit.
+    """
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, int):
+        return value + 1
+    if isinstance(value, tuple):
+        return (*value, 1)
+    raise AssertionError(
+        f"{field.name} is a {type(value).__name__}, which this probe cannot raise. "
+        "Declare it in _UNPROBEABLE with a reason, or add it to _HEADLINE_PHRASES if "
+        "it can raise the verdict."
+    )
+
+
 def test_no_state_raises_the_verdict_without_a_sentence_in_the_headline() -> None:
     """What makes the table exhaustive instead of a snapshot of today.
 
-    Each integer count is raised on its own against a calm baseline. Any that flips
-    the verdict must be tabulated — and the previous test then requires its phrase to
-    be in the prose. So adding a fifth finding to ``needs_attention`` fails here
-    until somebody writes a sentence for it, which is exactly the step ``D10-99``
-    skipped by hand and the reason a golden string would not have been enough.
+    Every field is perturbed on its own against a calm baseline. Any that flips the
+    verdict must be tabulated — and the previous test then requires its phrase to be in
+    the prose. So adding a fifth finding to ``needs_attention`` fails here until
+    somebody writes a sentence for it, which is exactly the step ``D10-99`` skipped by
+    hand and the reason a golden string would not have been enough.
 
-    The limit, stated rather than hidden: only integer counts are probed.
-    ``unsealed_field_ids`` is the one non-integer count today and is derived from
-    ``unsealed_field_values`` rather than a reason of its own, so it cannot raise the
-    verdict alone — a future tuple count that *could* would escape this probe.
+    The perturbation is chosen by type rather than by "is it an ``int``", because the
+    earlier filter admitted only integers and would have walked past a boolean or a
+    tuple reason in silence (``D10-102``). ``_calm()`` holds every count at zero, both
+    flags off, the id tuple empty and the transport named, so one step away from it is
+    the smallest reading that differs at all.
     """
     calm = _calm()
 
     for field in dataclasses.fields(AttentionReport):
-        value = getattr(calm, field.name)
-        # ``bool`` is an ``int``: a flag turned on is not a count being raised.
-        if isinstance(value, bool) or not isinstance(value, int):
+        if field.name in _UNPROBEABLE:
             continue
-        if not dataclasses.replace(calm, **{field.name: value + 1}).needs_attention:
+        value = getattr(calm, field.name)
+        raised = dataclasses.replace(calm, **{field.name: _raised(field, value)})
+        if not raised.needs_attention:
             continue
         assert field.name in _HEADLINE_PHRASES, (
             f"{field.name} raises the verdict, so the raised headline must name it"
         )
+
+
+def test_the_two_tables_answer_to_the_report_and_not_to_each_other() -> None:
+    """Both tables are keyed by real fields, and no field is filed under both.
+
+    ``_HEADLINE_PHRASES`` says *this field is a reason, so the prose must name it*.
+    ``_UNPROBEABLE`` says *this field cannot be a reason, so the probe declines it*.
+    Those are opposite verdicts about the same field, so a field in both would let the
+    guard agree with itself whatever the field did — and a key naming no field at all
+    would rot into a sentence about a state the report stopped having. The probe cannot
+    catch either, because it only ever looks fields up by name; it is asserted here.
+    """
+    declared = {field.name for field in dataclasses.fields(AttentionReport)}
+
+    assert set(_HEADLINE_PHRASES) <= declared, "a phrase is tabulated for no such field"
+    assert set(_UNPROBEABLE) <= declared, "a field is declared unprobeable that does not exist"
+    assert not set(_HEADLINE_PHRASES) & set(_UNPROBEABLE), (
+        "a field cannot be both a reason to name and impossible to raise"
+    )
+    assert all(reason.strip() for reason in _UNPROBEABLE.values()), (
+        "an unprobeable field is declared without a reason"
+    )
 
 
 def test_the_escalation_clause_says_it_is_not_a_delivery_failure() -> None:
