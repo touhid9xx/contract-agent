@@ -8404,3 +8404,9 @@ rule fired against a generated config, not a shipped one, and `D10-91`'s own ser
 (`escalation_email_failed_total`) never fired — that needs the scanner plus a refusing relay.
 Nothing here covers a dashboard, routing or retention. `free_port()` is racy by construction, and
 only Windows was measured here; CI is the first Linux run.
+
+**Landed.** `f1ec60c`, with this entry as `b83aaa1`. CI run `43513590120` is green on the tip,
+seven of seven jobs, and its `backend tests (pytest, sqlite)` job lists the
+`smoke worker metrics (real worker process, real socket)` step as succeeded — so this slice has
+now started the worker and scraped it on Ubuntu 3.13 as well, and the last clause of the Limits
+paragraph above is measured rather than open.

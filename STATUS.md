@@ -6997,6 +6997,15 @@ refuses. Nothing here covers a dashboard, alert routing or retention. `free_port
 construction, and only Windows was measured locally, so the new CI step is this script's first
 Linux run.
 
+The slice landed as `f1ec60c`, with this record as `b83aaa1`, and CI run
+`43513590120` is green on it: seven of seven jobs, read from the run's own job list rather than
+inferred from the names. Its `backend tests (pytest, sqlite)` job also lists a
+`smoke worker metrics (real worker process, real socket)` step that succeeded, which is the
+evidence for the last line above: the script has now run on Ubuntu 3.13 as well as on Windows,
+so the platform limit that paragraph left open is measured rather than argued. What is not
+covered by that run is the rest of the limits — the container port mapping, the alert-rule
+family, and the dashboards are still open, exactly as listed.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.
