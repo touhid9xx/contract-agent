@@ -7770,6 +7770,68 @@ unlike `unsealed_field_ids` the board cannot name the rows that need a person, a
 open the queue to find them; returning ids would need a bounded page and a truncation flag the count
 does not have. The watch recomputes hourly by default, so lateness surfaces within an hour of a
 deadline at worst. SQLite only: these queries add no new locking, but no MySQL run proves the stored
-`timestamp` compares identically through the driver. Nothing pins the operator mail's text, so the
-headline correction is verified by reading alone. And the board is still read-only — the card links
-to the screen that owns an escalation's state machine rather than gaining a second path into it.
+`timestamp` compares identically through the driver. Nothing pinned the operator mail's text when
+this landed; `D10-100` closes that, taking this correction as its reason. And the board is still
+read-only — the card links to the screen that owns an escalation's state machine rather than
+gaining a second path into it.
+
+### D10-100 — The operator's mail was prose, and only a reader compared it to the counts
+
+`D10-99` added `escalations_overdue` to the report and then had to notice, reading its own diff,
+that `_RAISED_HEADLINE` still named three findings. That is the weakest kind of verification: the
+defect was caught because somebody happened to look, and nothing in the suite would have failed if
+nobody had. The prose and the report were free to disagree, so they did.
+
+**The guard takes its list from `needs_attention`, not from a remembered one.** A test asserting
+"the headline mentions outbox, failed, suppressed and escalation" is a snapshot — it passes forever
+and cannot notice a fifth finding. So the reason set is computed instead. A calm report (every count
+zero, transport named, bus on) is the baseline; each integer field is raised on its own through
+`dataclasses.replace`; any field whose raise flips `needs_attention` is a reason. Every reason must
+have a phrase in the table, and every phrase in the table must appear in the raised headline. A
+fifth finding added to `needs_attention` therefore fails until somebody writes a sentence for it,
+which is the step `D10-99` walked by hand, made mechanical.
+
+**The first version of this test could not fail for the reason it was written.** It searched the
+composed mail *body* for each phrase — and `_body` appends `report.as_dict()`, whose key names are
+`outbox_parked`, `notifications_failed`, `notifications_suppressed` and `escalations_overdue`. Four
+of the five phrases were satisfied by the counts block whether or not the sentence above it
+mentioned anything. Restoring the three-finding headline did not fail that test; only a second,
+narrower case did. The guard now reads the headline and searches it alone, and one further case
+asserts the sent mail carries that same constant — otherwise the phrases would be a claim about a
+string the alerter need never use.
+
+**Not a golden string, and not a length check.** Quoting the whole headline would fail on any
+reworded clause and say nothing about coverage, while the risk being guarded is a *missing* clause.
+The prose is hard-wrapped at source width, so the search flattens whitespace first: matching raw
+text would start failing the day a re-wrap moved "in the clear" across a line break, a false
+failure about formatting. One clause is pinned literally — `"not a delivery failure"` — because
+that sentence is a decision rather than a description: this count sits beside three delivery
+failures, retrying a send is the one repair that cannot work for it, and dropping the sentence
+silently restores the misreading `D10-99` was written to prevent.
+
+**Four mutants, each reverted in the same turn.** The three-finding headline failed the coverage
+case and the delivery-failure case and nothing else — which is the result that matters, since before
+the fix that mutant failed one test and that one did not test coverage. Adding
+`or self.fields_scanned` to `needs_attention` without touching the prose failed the rot guard
+alone. Removing `escalations_overdue` from the table failed the rot guard alone. Removing
+`unsealed_field_values` from `needs_attention` while leaving its phrase in the table failed the
+coverage case, the other direction of the same rule. `git diff -- backend/app` was empty after the
+last revert, so no mutant survives in the tree.
+
+**Gates: measured on this tree.** `pytest` over `backend/tests` collected **1161 tests — 1146
+passed, 15 skipped, 0 failed, 0 errors**, counted from the JUnit XML rather than trusted from the
+console. The suite stood at 1157 before this entry and the four cases here are the difference, which
+is the arithmetic that shows they ran rather than being collected and skipped. `ruff check` passed,
+`ruff format --check` found 133 files already formatted, `mypy` reported no issues in 74 source
+files, `bandit` reported nothing beyond the annotated `nosec` on `config.py:80`,
+`smoke_journey.py` passed all 108 checks over a real socket, `pre-commit run --all-files` passed 18
+of 19 hooks with `forbid submodules` skipped for want of files, and `--hook-stage manual` passed
+all four, `gitleaks` among them, per `D10-95`.
+
+**Limits.** Only integer counts are probed, so a future tuple or string field that could raise the
+verdict would escape the rot guard; `unsealed_field_ids` is the only non-integer count today and is
+derived from `unsealed_field_values` rather than a reason of its own. The phrases are substring
+checks, so they prove a clause exists and not that it is accurate — a paragraph mentioning
+"escalation" while describing it wrongly would pass. This pins the presence of coverage; nothing
+here reads the mail the way an operator does. `_CLEARED_HEADLINE` stays uncovered by any table
+because it names no findings and has nothing to enumerate.

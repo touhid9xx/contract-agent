@@ -6614,8 +6614,40 @@ collected and skipped. `mypy` is clean in 74 files, `ruff check` passes and `ruf
 finds 133 files already formatted, `bandit` is clean, `smoke_journey.py` passes all 108 checks over
 a real socket, and `pre-commit --all-files` passes 18 of 19 hooks with one skipped for want of
 files — the frontend typecheck, eslint and vitest jobs among the passes. `--hook-stage manual`
-passes 4 of 4, `gitleaks` included, per `D10-95`. Not measured: MySQL, a live gateway, any LLM
-backend, and the operator mail's text, which still no test pins.
+passes 4 of 4, `gitleaks` included, per `D10-95`. Not measured: MySQL, a live gateway and any LLM
+backend.
+
+### The operator's mail was prose, and only a reader compared it to the counts (`D10-100`)
+
+`D10-99` added a fourth finding to the attention report and then had to spot by eye that the
+operator's raised headline still named three. The prose and the report were free to disagree, and
+nothing in the suite would have failed if nobody had looked. `test_attention_alerts.py` now derives
+the reason set from `needs_attention` itself: each integer count is raised on its own against a calm
+baseline, any that flips the verdict must be tabulated, and every tabulated phrase must appear in
+the raised headline. Adding a fifth finding therefore fails until somebody writes a sentence for it.
+
+Two things that test got wrong first are worth keeping. It searched the composed mail *body*, which
+`_body` builds on `report.as_dict()` — and those key names are `outbox_parked`,
+`notifications_failed`, `notifications_suppressed` and `escalations_overdue`, so four of the five
+phrases were satisfied by the counts block regardless of the sentence above them; reverting the
+headline to three findings did not fail it. It now reads the headline alone, and a separate case
+asserts the mail carries that constant. The prose is also hard-wrapped, so the search flattens
+whitespace, or a re-wrap would fail it for formatting rather than content. One clause is pinned
+literally, `"not a delivery failure"`, because retrying the send is the one repair that cannot work
+for this finding.
+
+Four mutants were run and each reverted in the same turn: the three-finding headline, a fifth
+reason added to `needs_attention` with no sentence, a phrase dropped from the table, and a reason
+dropped from `needs_attention` while its phrase stayed. `git diff -- backend/app` was empty
+afterwards.
+
+Gates: **measured on this tree.** `pytest` collected 1161 tests — 1146 passed, 15 skipped, 0
+failed, 0 errors, counted from the JUnit XML — up exactly four from the 1157 before this slice, so
+the new cases ran rather than being collected and skipped. `ruff check` passes, `ruff format
+--check` finds 133 files already formatted, `mypy` is clean in 74 files, `bandit` is clean,
+`smoke_journey.py` passes all 108 checks over a real socket, `pre-commit --all-files` passes 18 of
+19 hooks with one skipped for want of files, and `--hook-stage manual` passes 4 of 4, `gitleaks`
+included. Not measured: MySQL and a live gateway.
 
 ## Non-negotiable reminders
 

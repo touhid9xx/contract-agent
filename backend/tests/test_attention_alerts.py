@@ -30,10 +30,18 @@ the socket timeout — those belong to ``test_senders.py`` and ``test_smtp_socke
 and this module reuses that path rather than reimplementing it. The one thing
 asserted about the reuse is that the alert is handed to ``SmtpSender.deliver`` and
 not to a private copy.
+
+One thing about the text is asserted **structurally** rather than by quoting it: the
+raised headline must name every state that can raise the verdict, and the states are
+taken from ``needs_attention`` itself rather than from a remembered list. ``D10-99``
+added a fourth finding to the report and left the prose naming three; nothing failed,
+because the counts were right, the log line was right, and only the sentence above
+them described a smaller board than the operator was looking at.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from email.message import EmailMessage
 from typing import Any
@@ -49,6 +57,7 @@ from app.db.enums import ContractStatus
 from app.db.models import Contract, ExtractedField, Tenant
 from app.db.session import session_scope
 from app.workers.attention_alerts import (
+    _RAISED_HEADLINE,
     SUBJECT_CLEARED,
     SUBJECT_RAISED,
     SmtpAttentionAlerter,
@@ -386,6 +395,127 @@ def test_the_mail_has_no_message_id(
     alerter.raised(report)
 
     assert "Message-ID" not in sent[0]
+
+
+# --- the headline has to name what the body counts ------------------------
+#: One identifying phrase per state that can raise the verdict.
+#:
+#: ``_RAISED_HEADLINE`` is fixed prose rather than something generated from the
+#: report, so it has to name *every* category the body may then count. ``D10-99``
+#: added ``escalations_overdue`` to the report and left this prose naming three, so
+#: the operator's mail described a board that could raise a fourth finding it never
+#: mentioned. Nothing failed, because nothing compared the two. This table does.
+_HEADLINE_PHRASES: dict[str, str] = {
+    "outbox_parked": "dead-letter",
+    "notifications_failed": "failed",
+    "notifications_suppressed": "suppressed",
+    "escalations_overdue": "escalation",
+    "unsealed_field_values": "in the clear",
+}
+
+
+def _calm() -> AttentionReport:
+    """A reading with nothing on it, taken under a bus that is switched **on**.
+
+    ``bus_disabled=False`` is load-bearing: with the transport off a parked event is
+    ``parks_explained`` and deliberately does not raise the verdict (``D10-39``), so
+    every assertion below about ``outbox_parked`` would pass for the wrong reason.
+    """
+    return AttentionReport(
+        outbox_parked=0,
+        notifications_failed=0,
+        notifications_suppressed=0,
+        escalations_overdue=0,
+        unsealed_field_values=0,
+        unsealed_field_ids=(),
+        fields_scanned=0,
+        field_scan_truncated=False,
+        event_transport="kafka",
+        bus_disabled=False,
+    )
+
+
+def _raised_headline() -> str:
+    """The raised prose alone, flattened onto one line.
+
+    Read from the constant rather than from a composed message, and that distinction
+    is the whole test. ``_body`` appends ``report.as_dict()``, whose *key names* are
+    the same words a phrase search looks for: searching the whole body for
+    "escalation" matches ``escalations_overdue: 0`` whether or not the sentence above
+    it mentions the finding at all. An earlier version of this guard searched the
+    body and passed against a headline that named three findings instead of four —
+    a test that could not fail for the reason it was written.
+
+    Flattened because the prose is hard-wrapped at source width: searching it
+    verbatim would start failing the day a re-wrap moved a phrase across a line
+    break, which is a false failure about formatting rather than about what the
+    mail says.
+    """
+    return " ".join(_RAISED_HEADLINE.split())
+
+
+def test_the_mail_carries_the_headline_these_tests_read() -> None:
+    """So that the prose assertions below are about the message that is really sent.
+
+    Without this the guard would be about a constant nobody has to use: the alerter
+    could compose a different headline and every phrase test would still pass.
+    """
+    alerter, sent = _composer()
+    alerter.raised(_calm())
+    assert _raised_headline() in " ".join(sent[0].get_content().split())
+
+
+def test_the_headline_names_each_reason_the_body_may_then_count() -> None:
+    """Every tabulated entry is both a real reason and a sentence in the prose.
+
+    Both halves matter. A phrase with no matching reason describes a state that
+    cannot happen, and a reason with no phrase is ``D10-99``'s bug: the operator
+    reads a message that never mentions what the counts beneath it are counting.
+    """
+    headline = _raised_headline()
+
+    for name, phrase in _HEADLINE_PHRASES.items():
+        report = dataclasses.replace(_calm(), **{name: 1})
+        assert report.needs_attention, f"{name} is tabulated as a reason but raises nothing"
+        assert phrase in headline, f"the raised headline never mentions {name}"
+
+
+def test_no_state_raises_the_verdict_without_a_sentence_in_the_headline() -> None:
+    """What makes the table exhaustive instead of a snapshot of today.
+
+    Each integer count is raised on its own against a calm baseline. Any that flips
+    the verdict must be tabulated — and the previous test then requires its phrase to
+    be in the prose. So adding a fifth finding to ``needs_attention`` fails here
+    until somebody writes a sentence for it, which is exactly the step ``D10-99``
+    skipped by hand and the reason a golden string would not have been enough.
+
+    The limit, stated rather than hidden: only integer counts are probed.
+    ``unsealed_field_ids`` is the one non-integer count today and is derived from
+    ``unsealed_field_values`` rather than a reason of its own, so it cannot raise the
+    verdict alone — a future tuple count that *could* would escape this probe.
+    """
+    calm = _calm()
+
+    for field in dataclasses.fields(AttentionReport):
+        value = getattr(calm, field.name)
+        # ``bool`` is an ``int``: a flag turned on is not a count being raised.
+        if isinstance(value, bool) or not isinstance(value, int):
+            continue
+        if not dataclasses.replace(calm, **{field.name: value + 1}).needs_attention:
+            continue
+        assert field.name in _HEADLINE_PHRASES, (
+            f"{field.name} raises the verdict, so the raised headline must name it"
+        )
+
+
+def test_the_escalation_clause_says_it_is_not_a_delivery_failure() -> None:
+    """It sits beside three delivery failures and reads like a fourth.
+
+    Retrying the send is the one repair that cannot work for it — the notice reached
+    the customer, who then went quiet — so the mail has to say so, or the operator's
+    first move is the wrong one (``D10-99``).
+    """
+    assert "not a delivery failure" in _raised_headline()
 
 
 # --- settings decide whether an alert exists at all -----------------------
