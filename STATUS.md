@@ -6913,10 +6913,12 @@ files, `bandit` is clean beyond the annotated `nosec` on `config.py:80`, and
 Two mutants proved the wiring is load-bearing: removing one worker's `publish_metrics` call, and
 retyping another's label, each failed exactly one test and nothing else.
 
-Still out of reach: no container was scraped and no Prometheus rule was run, so the six ports are
-verified by parsing the compose file rather than by a metric arriving anywhere. `attention_watch`
-and `outbox_relay` write no metric of their own, so two of the six serve a declared-but-empty
-registry — a listener waiting for a first counter, not a number.
+~~Still out of reach: no container was scraped and no Prometheus rule was run, so the six ports are
+verified by parsing the compose file rather than by a metric arriving anywhere.~~ **`D10-108`
+amended this:** a worker's own registry has now been scraped over a socket and a rule over its
+series has been evaluated by Prometheus and fired. The container half of the sentence still stands.
+`attention_watch` and `outbox_relay` write no metric of their own, so two of the six serve a
+declared-but-empty registry — a listener waiting for a first counter, not a number.
 
 The slice landed as `9bf77b5`, with this record as `1a78196`, and CI run
 `43495701417` is green on it: seven of seven jobs, read from the run's own job list rather
@@ -6941,6 +6943,59 @@ just-served port is refused with errno 98 while the `SO_REUSEADDR` bind is accep
 file passed its 24 tests eight times in a row on both platforms. CI run `43502605579` is green
 on `f1f6f53`, seven of seven jobs, so the tip is green; but the paragraph above names a run on
 `1a78196`, and this is the run that covers the code the branch now ends on.
+
+### A worker's counter was readable, and no rule had ever read one (`D10-108`)
+
+`D10-107` gave all six workers their own listener, and every test that came with it served a
+registry the *test process* had filled: a family arrived because the test called `.inc()` a line
+earlier, not because a worker ticked and recorded one. So the only evidence that a worker's own
+series could be read by anything was a parse of `docker-compose.yml`, and no rule in this
+repository had ever been evaluated by Prometheus — `D10-91`'s `EscalationEmailFailed` was an
+expression nobody had run.
+
+`backend/tests/smoke_worker_metrics.py` starts `python -m app.workers.expiry` as a subprocess
+against a temporary SQLite database holding one contract whose time zone cannot be resolved, waits
+for the listener on the port the environment variable names, and asserts over the socket that
+`contracts_expired_total{outcome="unknown_timezone"}` arrives — a series no API process can
+produce. It then asserts the opposite for families this worker never writes:
+`reminder_plans_total` and `extractions_total` are declared by HELP and TYPE and carry no sample,
+the absent-versus-zero distinction `D10-107` rests on. Another path is a 404 on the wire rather
+than in a handler unit test, and the port is released when the process dies — probed through
+`MetricsServer.start` rather than a bare socket, which is what `f1f6f53` paid to learn.
+
+It is a script, not a test, because it spawns an interpreter and binds sockets; `smoke_journey.py`
+set that precedent, and CI now runs this one beside it as `smoke worker metrics (real worker
+process, real socket)`. The proof that pytest still does not collect it is the count below:
+unchanged.
+
+The first mutant found a defect in the assertion rather than in the worker. Making the seeded zone
+resolvable still passed, because `samples()` matched the family name and ignored the label, so a
+sample labelled `outcome="expired"` satisfied a claim about `outcome="unknown_timezone"`: the check
+proved the sweep ticks, not that this contract reached the branch it names. `EXPECTED_SAMPLE` now
+carries the label set and the same mutant fails — re-measured on this tree as a `200` that never
+yields the named series. `WORKER_METRICS_PORT=0` fails as well, and its log tail shows the sweep
+warning `expiry_sweep_unknown_timezone` every half second while nothing could read it, which is
+`D10-107`'s defect reproduced on demand rather than described.
+
+`prom/prometheus:v2.55.0` then scraped that worker and evaluated
+`increase(contracts_expired_total{outcome="unknown_timezone"}[1h]) > 0`, reaching `firing` at
+`8.238` with the target at `health=up`. That is the first time a rule here has read a real series.
+It is recorded, not shipped: the config was generated into a temporary directory, the orchestrating
+script is gitignored with the other scratch tools, and no rule, scrape config or dashboard is added
+to the repository by this slice.
+
+Gates, measured on this tree: `pytest` collected **1204** — 1189 passed, 15 skipped, 0 failed, 0
+errors, from the JUnit XML — so the number is unchanged and the script is demonstrably not
+collected. `ruff check` passes, `ruff format --check` finds 136 files already formatted, `mypy` is
+clean in 75, `bandit` is clean beyond the annotated `nosec` on `config.py:80`, and
+`evaluate-extraction --golden tests/golden/extraction/manifest.json` exits 0 at pooled F1 0.974.
+
+Limits: one worker, not six, so the compose port mapping is still verified by parsing the file
+rather than by a metric arriving in a container. `escalation_email_failed_total` — the family
+`D10-91`'s rule actually names — never fired, because that needs the scanner plus a relay that
+refuses. Nothing here covers a dashboard, alert routing or retention. `free_port()` is racy by
+construction, and only Windows was measured locally, so the new CI step is this script's first
+Linux run.
 
 ## Non-negotiable reminders
 

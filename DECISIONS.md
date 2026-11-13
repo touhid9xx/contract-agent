@@ -7074,8 +7074,10 @@ failed` is not "attempts".
 The registry is per-process; the `worker_replicas` gauge cannot be derived from inside one replica.
 **`D10-107` acted on this sentence:** each worker serves its own copy rather than the API summing
 across processes, so the boundary is visible on the wire instead of only recorded here.
-No Prometheus rules, Grafana dashboards, alert routing, or OpenTelemetry/Jaeger traces are added
-here either.
+~~No Prometheus rules, Grafana dashboards, alert routing, or OpenTelemetry/Jaeger traces are
+added here either.~~ **`D10-108` amended this:** one rule of this shape was written and evaluated
+by a real Prometheus against a real worker's own series, and it reached `firing` — but no rule,
+scrape config or dashboard ships, so a deployment still supplies its own.
 
 **Gates.** `backend/tests/test_metrics.py` (21 tests) pins the text shape, cumulative buckets,
 `+Inf`, `_sum`/`_count`, the PII guard (e-mail, dates and bare numbers refused; message value-free),
@@ -8331,3 +8333,74 @@ minutes earlier. `f1f6f53` binds through `MetricsServer.start` instead; a port h
 listener is still refused either way, so the assertion lost no strength. Measured on linux 3.13.18,
 and repeated eight times on both platforms. CI run `43502605579` is green on `f1f6f53`, seven of
 seven jobs.
+
+### D10-108 — The first scrape of a worker that is not the API, and the first rule Prometheus read
+
+**Context.** `D10-107` gave every worker its own listener, and the tests that came with it
+filled the registry themselves: a family arrived there because the test called `.inc()` a line
+earlier, never because a worker ticked. So the only evidence that a worker's own series could be
+read by anything was a parse of `docker-compose.yml`, and no rule in this repository had ever been
+evaluated by Prometheus — `D10-91`'s alert was an expression nobody had run.
+
+**Decision.** `backend/tests/smoke_worker_metrics.py` starts `python -m app.workers.expiry` as a
+subprocess against a temporary SQLite database holding one contract whose time zone cannot be
+resolved, waits for the listener on `WORKER_METRICS_PORT`, and asserts over the wire that the
+sweep's own `contracts_expired_total{outcome="unknown_timezone"}` arrives; that
+`reminder_plans_total` and `extractions_total` are declared with no sample, which is the
+absent-versus-zero distinction `D10-107` rests on; that another path is a 404 on a real socket;
+and that the port is released when the process dies. It is a script rather than a test for
+`smoke_journey.py`'s reason — it spawns an interpreter and binds sockets, so it belongs in one CI
+step rather than in 1189 collected cases — and CI now runs it beside the journey.
+
+**The first mutation found a defect in the assertion, not in the worker.** Making the seeded zone
+resolvable did not fail the journey: `samples()` matched the family name and ignored the label, so
+`outcome="expired"` satisfied a claim about `outcome="unknown_timezone"`. The check proved the sweep
+ticks, not that this contract reached the branch it names. `EXPECTED_SAMPLE` now carries the label
+set, and the same mutant fails. The second mutant, `WORKER_METRICS_PORT=0`, fails too, and its log
+tail shows the sweep warning `expiry_sweep_unknown_timezone` every half second while nothing could
+read it — `D10-107`'s defect reproduced on demand instead of described.
+
+**A rule was then evaluated.** With the worker up, `prom/prometheus:v2.55.0` scraped
+`host.docker.internal:<port>` every two seconds and evaluated `D10-91`'s shape over the one series
+this machine can produce on demand:
+
+```
+increase(contracts_expired_total{outcome="unknown_timezone"}[1h]) > 0
+```
+
+The alert reached `firing` (`value 8.238`) with the target at `health=up`, so `increase()` over a
+label-selected series is demonstrated end to end here for the first time. The config was generated
+into a temporary directory:
+
+```
+global:
+  scrape_interval: 2s
+  evaluation_interval: 2s
+rule_files:
+  - /etc/prometheus/rules.yml
+scrape_configs:
+  - job_name: worker-expiry
+    static_configs:
+      - targets: ["host.docker.internal:<WORKER_METRICS_PORT>"]
+```
+
+**Blocked alternatives.** Parsing `docker-compose.yml` from a pytest test needs a YAML parser, and
+this project declares none: `PyYAML` would be present only transitively through `pre-commit`, so the
+choice is a new dependency or a test that breaks when the tooling does. Letting pytest collect the
+script would spawn an interpreter per case. Shipping a Prometheus config now would mean six
+`service:9101` targets that nothing on this machine can scrape — no image is built here — so half of
+such a file would be asserted by reading rather than by scraping, which is the habit `D10-107` was
+amended for.
+
+**Gates.** Measured on this tree: `pytest` collected **1204** — unchanged, which is how the
+script is known not to be collected — 1189 passed, 15 skipped, 0 failed, 0 errors, from the JUnit
+XML. `ruff check` passes, `ruff format --check` finds 136 files formatted, `mypy` is clean in 75,
+`bandit` exits 0, and `evaluate-extraction --golden tests/golden/extraction/manifest.json` exits
+0 at pooled F1 0.974.
+
+**Limits.** One worker, not six: the compose port mapping is still verified by parsing the file, so
+this journey proves the process, the environment variable and the sample, not the container. The
+rule fired against a generated config, not a shipped one, and `D10-91`'s own series
+(`escalation_email_failed_total`) never fired — that needs the scanner plus a refusing relay.
+Nothing here covers a dashboard, routing or retention. `free_port()` is racy by construction, and
+only Windows was measured here; CI is the first Linux run.
