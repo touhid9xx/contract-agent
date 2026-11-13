@@ -6818,6 +6818,17 @@ clean beyond the annotated `nosec` on `config.py:80`. Still out of reach: a thre
 `_UNPROBEABLE`'s honesty, a reading truncated some other way, and any statement about whether a
 sentence reads correctly.
 
+The slice landed as `65d43ac`, with this record as `2e4097e`, and CI run `43467685717` is
+green on it: seven of seven jobs, read from the run's own job list rather than inferred from
+the names — hygiene + secret scan, python static (ruff, mypy strict, bandit), backend tests
+(pytest, sqlite) including the smoke journey over a real uvicorn socket, backend integration
+on MySQL 8.4 with skips counted as failures, demo frontend typecheck, frontend
+typecheck/eslint/vitest/production build, and the `CI gate` that requires every one of them to
+have succeeded. The gate job does not exist until its dependencies finish, so the run reported
+six jobs in flight and seven at the end. The 1171 tests counted above are again two suites: CI
+runs `-m "not integration"` and `-m integration` as separate jobs, so no single job's number
+matches the record — `D10-103` has the sentence that explains the difference.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.
