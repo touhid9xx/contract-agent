@@ -84,6 +84,85 @@ def test_a_scrape_with_nothing_recorded_still_names_every_family() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# the baseline an alert rule needs
+# --------------------------------------------------------------------------- #
+
+
+def _sample_lines(family: str) -> list[str]:
+    """The rendered sample lines for ``family``. ``HELP``/``TYPE`` are comments."""
+    return [
+        line
+        for line in metrics.render().splitlines()
+        if line.startswith(f"{family} ") or line.startswith(f"{family}{{")
+    ]
+
+
+def test_an_unlabelled_counter_reports_zero_before_it_is_incremented() -> None:
+    """D10-109: the family D10-91's rule reads exists at zero, before it can fail.
+
+    This is a defect pinned, not a preference. ``increase()`` subtracts two
+    samples, so with none before the first failure Prometheus saw the series go
+    absent → 1, and ``increase(...[1h]) > 0`` — the rule as the ledger records it —
+    read "no data" through the exact event it exists to catch. A counter that has
+    counted nothing is a zero; suppressing it until the first increment is what made
+    the rule unable to fire at all.
+    """
+    assert _sample_lines("escalation_email_failed_total") == ["escalation_email_failed_total 0"]
+
+    metrics.ESCALATION_EMAIL_FAILED_TOTAL.inc()
+
+    assert _sample_lines("escalation_email_failed_total") == ["escalation_email_failed_total 1"]
+
+
+def test_only_the_unlabelled_counter_reports_before_it_is_written() -> None:
+    """The zero is one family wide, so absent stays absent everywhere else.
+
+    A labelled family cannot be seeded: its series are named by outcome, and
+    inventing them would publish zeros for outcomes no call site can produce. A
+    histogram is a distribution, where zero observations are not a measurement of
+    zero. So D10-108's "declared, with no sample" assertion keeps its meaning for
+    the families it was written about, and this is the test that would notice if a
+    future family started reporting a value nobody recorded.
+    """
+    reporting = {family.name for family in metrics.families() if _sample_lines(family.name)}
+
+    assert reporting == {"escalation_email_failed_total"}
+    # Spelled out as the two reasons rather than only as the set literal, so a
+    # future family that breaks one of them fails on the rule it broke.
+    assert _sample_lines("extractions_total") == []
+    assert _sample_lines("extraction_confidence") == []
+
+
+def test_the_baseline_is_a_zero_and_not_a_recorded_increment() -> None:
+    """Reading the baseline is not recording it, and counting zero changes nothing."""
+    assert metrics.ESCALATION_EMAIL_FAILED_TOTAL.value() == 0.0
+
+    metrics.ESCALATION_EMAIL_FAILED_TOTAL.inc(amount=0)
+
+    assert _sample_lines("escalation_email_failed_total") == ["escalation_email_failed_total 0"]
+
+
+def test_reset_restores_the_baseline_rather_than_removing_it() -> None:
+    """``reset`` empties samples; it must not remove the one series a counter has.
+
+    Otherwise the regression above would depend on test ordering, and a run that
+    followed any ``reset`` would pass for the wrong reason.
+    """
+    metrics.ESCALATION_EMAIL_FAILED_TOTAL.inc()
+
+    metrics.reset()
+
+    assert _sample_lines("escalation_email_failed_total") == ["escalation_email_failed_total 0"]
+
+
+def test_a_refused_increment_leaves_the_baseline_in_place() -> None:
+    with pytest.raises(ValueError, match="cannot decrease"):
+        metrics.ESCALATION_EMAIL_FAILED_TOTAL.inc(amount=-1)
+
+    assert _sample_lines("escalation_email_failed_total") == ["escalation_email_failed_total 0"]
+
+
+# --------------------------------------------------------------------------- #
 # the PII guard
 # --------------------------------------------------------------------------- #
 

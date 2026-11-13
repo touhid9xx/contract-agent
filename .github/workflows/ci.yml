@@ -152,6 +152,23 @@ jobs:
       - name: smoke worker metrics (real worker process, real socket)
         run: python backend/tests/smoke_worker_metrics.py
 
+      # And the companion `D10-108` left open. That step scraped a worker whose
+      # counter is incremented on a branch the seed forces; this one scrapes the
+      # counter `D10-91` wrote an alert rule for, on the path where the mail could
+      # not be sent. `increase(escalation_email_failed_total[1h]) > 0` is the rule
+      # that tells an operator nobody was ever told about an escalation, and until
+      # this step it had only ever been exercised by a `RefusingAlerter` stub that
+      # raises on request — never by the real SMTP sender over a real socket.
+      #
+      # This starts `app.workers.escalation_scanner` as a subprocess against a
+      # temporary SQLite database seeded with a contract silent longer than the
+      # response window, with `NOTIFICATION_TRANSPORT=smtp` aimed at a loopback
+      # port nothing is listening on. The kernel refuses the connection, and the
+      # script fails unless the refusal is counted on the scanner's own listener,
+      # the escalation row survives it, and the port is released on death.
+      - name: smoke escalation alert (real refusal, real socket)
+        run: python backend/tests/smoke_escalation_alert.py
+
   # ------------------------------------------------------ mysql integration
   # The six guarantees `backend/tests/test_mysql_integration.py` lists in its
   # docstring — SKIP LOCKED claiming, real ENUMs, the dispatch lock, NUMERIC

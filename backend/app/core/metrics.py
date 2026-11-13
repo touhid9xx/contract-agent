@@ -111,6 +111,32 @@ class Counter(_Family):
     def __init__(self, name: str, help_text: str, labelnames: Sequence[str] = ()) -> None:
         super().__init__(name, help_text, labelnames)
         self._values: dict[tuple[str, ...], float] = {}
+        self._seed_its_one_series()
+
+    def _seed_its_one_series(self) -> None:
+        """Report an unlabelled counter at zero from the moment it is declared.
+
+        A counter with no labels has exactly one series, so ``0`` here is a fact
+        about counting rather than a claim about the world: nothing has been
+        counted yet. Rendering no sample instead makes the *first* failure
+        invisible to the only query anyone writes over a failure counter.
+        Prometheus then sees the series go absent → 1, and ``increase()`` over an
+        absent series returns no data rather than 1, so ``increase(x[1h]) > 0``
+        stays false through exactly the event it exists to catch.
+
+        That was not a hypothetical. Measured in D10-109: an escalation was
+        raised, its alert was refused, and ``EscalationEmailFailed`` never even
+        reached ``pending`` — the deployment reported health while an operator was
+        never told.
+
+        Only an *unlabelled* counter gets this. A labelled family's series names
+        its outcomes, so there is no single series to invent, and inventing every
+        outcome would publish zeros for paths no call site can produce. A
+        histogram is a distribution, not a count: "no observations" is not a
+        measurement of zero, and a zero count divides into nothing.
+        """
+        if not self.labelnames:
+            self._values[()] = 0.0
 
     def inc(self, amount: float = 1.0, **labels: str) -> None:
         if amount < 0:
@@ -249,10 +275,16 @@ def _declare[T: _Family](family: T) -> T:
 
 # --- the families this build actually writes ----------------------------------
 #
-# Only families that some code path increments are declared. A declared-but-never
-# written counter is a lie that shows up as a permanent zero on a dashboard, which
-# is worse than an absent series: the spec's alert rules cannot distinguish "no
-# failures" from "not instrumented".
+# Only families that some code path increments are declared. Declaring a family
+# with no writer is a lie that shows up as a permanent zero on a dashboard: "no
+# failures" and "not instrumented" look identical, and no query separates them.
+#
+# That note used to read "a declared-but-never written counter is a lie ... which is
+# worse than an absent series", which was too broad. Amended, not deleted, in
+# D10-109: it rules out a family nothing can *ever* write, not the zero itself. A
+# counter that can rise reports zero until it does -- that is the baseline
+# ``increase()`` needs, and suppressing the zero until the first increment is what
+# left D10-91's rule unable to fire at all.
 
 EXTRACTIONS_TOTAL: Final = _declare(
     Counter(
@@ -310,6 +342,11 @@ REMINDER_PLANS_TOTAL: Final = _declare(
 # -- works verbatim, with no query to rewrite on the day someone writes the rule.
 # There is deliberately no matching "sent" counter: nothing would read it, and an
 # unwatched series is what the note above warns about.
+#
+# The name was necessary and not sufficient. Until D10-109 the family carried no
+# sample until its first failure, so the rule compared "absent" against 1 and stayed
+# quiet; carrying no labels is what made the zero fixable, since there is only one
+# series to report (see ``Counter._seed_its_one_series``).
 ESCALATION_EMAIL_FAILED_TOTAL: Final = _declare(
     Counter(
         "escalation_email_failed_total",
@@ -366,6 +403,12 @@ def reset() -> None:
         if isinstance(family, Histogram):
             family._counts.clear()
             family._sums.clear()
+        elif isinstance(family, Counter):
+            family._values.clear()
+            # Clearing a bare counter would undo the one-series invariant its
+            # constructor establishes, so a test that guards that invariant would
+            # pass or fail on test ordering rather than on the behaviour.
+            family._seed_its_one_series()
         else:
             family._values.clear()  # type: ignore[attr-defined]
 
