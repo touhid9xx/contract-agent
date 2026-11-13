@@ -6729,12 +6729,13 @@ verdict while every single-field reading stays calm, and the guard passed on it.
 that mutant `test_attention_alerts.py` stayed green, and `test_attention_watch.py` caught it in
 a case written to order two log lines. Coverage by luck.
 
-The walk is now arity 1 and then arity 2, with the raise attributed by removal: a member is held
-to the phrase table only if the verdict falls back when that member alone goes calm. Companions
-— the id tuple behind the count — are not reasons, and tabulating them would drain the table of
-meaning. A second case asserts the walk is not an empty loop: the fields that raise alone are
-exactly the tabulated ones, at least one pair raises, and at least one pair survives a member's
-removal, so both branches run against the report as it stands.
+The walk is ~~now arity 1 and then arity 2~~ **every combination since `D10-104`**, with the raise
+attributed by removal: a member is held to the phrase table only if the verdict falls back when that
+member alone goes calm. Companions — the id tuple behind the count — are not reasons, and tabulating
+them would drain the table of meaning. A second case asserts the walk is not an empty loop: the
+fields that raise alone are exactly the tabulated ones, some combination beyond the single fields
+raises, and some untabulated field rides along in one — so both branches of the attribution rule run
+against the report as it stands.
 
 The other half was found by asking what else carries the rule. `TenantAttentionReport` has its
 own `needs_attention` — narrower by design, no park count — and no test compared the two. Adding
@@ -6748,14 +6749,39 @@ No application code changes: `git diff -- backend/app` is empty. One test file.
 Gates: **measured on this tree.** `pytest` collected 1167 tests — 1152 passed, 15 skipped, 0
 failed, 0 errors, counted from the JUnit XML — up exactly two from the 1165 before this slice.
 `ruff check` passes, `ruff format --check` finds 133 files already formatted, `mypy` is clean in
-74 files. Not measured anywhere: a live gateway. Still unseen: a raise needing three fields
-together, measured green under such a mutant.
+74 files. Not measured anywhere: a live gateway. ~~Still unseen: a raise needing three fields
+together, measured green under such a mutant.~~ **Amended by `D10-104`, not deleted:** the mutant
+named in `DECISIONS.md` was green, and the generalisation was too wide — a triple carrying the
+transport flag was already caught. The walk now covers every combination.
 
 The slice landed as `a36cb75`, and CI run `43450828120` is green on it: seven of seven jobs,
 including the real-socket smoke journey, the MySQL 8.4 suite that treats a skip as a failure, and
 the `CI gate`. The 1167 above is both suites together: CI runs them as two jobs, `-m "not
 integration"` collecting 1148 and `-m integration` collecting 19, so neither job's own count
 matches this record and this sentence is where the difference is explained.
+
+### A walk with a ceiling is a guard with an unread corner (`D10-104`)
+
+`D10-103` closed by naming the shape its guard could not see: a raise needing three fields with
+no raising pair. That was true of the mutant it measured and too wide as a general claim.
+Re-measured with both guards and two three-field mutants: the `unsealed_field_ids` mutant stayed
+green under the old guard, exactly as recorded, while a `bus_disabled` mutant was already caught —
+the suites run with the event transport off, so that mutant collapses into the pair `D10-103` had
+fixed. The hole was shape-dependent, which is what "coverage by luck" means.
+
+The walk now covers every combination of the nine probeable fields — 511 readings — with the
+attribution rule unchanged, so `unsealed_field_ids` still rides along behind its count without
+demanding a sentence. `_problems` takes the verdict as a callable and a depth, and one case points
+it at a three-field rule: at depth two it finds nothing, at full depth it demands a sentence for
+all three fields. Both halves are measured in a single test.
+
+No application code changes: `git diff -- backend/app` is empty. One test file.
+
+Gates: **measured on this tree.** `pytest` collected 1168 tests — 1153 passed, 15 skipped, 0
+failed, 0 errors, from the JUnit XML — up exactly one from 1167. `ruff check` passes, `ruff
+format --check` finds 133 files already formatted, `mypy` is clean in 74 files. Still out of
+reach: a threshold above one, `_UNPROBEABLE`'s honesty, `_CLEARED_HEADLINE`, and any statement
+about whether a sentence reads correctly.
 
 ## Non-negotiable reminders
 

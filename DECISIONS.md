@@ -8020,16 +8020,77 @@ than being collected and skipped. `ruff check` passed, `ruff format --check` fou
 already formatted, `mypy` reported no issues in 74 source files. `git diff -- backend/app` is
 **empty**: one test file, no application code, so the green run that covers the shipped
 application still covers it.
-**Limits.** Arity three, with no pair among the three raising, is still unseen — measured, not
+**Limits.** ~~Arity three, with no pair among the three raising, is still unseen — measured, not
 assumed: a `field_scan_truncated and fields_scanned and unsealed_field_ids` mutant left all four
-attention suites green. A threshold above one is out of reach of a fixed step, which `D10-102`
-already recorded and this entry does not change. `_UNPROBEABLE` can still silence the guard, and
-its honesty remains a written sentence. The agreement case compares the *rule*, not the counts,
-which legitimately differ between the two readers. `_CLEARED_HEADLINE` remains uncovered, no
-test reads the mail the way a person does, and none of this says whether a sentence reads
-correctly.
+attention suites green.~~ **Amended by `D10-104`, not deleted:** that mutant is still green under
+the guard this entry describes and fails under the one that replaced it. The sentence was also too
+wide — a triple carrying `bus_disabled` was already caught by the floor case, because the suites
+run with the event transport off. Arity is no longer a shape the guard can miss, and two
+descriptions above are stale in the same direction: the walk this entry calls one field and then
+two is every combination since, in both readers, and the empty-loop case now asserts that a
+companion rides along rather than that a pair survives a removal. A threshold above one is out of
+reach of a fixed step, which `D10-102` already recorded and this entry does not change.
+`_UNPROBEABLE` can still silence the guard, and its honesty remains a written sentence. The
+agreement case compares the *rule*, not the counts, which legitimately differ between the two
+readers. `_CLEARED_HEADLINE` remains uncovered, no test reads the mail the way a person does,
+and none of this says whether a sentence reads correctly.
 
 **A defect in the apply script, caught by its own re-read.** `rewrap` joins its lines with
 `splitlines()`, which drops the trailing newline, so the first `--write` appended this entry
 and then failed its own check that both files end with exactly one newline — after writing.
 The check turned a malformed file into a two-line repair, and that repair added this paragraph.
+
+### D10-104 — A walk with a ceiling is a guard with an unread corner
+
+**The residue, as the previous entry left it.** `D10-103` ended by naming what it could not see:
+"arity three, with no pair among the three raising, is still unseen — measured, not assumed", with
+the exact mutant that walked past. A sentence like that is the honest thing to write; it is also
+the whole problem. A guard is a claim about what cannot happen, and a claim carrying a clause that
+describes the case it cannot see is a description of a hole kept in the same file as the guard, so
+every later reader has to hold both.
+
+**Both guards, two mutants, four suites each.** `attention.py` and the test module were written
+back from bytes and verified byte-identical afterwards, because `D10-102`'s text round-trip
+reports a perfect restore while the file on disk has changed.
+
+The mutant `D10-103` recorded — `field_scan_truncated and fields_scanned and unsealed_field_ids` —
+left the old guard **green** across all four attention suites, exactly as the ledger says. The
+widened guard fails on it, in the case written to catch it.
+
+A second mutant, `field_scan_truncated and fields_scanned and bus_disabled`, was **not** green
+under the old guard: `test_a_full_scan_page_warns_that_the_count_is_a_floor` failed. The suites
+run with the event transport off, so `bus_disabled` is true nearly everywhere and that mutant
+collapses into the pair `D10-103` had already fixed. So the recorded sentence was right about its
+mutant and too wide as a general claim, and this measurement is what says so. The distinction is
+worth keeping: the hole was **shape-dependent**, not an arity. Which fields the next term joins is
+not chosen by anyone who knows which tests exist, and a hole that closes when you pick different
+fields is precisely what "coverage by luck" means.
+
+**The fix: every combination, not a deeper ceiling.** `_verdict` became `_moved` plus `_problems`,
+which walks `itertools.combinations` at every arity over the nine probeable fields — 511 readings
+— and keeps `D10-103`'s attribution rule unchanged, because the rule was never the problem: a
+member is held to the phrase table only if the verdict falls back when that member alone returns
+to calm, so `unsealed_field_ids` still rides along behind its count without demanding a sentence.
+
+**The walk is now a thing that can be measured.** `_problems` takes the verdict as a callable and
+a `depth`, so one case points it at a rule shaped like the one a ceiling cannot see: three fields,
+no raising pair. At `depth=2` it reports nothing — the blindness, measured rather than remembered
+— and at full depth it demands a sentence for each of the three fields. That second run passes an
+empty phrase table on purpose: with nothing tabulated the narrow walk still finds nothing, so its
+silence was never the table's doing.
+
+**Gates: measured on this tree.** `pytest` over `backend/tests` collected **1168 tests — 1153
+passed, 15 skipped, 0 failed, 0 errors**, counted from the JUnit XML, up exactly one from the 1167
+before this slice. `ruff check` passed, `ruff format --check` found 133 files already formatted,
+`mypy` reported no issues in 74 source files. `git diff -- backend/app` is **empty**: one test
+file, no application code, so the green run covering the shipped application still covers it.
+
+**Limits.** A threshold above one is invisible to any single step: `notifications_failed >= 2`
+raises nothing anywhere in this lattice, which `D10-102` recorded and this entry does not touch.
+`event_transport` stays unprobed and declared, and `_UNPROBEABLE`'s honesty is still a written
+sentence rather than a checked property — the proof above shows the walk reaches a three-field
+term, not that every declaration in that table is true. `_CLEARED_HEADLINE` remains uncovered, no
+test reads the mail the way a person does, and none of this says whether a sentence reads
+correctly, only that a field is named in it. The walk doubles per probeable field: 511 readings at
+nine, a thousand million at thirty, so it is cheap because the report is small, and the day the
+report is not small this wants a different shape rather than a larger constant.
