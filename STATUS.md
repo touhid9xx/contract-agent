@@ -6918,6 +6918,16 @@ verified by parsing the compose file rather than by a metric arriving anywhere. 
 and `outbox_relay` write no metric of their own, so two of the six serve a declared-but-empty
 registry — a listener waiting for a first counter, not a number.
 
+The slice landed as `9bf77b5`, with this record as `1a78196`, and CI run
+`43495701417` is green on it: seven of seven jobs, read from the run's own job list rather
+than inferred from the names — hygiene + secret scan, python static (ruff, mypy strict,
+bandit), backend tests (pytest, sqlite), backend integration on MySQL 8.4 with skips
+counted as failures, demo frontend typecheck, frontend typecheck/eslint/vitest/
+production build, and the `CI gate` that requires every one of them to have succeeded.
+The 1204 tests counted above are again two suites: CI runs `-m "not integration"` and
+`-m integration` as separate jobs, so no single job's number matches this record —
+`D10-103` has the sentence that explains the difference.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.
