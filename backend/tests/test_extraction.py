@@ -171,6 +171,38 @@ def test_an_unlabelled_phone_is_scored_below_the_review_threshold() -> None:
     assert bare[0].confidence == 0.75 < THRESHOLD
 
 
+def test_a_labelled_address_is_read_to_the_end_of_its_line() -> None:
+    found = PatternExtractor().extract("Postal address: 14 Fenwick Row, Leeds LS1 4AB")
+
+    assert [c.value for c in found] == ["14 Fenwick Row, Leeds LS1 4AB"]
+    # Above the review threshold on purpose. A field nothing in this product
+    # consumes is still a pipeline gate: at 0.75 every contract that carries an
+    # address would wait for a human before its reminder could be sent.
+    assert found[0].confidence == 0.9 > THRESHOLD
+
+
+def test_an_address_label_inside_prose_is_not_an_address() -> None:
+    found = PatternExtractor().extract("Questions? Write to our registered address in Bristol.")
+
+    # Prose names an address to a reader, not to a parser: no colon and no line of
+    # its own, so the label never becomes a field and there is no value to take.
+    assert found == []
+
+
+def test_a_placeholder_under_an_address_label_is_refused() -> None:
+    # A label is good evidence but not proof: an unfilled form leaves "N/A" behind.
+    assert PatternExtractor().extract("Address: N/A") == []
+
+
+def test_an_email_in_the_address_column_is_refused() -> None:
+    # A data-entry slip in the source document rather than a shape a contract has:
+    # the column and the value disagree, and the value is a contact the email rule
+    # already reads. Storing it again under ADDRESS would be two rows for one string.
+    found = PatternExtractor().extract("Address: a.rahman@example.test")
+
+    assert [c.field_name for c in found] == [FieldName.EMAIL]
+
+
 def test_a_date_is_taken_from_the_label_that_names_it() -> None:
     found = {c.field_name: c for c in PatternExtractor().extract(DOCUMENT)}
 
@@ -191,6 +223,42 @@ def test_a_day_first_date_is_read_when_the_day_cannot_be_a_month() -> None:
     assert found[0].value == "2025-12-25"
     # Read, but not trusted as much as an unambiguous ISO date.
     assert found[0].confidence == 0.85
+
+
+def test_a_labelled_date_of_birth_is_read_in_iso_form() -> None:
+    found = PatternExtractor().extract("Date of birth: 1979-11-02")
+
+    assert [c.field_name for c in found] == [FieldName.DOB]
+    assert found[0].value == "1979-11-02"
+    assert found[0].confidence == 0.95 > THRESHOLD
+
+
+def test_dotted_initials_label_a_date_of_birth_too() -> None:
+    found = PatternExtractor().extract("D.O.B.: 25/12/1979")
+
+    assert [c.value for c in found] == ["1979-12-25"]
+    # Read, but less trusted than an ISO date — the rule the start and end dates
+    # already follow, applied to the third date in a contract.
+    assert found[0].confidence == 0.85
+
+
+def test_an_ambiguous_date_of_birth_is_dropped_rather_than_guessed() -> None:
+    # 02/11/1979 is 2 November to most of the world and 11 February in the United
+    # States, so it is dropped for the reason an ambiguous end_date is.
+    assert PatternExtractor().extract("Date of birth: 02/11/1979") == []
+
+
+def test_a_birth_date_is_not_read_as_the_contract_start() -> None:
+    found = {
+        c.field_name: c
+        for c in PatternExtractor().extract("Start date: 2025-05-06\nDate of birth: 1979-11-02")
+    }
+
+    # Two date readers now scan the same lines, so the separation is asserted rather
+    # than assumed: the labelled start date wins its own field and the birthday wins
+    # only DOB, whichever line each appears on.
+    assert found[FieldName.START_DATE].value == "2025-05-06"
+    assert found[FieldName.DOB].value == "1979-11-02"
 
 
 def test_a_date_is_not_mistaken_for_a_phone_number() -> None:

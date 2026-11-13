@@ -7,15 +7,18 @@ the two things that can sit behind it.
     Deterministic, offline, labelled regexes. It is the default because it is the
     only backend whose behaviour can be *proven* in this repository — there is no
     Ollama service in ``docker-compose.yml``, so an LLM-only stage would be an
-    unverifiable milestone. It covers the fields that actually drive the product:
-    the two contact channels, the two dates the daily scan compares, and the
-    contract value.
+    unverifiable milestone. It reads all seven field types, but not with equal
+    evidence: the contact channels and the dates are recognised by *shape*, while
+    an address and a date of birth are read only when a label named them at the
+    start of a line. Gap 17 was the price of the earlier rule, which read neither
+    of them at all (D10-106).
 
 ``ollama``
-    The local model, opt-in via ``EXTRACTION_BACKEND=ollama``, for the fields a
-    regex cannot reach (``address``, ``dob``). "Local only" is structural rather
-    than a matter of policy: ``ExtractionBackend`` has no cloud member, so a
-    deployment cannot name one (DECISIONS.md D7-02).
+    The local model, opt-in via ``EXTRACTION_BACKEND=ollama``, for the documents a
+    labelled regex cannot read — an address written without a label, a value on the
+    line below its label, a field no corpus here has shown. "Local only" is
+    structural rather than a matter of policy: ``ExtractionBackend`` has no cloud
+    member, so a deployment cannot name one (DECISIONS.md D7-02).
 
 The two are **alternatives, not layers.** Merging a deterministic result with a
 model result needs a precedence rule per field, and inventing that rule before
@@ -66,6 +69,25 @@ _END_LABELS = re.compile(
 _EMAIL_LABELS = re.compile(r"(?i)\be-?mail\b")
 _PHONE_LABELS = re.compile(r"(?i)\b(?:phone|tel|telephone|mobile|cell)\b")
 
+#: Address and date-of-birth labels, anchored to the **start of a line**, because
+#: for these two fields the label is the only evidence of where a value begins and
+#: the line break is the only evidence of where it ends: "14 Fenwick Row, Leeds LS1
+#: 4AB" is a sequence of ordinary words and numbers, and no pattern of *its shape*
+#: separates it from a sentence. Three things keep the rule out of trouble and they
+#: overlap on purpose: the **colon** is what makes prose ("write to our registered
+#: address in Bristol") a sentence rather than a field; the **anchor** stops "Tenant
+#: email address:" from offering "address" as the label of a line about an email;
+#: and the ``@`` guard in ``_find_address`` refuses a mail address even when a line
+#: does read "Email address: a.rahman@example.test".
+_ADDRESS_LABELS = re.compile(
+    r"(?im)^[ \t]*(?:(?:postal|site|registered|delivery|billing|contact)[ \t]+)?"
+    r"(?:address|property|premises)[ \t]*:[ \t]*(\S[^\n]*)$"
+)
+_DOB_LABELS = re.compile(
+    r"(?im)^[ \t]*(?:date[ \t]+of[ \t]+birth|d[ \t]*\.[ \t]*o[ \t]*\.[ \t]*b[ \t]*\.)"
+    r"[ \t]*:[ \t]*(\S[^\n]*)$"
+)
+
 _EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 _PHONE = re.compile(r"\+?\d[\d\s().\-]{6,}\d")
 #: A phone-shaped run of digits can also be a date or an amount. Those are cheap
@@ -86,10 +108,18 @@ _VALUE = re.compile(
 
 _DMY = re.compile(r"^(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{4})$")
 _ISO = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+#: The two shapes a date is written in, named once because three finders now look
+#: for a date. A second copy of this alternation is how one format silently stops
+#: being read while the other keeps scoring.
+_DATE_SHAPE = re.compile(r"\d{4}-\d{2}-\d{2}|\d{1,2}[/.\-]\d{1,2}[/.\-]\d{4}")
 
 #: A phone number worth auto-detecting: 9-15 digits after separators are removed.
 _MIN_PHONE_DIGITS = 9
 _MAX_PHONE_DIGITS = 15
+#: Shortest thing accepted as a postal address. A label is good evidence but not
+#: proof: "Address: N/A" and "Address: -" are lines a form leaves behind, and a
+#: four-character row in the address column is worse than no row at all.
+_MIN_ADDRESS_CHARS = 8
 #: How far back to look for the label that qualifies a bare match.
 _LABEL_WINDOW = 32
 
@@ -144,6 +174,33 @@ def _find_phone(text: str) -> list[FieldCandidate]:
     return found
 
 
+def _find_address(text: str) -> list[FieldCandidate]:
+    """The rest of a labelled line, when the label says it is a postal address."""
+    found: list[FieldCandidate] = []
+    for match in _ADDRESS_LABELS.finditer(text):
+        value = match.group(1).strip()
+        # "Email address: a.rahman@example.test" is the one shape where the label
+        # misdescribes what follows it, so an ``@`` disqualifies the value outright
+        # rather than being scored lower: the email rule already reads that line at
+        # a higher confidence, and a second row holding the same string as an
+        # address is a field no reviewer can act on.
+        if "@" in value or len(value) < _MIN_ADDRESS_CHARS:
+            continue
+        found.append(
+            FieldCandidate(
+                field_name=FieldName.ADDRESS,
+                value=value,
+                # Below a labelled email's 0.95 on purpose. Both ends of an address
+                # are inferred — the label starts it, a line break ends it — so a
+                # trailing clause on the same line ("..., billing to the number
+                # overleaf") is captured along with the address.
+                confidence=0.9,
+                source_line=_line_of(text, match.start(1)),
+            )
+        )
+    return found
+
+
 def _to_iso(match: re.Match[str]) -> str | None:
     """ISO form of a date match, or ``None`` when the document is ambiguous.
 
@@ -177,7 +234,7 @@ def _find_dates(text: str) -> list[FieldCandidate]:
         for match in labels.finditer(text):
             # The date is what follows the label on the same line.
             tail = text[match.end() : match.end() + 40]
-            date_match = re.search(r"\d{4}-\d{2}-\d{2}|\d{1,2}[/.\-]\d{1,2}[/.\-]\d{4}", tail)
+            date_match = _DATE_SHAPE.search(tail)
             if date_match is None:
                 continue
             iso = _to_iso(date_match)
@@ -194,6 +251,30 @@ def _find_dates(text: str) -> list[FieldCandidate]:
                     source_line=_line_of(text, offset),
                 )
             )
+    return found
+
+
+def _find_dob(text: str) -> list[FieldCandidate]:
+    """A labelled date of birth, in the same two shapes the other dates use."""
+    found: list[FieldCandidate] = []
+    for match in _DOB_LABELS.finditer(text):
+        date_match = _DATE_SHAPE.search(match.group(1))
+        if date_match is None:
+            continue
+        iso = _to_iso(date_match)
+        if iso is None:
+            # "Date of birth: 03/04/1979" is a month of a person's life, not a
+            # typo, so it is dropped for the same reason an ambiguous ``end_date``
+            # is: a guessed birthday is worse than a blank one.
+            continue
+        found.append(
+            FieldCandidate(
+                field_name=FieldName.DOB,
+                value=iso,
+                confidence=0.95 if _ISO.match(date_match.group(0)) else 0.85,
+                source_line=_line_of(text, match.start(1) + date_match.start()),
+            )
+        )
     return found
 
 
@@ -232,7 +313,9 @@ class PatternExtractor:
         return [
             *_find_email(text),
             *_find_phone(text),
+            *_find_address(text),
             *_find_dates(text),
+            *_find_dob(text),
             *_find_contract_value(text),
         ]
 

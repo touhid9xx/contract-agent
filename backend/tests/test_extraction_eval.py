@@ -414,39 +414,61 @@ def test_the_committed_corpus_meets_the_gate(measured: EvaluationReport) -> None
     assert measured.meets(DEFAULT_MIN_F1), measured.as_dict()
 
 
-def test_the_corpus_names_the_fields_the_pattern_backend_cannot_reach(
+def test_the_corpus_no_longer_names_a_field_the_pattern_backend_cannot_reach(
     measured: EvaluationReport,
 ) -> None:
-    # Gap 17, as a pair of numbers rather than a note: the backend has no rule for
-    # these at all, so no amount of corpus will move them. The LLM backend is what
-    # they are for.
-    assert measured.unreachable == (FieldName.ADDRESS, FieldName.DOB)
-    assert score_of(measured, FieldName.ADDRESS).recall == 0.0
-    assert score_of(measured, FieldName.DOB).recall == 0.0
+    # Gap 17, as numbers rather than a note. Both fields used to read 0.0 recall here
+    # because the backend had no rule for them at all.
+    assert measured.unreachable == ()
+    # An empty corpus section would clear ``unreachable`` just as well and prove
+    # nothing — "no field is unreachable" is only a measurement while the documents
+    # still state the fields it used to name. These four lines are what make the line
+    # above mean something rather than being an artefact of a shorter manifest.
+    address = score_of(measured, FieldName.ADDRESS)
+    dob = score_of(measured, FieldName.DOB)
+    assert (address.expected, dob.expected) == (3, 1)
+    assert (address.recall, dob.recall) == (1.0, 1.0)
 
 
-def test_a_channel_that_stops_being_extracted_falls_below_the_gate(
+class _Without:
+    """The real backend with the named fields removed — a plausible regression."""
+
+    def __init__(self, *dropped: FieldName) -> None:
+        self._inner = PatternExtractor()
+        self._dropped = dropped
+
+    def extract(self, text: str) -> list[FieldCandidate]:
+        return [
+            found for found in self._inner.extract(text) if found.field_name not in self._dropped
+        ]
+
+
+def test_a_channel_that_stops_being_extracted_moves_the_score(
+    corpus: GoldenCorpus, measured: EvaluationReport
+) -> None:
+    report = score_corpus(corpus, _Without(FieldName.PHONE))
+
+    # A regression has to be visible in the number the report quotes...
+    assert report.f1 < measured.f1
+    assert score_of(report, FieldName.PHONE).missed == 5
+    # ...and it is: 0.974 becomes 0.904. What it no longer does is cross the floor,
+    # because closing gap 17 put four more true positives in the denominator. The
+    # loss of one channel is therefore asserted as the narrowing it is rather than
+    # treated as a failure of the gate (D10-106).
+    assert report.f1 > DEFAULT_MIN_F1
+
+
+def test_losing_both_contact_channels_falls_below_the_gate(
     corpus: GoldenCorpus,
 ) -> None:
-    class WithoutPhone:
-        """The real backend with one channel removed — a plausible regression."""
+    report = score_corpus(corpus, _Without(FieldName.PHONE, FieldName.EMAIL))
 
-        def __init__(self) -> None:
-            self._inner = PatternExtractor()
-
-        def extract(self, text: str) -> list[FieldCandidate]:
-            return [
-                found
-                for found in self._inner.extract(text)
-                if found.field_name is not FieldName.PHONE
-            ]
-
-    report = score_corpus(corpus, WithoutPhone())
-
-    # A gate only ever observed green is indistinguishable from a constant.
+    # The floor is about contactability, and the corpus's other fields cannot excuse
+    # a backend that finds neither channel: 0.818 is below the gate, which is how
+    # "a gate only ever observed green is indistinguishable from a constant" stays
+    # true after the corpus got easier to score.
     assert not report.meets(DEFAULT_MIN_F1)
     assert report.f1 < DEFAULT_MIN_F1
-    assert score_of(report, FieldName.PHONE).missed == 5
 
 
 def test_an_ambiguous_date_is_left_unfound_rather_than_guessed(

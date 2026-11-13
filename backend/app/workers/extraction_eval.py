@@ -241,9 +241,10 @@ class EvaluationReport:
     def unreachable(self) -> tuple[FieldName, ...]:
         """Fields the corpus states and the extractor never once found.
 
-        The number behind STATUS.md gap 17: the pattern backend has no rule for
-        ``address`` or ``dob`` at all, so those score a structural zero and no
-        amount of corpus size will move them.
+        Gap 17's number. It used to name ``address`` and ``dob`` permanently,
+        because the pattern backend had no rule for either, so a corpus could
+        never move them. ``D10-106`` gave both a rule, so an entry here now says
+        a document defeated the rule rather than that no rule exists.
         """
         return tuple(
             score.field_name for score in self.scores if score.expected and not score.matched
