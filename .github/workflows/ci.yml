@@ -135,6 +135,23 @@ jobs:
       - name: smoke journey (real uvicorn, real socket)
         run: python backend/tests/smoke_journey.py
 
+      # The companion for the *worker* process boundary. `smoke_journey.py` above
+      # drives the API, which is the one process whose metrics were always
+      # scrapeable. `D10-107` added a listener to each of the six workers precisely
+      # because their counters existed nowhere else — and until this step, the only
+      # evidence that a worker's own series could be read was a parse of
+      # `docker-compose.yml` plus unit tests that filled the registry themselves.
+      # This starts `app.workers.expiry` as a subprocess on a loopback port against
+      # a temporary SQLite database, and fails unless the sweep's own
+      # `contracts_expired_total{outcome="unknown_timezone"}` arrives over the
+      # socket while a family the sweep never writes arrives with no sample.
+      #
+      # No service container, no new dependency, and not collected by pytest: the
+      # file is `smoke_worker_metrics.py`, so it runs here once rather than as a
+      # test that spawns an interpreter per case.
+      - name: smoke worker metrics (real worker process, real socket)
+        run: python backend/tests/smoke_worker_metrics.py
+
   # ------------------------------------------------------ mysql integration
   # The six guarantees `backend/tests/test_mysql_integration.py` lists in its
   # docstring — SKIP LOCKED claiming, real ENUMs, the dispatch lock, NUMERIC
