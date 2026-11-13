@@ -6751,6 +6751,12 @@ failed, 0 errors, counted from the JUnit XML — up exactly two from the 1165 be
 74 files. Not measured anywhere: a live gateway. Still unseen: a raise needing three fields
 together, measured green under such a mutant.
 
+The slice landed as `a36cb75`, and CI run `43450828120` is green on it: seven of seven jobs,
+including the real-socket smoke journey, the MySQL 8.4 suite that treats a skip as a failure, and
+the `CI gate`. The 1167 above is both suites together: CI runs them as two jobs, `-m "not
+integration"` collecting 1148 and `-m integration` collecting 19, so neither job's own count
+matches this record and this sentence is where the difference is explained.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.
