@@ -89,6 +89,7 @@ __all__ = [
     "UnavailableSender",
     "assert_may_contact",
     "build_notification",
+    "contract_today",
     "dispatch_moment",
     "dispatch_notification",
     "in_quiet_hours",
@@ -367,6 +368,26 @@ def dispatch_moment(contract: Contract, now: datetime, *, start: int, end: int) 
 # --- milestones -------------------------------------------------------------
 
 
+def contract_today(contract: Contract, *, now: datetime) -> date:
+    """The calendar day it is where the customer is.
+
+    Not the server's day. A contract one day from expiry in Dhaka is not one day
+    from expiry in UTC at 23:00, and both the milestone the customer is told about
+    *and* the day their term is judged to have ended have to be their day.
+
+    Named here, once, because two now ask the question:
+    :func:`milestone_for` decides what is due, and
+    :func:`app.workers.expiry.is_expired` decides when to stop. If those two ever
+    disagreed, the pair would either close a contract that is still inside its final
+    day or keep reminding one that ended yesterday — and neither would fail a test
+    that only exercised one of them.
+
+    Raises :class:`DispatchRefusedError` when the zone cannot be resolved, for the
+    reason :func:`_zone` gives.
+    """
+    return _as_aware_utc(now).astimezone(_zone(contract.timezone)).date()
+
+
 def milestone_for(*, end_date: date, today: date) -> tuple[str, date]:
     """The reminder milestone due for ``today``, and the date it belongs to.
 
@@ -533,7 +554,7 @@ def build_notification(
 
     # "Today" is the customer's calendar day, not the server's: a contract one day
     # from expiry in Dhaka is not one day from expiry in UTC at 23:00.
-    local_today = _as_aware_utc(now).astimezone(_zone(contract.timezone)).date()
+    local_today = contract_today(contract, now=now)
     template, scheduled_date = milestone_for(end_date=contract.end_date, today=local_today)
 
     return Notification(

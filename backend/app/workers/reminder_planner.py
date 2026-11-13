@@ -114,10 +114,11 @@ WINDOW_DAYS: int = max(days for _, days in DEFAULT_MILESTONE_DAYS)
 #:
 #: One day and no more, because a longer grace would send "a contract we hold for you
 #: is approaching its expiry date" about a contract that already expired — the one
-#: statement the message makes that would then be false. What happens to a contract
-#: that expires unreminded is recorded in ``STATUS.md``: nothing marks it expired, so
-#: it leaves this scan silently. Closing that needs an expiry transition, not a wider
-#: window.
+#: statement the message makes that would then be false. The grace cannot hide a lapse
+#: either: :class:`app.workers.expiry.ExpirySweep` moves a contract to ``expired`` on
+#: the first day after its term ends in its own zone, and ``expired`` is outside
+#: :data:`app.db.repositories.contracts.REMINDABLE_CONTRACT_STATUSES`, so a stale end
+#: date leaves this scan by status rather than by window.
 EXPIRY_GRACE_DAYS: int = 1
 
 

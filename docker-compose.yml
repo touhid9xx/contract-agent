@@ -171,6 +171,22 @@ services:
       - -m
       - app.workers.reminder_planner
 
+  expiry:
+    <<: *worker
+    # The other half of the same clock. `planner` stops *planning* once a contract
+    # leaves its reminder window, but nothing moved the contract's status when its
+    # term actually ran out — so an expired file stayed `active` for ever: counted
+    # as live, still scannable for escalation, and still reading to the contact
+    # policy as a file no human had closed. Worse, asking for a reminder on one
+    # produced a T-14 row dated before the term ended, because `milestone_for`
+    # returns the tightest milestone already due and for a past end date that is
+    # all of them. This closes the status on the customer's own calendar day and
+    # leaves one audit row saying which date did it. It sends nothing.
+    command:
+      - python
+      - -m
+      - app.workers.expiry
+
   scanner:
     <<: *worker
     # Gap 15's trigger. Without it, a contract could sit unanswered for a year

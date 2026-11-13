@@ -7572,3 +7572,99 @@ inferred from existing notification rows rather than recorded on the contract. T
 and holds no durable cursor: a restart re-reads the window from the beginning, which is safe
 (planning is idempotent) but can delay the tail of a very large book under frequent restarts.
 Nothing here schedules a future date, so "send at 09:00 local" is still the scheduler's job.
+
+### D10-98 — The status enum had a member nothing could reach
+
+`ContractStatus.EXPIRED` has been in `0001` since the first migration with no code path producing
+it. A contract whose term ran out never left `active`, so it stayed countable on a dashboard as
+live, stayed eligible for an escalation chase, and still read to `assert_may_contact` as a file no
+human had closed. The consequence that mattered was at the boundary where messages are made:
+`build_notification` computes "today" in the customer's zone and `milestone_for` returns the
+*tightest* milestone already due — for a past end date, every one of them — so asking for a
+reminder on an expired contract **produced one**: a `T-14` row dated before the term ended,
+claimed on the next scheduler tick because its moment had already passed. The message itself was
+the false statement. `D10-97` narrowed the planner's window so it stopped *reaching* those
+contracts and recorded the residue honestly — they leave that scan silently, and "closing that
+needs an expiry transition, not a wider window". This is that transition.
+
+**The sweep decides on the customer's calendar, not the server's.** `ExpirySweep` leases contracts
+whose end date is at or before today in **UTC** — a deliberate superset, since "has this term
+ended?" cannot be answered from one date for a book spanning every zone — and then asks each row's
+own zone. `is_expired` is strictly *before* today: a contract ending today is still live today,
+and closing it early would contradict a reminder sent that morning. The calendar-day rule now
+exists once, as `contract_today` in `app/workers/dispatch.py`, and both `build_notification` and
+`is_expired` call it. Two copies would have agreed on every test that exercised one path and
+disagreed across a date line in production.
+
+**Which states a clock may close** is `EXPIRABLE_CONTRACT_STATUSES` — `active` and
+`reminder_sent` — a separate name from `REMINDABLE_CONTRACT_STATUSES` for the reason that one is
+separate from the scanner's set: "may this be reminded?" and "may a passing end date close this?"
+are different questions that share an answer today, so a test asserts the two sets are equal.
+`responded` and `escalated` are excluded on purpose: each means a person has already engaged with
+the file, and a clock that overwrote one would erase the more informative state. `do_not_contact`
+is deliberately **not** filtered, unlike the reminder scan: a customer who asked us to stop
+writing asked about *messages*, their contract still ends, and an `active` contract nobody may
+contact is precisely the row that must not outlive its end date. Filtering it would leave every
+opted-out contract permanently `active` — a worse lie than a stale status.
+
+**Idempotency here is a property of the predicate, not a constraint.** Closing a contract removes
+it from the query, so a second tick finds nothing and a fresh process re-reads the same window
+harmlessly; that is why the audit row can be written unconditionally, since an already-`expired`
+row is not a candidate. The cursor exists for a different reason than the planner's: the lease
+over-selects by a calendar day on purpose, so a row that is still current *keeps matching* and
+would occupy the front of every batch. `after_id` lets a drain prove progress within one tick.
+
+**A page is one transaction**, so a row that raises cannot discard the closures committed beside
+it; a failed tick is logged, counted as nothing, and re-read on the next pass. A contract whose
+zone cannot be resolved is refused per row, counted under its own outcome, and left alone rather
+than assumed to be UTC — guessing moves a term end by up to fourteen hours, which is a message
+somebody reads. The `contracts and …` guard on the cursor came from mutation testing: with a
+`batch_size` of zero the repository leases nothing, and `len(contracts) == self._batch_size` is
+`0 == 0`, so the unguarded expression indexed an empty page.
+
+**One audit row per closure, and no outbox event.** The row is system-attributed, carries the
+status it replaced and the end date, and names the date and zone that closed it — never a contact
+value, which is what makes it safe to keep forever. Nothing downstream subscribes to a contract
+closing, so an event would add a parked row to every deployment with the transport off in exchange
+for no consumer. No explicit `version` bump either: `Contract` carries `version_id_col`, so
+assigning `status` bumps it and a concurrent operator edit raises `StaleDataError` instead of
+being silently overwritten.
+
+**Mutation testing: five mutants, each reverted in the same turn.** `<` to `<=` in `is_expired` ->
+10 tests red. The customer's calendar day replaced by the server's UTC date -> 5, all of them zone
+tests. The cursor never advancing -> 2, exactly the fairness pair. The `contracts and` guard
+removed -> 1. `_close` keeping the old status -> 7, including the end-to-end test that asks
+`build_notification` for a reminder on an expired contract. That last one matters most: the
+slice's headline claim rests on the transition itself, not on two independent assertions
+happening to agree.
+
+**Four settings needed a home in `.env.example`, and one comment needed correcting.**
+`REMINDER_SCAN_*` and `EXPIRY_SWEEP_*` were read by `Settings` and documented nowhere, which made
+`STATUS.md`'s standing claim that `.env.example` documents every setting `Settings` reads false —
+`D10-97`'s omission, inherited here. Both pairs are now there, written in the file's own voice
+rather than as bare names. The sweep's batch-size comment also claimed to be "smaller than the
+planner's by default" while both defaults are 50, so the sentence was corrected instead of a
+working default being changed to match it.
+
+**Gates.** `test_expiry.py` -> 35 tests. Full suite -> **1151 tests, 1136 passed, 15 skipped, 0
+failed** counted from the JUnit XML (+35); `mypy app` -> no issues in 74 files; `ruff check` /
+`ruff format --check` -> clean over 133 files; `smoke_journey.py` -> 108 checks;
+`pre-commit run --all-files` -> 19 hooks, 18 passed and 1 skipped; `pre-commit --hook-stage
+manual` -> 4 hooks passed, `gitleaks` included. The `expiry` Compose service is defined on the
+existing `x-worker` anchor and the YAML parses, but the image was **not built and the sweep was
+never started as a process**: it was exercised through `run_once`/`drain`/`run_forever` in tests,
+and `main`'s `--once` path has no test of its own.
+
+**Limits.** `expired` is terminal: a reviewer who later corrects `end_date` to a future date
+leaves the contract closed, because reopening a file is a decision for someone who can see why it
+was closed, not something a clock does because a column moved. SQLite only — no MySQL run, so the
+`SKIP LOCKED` lease is proven under SQLite's locking alone. No live email or SMS gateway and no
+LLM backend, because this worker sends nothing and asks nothing. The hourly default bounds the lag
+between a term ending and the status saying so at one hour, and a first tick against an existing
+book can close a large backlog a page at a time — `--once` exists for exactly that. And `renewed`
+is now the last member of the enum with no writer: it appears only in *exclusions*
+(`CLOSED_CONTRACT_STATUSES`, `decision.py`'s unroutable set) and in display maps, while the
+writers are the sweep -> `expired`, the scanner -> `escalated`, and the response route ->
+`responded`. That one is left open deliberately. A renewal happens outside this system and leaves
+no signal it could observe, so closing it needs a product decision — an operator action, or
+reading the replacement contract — rather than another clock.

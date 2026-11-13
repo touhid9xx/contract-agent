@@ -3880,7 +3880,7 @@ slice makes those sentences narrower instead of deleting them.
 
 | Area | What changed, and why |
 | --- | --- |
-| `scheduler` and `scanner` services | `python -m app.workers.notification_scheduler` and `…escalation_scanner`, on the same image as `api` — one `Dockerfile.backend`, five processes, differing only in `command` — six as of `D10-97`, which added `planner`. |
+| `scheduler` and `scanner` services | `python -m app.workers.notification_scheduler` and `…escalation_scanner`, on the same image as `api` — one `Dockerfile.backend`, five processes, differing only in `command` — seven as of `D10-98`, which added `planner` and `expiry`. |
 | One `x-worker` anchor | Three near-identical service blocks are exactly where a `read_only: true` or a `no-new-privileges` line goes missing in one of them. `relay` was moved onto the anchor too, so all three worker processes are now defined by the same block. |
 | `healthcheck: disable: true` | **The defect this slice found.** `Dockerfile.backend`'s `HEALTHCHECK` probes `http://127.0.0.1:8000/health`, which only uvicorn answers. Every worker inherits it from the image, so `relay` has reported **unhealthy** for its entire life while working correctly — and any `depends_on: condition: service_healthy` pointing at it would have deadlocked. The API keeps its liveness probe; the workers switch theirs off explicitly rather than health-checking a port nothing listens on. |
 | `make logs` | It followed `api` only, and was missing from `make help` besides. With five services that hides a crash-looping worker from the first command an operator reaches for. It now follows everything; `make logs S=api` narrows it. |
@@ -6539,6 +6539,45 @@ failed** from the JUnit XML; `mypy app` -> no issues in 73 files; `ruff check` /
 `gitleaks` included. Not measured: MySQL, a live gateway, any LLM backend, and the Compose service
 itself — the YAML parses and the service is defined, but the image was not built and the planner
 never ran as a process.
+
+### The status enum had a member nothing could reach (`D10-98`)
+
+`ContractStatus.EXPIRED` has existed since the first migration with no code path producing it, so a
+contract whose term ran out stayed `active`: still counted as live, still chased for a reply, still
+not closed by anyone. The consequence that mattered was where messages are made.
+`build_notification` computes "today" in the customer's zone and `milestone_for` returns the
+tightest milestone already due — for a past end date, every one of them — so asking for a reminder
+on an expired contract *produced* one: a `T-14` row dated before the term ended, claimed on the next
+scheduler tick because its moment had passed. The message itself was the false statement. `D10-97`
+narrowed the planner so it stopped reaching those contracts, and recorded that closing them needed
+an expiry transition rather than a wider window.
+
+`backend/app/workers/expiry.py` is that transition. It leases contracts whose end date is at or
+before today in UTC — a deliberate superset — then decides each row on the customer's own calendar,
+closing only when the end date is strictly *before* today, so a contract ending today is still live
+today. The calendar-day rule now lives in one function, `contract_today`, called by both
+`build_notification` and the sweep, because two copies would have agreed on every test that
+exercised one path and disagreed across a date line. `responded` and `escalated` are never closed —
+a person has already engaged with those files — while a `do_not_contact` contract still expires,
+because the customer declined *messages*, not the record that their contract ended.
+
+Each closure writes one system-attributed audit row naming the status it replaced, the end date, and
+the zone that closed it, and never a contact value. Nothing downstream subscribes to a contract
+closing, so there is no outbox event to park. It is a Compose service (`expiry`) on the existing
+`x-worker` anchor, because a worker nothing starts is the hole this project keeps re-finding.
+
+`expired` is terminal — a corrected `end_date` does not reopen a file — and `renewed` is now the
+last member of the enum with no writer: it survives only in exclusions and display maps. That one is
+left open deliberately. A renewal happens outside this system and leaves no signal it could observe,
+so closing it needs a product decision, not another clock.
+
+Gates: `test_expiry.py` -> 35; full suite -> **1151 tests, 1136 passed, 15 skipped, 0 failed** from
+the JUnit XML (+35); `mypy app` -> no issues in 74 files; `ruff check` / `ruff format --check` ->
+clean over 133 files; `smoke_journey.py` -> 108 checks; `pre-commit run --all-files` -> 19 hooks, 18
+passed and 1 skipped; `pre-commit --hook-stage manual` -> 4 hooks passed, `gitleaks` included.
+`.env.example` gained this slice's settings **and** `D10-97`'s, which had been read by `Settings`
+and documented nowhere. Not measured: MySQL, a live gateway, any LLM backend, and the Compose
+service itself — the YAML parses, but the image was not built and the sweep never ran as a process.
 
 ## Non-negotiable reminders
 

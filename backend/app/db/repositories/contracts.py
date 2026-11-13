@@ -73,6 +73,24 @@ REMINDABLE_CONTRACT_STATUSES: tuple[ContractStatus, ...] = (
     ContractStatus.REMINDER_SENT,
 )
 
+#: Contract states whose term has run out without anything recording it.
+#:
+#: The same pair as :data:`REMINDABLE_CONTRACT_STATUSES`, and a separate name for the
+#: same reason that one is separate from the scanner's set: "may this contract
+#: receive a reminder?" and "may a passing end date close this contract?" are
+#: different questions that happen to share an answer today.
+#:
+#: ``responded`` is absent on purpose, even though its term still ends. A customer
+#: answering is a person engaging with the file, and replacing that with a
+#: clock-driven state would erase the reply while telling nobody anything the
+#: response itself did not already say. ``escalated`` is absent for the reason
+#: D10-20 records: the contract sits in that state because an operator resolved it by
+#: hand, and a clock that overwrote it would undo a person's decision.
+EXPIRABLE_CONTRACT_STATUSES: tuple[ContractStatus, ...] = (
+    ContractStatus.ACTIVE,
+    ContractStatus.REMINDER_SENT,
+)
+
 
 class ContractRepository(TenantScopedRepository[Contract]):
     """Tenant-scoped access to the contracts of one organisation."""
@@ -305,6 +323,69 @@ def claim_reminder_candidates(
             Contract.end_date.is_not(None),
             Contract.end_date >= earliest_end_date,
             Contract.end_date <= latest_end_date,
+            Contract.id > after_id,
+        )
+        .order_by(Contract.id)
+        .limit(limit)
+        .with_for_update(skip_locked=True, of=Contract)
+    )
+    return list(session.execute(statement).scalars())
+
+
+def claim_expired_candidates(
+    session: Session,
+    *,
+    on_or_before: date,
+    after_id: int = 0,
+    limit: int,
+) -> list[Contract]:
+    """Lease the contracts whose end date may already have passed, **unscoped**.
+
+    The tenant predicate is absent for the reason :func:`claim_reminder_candidates`
+    gives: the expiry sweep is a system actor with a database connection and a
+    clock, not a principal, so a tenant-scoped query could not see the contracts it
+    exists to close. The *write* it enables stays tenant-scoped — the sweep builds
+    its audit repository from each row's own ``tenant_id``.
+
+    ``on_or_before`` is a calendar date in **UTC**, and the predicate is deliberately
+    a superset. "Has the term ended for this customer?" cannot be answered from one
+    date for a book spanning every zone, so the sweep takes everything at or before
+    today in UTC and lets :func:`app.workers.dispatch.contract_today` decide per row.
+    A row this over-selects costs one do-nothing tick; a row it under-selects is a
+    contract that stays ``active`` after its term ended, which is the defect this
+    query exists to remove. The predicate is ``status IN (...) AND end_date <= ?`` —
+    the shape ``ix_contracts_scan`` indexes, so the query costs one index range.
+
+    Two deliberate absences:
+
+    ``do_not_contact``
+        **Not** filtered, unlike the reminder scan. A customer who asked us to stop
+        writing asked about *messages*; their contract still ends, and an
+        ``active`` contract nobody may contact is precisely the row that must not
+        outlive its end date. Filtering it here would leave every opted-out
+        contract permanently ``active`` — a worse lie than a stale status.
+
+    ``end_date IS NOT NULL``
+        Kept, because a contract with no end date cannot have outlived one. The
+        planner treats a dateless contract as unplannable; the sweep treats it as
+        unexpirable. Both leave it to review to supply the date (see
+        ``app.api.v1.review``).
+
+    ``FOR UPDATE SKIP LOCKED`` (a no-op on SQLite) so two sweep replicas lease
+    disjoint rows rather than both writing a status and an audit row for one
+    contract. ``after_id`` lets :meth:`app.workers.expiry.ExpirySweep.drain` prove
+    progress within a single tick: a row that is not yet expired *in its own zone*
+    keeps matching this predicate and would otherwise occupy the front of every
+    batch.
+    """
+    if limit <= 0:
+        return []
+    statement = (
+        select(Contract)
+        .where(
+            Contract.status.in_(EXPIRABLE_CONTRACT_STATUSES),
+            Contract.end_date.is_not(None),
+            Contract.end_date <= on_or_before,
             Contract.id > after_id,
         )
         .order_by(Contract.id)

@@ -329,6 +329,28 @@ SMS_INBOUND_TOTAL: Final = _declare(
     )
 )
 
+#: One tick of the expiry sweep, counted per contract it leased.
+#:
+#: ``outcome`` is ``expired`` (the term had ended on the customer's own calendar, so
+#: the status moved and an audit row was written), ``still_current`` (leased because
+#: the end date is at or before today *in UTC*, but not yet past on the customer's
+#: clock — the one-day over-selection the query accepts) or ``unknown_timezone`` (the
+#: zone could not be resolved, so the day the term ends cannot be computed and the
+#: row was left alone).
+#:
+#: Split this way because the three look identical from outside and mean opposite
+#: things: ``expired`` dominating is a backlog being cleared and then going quiet,
+#: ``still_current`` dominating is normal, and a standing ``unknown_timezone`` is a
+#: set of contracts that will never close — the only one of the three that needs
+#: someone to do something.
+CONTRACTS_EXPIRED_TOTAL: Final = _declare(
+    Counter(
+        "contracts_expired_total",
+        "Contracts the expiry sweep leased, by outcome.",
+        ("outcome",),
+    )
+)
+
 
 def render() -> str:
     """Return the whole registry in Prometheus text exposition format."""

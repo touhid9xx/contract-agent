@@ -374,6 +374,25 @@ class Settings(BaseSettings):
     #: rather than a day later.
     reminder_scan_poll_interval_seconds: float = Field(default=300.0, gt=0, le=3600)
 
+    # --- contract expiry --------------------------------------------------
+    # The other half of the same clock. The planner stops *planning* once a contract
+    # drops out of its window, but nothing moved the contract's status when its term
+    # ran out, so an expired file stayed ``active`` for ever: still countable on a
+    # dashboard about to be renewed, still scannable for escalation, still not
+    # contactable-but-not-refused. D10-98 closes that. These are its only knobs.
+    #: Contracts the sweep leases per query, the same size as the planner's. The work
+    #: per leased row is heavier here — every genuinely expired row costs a `status`
+    #: write and an audit row, where the planner's usually costs a read and a refusal —
+    #: but this still bounds one statement, not how long a lock is held.
+    expiry_sweep_batch_size: int = Field(default=50, gt=0, le=1000)
+    #: How long the sweep waits between passes. Hourly, not five-minutely: the event
+    #: it looks for happens once per contract, on a calendar day boundary, so a finer
+    #: interval would add a query per five minutes to notice something that can never
+    #: be more than an hour late. An hour also bounds the worst-case lag between a
+    #: contract's term ending and its status saying so, which is the number an
+    #: operator will ask about.
+    expiry_sweep_poll_interval_seconds: float = Field(default=3600.0, gt=0, le=86400)
+
     # --- smtp transport --------------------------------------------------
     # Read only when ``notification_transport == "smtp"``. ``smtp_host`` is the
     # one field with no usable default: every other setting below has a sane

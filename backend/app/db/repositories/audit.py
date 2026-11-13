@@ -132,6 +132,15 @@ ACTION_CONSENT_UPDATED = "contract.consent_updated"
 #: somebody who then asked us to stop — which is the fact a complaint turns on.
 ACTION_CONSENT_OPTED_OUT = "contract.opted_out"
 
+#: ``AuditLog.action`` for a contract being closed because its end date passed.
+#:
+#: System-attributed (:data:`ACTOR_WORKER`), and recorded even though nobody asked
+#: for it: the status is the one thing an operator reads to decide whether a file is
+#: still live, so a clock moving it has to be as traceable as a person moving it. The
+#: snapshot carries the status and the end date that closed it — never a contact
+#: value, which is what makes this row safe to keep forever.
+ACTION_CONTRACT_EXPIRED = "contract.expired"
+
 #: ``AuditLog.action`` for an operator account being created by ``create-admin``.
 ACTION_USER_CREATED = "user.created"
 
