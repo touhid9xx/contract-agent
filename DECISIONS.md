@@ -7044,6 +7044,10 @@ for the 0.0.4 text format: no third-party code, no background thread, no network
 sits outside `/api/v1` beside `/health` (a scrape path is an infrastructure contract, not a versioned
 product API), is unauthenticated like every Prometheus target, and is hidden from OpenAPI.
 
+**Amended by `D10-107`, not deleted:** at the time this route was the only target, and it still
+serves the API's own registry. Six workers now serve theirs too, on their own published ports,
+because the counters they write live in a process this route never reads.
+
 The label rule is the security decision, not a formatting preference. `LABEL_VALUE_RE` is
 `[a-z][a-z0-9_.-]{0,31}`: no `@`, no `+`, no whitespace, and a leading letter is required, so an
 e-mail, a phone number, a date or a bare amount cannot be expressed as a label *at all*. A violation
@@ -7059,11 +7063,17 @@ ten so they read `0` forever would be the placeholder logic the spec forbids in 
 `escalations_total`, `agent_decisions_total`, `voice_calls_total`, `ollama_requests_total`,
 `ollama_latency_seconds`, `agent_schema_repair_total`, `ollama_circuit_breaker_state`,
 `kafka_consumer_lag`, `worker_replicas`, `outbox_pending_count` and `redis_connections_active` are
-absent rather than hollow. Consequently no alert rule can be written yet, and `extractions_total`
-records only `status="ok"` — extractor failures still propagate as exceptions, so the
-`HighExtractionFailureRate` rule would never fire. `notifications_sent_total` counts *attempts* by
-this attempt's outcome: a quiet-hours deferral is not counted, so `sent + failed` is not "attempts".
+absent rather than hollow. ~~Consequently no alert rule can be written yet, and~~ **amended by
+`D10-107`, not deleted:** `D10-91` did write `EscalationEmailFailed:
+increase(escalation_email_failed_total[1h]) > 0`, and that rule could not fire at all until a
+target exposed the series. What was missing was a listener rather than a rule, and the scanner now
+serves one. `extractions_total` records only `status="ok"` — extractor failures still propagate as
+exceptions, so the `HighExtractionFailureRate` rule would never fire. `notifications_sent_total`
+counts *attempts* by this attempt's outcome: a quiet-hours deferral is not counted, so `sent +
+failed` is not "attempts".
 The registry is per-process; the `worker_replicas` gauge cannot be derived from inside one replica.
+**`D10-107` acted on this sentence:** each worker serves its own copy rather than the API summing
+across processes, so the boundary is visible on the wire instead of only recorded here.
 No Prometheus rules, Grafana dashboards, alert routing, or OpenTelemetry/Jaeger traces are added
 here either.
 
@@ -8229,3 +8239,84 @@ exists for, and it still has no compose service and has never been run against a
 (`D7-03`). An address is read to the end of its line, so a trailing clause becomes part of the
 value. A postal address is now read and reviewable; it is still not a delivery channel, and neither
 dispatch nor escalation consults it.
+
+### D10-107 — Each worker serves its own registry, because a counter nobody scrapes is not a zero
+
+**Context.** `D10-90`'s registry is process-local, and `GET /metrics` was served by the `api`
+container alone. The scanner increments `escalations_total` and `escalation_email_failed_total`,
+the planner `reminder_plans_total`, the sweep `contracts_expired_total`, the scheduler its share of
+`notifications_sent_total`, and `cli extract` all of `extractions_total` — a process that exits
+before anything could scrape it. None of those series reached any target, so what a scrape would
+have said about them was not `0` but nothing at all. `D10-91` wrote
+`EscalationEmailFailed: increase(escalation_email_failed_total[1h]) > 0` against a series no
+scrape could see, and a rule over an absent series cannot fire: the alert that slice exists to send
+was unreachable by construction rather than by misconfiguration.
+
+**Decision.** `app/workers/metrics_server.py` serves `metrics.render()` — the same bytes the API
+serves, from the same registry — over a stdlib `ThreadingHTTPServer`, and each of the six workers
+wraps its polling loop in `publish_metrics(settings, worker=<name>)`: `outbox_relay`,
+`notification_scheduler`, `escalation_scanner`, `attention_watch`, `reminder_planner`, `expiry`. No
+dependency is added, for `D10-90`'s reason.
+
+Four properties are deliberate:
+
+- **The bind is synchronous, inside `start`.** A taken port raises `MetricsServerError` naming
+  `WORKER_METRICS_PORT` and the worker, at boot, in the foreground. Binding inside the background
+  thread would move the same failure somewhere nothing watches it, and the deployment would look
+  healthy while serving nothing.
+- **`SO_REUSEADDR` is off on Windows.** Measured: `HTTPServer` sets it, and with it a *second* bind
+  of the same port succeeds on the platform this repository is developed on, so "a taken port is
+  fatal" was false there until the subclass cleared it.
+- **The access line goes to structlog, not to `stderr`.** The base class writes the raw request
+  line straight to `sys.stderr`, past every redaction rule in `app/core/logging.py`. The override
+  logs one `worker_metrics_request` event at `debug` — one line per scrape, which is noise at
+  `info`.
+- **The `Server` header carries no interpreter version, and no trailing space either.** The base
+  composes `server_version + " " + sys_version`, so the usual spelling (`sys_version = ""`) still
+  leaves the space; `version_string` is overridden instead.
+
+It deliberately does not aggregate, and is not a liveness signal. Exposition prints only label sets
+that were recorded, so a scrape of the relay declares `escalations_total` and emits no sample for
+it: an absent series, not a zero, and Prometheus treats those differently — `increase()` over an
+absent series yields no data rather than `0`. Point rules at the worker that owns the family, which
+is why the *published* ports differ per worker (9101-9106 by default) while every container listens
+on the same number. The listener also answers `200` while the tick it wraps is wedged on a dead
+database, so it must never be used as readiness; `/health` stays the API's.
+
+`WORKER_METRICS_HOST` defaults to `127.0.0.1` and `WORKER_METRICS_PORT` to `9101`, with `0`
+switching the listener off, so a developer running six processes by hand binds nothing until they
+ask. A blank host is refused at boot, because that is almost always an env var the operator
+believes is set. `docker-compose.yml` sets `WORKER_METRICS_HOST: 0.0.0.0` in the `x-worker` anchor
+and publishes one loopback port per service — without it the feature ships a listener no container
+can reach. The two `--once`-capable workers serve on the polling path only, so a cron run does not
+fight a long-running planner for the port.
+
+**Gates.** `backend/tests/test_metrics_server.py` (24 tests) pins the body byte-identical to
+`render()` from the live registry, `200` with `metrics.CONTENT_TYPE`, `/metrics?x=1` still routing,
+`404` with a fixed body on any other path, `501` on `POST` from the base class, `port=0` yielding
+`None` and starting no thread, a second bind raising, `stop()` releasing the port for a plain
+`bind()`, `start` refusing `0`/`-1`/`65536` by setting name, the refusal naming the worker, a blank
+host refused when `Settings` loads, the header carrying no interpreter version, the access line
+reaching the logger and never `stderr`, and the six-worker wiring — an AST check over each `main`
+that also pins the label, plus a check that importing a worker opens no listener.
+
+Measured on this tree: `pytest` collected 1204 tests — 1189 passed, 15 skipped, 0 failed, 0 errors,
+from the JUnit XML — up exactly 24. `ruff check` passes, `ruff format --check` finds 135 files
+already formatted, `mypy` is clean in 75 source files, `bandit` is clean beyond the annotated
+`nosec` on `config.py:80`, and `evaluate-extraction --golden tests/golden/extraction/manifest.json`
+exits 0 at pooled F1 0.974.
+
+**Proved load-bearing, twice.** Deleting `expiry`'s `with publish_metrics(...)` failed exactly one
+test — its own parametrised case — and retyping `outbox_relay`'s label to `outbox` failed exactly
+one, its own. Both mutants were reverted. The label half matters because copying a worker's
+`publish_metrics` line into the next worker leaves a series attributed to the wrong process.
+
+**Limits.** Nothing here scraped a container: the compose ports were parsed from the YAML and
+checked service by service, but no Prometheus, exporter or `curl` inside a container ever reached
+one. The listener says nothing about the loop it wraps. Registries are per-replica, so
+`notifications_sent_total` is written by both the API and the scheduler and a single-target scrape
+undercounts it — visibly, which is the point. `attention_watch` and `outbox_relay` write no metric
+of their own, so two of the six serve a declared-but-empty registry: a listener waiting for a first
+counter, not a number. Nothing tests whether a Prometheus rule fires; absence-versus-zero is
+asserted at the exposition level only, and no scrape configuration, dashboard or alert route is
+added — the six ports exist for an operator who configures them.

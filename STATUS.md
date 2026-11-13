@@ -1419,7 +1419,7 @@ that criterion.
 | Backend | `app/core/config.py` fail-fast settings, `app/core/logging.py` structlog + PII redaction, `app/core/middleware.py` request/trace IDs, `app/main.py` factory + error envelope, `/api/v1/health` |
 | Frontend | Next.js 16 + Tailwind 4 + TanStack Query + Zustand + next-themes + next-intl (en, bn), ESLint flat config, Prettier, `[locale]` routing |
 | Scripts | `scripts/bootstrap.mjs` (one-command setup), `scripts/run-frontend-check.mjs` |
-| Env | `.env.example` documents every setting read by `Settings` |
+| Env | `.env.example` ~~documents every setting read by `Settings`~~ — **amended by `D10-107`:** it documents the variables an operator sets, and not every field `Settings` reads. The `AGENT_*` group, the `DB_*` pool group and the `OUTBOX_*` group are read from their defaults and never listed, deliberately: the first describes a backend the README says is off (`D7-03`), the other two are internal. The claim was read as true for several slices because nobody compared the two lists |
 
 ## F2 — MySQL 8 + SQLAlchemy 2.0 + Alembic + outbox relay ✅
 
@@ -6877,6 +6877,46 @@ typecheck/eslint/vitest/production build, and the `CI gate` that requires every 
 to have succeeded. The 1180 tests counted above are again two suites: CI runs
 `-m "not integration"` and `-m integration` as separate jobs, so no single job's number
 matches this record — `D10-103` has the sentence that explains the difference.
+
+### P2-B (part 3) — every worker serves its own metrics registry (`D10-107`)
+
+`D10-90`'s registry is process-local and `/metrics` was served only by the `api` container, so the
+counters the workers write were scraped by nothing. The four that mattered — `escalations_total`
+and `escalation_email_failed_total` in the scanner, `reminder_plans_total` in the planner,
+`contracts_expired_total` in the sweep, and the scheduler's share of `notifications_sent_total` —
+had no target at all, and `extractions_total` is written by `cli extract`, which exits before
+anything could scrape it. So `D10-91`'s `EscalationEmailFailed` rule could never have fired: a
+rule over an absent series does not read `0`, it reads nothing.
+
+`app/workers/metrics_server.py` serves `metrics.render()` over a stdlib `ThreadingHTTPServer`, and
+all six workers wrap their polling loop in `publish_metrics(settings, worker=<name>)`. The bind is
+synchronous, so a taken port stops the worker at boot naming `WORKER_METRICS_PORT` instead of
+failing in an unwatched thread; `SO_REUSEADDR` is cleared on Windows, where it makes a *second*
+bind succeed and would have made that promise false; the access line goes to structlog rather than
+straight to `stderr`, past every redaction rule; and the `Server` header carries no interpreter
+version. `WORKER_METRICS_HOST` defaults to loopback and `WORKER_METRICS_PORT` to `9101`, with `0`
+off. Compose overrides the host to `0.0.0.0` and publishes one port per worker (9101-9106);
+without that the listener is reachable by nothing.
+
+It deliberately does not aggregate. A scrape of the relay declares `escalations_total` and emits no
+sample for it — an absent series rather than a zero, which Prometheus treats differently — so
+rules belong on the worker that owns the family. The listener is also not a liveness signal: a
+worker wedged on a dead database still answers `200`. Each replica keeps its own registry, so
+`notifications_sent_total` is complete only when both the API's target and the scheduler's are
+scraped.
+
+Gates: **measured on this tree.** `pytest` collected 1204 tests — 1189 passed, 15 skipped, 0
+failed, 0 errors, from the JUnit XML — up exactly 24, all in `tests/test_metrics_server.py`.
+`ruff check` passes, `ruff format --check` finds 135 files already formatted, `mypy` is clean in 75
+files, `bandit` is clean beyond the annotated `nosec` on `config.py:80`, and
+`evaluate-extraction --golden tests/golden/extraction/manifest.json` exits 0 at pooled F1 0.974.
+Two mutants proved the wiring is load-bearing: removing one worker's `publish_metrics` call, and
+retyping another's label, each failed exactly one test and nothing else.
+
+Still out of reach: no container was scraped and no Prometheus rule was run, so the six ports are
+verified by parsing the compose file rather than by a metric arriving anywhere. `attention_watch`
+and `outbox_relay` write no metric of their own, so two of the six serve a declared-but-empty
+registry — a listener waiting for a first counter, not a number.
 
 ## Non-negotiable reminders
 
