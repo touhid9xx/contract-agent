@@ -6991,11 +6991,12 @@ clean in 75, `bandit` is clean beyond the annotated `nosec` on `config.py:80`, a
 `evaluate-extraction --golden tests/golden/extraction/manifest.json` exits 0 at pooled F1 0.974.
 
 Limits: one worker, not six, so the compose port mapping is still verified by parsing the file
-rather than by a metric arriving in a container. `escalation_email_failed_total` — the family
+rather than by a metric arriving in a container. ~~`escalation_email_failed_total` — the family
 `D10-91`'s rule actually names — never fired, because that needs the scanner plus a relay that
-refuses. Nothing here covers a dashboard, alert routing or retention. `free_port()` is racy by
-construction, and only Windows was measured locally, so the new CI step is this script's first
-Linux run.
+refuses.~~ **`D10-109` built exactly that, and the rule still did not fire:** the counter carried no
+sample until its first increment, so `increase()` had no baseline to subtract. Nothing here covers a
+dashboard, alert routing or retention. `free_port()` is racy by construction, and only Windows was
+measured locally, so the new CI step is this script's first Linux run.
 
 The slice landed as `f1ec60c`, with this record as `b83aaa1`, and CI run
 `43513590120` is green on it: seven of seven jobs, read from the run's own job list rather than
@@ -7003,8 +7004,77 @@ inferred from the names. Its `backend tests (pytest, sqlite)` job also lists a
 `smoke worker metrics (real worker process, real socket)` step that succeeded, which is the
 evidence for the last line above: the script has now run on Ubuntu 3.13 as well as on Windows,
 so the platform limit that paragraph left open is measured rather than argued. What is not
-covered by that run is the rest of the limits — the container port mapping, the alert-rule
-family, and the dashboards are still open, exactly as listed.
+covered by that run is the rest of the limits — the container port mapping, ~~the alert-rule
+family,~~ **the alert-rule family, which `D10-109` measured for a refused connection and which a
+bounced one still escapes,** and the dashboards are still open, exactly as listed.
+
+### A failure counter with no baseline could not fire its rule (`D10-109`)
+
+`D10-108` left one residue: `escalation_email_failed_total` — the family `D10-91`'s rule names — had
+never fired, "and that needs the scanner plus a refusing relay". The refusal path had been proven
+only against a `RefusingAlerter` double that raises when asked, so "the alert works" depended on a
+stand-in for the relay. This slice built the real one: a scanner subprocess, a temporary SQLite
+database holding one contract silent past `ESCALATION_NO_RESPONSE_DAYS`, and
+`NOTIFICATION_TRANSPORT=smtp` aimed at a loopback port nothing listens on.
+
+`backend/tests/smoke_escalation_alert.py` does that and reads the result over the socket from the
+scanner's own listener. Eight steps pass: a process that never failed an alert reports the family
+at `0`; a labelled family with no outcome written is absent rather than zero; the contract is
+silent past the window; the refusal was counted on the family the rule reads;
+`escalations_total{status="opened"}` still incremented; the refusal was logged as
+`escalation_alert_failed`, not only counted; the escalation survived the dead relay; and the port
+was released when the process died.
+
+The measurement that mattered was Prometheus reading it, and it found the rule dead:
+
+```
+escalation_email_failed_total                    1
+increase(escalation_email_failed_total[1h])      0
+alert EscalationEmailFailed state                <absent>
+```
+
+One escalation was raised, the operator was never told, and the rule written to catch exactly that
+reported health. The cause was in `metrics.py`, not in the scanner: `Counter.render()` walks the
+label keys it has recorded, and a counter declaring no label names has recorded none until its first
+`.inc()`, so a labelless family was declared by HELP and TYPE and carried **no sample**. A rule over
+an absent series has nothing to compare, and a series appearing at `1` with no earlier sample is not
+a small baseline but a missing one.
+
+`Counter` now seeds `_values[()] = 0.0` when it declares no label names, and `reset()` re-seeds it
+so clearing cannot reopen the gap. The blast radius is one family: every other counter here carries
+labels and keeps the absent-versus-zero distinction `D10-107` and `D10-108` rest on. The same
+harness then read `1.06062` and `firing`.
+
+The journey had to be rewritten, because "the family appeared" stopped being a signal — with a
+baseline it is present before any failure, and asserting a constant `0` would pass before a refusal
+happened. It now runs a quiet worker first, its contract contacted a day ago so nothing is due,
+asserting the family present at `0`, then the refusing worker asserting `1`; the wait gates on the
+value rather than on presence. Building that phase caught a bug of my own: `build_database`'s
+signature changed while its body still read the module constant, so the "quiet" contract was 30 days
+stale and the first assertion failed for the wrong reason.
+
+Four of the five new unit tests are load-bearing: run against `787fe38`'s `metrics.py` in a
+throwaway worktree, they fail. The fifth calls `inc(amount=0)` first and pins that a zero increment
+records nothing, so it passes on both trees and is kept for that.
+
+Gates, measured on this tree: `pytest` collected **1209** against **1204** on `787fe38` — 1194
+passed, 15 skipped, 0 failed, 0 errors, from the JUnit XML — and the difference is exactly the five
+tests above, so the smoke script is still demonstrably not collected. Those figures are the whole
+suite; the command the workflow runs, `-m "not integration"`, deselects 19 and reports 1188 passed
+and 2 skipped against the same 1209 collected, so the six marker-carrying tests that pass here are
+absent from CI's count. `ruff check` passes, `ruff format --check backend` finds 137 files against
+136 on `787fe38`, `mypy` is clean in 75, `bandit` is clean beyond the annotated `nosec` on
+`config.py:80`, and `evaluate-extraction --golden tests/golden/extraction/manifest.json` exits 0 at
+pooled F1 0.974.
+
+Limits: the before/after pair lives in `.agent-cache/prove_d109_rule.py`, which is gitignored, so it
+is recorded here and not reproducible from the repository; the committed script supplies the seed
+and the process control, the container orchestration is scratch. Everything above was measured on
+Windows with Python 3.14.7, so CI is the first Linux run. A counter reporting `0` from declaration
+and a counter never written are no longer distinguishable at the scrape, which is the cost of making
+the rule able to fire. The relay still accepts-then-bounces undetected, so only a refused connection
+is counted: one failure mode of two. Five of the six workers remain unscraped by anything but the
+compose file.
 
 ## Non-negotiable reminders
 

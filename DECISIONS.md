@@ -7066,8 +7066,12 @@ ten so they read `0` forever would be the placeholder logic the spec forbids in 
 absent rather than hollow. ~~Consequently no alert rule can be written yet, and~~ **amended by
 `D10-107`, not deleted:** `D10-91` did write `EscalationEmailFailed:
 increase(escalation_email_failed_total[1h]) > 0`, and that rule could not fire at all until a
-target exposed the series. What was missing was a listener rather than a rule, and the scanner now
-serves one. `extractions_total` records only `status="ok"` — extractor failures still propagate as
+target exposed the series. ~~What was missing was a listener rather than a rule, and the scanner
+now serves one.~~ **`D10-109` amended the diagnosis:** the listener was necessary and not
+sufficient. With a target serving the series the rule still did not fire, because a counter that
+declares no label names carried no sample until its first increment; the counter now reports `0`
+from declaration and the same expression reaches `firing`. `extractions_total` records only
+`status="ok"` — extractor failures still propagate as
 exceptions, so the `HighExtractionFailureRate` rule would never fire. `notifications_sent_total`
 counts *attempts* by this attempt's outcome: a quiet-hours deferral is not counted, so `sent +
 failed` is not "attempts".
@@ -7141,6 +7145,10 @@ scanner replicas each build their own alerter and each mail what their own pass 
 quiet pass telling nobody, the refusing-relay case (escalation survives, `run_once` still reports
 `opened=1`, counter advances), an unconfigured address building no alerter, the message naming ids
 and containing no customer value, the UTC deadline rendering, and both start-up refusals.
+**`D10-109` amended what these tests can claim:** every one of them hands the scanner a refusing
+*double*, so they prove the increment and never the rule. Measured against a real refusing relay
+and a real Prometheus, `increase(escalation_email_failed_total[1h]) > 0` did not fire — the alert
+stayed `<absent>` — until `D10-109` gave the counter a zero baseline.
 `python -m pytest tests/test_escalation_alerts.py tests/test_escalation_scanner.py
 tests/test_escalations.py` -> 91 passed; full suite -> 958 passed, 15 skipped; `python -m mypy app`
 -> no issues in 69 files.
@@ -8400,13 +8408,103 @@ XML. `ruff check` passes, `ruff format --check` finds 136 files formatted, `mypy
 
 **Limits.** One worker, not six: the compose port mapping is still verified by parsing the file, so
 this journey proves the process, the environment variable and the sample, not the container. The
-rule fired against a generated config, not a shipped one, and `D10-91`'s own series
-(`escalation_email_failed_total`) never fired — that needs the scanner plus a refusing relay.
-Nothing here covers a dashboard, routing or retention. `free_port()` is racy by construction, and
-only Windows was measured here; CI is the first Linux run.
+rule fired against a generated config, not a shipped one, and ~~`D10-91`'s own series
+(`escalation_email_failed_total`) never fired — that needs the scanner plus a refusing relay.~~
+**`D10-109` did that work, and found the rule dead for a second reason:** it built the scanner plus
+the refusing relay, and the rule still did not fire, because the counter carried no sample until
+its first increment. Nothing here covers a dashboard, routing or retention. `free_port()` is racy
+by construction, and only Windows was measured here; CI is the first Linux run.
 
 **Landed.** `f1ec60c`, with this entry as `b83aaa1`. CI run `43513590120` is green on the tip,
 seven of seven jobs, and its `backend tests (pytest, sqlite)` job lists the
 `smoke worker metrics (real worker process, real socket)` step as succeeded — so this slice has
 now started the worker and scraped it on Ubuntu 3.13 as well, and the last clause of the Limits
 paragraph above is measured rather than open.
+
+### D10-109 — A failure counter with no baseline cannot fire the rule written for it
+
+**Context.** `D10-108` closed with the one residue it could not reach:
+`escalation_email_failed_total` — the family `D10-91` wrote `EscalationEmailFailed:
+increase(...[1h]) > 0` against — had never fired, "and that needs the scanner plus a refusing
+relay". The refusal path had been proven only against a `RefusingAlerter` **double** that raises
+when asked. Between that double and a real refusal stood the real sender, a real socket, a real
+process and the registry it serves; none of the four had been measured together, so "the alert rule
+works" rested on a stand-in.
+
+**Decision.** `backend/tests/smoke_escalation_alert.py` starts `python -m
+app.workers.escalation_scanner` as a subprocess against a temporary SQLite database holding one
+contract silent for longer than `ESCALATION_NO_RESPONSE_DAYS`, with `NOTIFICATION_TRANSPORT=smtp`
+aimed at a loopback port nothing listens on. The kernel refuses the connection, `SmtpSender` turns
+that into `SenderError`, the scanner's `_alert` counts it, and the journey reads the count back
+**over the wire** from the scanner's own listener. It also pins that the refusal was logged and not
+only counted, that `escalations_total{status="opened"}` still incremented, that the escalation row
+survived the dead relay, and that the port is released when the process dies. Like
+`smoke_journey.py` it is a script rather than a collected test, for the same reason: it spawns an
+interpreter and binds sockets.
+
+**Running it found the rule dead, not the worker.** With `prom/prometheus:v2.55.0` scraping that
+listener, the counter read `1` and the expression `D10-91` wrote for it did not fire:
+
+```
+escalation_email_failed_total                    1
+increase(escalation_email_failed_total[1h])      0
+alert EscalationEmailFailed state                <absent>
+```
+
+One escalation was raised, the operator was never told, and the rule written to catch exactly that
+reported health. The cause is one line of `metrics.py`: `Counter.render()` walks the label keys it
+has recorded, and a counter that declares no label names has recorded none until its first `.inc()`.
+So a labelless family is declared by HELP and TYPE and carries **no sample**, and a rule over an
+absent series has nothing to compare — Prometheus saw the series appear at `1` with no earlier
+sample, which is not a small baseline but a missing one.
+
+**The fix is a seeded zero.** `Counter.__init__` records `_values[()] = 0.0` when the counter
+declares no label names, so it reports `0` from declaration; `reset()` re-seeds it, because clearing
+would otherwise reopen the gap and let the guard tests pass or fail by ordering. The blast radius is
+one family: every other counter in the app carries labels and keeps the absent-versus-zero
+distinction `D10-107` and `D10-108` rest on. Re-running the harness:
+
+```
+escalation_email_failed_total                    1
+increase(escalation_email_failed_total[1h])      1.06062
+alert EscalationEmailFailed state                firing
+```
+
+**The journey had to change, because "it appeared" stopped being a signal.** With the baseline the
+family is present before any failure, so waiting for it to arrive would return immediately and
+asserting a constant `0` would pass before a refusal happened. The script now runs two phases on one
+database: a **quiet** worker, whose contract was contacted a day ago so nothing is due, must report
+the family present at `0`; then the refusing worker must report `1`. The wait condition gates on the
+value rather than on presence. Building that phase also surfaced a bug of my own —
+`build_database`'s signature changed while its body still read the module constant, so the "quiet"
+contract was silently 30 days stale and the first assertion failed for the wrong reason.
+
+**Four of the five new unit tests are load-bearing.** Run against `787fe38`'s `metrics.py`, with the
+fix reverted in a throwaway worktree, exactly these fail:
+`test_an_unlabelled_counter_reports_zero_before_it_is_incremented`,
+`test_only_the_unlabelled_counter_reports_before_it_is_written`,
+`test_reset_restores_the_baseline_rather_than_removing_it` and
+`test_a_refused_increment_leaves_the_baseline_in_place`. The fifth,
+`test_the_baseline_is_a_zero_and_not_a_recorded_increment`, passes on both trees because it calls
+`inc(amount=0)` first: it pins that a zero increment records nothing, not the seed, and is kept for
+that.
+
+**Gates.** `pytest` collects **1209** against **1204** on `787fe38`, the difference being exactly
+the five tests above — the smoke script is not collected, which that arithmetic confirms — and the
+run is 1194 passed, 15 skipped, 0 failed, 0 errors from the JUnit XML. Those figures are the whole
+suite; the workflow runs `-m "not integration"`, which deselects 19 and reports 1188 passed and 2
+skipped against the same 1209 collected, so the six marker-carrying tests that pass here are absent
+from CI's count. `ruff check` passes, `ruff format --check backend` reports 137 files against 136 on
+`787fe38` (the new script), `mypy app` is clean in 75 source files,
+`bandit -c pyproject.toml -r backend/app -q` exits 0, and
+`evaluate-extraction --golden tests/golden/extraction/manifest.json` exits 0 at pooled F1 0.974.
+
+**Limits.** The before/after pair lives in `.agent-cache/prove_d109_rule.py`, which is gitignored,
+so it is recorded here and not reproducible from the repository; the committed script supplies the
+seed and the process control, the container orchestration is scratch. Everything above was measured
+on Windows with Python 3.14.7, so CI is the first Linux run of the two-phase script. A counter
+reporting `0` from declaration and a counter never written are no longer distinguishable at the
+scrape, which is the cost of making the rule able to fire at all. The relay still
+accepts-then-bounces undetected, so only a refused connection is counted: this proves the rule for
+one failure mode of two, and five of the six workers remain unscraped by anything but the compose
+file.
