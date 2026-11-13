@@ -67,6 +67,7 @@ from app.workers.dispatch import (
     dispatch_notification,
     recipient_for,
 )
+from app.workers.metrics_server import publish_metrics
 from app.workers.senders import build_sender
 
 log = structlog.get_logger(__name__)
@@ -346,7 +347,11 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _request_stop)
 
     try:
-        scheduler.run_forever(stop)
+        # The clock sends most notifications, not a client, so ``notifications_sent``
+        # is written here far more often than in the API process. Serving this
+        # process's registry is what makes that half of the series visible.
+        with publish_metrics(settings, worker="notification_scheduler"):
+            scheduler.run_forever(stop)
     finally:
         engine.dispose()
     return 0

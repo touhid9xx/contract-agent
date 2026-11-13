@@ -67,6 +67,7 @@ from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.db.session import build_engine, build_session_factory, session_scope
 from app.workers.attention_alerts import AttentionAlerter, build_attention_alerter
+from app.workers.metrics_server import publish_metrics
 
 log = structlog.get_logger(__name__)
 
@@ -239,7 +240,12 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _request_stop)
 
     try:
-        watch.run_forever(stop)
+        # This watch increments no counter of its own, so its scrape is mostly
+        # zeros. It is served anyway because "this process is reachable" is the
+        # same fact for all six workers, and a worker with no listener is the
+        # asymmetry that hid the others.
+        with publish_metrics(settings, worker="attention_watch"):
+            watch.run_forever(stop)
     finally:
         engine.dispose()
     return 0

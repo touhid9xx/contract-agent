@@ -73,6 +73,7 @@ from app.db.repositories.contracts import (
 )
 from app.db.session import build_engine, build_session_factory, session_scope
 from app.workers.dispatch import DispatchRefusedError, contract_today
+from app.workers.metrics_server import publish_metrics
 
 log = structlog.get_logger(__name__)
 
@@ -401,7 +402,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         # transaction, so "finish" means "commit or roll back", never "half wrote".
         signal.signal(signal.SIGINT, _request_stop)
         signal.signal(signal.SIGTERM, _request_stop)
-        sweep.run_forever(stop)
+        # Served on the polling path only: a ``--once`` run finishes in seconds and
+        # must not fight a long-running sweep for the same port.
+        with publish_metrics(settings, worker="expiry"):
+            sweep.run_forever(stop)
         return 0
     finally:
         engine.dispose()

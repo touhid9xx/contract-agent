@@ -480,6 +480,24 @@ class Settings(BaseSettings):
     # --- http ------------------------------------------------------------
     cors_origins: str = "http://localhost:3000"
 
+    # --- worker metrics --------------------------------------------------
+    #: Where a worker's own ``/metrics`` listener binds. The API always serves
+    #: ``/metrics``; every other process holds a private copy of the same registry
+    #: (see :mod:`app.workers.metrics_server`), and this is the address it
+    #: publishes that copy on.
+    #:
+    #: Loopback by default, because a listener nobody asked for should not be
+    #: reachable from off the host. The Compose file sets ``0.0.0.0`` for the
+    #: workers: inside a container the container is the network boundary, and a
+    #: scraper on the Compose network cannot reach another container's loopback.
+    worker_metrics_host: str = "127.0.0.1"
+    #: ``0`` switches the listener off — a deployment that scrapes nothing should
+    #: not open a port, and that was the state of *every* worker before D10-107.
+    #: Any other value is the port to bind. Workers sharing one host need distinct
+    #: values; in Compose each worker has its own container, so the single default
+    #: serves the whole stack and only the published host ports differ.
+    worker_metrics_port: int = Field(default=9101, ge=0, le=65535)
+
     # --- validators ------------------------------------------------------
     @field_validator("log_level")
     @classmethod
@@ -489,6 +507,25 @@ class Settings(BaseSettings):
             allowed = ", ".join(sorted(_VALID_LOG_LEVELS))
             raise ValueError(f"LOG_LEVEL must be one of {allowed}; got {value!r}")
         return level
+
+    @field_validator("worker_metrics_host")
+    @classmethod
+    def _require_a_bind_host(cls, value: str) -> str:
+        """Refuse a blank bind address; absence is expressed by the port being 0.
+
+        ``WORKER_METRICS_HOST`` set to nothing almost always means an environment
+        variable the operator believes holds an address. Binding the empty string
+        fails at the socket instead, inside a worker, after it has logged its
+        start-up lines — so the refusal is here, where it can name the variable.
+        """
+        host = value.strip()
+        if not host:
+            raise ValueError(
+                "WORKER_METRICS_HOST is set but empty; give an address to bind "
+                "(127.0.0.1, or 0.0.0.0 inside a container), or set "
+                "WORKER_METRICS_PORT=0 to switch the worker metrics listener off."
+            )
+        return host
 
     @field_validator("contact_blind_index_key")
     @classmethod

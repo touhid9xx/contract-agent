@@ -95,6 +95,7 @@ from app.db.repositories.notifications import NotificationRepository
 from app.db.session import build_engine, build_session_factory, session_scope
 from app.workers.decision import DecisionRefusedError, build_decision
 from app.workers.dispatch import DEFAULT_MILESTONE_DAYS, build_notification
+from app.workers.metrics_server import publish_metrics
 
 log = structlog.get_logger(__name__)
 
@@ -432,7 +433,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         # transaction, so "finish" means "commit or roll back", never "half wrote".
         signal.signal(signal.SIGINT, _request_stop)
         signal.signal(signal.SIGTERM, _request_stop)
-        planner.run_forever(stop)
+        # Served on the polling path only: a ``--once`` run finishes in seconds and
+        # must not fight a long-running planner for the same port.
+        with publish_metrics(settings, worker="reminder_planner"):
+            planner.run_forever(stop)
         return 0
     finally:
         engine.dispose()

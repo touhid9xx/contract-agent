@@ -81,6 +81,7 @@ from app.workers.escalation_alerts import (
     RaisedEscalation,
     build_escalation_alerter,
 )
+from app.workers.metrics_server import publish_metrics
 
 log = structlog.get_logger(__name__)
 
@@ -345,7 +346,11 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _request_stop)
 
     try:
-        scanner.run_forever(stop)
+        # Both escalation series are written only by this process, so a scraper
+        # that never reaches it sees no escalations at all — including the failure
+        # counter whose alert rule D10-91 promised would work unmodified.
+        with publish_metrics(settings, worker="escalation_scanner"):
+            scanner.run_forever(stop)
     finally:
         engine.dispose()
     return 0

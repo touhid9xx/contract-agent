@@ -47,6 +47,25 @@ x-worker: &worker
     # what makes it writable at all: `read_only: true` means an unmounted store
     # path fails at the first upload, not at boot.
     DOCUMENT_STORE_PATH: ${DOCUMENT_STORE_PATH:-/var/lib/contract-agent/documents}
+    # D10-107. Every process holds a private copy of the metrics registry, so the
+    # API's /metrics answers with the API's counters and nothing else: the series
+    # only a worker writes (escalations_total, reminder_plans_total,
+    # contracts_expired_total) were scraped by no target at all. Each worker now
+    # serves its own copy on WORKER_METRICS_PORT.
+    #
+    # 0.0.0.0 here, against the loopback default in Settings, for the same reason
+    # the healthcheck below is switched off: inside a container the container is
+    # the network boundary, and a scraper on the Compose network cannot reach
+    # another container's loopback. The host side of each mapping is bound to
+    # 127.0.0.1, so nothing is published beyond this machine.
+    WORKER_METRICS_HOST: 0.0.0.0
+    # Pinned, not read from .env, so the published ports stay exact: every worker
+    # container listens on 9101 and only the HOST port differs. Reading it from
+    # .env would let a host-side edit desynchronise the mapping, and a `0` there
+    # (listener off) would make `up` fail on an unparseable port instead of
+    # closing it. This variable still governs a worker run by hand, where six
+    # processes on one loopback do need distinct values.
+    WORKER_METRICS_PORT: 9101
   volumes:
     - documents:/var/lib/contract-agent/documents
   depends_on:
@@ -145,6 +164,13 @@ services:
       - python
       - -m
       - app.workers.outbox_relay
+    # One host port per worker, because all six containers listen on 9101 inside
+    # their own network namespace and one machine publishes all of them. The relay
+    # writes no family of its own — its registry holds the API's zeros — so a
+    # scrape here answers "is this listener alive", not "is the relay working".
+    # `outbox_pending_count` is still absent (`D10-90`).
+    ports:
+      - "127.0.0.1:${RELAY_METRICS_PORT:-9101}:9101"
 
   scheduler:
     <<: *worker
@@ -154,6 +180,11 @@ services:
       - python
       - -m
       - app.workers.notification_scheduler
+    # The scheduler writes the worker half of `notifications_sent_total` — the
+    # sends the clock decided rather than the ones a client asked for, which land
+    # in the API's copy of the same family.
+    ports:
+      - "127.0.0.1:${SCHEDULER_METRICS_PORT:-9102}:9101"
 
   planner:
     <<: *worker
@@ -170,6 +201,12 @@ services:
       - python
       - -m
       - app.workers.reminder_planner
+    # `reminder_plans_total{outcome}` lives only here: planned, already_planned and
+    # refused are the three answers to "is the daily scan doing anything?", and
+    # before D10-107 no worker served a scrape at all — the API's `/metrics`
+    # answered, and it has never incremented this family.
+    ports:
+      - "127.0.0.1:${PLANNER_METRICS_PORT:-9103}:9101"
 
   expiry:
     <<: *worker
@@ -186,6 +223,11 @@ services:
       - python
       - -m
       - app.workers.expiry
+    # `contracts_expired_total{outcome}` is the sweep's only standing signal, and
+    # the one that separates a cleared backlog (still_current) from contracts that
+    # will never close (unknown_timezone).
+    ports:
+      - "127.0.0.1:${EXPIRY_METRICS_PORT:-9104}:9101"
 
   scanner:
     <<: *worker
@@ -202,6 +244,12 @@ services:
       - python
       - -m
       - app.workers.escalation_scanner
+    # `escalations_total{status}` and `escalation_email_failed_total` are written
+    # here and nowhere else. The second one is the family `D10-91` names: alerting
+    # on `increase(escalation_email_failed_total[1h]) > 0` was unwritable until
+    # this port existed, because no target exposed the series the rule reads.
+    ports:
+      - "127.0.0.1:${SCANNER_METRICS_PORT:-9105}:9101"
 
   attention:
     <<: *worker
@@ -216,6 +264,12 @@ services:
       - python
       - -m
       - app.workers.attention_watch
+    # No family of its own either: this worker reads the database and writes log
+    # lines. The port is here for the same reason the relay's is — so every worker
+    # in the stack answers the same question with the same command, and a missing
+    # listener shows up as a refused connection rather than as an empty chart.
+    ports:
+      - "127.0.0.1:${ATTENTION_METRICS_PORT:-9106}:9101"
 
 volumes:
   mysql-data:

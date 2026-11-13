@@ -34,6 +34,7 @@ from app.core.logging import configure_logging
 from app.db.models.outbox import OutboxEvent
 from app.db.repositories.outbox import OutboxRepository
 from app.db.session import build_engine, build_session_factory, session_scope
+from app.workers.metrics_server import publish_metrics
 
 log = structlog.get_logger(__name__)
 
@@ -247,7 +248,10 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _request_stop)
 
     try:
-        relay.run_forever(stop)
+        # This process holds its own copy of the metrics registry, so it has to
+        # serve that copy: the API's ``/metrics`` would answer with its own.
+        with publish_metrics(settings, worker="outbox_relay"):
+            relay.run_forever(stop)
     finally:
         engine.dispose()
     return 0
