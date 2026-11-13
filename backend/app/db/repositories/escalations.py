@@ -25,11 +25,12 @@ caller remembers.
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import ColumnElement, Exists, and_, exists, select
+from sqlalchemy import ColumnElement, Exists, and_, exists, func, select
 from sqlalchemy.orm import Session
 
 from app.db.enums import Channel, ContractStatus, EscalationStatus, NotificationStatus, ResponseType
@@ -316,3 +317,81 @@ def claim_silent_contracts(
         .with_for_update(skip_locked=True, of=Contract)
     )
     return list(session.execute(stmt).scalars())
+
+
+def overdue_escalation_count(session: Session, *, now: datetime) -> int:
+    """How many escalations are late and still somebody's job, table-wide.
+
+    The count :func:`~app.core.attention.attention_report` was missing. Every other
+    state that reading reports is a *sender-side* failure — a notice that stopped
+    without reaching anybody — and this one is the opposite: the notice went out, the
+    customer did not answer, nobody replied to *them*, and the deadline the SLA set
+    passed. Nothing about that state raises an alarm of its own. The queue screen
+    derives ``overdue`` from the same ``sla_deadline`` column, but only for a reader
+    who thought to open it, which is exactly the "invisible until somebody looks"
+    class the attention check exists to answer.
+
+    Unscoped, for the same structural reason as :func:`claim_silent_contracts`:
+    ``doctor`` and the scheduled watch run without a principal, serve every tenant at
+    once, and narrowing them to one organisation would report a clean board while
+    another organisation's queue sat late.
+
+    **Not the queue route's ``overdue`` number.** That one counts the page it has
+    just returned, over whatever statuses the caller filtered to, because it is
+    answering "how many of these rows in front of you are late". This answers "how
+    many rows anywhere still need work and are past their deadline", so it is
+    table-wide and restricted to :data:`OPEN_ESCALATION_STATUSES` — the same three
+    states :func:`~app.workers.escalation.is_overdue` admits. A resolved row whose
+    deadline has since passed is history, not work, and counting it would leave an
+    operator with a number they can never get back to zero.
+
+    ``now`` is a parameter rather than a call to :func:`~app.db.base.utc_now` inside,
+    for the reason every other time-dependent function here takes it: a test that
+    cannot move the clock can only assert the count is "some number".
+
+    Strictly ``<``, matching ``is_overdue``: an escalation whose deadline is exactly
+    ``now`` is not late yet, and the boundary belongs to one side only.
+    """
+    stmt = (
+        select(func.count())
+        .select_from(Escalation)
+        .where(
+            Escalation.status.in_(list(OPEN_ESCALATION_STATUSES)),
+            Escalation.sla_deadline < now,
+        )
+    )
+    return int(session.execute(stmt).scalar_one())
+
+
+def overdue_escalation_count_for_tenant(
+    session: Session, tenant_id: uuid.UUID, *, now: datetime
+) -> int:
+    """Count **one organisation's** late, still-open escalations.
+
+    The tenant-scoped twin of :func:`overdue_escalation_count`, written beside it for
+    the reason :func:`~app.db.repositories.notifications.undelivered_counts_for_tenant`
+    gives: the two answer different questions. The operator reading has no principal
+    and must see the whole board; this one runs behind an authenticated request where
+    the tenant is known from the token, and another organisation's queue size is both
+    a cross-tenant disclosure and something the caller could not act on.
+
+    It belongs on a tenant's own board, unlike the parked-event count, because a
+    tenant can clear it from a screen they already have: the escalation queue is
+    theirs, the work is theirs, and assigning or resolving the row is one PATCH.
+
+    ``ix_escalations_tenant_status`` leads on ``tenant_id``, so this narrows to one
+    organisation's rows before the status and deadline predicates are applied; the
+    operator count leans on ``ix_escalations_status_sla_deadline`` instead. Both run
+    the same two predicates over the same three statuses, so they cannot disagree
+    about which rows are late — only about which rows are visible.
+    """
+    stmt = (
+        select(func.count())
+        .select_from(Escalation)
+        .where(
+            Escalation.tenant_id == tenant_id,
+            Escalation.status.in_(list(OPEN_ESCALATION_STATUSES)),
+            Escalation.sla_deadline < now,
+        )
+    )
+    return int(session.execute(stmt).scalar_one())

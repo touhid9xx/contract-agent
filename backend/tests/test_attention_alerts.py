@@ -438,6 +438,7 @@ def test_the_alert_travels_the_shared_smtp_transport(
         outbox_parked=1,
         notifications_failed=0,
         notifications_suppressed=0,
+        escalations_overdue=0,
         unsealed_field_values=0,
         unsealed_field_ids=(),
         fields_scanned=0,

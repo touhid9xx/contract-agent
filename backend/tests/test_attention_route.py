@@ -40,7 +40,7 @@ other test in this file.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -49,13 +49,14 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.core.attention import attention_report
+from app.core.attention import attention_report, tenant_attention_report
 from app.core.config import Settings
 from app.core.crypto import FieldCipher
 from app.db.base import utc_now
 from app.db.enums import (
     Channel,
     ContractStatus,
+    EscalationStatus,
     FieldName,
     FieldStatus,
     NotificationStatus,
@@ -65,15 +66,21 @@ from app.db.enums import (
 from app.db.models import (
     AuditLog,
     Contract,
+    Escalation,
     ExtractedField,
     Notification,
     OutboxEvent,
     Tenant,
     User,
 )
+from app.db.repositories.escalations import (
+    overdue_escalation_count,
+    overdue_escalation_count_for_tenant,
+)
 from app.db.session import session_scope
 from app.main import create_app
 from app.workers.dispatch import notification_idempotency_key
+from app.workers.escalation import is_overdue
 
 ATTENTION_PATH = "/api/v1/attention"
 LOGIN_PATH = "/api/v1/auth/login"
@@ -206,6 +213,40 @@ def add_parked_event(session_factory: sessionmaker[Session], owner: Tenant) -> i
         return int(row.id)
 
 
+def add_escalation(
+    session_factory: sessionmaker[Session],
+    contract: Contract,
+    *,
+    status: EscalationStatus = EscalationStatus.OPEN,
+    deadline_in: timedelta = timedelta(hours=-1),
+    now: datetime | None = None,
+) -> int:
+    """Insert one escalation whose deadline sits ``deadline_in`` away from ``now``.
+
+    Written directly rather than through ``EscalationScanner``: whether a contract
+    *should* be escalated is the scanner's subject and ``test_escalation_scanner``
+    owns it. This file's subject is what an already-late row does to a reading, so
+    it starts from the row rather than from the silence that would produce one.
+
+    ``deadline_in`` is negative by default because nearly every test here wants a
+    late row; passing ``timedelta(0)`` puts the deadline exactly on ``now``, which is
+    the boundary the repository and the policy function have to agree about.
+    """
+    moment = utc_now() if now is None else now
+    with session_scope(session_factory) as session:
+        row = Escalation(
+            correlation_id="corr-attention-overdue",
+            tenant_id=contract.tenant_id,
+            contract_id=contract.id,
+            sla_deadline=moment + deadline_in,
+            status=status,
+            resolved_at=moment if status is EscalationStatus.RESOLVED else None,
+        )
+        session.add(row)
+        session.flush()
+        return int(row.id)
+
+
 def login(client: TestClient, owner: Tenant, email: str) -> dict[str, str]:
     response = client.post(
         LOGIN_PATH,
@@ -245,6 +286,7 @@ def audit_rows(session_factory: sessionmaker[Session]) -> list[AuditLog]:
 CLEAN = {
     "notifications_failed": 0,
     "notifications_suppressed": 0,
+    "escalations_overdue": 0,
     "unsealed_field_values": 0,
     "unsealed_field_ids": [],
     "fields_scanned": 0,
@@ -581,3 +623,180 @@ def test_reading_the_board_writes_nothing_and_answers_twice(
     assert first == second
     assert first["needs_attention"] is True
     assert audit_rows(session_factory) == []
+
+
+# --- an escalation nobody has picked up (D10-99) --------------------------
+#
+# The board's fourth count, and the only one that is not a delivery failure: the
+# notice went out, the customer went quiet, and the deadline passed with the row
+# still sitting in somebody's queue. The escalation screen already derives this
+# lateness from ``sla_deadline``; what is pinned here is that the *board* asks the
+# same question of the same rows, so the two screens cannot tell one operator two
+# different things about one escalation.
+
+
+def test_an_escalation_past_its_deadline_is_counted_and_raises_the_verdict(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    """One late row is one count, and one count is enough to need a person.
+
+    The verdict half is why the count exists at all. A board that displayed the
+    number while leaving ``needs_attention`` clean would be a dashboard rather than
+    an alarm, and the operator mail would correctly stay silent about a row nobody
+    is going to be told about.
+    """
+    contract = make_contract(session_factory, tenant)
+    add_escalation(session_factory, contract)
+
+    board = read(client, auth(client, tenant, make_user))
+    assert board["escalations_overdue"] == 1
+    assert board["needs_attention"] is True
+
+
+def test_an_escalation_resolved_before_its_deadline_is_history_not_work(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    """A closed row whose deadline has since passed must not be counted.
+
+    This is the row a deadline-only query counts. Somebody did the work, so the
+    number has to fall back to zero; a count that never returns to zero is a count
+    the operator learns to ignore, which is the failure mode the whole board is
+    built to avoid.
+    """
+    contract = make_contract(session_factory, tenant)
+    add_escalation(session_factory, contract, status=EscalationStatus.RESOLVED)
+
+    board = read(client, auth(client, tenant, make_user))
+    assert board["escalations_overdue"] == 0
+    assert board["needs_attention"] is False
+
+
+def test_an_escalation_whose_deadline_has_not_arrived_is_not_counted(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+) -> None:
+    """An open row still inside its window is live work, not late work."""
+    contract = make_contract(session_factory, tenant)
+    add_escalation(session_factory, contract, deadline_in=timedelta(hours=1))
+
+    board = read(client, auth(client, tenant, make_user))
+    assert board["escalations_overdue"] == 0
+    assert board["needs_attention"] is False
+
+
+def test_the_deadline_instant_itself_is_not_late(
+    session_factory: sessionmaker[Session],
+    tenant: Tenant,
+) -> None:
+    """``sla_deadline == now`` is not overdue, and one second later is.
+
+    Asserted against the repository with an injected clock rather than through the
+    route, because the route reads the real one. The boundary has to be chosen
+    deliberately on one side only: :func:`is_overdue` uses ``<``, and a count using
+    ``<=`` would put a row on the board that the queue screen shows as on time.
+    """
+    contract = make_contract(session_factory, tenant)
+    instant = datetime(2025, 6, 1, 12, 0, 0)
+    add_escalation(session_factory, contract, deadline_in=timedelta(0), now=instant)
+
+    with session_scope(session_factory) as session:
+        assert overdue_escalation_count(session, now=instant) == 0
+        assert overdue_escalation_count(session, now=instant + timedelta(seconds=1)) == 1
+
+
+def test_one_organisation_never_sees_another_organisations_late_row(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    make_user: Callable[..., User],
+    tenant: Tenant,
+    other_tenant: Tenant,
+) -> None:
+    """Globex's late queue is Globex's business, and reads as clean at Acme.
+
+    This is the one count on the board that is *work*, so leaking it leaks how busy
+    another customer's operation is. Both halves are asserted: Acme's zero is a real
+    zero rather than a query that counts nothing anywhere, because Globex's own board
+    sees the row that Acme cannot.
+    """
+    add_escalation(session_factory, make_contract(session_factory, other_tenant))
+
+    apart = read(client, auth(client, tenant, make_user))
+    assert apart["escalations_overdue"] == 0
+    assert apart["needs_attention"] is False
+
+    globex = read(client, auth(client, other_tenant, make_user, email=OTHER_EMAIL))
+    assert globex["escalations_overdue"] == 1
+
+
+def test_both_readers_count_exactly_the_rows_the_policy_calls_late(
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+    tenant: Tenant,
+    other_tenant: Tenant,
+) -> None:
+    """The SQL counts and the Python predicate pick the same rows out of a mixed set.
+
+    The counts are written as SQL while the queue screen's ``overdue`` flag is
+    computed in Python, so the two can drift without either looking wrong — each
+    would still be self-consistent. This walks a set covering every status the
+    widget has and both sides of the deadline, then requires the three readings to
+    be the same number: the operator's, the tenant's, and :func:`is_overdue`.
+    """
+    instant = datetime(2025, 6, 1, 12, 0, 0)
+    acme = make_contract(session_factory, tenant)
+    globex = make_contract(session_factory, other_tenant)
+
+    add_escalation(session_factory, acme, deadline_in=timedelta(hours=-1), now=instant)
+    add_escalation(
+        session_factory,
+        acme,
+        status=EscalationStatus.IN_PROGRESS,
+        deadline_in=timedelta(hours=-1),
+        now=instant,
+    )
+    add_escalation(
+        session_factory,
+        acme,
+        status=EscalationStatus.SLA_BREACHED,
+        deadline_in=timedelta(hours=-1),
+        now=instant,
+    )
+    add_escalation(
+        session_factory,
+        acme,
+        status=EscalationStatus.RESOLVED,
+        deadline_in=timedelta(hours=-1),
+        now=instant,
+    )
+    # Open, but still inside its window.
+    add_escalation(session_factory, acme, deadline_in=timedelta(hours=1), now=instant)
+    # Exactly on the line.
+    add_escalation(session_factory, acme, deadline_in=timedelta(0), now=instant)
+    add_escalation(session_factory, globex, deadline_in=timedelta(hours=-2), now=instant)
+
+    with session_scope(session_factory) as session:
+        rows = list(session.execute(select(Escalation).order_by(Escalation.id)).scalars())
+
+        late_anywhere = sum(1 for row in rows if is_overdue(row, instant))
+        assert late_anywhere == 4
+        assert overdue_escalation_count(session, now=instant) == late_anywhere
+
+        late_at_acme = sum(
+            1 for row in rows if row.tenant_id == tenant.id and is_overdue(row, instant)
+        )
+        assert late_at_acme == 3
+        assert overdue_escalation_count_for_tenant(session, tenant.id, now=instant) == late_at_acme
+
+        operator = attention_report(session, limit=50, settings=settings, now=instant)
+        assert operator.escalations_overdue == late_anywhere
+
+        board = tenant_attention_report(session, tenant_id=tenant.id, limit=50, now=instant)
+        assert board.escalations_overdue == late_at_acme

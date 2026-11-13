@@ -2542,9 +2542,10 @@ can act on it without parsing a log line.
 
 What lands:
 
-1. **Three counts, one report.** Outbox rows parked `failed` (gap 22's residue),
+1. **Every silent state, one report.** Outbox rows parked `failed` (gap 22's residue),
    notifications that ended `failed` or `suppressed` (the same residue one layer up),
-   and extracted-field values still stored as plaintext (gap 20's residue).
+   extracted-field values still stored as plaintext (gap 20's residue), and — since
+   `D10-99` — escalations past their SLA deadline with nobody working them.
    `dead_letter_count()` is an exact table-wide `COUNT` — `dead_lettered()` returns a
    bounded page and cannot answer "how much is parked"; `undelivered_counts()`
    zero-fills both statuses so one can never quietly stop being reported.
@@ -6578,6 +6579,43 @@ passed and 1 skipped; `pre-commit --hook-stage manual` -> 4 hooks passed, `gitle
 `.env.example` gained this slice's settings **and** `D10-97`'s, which had been read by `Settings`
 and documented nowhere. Not measured: MySQL, a live gateway, any LLM backend, and the Compose
 service itself — the YAML parses, but the image was not built and the sweep never ran as a process.
+
+### The board was silent about a queue nobody was reading (`D10-99`)
+
+The attention check answers one question: what needs a human and is invisible until somebody goes
+looking? An escalation that passed its SLA deadline with nobody working it belongs on that list, and
+was not on it. The escalation queue *looks* like the answer — `EscalationScanner` stamps a deadline
+and the screen filters on exactly the lateness `is_overdue` defines — but only for the reader who
+thought to open that screen. A promise that came due in a queue nobody is reading is the definition
+of the state this check exists to surface.
+
+`backend/app/db/repositories/escalations.py` gained two readers: `overdue_escalation_count` for the
+operator, `overdue_escalation_count_for_tenant` for the board. They share the predicate — open
+status, `sla_deadline < now` — and differ only in the tenant clause, so the two can disagree about
+which rows are *visible* but never about which rows are *late*. `is_overdue` stays the one
+definition of "late", and `<` rather than `<=` is the boundary both apply: a row due at exactly
+`now` has not missed anything yet. Both report types gained the field, deliberately in both
+directions — with the count on the tenant board alone, `doctor` would have exited `0` on a
+deployment whose only finding was a queue of missed promises.
+
+The operator's mail had to change with it. `AttentionWatch`'s raised headline named three findings
+while the report now carries four, so it would have under-reported a state the same operator could
+see on the board. It names the escalation finding now and says it is not a delivery failure — the
+notice arrived, the customer went quiet — because the wrong reading of this count is "the transport
+is broken", and retrying the send is exactly the wrong fix for a silence. On the screen it is a
+fourth card whose link is the unresolved queue's plain address: that view is already the late rows,
+and it is deliberately not the notification queue. Both catalogues carry the strings, and the client
+type carries the field.
+
+Gates: **measured on this tree.** `pytest` collected 1157 tests — 1142 passed, 15 skipped, 0
+failed, 0 errors, counted from the JUnit XML — and the six cases added here run green by explicit
+node id; the suite's growth over the previous slice is exactly those six, so none of them was
+collected and skipped. `mypy` is clean in 74 files, `ruff check` passes and `ruff format --check`
+finds 133 files already formatted, `bandit` is clean, `smoke_journey.py` passes all 108 checks over
+a real socket, and `pre-commit --all-files` passes 18 of 19 hooks with one skipped for want of
+files — the frontend typecheck, eslint and vitest jobs among the passes. `--hook-stage manual`
+passes 4 of 4, `gitleaks` included, per `D10-95`. Not measured: MySQL, a live gateway, any LLM
+backend, and the operator mail's text, which still no test pins.
 
 ## Non-negotiable reminders
 

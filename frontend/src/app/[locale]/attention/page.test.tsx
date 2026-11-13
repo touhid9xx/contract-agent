@@ -10,8 +10,8 @@
  *     route is `require_roles(UserRole.ADMIN)`, so an operator's request could only
  *     ever return a `403` that a retry cannot clear. `enabled: isAdmin` keeps that
  *     refusal off the wire, and this file asserts the *null hypothesis*: zero calls.
- *   * `needs_attention` is read from the wire rather than recomputed from the three
- *     counts, so a count the server adds later leaves this screen's verdict correct
+ *   * `needs_attention` is read from the wire rather than recomputed from the counts,
+ *     so a count the server adds later leaves this screen's verdict correct
  *     and a local `> 0` would not. The test for that hands the page a board whose
  *     counts are non-zero and whose flag is `false`.
  *   * `field_scan_truncated` travels beside the count, because that count is a
@@ -64,6 +64,7 @@ function say(template: string, values: Record<string, string | number>): string 
 const CLEAN: AttentionReport = {
   notifications_failed: 0,
   notifications_suppressed: 0,
+  escalations_overdue: 0,
   unsealed_field_values: 0,
   unsealed_field_ids: [],
   fields_scanned: 0,
@@ -170,8 +171,8 @@ describe("a clean board is an answer, not an empty state", () => {
     // One read, addressed by the session's token and by nothing else.
     expect(vi.mocked(attention.read).mock.calls[0]).toStrictEqual([ACCESS]);
 
-    // Three count paragraphs at zero, plus a scanned line that is one string.
-    expect(screen.getAllByText("0")).toHaveLength(3);
+    // One count paragraph per card at zero, plus a scanned line that is one string.
+    expect(screen.getAllByText("0")).toHaveLength(4);
     expect(screen.getByText(say(EN.attention.scanned, { count: 0 }))).toBeDefined();
     expect(screen.getByText(EN.attention.unsealedNone)).toBeDefined();
     // Nothing filled the scan's page, so the floor warning stays off.
@@ -179,9 +180,9 @@ describe("a clean board is an answer, not an empty state", () => {
   });
 
   it("trusts the wire's verdict over the counts it was handed", async () => {
-    // The rule from the source: a server that adds a fourth count would leave this
-    // screen's `needs_attention` branch correct and a local `> 0` wrong. A board
-    // that is non-zero yet flagged calm must therefore render as calm.
+    // The rule from the source: a server that adds a count this screen has not learned
+    // about would leave the page's `needs_attention` branch correct and a local `> 0`
+    // wrong. A board that is non-zero yet flagged calm must therefore render as calm.
     setSession(sessionFor("admin"));
     vi.mocked(attention.read).mockResolvedValue(
       board({ notifications_failed: 3, needs_attention: false }),
@@ -217,24 +218,26 @@ describe("the cards a finding gets", () => {
   const FINDING = board({
     notifications_failed: 2,
     notifications_suppressed: 1,
+    escalations_overdue: 4,
     unsealed_field_values: 3,
     unsealed_field_ids: [41, 42, 43],
     fields_scanned: 500,
     needs_attention: true,
   });
 
-  it("shows the three counts and the ids, and no clean heading", async () => {
+  it("shows the four counts and the ids, and no clean heading", async () => {
     setSession(sessionFor("admin"));
     vi.mocked(attention.read).mockResolvedValue(FINDING);
     renderScreen();
 
     expect(await screen.findByText(EN.attention.failedHeading)).toBeDefined();
     expect(screen.getByText(EN.attention.suppressedHeading)).toBeDefined();
+    expect(screen.getByText(EN.attention.escalationsHeading)).toBeDefined();
     expect(screen.getByText(EN.attention.unsealedHeading)).toBeDefined();
-    // A calm sentence above three findings would be a contradiction on one page.
+    // A calm sentence above the findings would be a contradiction on one page.
     expect(screen.queryByText(EN.attention.cleanHeading)).toBeNull();
 
-    for (const count of ["2", "1", "3"]) {
+    for (const count of ["2", "1", "4", "3"]) {
       expect(screen.getByText(count)).toBeDefined();
     }
     for (const id of FINDING.unsealed_field_ids) {
@@ -268,6 +271,30 @@ describe("the cards a finding gets", () => {
     expect(hrefOf(EN.attention.unsealedAction)).toBe("/en/review");
   });
 
+  it("sends a late escalation to its own queue, and says it is not a failed send", async () => {
+    // The distinction the card exists for: both notification counts are delivery
+    // faults, while this one means the notice arrived and the customer went quiet. So
+    // its link is the screen that owns an operator's answer, and the card's own
+    // sentence has to say so — reusing the failure wording would tell an operator to
+    // retry a send that succeeded.
+    setSession(sessionFor("admin"));
+    vi.mocked(attention.read).mockResolvedValue(FINDING);
+    renderScreen();
+
+    expect(await screen.findByText(EN.attention.escalationsHeading)).toBeDefined();
+    expect(screen.getByText(EN.attention.escalationsBody)).toBeDefined();
+    // The plain address, because that screen's default view is already the unresolved
+    // rows — the same set the count holds.
+    expect(hrefOf(EN.attention.escalationsAction)).toBe("/en/escalations");
+    // Every link labelled as the notification queue still leads there: this card did
+    // not become a second route into it.
+    expect(
+      screen
+        .getAllByRole("link", { name: EN.attention.failedAction })
+        .every((node) => node.getAttribute("href") === "/en/notifications"),
+    ).toBe(true);
+  });
+
   it("says the count is a floor only when the scan filled its page", async () => {
     setSession(sessionFor("admin"));
     vi.mocked(attention.read).mockResolvedValue(
@@ -291,6 +318,7 @@ describe("the cards a finding gets", () => {
 
     expect(await screen.findByText(bn.attention.failedHeading)).toBeDefined();
     expect(screen.getByText(bn.attention.suppressedHeading)).toBeDefined();
+    expect(screen.getByText(bn.attention.escalationsHeading)).toBeDefined();
     expect(screen.getByText(bn.attention.unsealedHeading)).toBeDefined();
     expect(screen.getByText(say(bn.attention.scanned, { count: 500 }))).toBeDefined();
     // The headings are what a fallback to the English catalogue would leave in place.

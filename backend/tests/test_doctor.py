@@ -53,7 +53,13 @@ from app.db.enums import (
     NotificationStatus,
     OutboxStatus,
 )
-from app.db.models import Contract, ExtractedField, Notification, OutboxEvent, Tenant
+from app.db.models import (
+    Contract,
+    ExtractedField,
+    Notification,
+    OutboxEvent,
+    Tenant,
+)
 from app.db.session import session_scope
 from app.workers.dispatch import notification_idempotency_key
 
@@ -220,6 +226,7 @@ def test_a_clean_report_counts_nothing_at_all(
         "outbox_parked_explained": 0,
         "notifications_failed": 0,
         "notifications_suppressed": 0,
+        "escalations_overdue": 0,
         "unsealed_field_values": 0,
         "unsealed_field_ids": [],
         "fields_scanned": 0,

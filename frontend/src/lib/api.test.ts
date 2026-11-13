@@ -308,6 +308,7 @@ describe("the tenant attention board", () => {
   const board = {
     notifications_failed: 2,
     notifications_suppressed: 1,
+    escalations_overdue: 1,
     unsealed_field_values: 3,
     unsealed_field_ids: [41, 42, 43],
     fields_scanned: 500,
@@ -331,7 +332,7 @@ describe("the tenant attention board", () => {
     });
   });
 
-  it("returns the board's seven fields as the body had them", () => {
+  it("returns the board's eight fields as the body had them", () => {
     fetchMock.mockResolvedValue(jsonResponse(board));
 
     return attention.read("access-1").then((report) => {
@@ -339,7 +340,7 @@ describe("the tenant attention board", () => {
       // `outbox_parked` is absent from the wire on purpose: a parked event is a
       // relay fault the tenant neither causes nor clears. A client that invented
       // the key would show a tenant a count they cannot act on.
-      expect(Object.keys(report)).toHaveLength(7);
+      expect(Object.keys(report)).toHaveLength(8);
       expect("outbox_parked" in report).toBe(false);
     });
   });

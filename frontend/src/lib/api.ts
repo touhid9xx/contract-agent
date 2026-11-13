@@ -1180,11 +1180,11 @@ export const users = {
 /**
  * One organisation's own attention reading, `GET /api/v1/attention`.
  *
- * Seven fields and no metadata: the route does not echo `tenant_id` back, because
- * the caller is the tenant and a field the server never reads from the client is a
- * field a client starts trusting. `outbox_parked` is absent by design — a parked
- * event is a relay fault the tenant can neither cause nor clear, so it belongs on
- * the operator's board (`python -m app.cli doctor`), not here.
+ * Counts, one id list and no metadata: the route does not echo `tenant_id` back,
+ * because the caller is the tenant and a field the server never reads from the
+ * client is a field a client starts trusting. `outbox_parked` is absent by design —
+ * a parked event is a relay fault the tenant can neither cause nor clear, so it
+ * belongs on the operator's board (`python -m app.cli doctor`), not here.
  *
  * `unsealed_field_ids` are primary keys and never values. The route returns no
  * field value in any form; sealing happens from the review queue, so that is where
@@ -1195,6 +1195,12 @@ export interface AttentionReport {
   notifications_failed: number;
   /** Notifications that ended `suppressed` — a policy gate refused. */
   notifications_suppressed: number;
+  /**
+   * Escalations opened, never resolved, and past the deadline this deployment
+   * promised. The one count here that is not a delivery failure: the message
+   * arrived and the customer went quiet.
+   */
+  escalations_overdue: number;
   /** Rows holding a value in the clear. Rows, not columns: one row counts once. */
   unsealed_field_values: number;
   /** Ids of those rows, so the screen can point at something actionable. */

@@ -19,7 +19,7 @@ import { authorized } from "@/lib/session";
  * with a failed send or a plaintext field value still learned about it by reading
  * deployment logs. That was the half of gap 22 the route alone did not close.
  *
- * Five choices are deliberate:
+ * Six choices are deliberate:
  *
  * * **Admin only, and the query is not fired for anyone else.** The route is
  *   `require_roles(UserRole.ADMIN)`, so anyone else gets a 403 that no retry can
@@ -30,9 +30,13 @@ import { authorized } from "@/lib/session";
  *   value belongs to the review queue, which is where the returned ids lead. A
  *   button here would be a second path into both, with its own refusals to
  *   translate.
- * * **Two counts, not three.** `outbox_parked` is not on the wire at all: a parked
- *   event is a relay fault the tenant neither causes nor clears. The board shows
- *   the two states they can act on from screens they already have.
+ * * **Every count on the wire is one the tenant can act on.** `outbox_parked` is not
+ *   on the wire at all: a parked event is a relay fault the tenant neither causes nor
+ *   clears. The board shows only states they can clear from screens they already have.
+ * * **A late escalation is not a failed send.** The two notification counts are
+ *   delivery faults; this one means the notice arrived and the customer went quiet,
+ *   so its card says that instead of borrowing the failure wording. It counts rows
+ *   nobody has resolved yet, so its link is the unresolved queue.
  * * **The scan's bound travels with the count.** `unsealed_field_values` is a floor
  *   when the scan filled its page, so `field_scan_truncated` is rendered beside the
  *   number instead of being swallowed. A screen that printed the count alone would
@@ -119,8 +123,8 @@ export default function AttentionPage() {
         <>
           {/*
             `needs_attention` is a derived flag, but it is read from the wire rather
-            than recomputed from the counts: if the server ever adds a third count
-            this screen has not learned about, this branch stays correct and the
+            than recomputed from the counts: if the server ever adds a count this
+            screen has not learned about, this branch stays correct and the
             recomputed one would not.
           */}
           {board.needs_attention ? null : (
@@ -165,6 +169,30 @@ export default function AttentionPage() {
               <Link href={`/${locale}/notifications`}>
                 <Button size="sm" variant="secondary">
                   {t("attention.suppressedAction")}
+                </Button>
+              </Link>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>{t("attention.escalationsHeading")}</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <p className="text-2xl font-semibold tabular-nums">
+                {board.escalations_overdue}
+              </p>
+              <p className="text-sm text-muted-foreground">
+                {t("attention.escalationsBody")}
+              </p>
+              {/*
+                The unresolved queue, and no query parameter to get there: a resolved
+                row is not late, it is somebody's answer, so the count above and the
+                default view of that screen are the same set of rows.
+              */}
+              <Link href={`/${locale}/escalations`}>
+                <Button size="sm" variant="secondary">
+                  {t("attention.escalationsAction")}
                 </Button>
               </Link>
             </CardContent>

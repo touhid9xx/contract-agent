@@ -87,8 +87,13 @@ _RAISED_HEADLINE = (
     "\n"
     "These are states that raise no alarm of their own: an outbox event parked\n"
     "in the dead-letter state, a notification that ended failed or suppressed,\n"
-    "or an extracted-field value still stored in the clear. None of them gets\n"
-    "better on its own.\n"
+    "an extracted-field value still stored in the clear, or an escalation whose\n"
+    "SLA deadline has passed with nobody working it. None of them gets better on\n"
+    "its own.\n"
+    "\n"
+    "The last of those is not a delivery failure: the notice went out, the\n"
+    "customer went quiet, and the row is then somebody's work rather than\n"
+    "something that broke.\n"
 )
 
 _CLEARED_HEADLINE = (

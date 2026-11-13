@@ -1502,6 +1502,15 @@ committed together. That pairing is the milestone; extraction and review follow.
   nobody runs is worth little more than the log line it replaces. This narrows the GATE
   2 clauses; it does not close them.
 
+> **Amended by D10-39, D10-40 and D10-99.** The "nothing schedules it" trade-off above
+> was closed by `D10-39`, which put the same reading on a schedule as `AttentionWatch`,
+> and `D10-40`, which mails the operator when the verdict changes. The list of states is
+> also no longer three: `D10-99` added a fourth — an escalation past its SLA deadline
+> with nobody working it — to the operator reading and the tenant board at once, and
+> `D10-79` had already put the same reading behind a route. The rest of this entry still
+> holds, including the exit code, the shape-based `is_sealed`, the read-only promise and
+> the truncation flag.
+
 ### D10-13 — `ENCRYPTION_KEY` can be rotated, through a ring of decrypt-only keys
 
 - **Decision:** `FieldCipher` takes a *ring*: one current key plus zero or more retired
@@ -7668,3 +7677,99 @@ writers are the sweep -> `expired`, the scanner -> `escalated`, and the response
 `responded`. That one is left open deliberately. A renewal happens outside this system and leaves
 no signal it could observe, so closing it needs a product decision — an operator action, or
 reading the replacement contract — rather than another clock.
+
+### D10-99 — The board did not know about the queue that waits for a person
+
+The attention check exists to answer one question: *what needs a human and is invisible until
+somebody goes looking?* Three of its four states were already on that list. The fourth — an
+escalation that passed its SLA deadline with nobody working it — was not, and the omission survived
+because the escalation queue looks like the answer. It is not. `EscalationScanner` raises a row and
+stamps a deadline, `is_overdue` can say whether that deadline has passed, and the escalations screen
+filters on exactly that — but only for the reader who thought to open it. A promise that came due in
+a queue nobody is reading is the definition of this check's subject, and the board said nothing
+about it.
+
+**The count reuses the definition it already had.** `is_overdue` is the one place that answers "is
+this escalation late?" — open status, deadline strictly before now — and both new readings apply the
+same two predicates in SQL rather than re-deriving them in Python:
+`status IN OPEN_ESCALATION_STATUSES AND sla_deadline < now`. Two copies of that rule would have
+agreed on every test that exercised one path. The comparison is `<`, not `<=`, for the reason
+`is_expired` is strictly before today: an escalation is late *after* the moment it promised, and a
+row due at exactly `now` has not missed anything yet. The same boundary written twice — once in SQL,
+once in `is_overdue` — is what makes the parity test in `test_attention_route.py` a real assertion
+rather than a tautology.
+
+**Two readers, one rule, two scopes — the shape `D10-79` established.** `overdue_escalation_count`
+is unscoped, for `doctor` and the watch; `overdue_escalation_count_for_tenant` takes the principal's
+tenant. They share the predicate and differ only in the tenant clause, so the two can disagree about
+*which rows are visible* but never about *which rows are late*. The operator reading feeds an exit
+code and a log line; the tenant reading feeds the board. `D10-79`'s reason for keeping them apart
+still holds: the operator functions scan every tenant at once, so they could not be served behind a
+route.
+
+**The count belongs on both readings, and that was deliberate.** `D10-79` separated the two so that
+a tenant could not read another tenant's counts; it did not say the two should count different
+*states*. Adding this field to the tenant board alone would have let `doctor` exit `0` on a
+deployment whose only finding was a queue of missed promises — the operator's check and the tenant's
+screen disagreeing about one database. So both report types gained the field, `as_dict()` publishes
+it on both, and `needs_attention` ORs it, which is what stops a board whose only finding is late
+escalations from rendering as clean.
+
+**This one is not a delivery failure, and the operator's mail now says so.** `AttentionWatch` is the
+one place the findings arrive as prose, and its raised headline named three. Left alone it would
+have reported "failed, suppressed, unsealed" while the report it was composing carried a fourth
+count — the mail under-reporting a state the same operator could see on the board. The headline
+names the escalation finding now and says explicitly that it is not a delivery failure: the notice
+arrived, the customer went quiet, the escalation was raised. That sentence earns its length because
+the wrong reading of this count is "the transport is broken", and the first fix an operator reaches
+for on a transport fault — retry the send — is exactly wrong for a silence.
+
+**The clock is injectable, so the boundary is testable.** Both readers take `now` as an optional
+argument in the house style `claim_next_due` set, defaulting to a naive UTC `datetime.now()`. The
+case that matters asserts a row due at exactly `now` is *not* overdue, against the repository rather
+than against a comment; without injection that assertion would only be reachable by waiting.
+
+**On the wire, and one shape that is deliberately absent.** The route gained `escalations_overdue`
+with a description that says what the number is *not*; the client type gained the field; the board
+gained a fourth card; both catalogues gained the three strings. The count is an aggregate with no
+page behind it — a `COUNT(*)` over the tenant's whole queue — which is why it has no truncation
+sibling: `field_scan_truncated` exists because that scan is bounded by a limit, and a flag here
+would have to invent a bound to describe. The card's link is the unresolved queue's plain address,
+not an annotated one: that screen's default view is already the unresolved rows, so the count and
+the destination are the same set. It is also not the notification queue's link, which is the one
+mistake this card could invite.
+
+**Two claims in the new code were corrected rather than left.** A docstring cited an index that does
+not exist under that name; the two indexes that do back these queries are
+`ix_escalations_status_sla_deadline` and `ix_escalations_tenant_status`. An ordinal ("for the fifth
+time") that nothing in the repository could verify came out of the prose. The same rule the API
+docstring adopted applies to the record: state the rule, not the count, because an ordinal is true
+until the next count and then quietly false.
+
+**Gates: measured on this tree, not assumed.** `pytest` over `backend/tests` collected **1157
+tests — 1142 passed, 15 skipped, 0 failed, 0 errors**, counted from the JUnit XML rather than
+trusted from the console summary, and the six cases this entry introduces were run by explicit
+node id so that a name-matching filter could not stand in for them. The suite grew by exactly
+those six, which is the arithmetic that proves the new cases ran rather than being collected
+and silently skipped. `mypy app` from `backend/` found no issues in 74 source files; `ruff
+check` passed and `ruff format --check` found 133 files already formatted; `bandit` reported
+nothing beyond the one annotated `nosec` on `config.py:80`; `smoke_journey.py` passed all 108
+checks over a real socket; `pre-commit run --all-files` passed 18 of 19 hooks, `forbid
+submodules` skipped for want of files — and that sweep includes the frontend typecheck, eslint
+and vitest jobs, which is what turns the fourth card's wire shape from plausible into pinned.
+`--hook-stage manual` passed all four hooks, `gitleaks` among them, per `D10-95`.
+
+An earlier draft of this paragraph recorded every gate as unmeasured because the session's shell
+was returning truncated echoes of earlier commands instead of running anything. That draft was
+true when written and false by the time the shell recovered, so it is replaced rather than kept:
+a record that says "not run" beside a tree that has run everything is worse than no record.
+
+**Limits.** Overdue is derived, never resolved: no clock clears a late escalation, which is the
+point — an SLA breach is a fact about the past, not a state to be tidied. The count is a scalar, so
+unlike `unsealed_field_ids` the board cannot name the rows that need a person, and the reader must
+open the queue to find them; returning ids would need a bounded page and a truncation flag the count
+does not have. The watch recomputes hourly by default, so lateness surfaces within an hour of a
+deadline at worst. SQLite only: these queries add no new locking, but no MySQL run proves the stored
+`timestamp` compares identically through the driver. Nothing pins the operator mail's text, so the
+headline correction is verified by reading alone. And the board is still read-only — the card links
+to the screen that owns an escalation's state machine rather than gaining a second path into it.

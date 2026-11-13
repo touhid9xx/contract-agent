@@ -22,17 +22,28 @@ not one question with two callers:
 
 So :func:`~app.core.attention.tenant_attention_report` sits *beside*
 ``attention_report`` rather than replacing or narrowing it. The operator functions
-are untouched, ``doctor`` still exits on the same numbers, and the watch still logs
-the same line.
+were untouched by that slice, ``doctor`` exited on the same numbers, and the watch
+logged the same line — until ``D10-99`` added a count to *both* readings on purpose,
+which is the difference between narrowing a reading and extending it.
 
-**Two counts, not three.** ``outbox_parked`` is deliberately absent. A parked event
+**Every count but the park.** ``outbox_parked`` is deliberately absent. A parked event
 is a relay fault attributable to the deployment — the tenant cannot fix it, cannot
 cause it, and a count on their board would produce a support ticket about somebody
 else's misconfigured transport. ``D10-39`` reached the same conclusion from the other
 side: it explains parks away under ``EVENT_TRANSPORT=none`` rather than alarming on
-them. The two counts that remain are the two a tenant can act on from screens they
-already have: a notification that ended ``failed`` or ``suppressed`` is retried from
-their notification queue, and a plaintext field value is sealed from their own data.
+them.
+
+The rule is the one worth stating, not the number, because the number is what
+``D10-99`` changed: *a count belongs on a tenant's board when a tenant can clear it
+from a screen they already have.* A notification that ended ``failed`` or
+``suppressed`` is retried from their notification queue, a plaintext field value is
+sealed from their own data, and an overdue escalation is assigned or resolved from
+their own queue. That last one was missing until ``D10-99``, and its absence is the
+gap this paragraph's rule names: the queue screen already derived the same lateness,
+so the board was silent about work the tenant could see the moment they opened a
+different page. The count is stated as a rule rather than as an ordinal because an
+ordinal is the kind of sentence that is true until the next count and then quietly
+false — which is exactly what happened here.
 
 **Admin only.** This is an operational view whose row-level detail is a list of
 field primary keys. Those keys are harmless in themselves — an admin of that tenant
@@ -79,6 +90,13 @@ class AttentionView(BaseModel):
     notifications_suppressed: int = Field(
         description="Notifications that ended `suppressed` — a policy gate refused.",
     )
+    escalations_overdue: int = Field(
+        description=(
+            "Escalations on this organisation's queue whose SLA deadline has passed "
+            "and that nobody has resolved. The one count here that is not a delivery "
+            "failure: the notice reached the customer and they went quiet."
+        ),
+    )
     unsealed_field_values: int = Field(
         description=(
             "Extracted-field rows still holding a value in the clear. Counts rows, "
@@ -109,6 +127,7 @@ def _view(report: TenantAttentionReport) -> AttentionView:
     return AttentionView(
         notifications_failed=report.notifications_failed,
         notifications_suppressed=report.notifications_suppressed,
+        escalations_overdue=report.escalations_overdue,
         unsealed_field_values=report.unsealed_field_values,
         unsealed_field_ids=list(report.unsealed_field_ids),
         fields_scanned=report.fields_scanned,

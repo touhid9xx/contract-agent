@@ -2,10 +2,18 @@
 
 ``python -m app.cli doctor`` counts the states that need a person while raising no
 alert of their own: an outbox event parked in the dead-letter state, a notification
-that ended ``failed`` or ``suppressed``, and an extracted-field value still stored in
-the clear from before gap 20. They are one defect wearing three hats — a state that
-needs somebody and is invisible until somebody goes looking — so one read-only
-reading answers all three.
+that ended ``failed`` or ``suppressed``, an extracted-field value still stored in
+the clear from before gap 20, and an escalation whose SLA deadline has passed with
+nobody working it. They share one property — a state that needs somebody and is
+invisible until somebody goes looking — so one read-only reading answers all four.
+
+The first three are failures: something that was supposed to reach a customer
+stopped short, or a value that should have been sealed was not. The fourth is not a
+failure at all — the notice went out, the customer went quiet, the escalation was
+raised, and then nobody picked it up. It is here for the same reason and by the same
+test: a deadline that passes unwatched is a promise the system made and then forgot,
+and the queue screen only tells the reader who thought to open it
+(``DECISIONS.md`` D10-99).
 
 The numbers live here rather than in the command that first needed them because
 there are now **two** callers with different jobs: the CLI, which turns the reading
@@ -47,16 +55,17 @@ an id plus a column name is enough to run ``reseal-fields --ids``, and nothing h
 should be able to put PII on a log line even by accident.
 
 **Two readings, two questions, one home.** Everything above describes the *operator*
-reading: no principal, every organisation at once, three counts. When gap 22's
+reading: no principal, every organisation at once, four counts. When gap 22's
 residue grew an HTTP route it needed a second reader, which is
 :func:`tenant_attention_report` — and it answers a narrower question, *what on my own
-board needs me?* It reports the two counts a tenant can act on, and deliberately not
-the third: a parked outbox event is a relay fault attributable to the deployment, so
-showing it to a tenant would invite a support ticket about somebody else's
-misconfigured transport. The counting lives here rather than in the route for the
-same reason the operator counts do — a second copy would be a second answer to "what
-needs a human", and the two readings share one ``is_sealed`` scan so that they cannot
-eventually disagree about the same database.
+board needs me?* It reports the counts a tenant can act on — notices they can retry,
+a value they can seal, and an escalation that is late in their own queue — and
+deliberately not the one they cannot: a parked outbox event is a relay fault
+attributable to the deployment, so showing it to a tenant would invite a support
+ticket about somebody else's misconfigured transport. The counting lives here rather
+than in the route for the same reason the operator counts do — a second copy would be
+a second answer to "what needs a human", and the two readings share one ``is_sealed``
+scan so that they cannot eventually disagree about the same database.
 """
 
 from __future__ import annotations
@@ -64,13 +73,19 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.core.crypto import is_sealed
+from app.db.base import utc_now
 from app.db.enums import NotificationStatus
+from app.db.repositories.escalations import (
+    overdue_escalation_count,
+    overdue_escalation_count_for_tenant,
+)
 from app.db.repositories.fields import fields_for_reseal, fields_for_reseal_for_tenant
 from app.db.repositories.notifications import (
     undelivered_counts,
@@ -104,6 +119,10 @@ class AttentionReport:
     outbox_parked: int
     notifications_failed: int
     notifications_suppressed: int
+    #: Escalations past their SLA deadline that nobody has resolved, table-wide.
+    #: The one count here that is not a delivery failure — nothing was lost, a
+    #: promise simply came due in a queue nobody was reading (D10-99).
+    escalations_overdue: int
     unsealed_field_values: int
     unsealed_field_ids: tuple[int, ...]
     fields_scanned: int
@@ -135,7 +154,9 @@ class AttentionReport:
         Every count except an explained park is a reason, because every one of them
         is a state that will not clear itself: a notification that stopped
         ``failed`` or ``suppressed`` sits until an operator retries or resolves it,
-        and a plaintext value sits until ``reseal-fields`` runs.
+        a plaintext value sits until ``reseal-fields`` runs, and an overdue
+        escalation sits until somebody works the row — no clock resolves it, because
+        the whole reason it is there is that the contract went quiet.
 
         An explained park is deliberately **not** a reason, and this is the one
         judgement in the module worth arguing about. The alternative — count it and
@@ -149,6 +170,7 @@ class AttentionReport:
             self.parks_unexplained
             or self.notifications_failed
             or self.notifications_suppressed
+            or self.escalations_overdue
             or self.unsealed_field_values
         )
 
@@ -163,6 +185,7 @@ class AttentionReport:
             "outbox_parked_explained": self.parks_explained,
             "notifications_failed": self.notifications_failed,
             "notifications_suppressed": self.notifications_suppressed,
+            "escalations_overdue": self.escalations_overdue,
             "unsealed_field_values": self.unsealed_field_values,
             "unsealed_field_ids": list(self.unsealed_field_ids),
             "fields_scanned": self.fields_scanned,
@@ -200,6 +223,7 @@ def attention_report(
     *,
     limit: int,
     settings: Settings,
+    now: datetime | None = None,
 ) -> AttentionReport:
     """Read the attention states on an open session.
 
@@ -211,6 +235,14 @@ def attention_report(
     rather than the table's total. That is recorded as ``field_scan_truncated``
     rather than rounded away: "0 unsealed" from a truncated scan is the one answer
     this check must never report confidently.
+
+    ``now`` decides whether an escalation is late, and defaults to the wall clock the
+    way :func:`~app.db.repositories.notifications.claim_next_due` does. A test can
+    pin it; nothing in production needs to, because the caller asking "what needs a
+    human *now*" is the only caller there is. ``limit`` deliberately does **not**
+    bound the escalation count: unlike the field scan there is no unbounded read
+    behind it, only a ``COUNT`` the database answers in one statement, so truncating
+    it would add a "floor, not a total" caveat to a number that does not need one.
     """
     undelivered = undelivered_counts(session)
     fields = fields_for_reseal(session, limit=limit)
@@ -220,6 +252,9 @@ def attention_report(
         outbox_parked=dead_letter_count(session),
         notifications_failed=undelivered[NotificationStatus.FAILED],
         notifications_suppressed=undelivered[NotificationStatus.SUPPRESSED],
+        escalations_overdue=overdue_escalation_count(
+            session, now=utc_now() if now is None else now
+        ),
         unsealed_field_values=len(unsealed),
         unsealed_field_ids=unsealed,
         fields_scanned=len(fields),
@@ -242,6 +277,12 @@ class TenantAttentionReport:
     tenants" the same value — which is exactly the confusion ``D10-39`` spent a
     section avoiding on the operator side.
 
+    ``escalations_overdue`` **is** here, and the test that admits it is the same one
+    that excludes the park: the queue is theirs to work, so a late row on their board
+    is a row they can clear. Counting only their own rows is what makes it
+    actionable — an operator-wide number would tell a tenant that *somebody* is late
+    without telling them whether it is their problem (D10-99).
+
     ``slots`` and ``frozen`` for the same reason every other result record here has
     them: it is a value, it is not edited after the fact, and a typo that assigns an
     attribute should raise rather than invent a field.
@@ -249,6 +290,7 @@ class TenantAttentionReport:
 
     notifications_failed: int
     notifications_suppressed: int
+    escalations_overdue: int
     unsealed_field_values: int
     unsealed_field_ids: tuple[int, ...]
     fields_scanned: int
@@ -260,12 +302,16 @@ class TenantAttentionReport:
 
         Every count here is actionable by the organisation that owns the rows: a
         ``failed``/``suppressed`` notification is retried — or the policy gate that
-        suppressed it is fixed — from their own queue, and a plaintext field value is
-        sealed from their own data. That is the same test that *disqualifies* the park
+        suppressed it is fixed — from their own queue, a plaintext field value is
+        sealed from their own data, and an overdue escalation is assigned or resolved
+        by whoever is on call. That is the same test that *disqualifies* the park
         count from this report: a tenant cannot fix a relay.
         """
         return bool(
-            self.notifications_failed or self.notifications_suppressed or self.unsealed_field_values
+            self.notifications_failed
+            or self.notifications_suppressed
+            or self.escalations_overdue
+            or self.unsealed_field_values
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -273,6 +319,7 @@ class TenantAttentionReport:
         return {
             "notifications_failed": self.notifications_failed,
             "notifications_suppressed": self.notifications_suppressed,
+            "escalations_overdue": self.escalations_overdue,
             "unsealed_field_values": self.unsealed_field_values,
             "unsealed_field_ids": list(self.unsealed_field_ids),
             "fields_scanned": self.fields_scanned,
@@ -286,6 +333,7 @@ def tenant_attention_report(
     *,
     tenant_id: uuid.UUID,
     limit: int,
+    now: datetime | None = None,
 ) -> TenantAttentionReport:
     """Read one organisation's attention states on an open session.
 
@@ -303,6 +351,9 @@ def tenant_attention_report(
     full page makes the unsealed count a floor rather than a total, reported as
     ``field_scan_truncated``. "0 unsealed" from a truncated scan is the one answer
     this report must never give confidently either.
+
+    ``now`` decides whether an escalation is late, and defaults to the wall clock for
+    the same reason and with the same escape hatch as :func:`attention_report`'s.
     """
     undelivered = undelivered_counts_for_tenant(session, tenant_id)
     fields = fields_for_reseal_for_tenant(session, tenant_id, limit=limit)
@@ -311,6 +362,9 @@ def tenant_attention_report(
     return TenantAttentionReport(
         notifications_failed=undelivered[NotificationStatus.FAILED],
         notifications_suppressed=undelivered[NotificationStatus.SUPPRESSED],
+        escalations_overdue=overdue_escalation_count_for_tenant(
+            session, tenant_id, now=utc_now() if now is None else now
+        ),
         unsealed_field_values=len(unsealed),
         unsealed_field_ids=unsealed,
         fields_scanned=len(fields),
