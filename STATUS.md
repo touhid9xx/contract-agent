@@ -6868,6 +6868,16 @@ whose trailing clause is part of the value, and any claim that 0.974 is accuracy
 regression net — the corpus shares an author with the regexes. No live model has answered anything
 (`D7-03`).
 
+The slice landed as `b3f2802`, with this record as `974af89`, and CI run `43487327774` is
+green on it: seven of seven jobs, read from the run's own job list rather than inferred
+from the names — hygiene + secret scan, python static (ruff, mypy strict, bandit), backend
+tests (pytest, sqlite) including the smoke journey over a real uvicorn socket, backend
+integration on MySQL 8.4 with skips counted as failures, demo frontend typecheck, frontend
+typecheck/eslint/vitest/production build, and the `CI gate` that requires every one of them
+to have succeeded. The 1180 tests counted above are again two suites: CI runs
+`-m "not integration"` and `-m integration` as separate jobs, so no single job's number
+matches this record — `D10-103` has the sentence that explains the difference.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.
