@@ -6681,8 +6681,9 @@ Gates: **measured on this tree.** `pytest` collected 1164 tests — 1149 passed,
 0 errors, counted from the JUnit XML — up exactly three from the 1161 before this slice, so the new
 cases ran rather than being collected and skipped. `ruff check` passes, `ruff format --check` finds
 133 files already formatted, `mypy` is clean in 74 files, `bandit` is clean, `smoke_journey.py`
-passes all 108 checks over a real socket. Not measured yet: the pre-commit and CI runs for this
-commit, MySQL, a live gateway.
+passes all 108 checks over a real socket, `pre-commit --all-files` passes 18 of 19 hooks with one
+skipped for want of files, and CI run `43428893725` is green on `a30bca3` — all seven jobs,
+including the MySQL 8.4 integration suite and the `CI gate`. Not measured anywhere: a live gateway.
 
 ## Non-negotiable reminders
 
