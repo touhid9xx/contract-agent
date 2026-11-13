@@ -6649,6 +6649,41 @@ the new cases ran rather than being collected and skipped. `ruff check` passes, 
 19 hooks with one skipped for want of files, and `--hook-stage manual` passes 4 of 4, `gitleaks`
 included. Not measured: MySQL and a live gateway.
 
+### A park under a switched-off bus is a description, not a queue to work (`D10-101`)
+
+The paragraph the operator's mail opens with said a parked outbox event was one of the states
+somebody has to clear. With `EVENT_TRANSPORT=none` that is false: `parks_explained` accounts for
+every park and `needs_attention` refuses to raise on one by design (`D10-39`), so the mail could
+send an operator to work a queue the configuration had created. It failed nothing — the count was
+correct, the phrase was present, and the coverage guard `D10-100` added was satisfied — which makes
+it the first concrete instance of the residue that entry recorded: a substring check proves a clause
+exists, not that it is accurate.
+
+Two halves, because either alone leaves a false sentence standing. The static clause is conditional
+now, "parked in the dead-letter state on a deployment that has a transport to deliver it", which is
+true in every configuration and still carries the phrase the coverage table looks for. And `_body`
+composes one paragraph, added only when the bus is off **and** something is parked, saying that this
+reading's parks are what the configuration produces and are not a reason for the message. A bus that
+is on would make the paragraph an invitation to ignore a real fault; a bus-off deployment with
+nothing parked has nothing to explain.
+
+`attention.py` is untouched. The verdict, the counts and the explained/unexplained split are
+`D10-39`'s and `D10-99`'s; this slice only stops the mail from contradicting them, reading
+`bus_disabled` and `event_transport`, which are on the report for exactly this purpose. No new
+field, no new setting, no migration.
+
+Three cases, three mutants, each failing exactly one: no paragraph at all, a paragraph that ignores
+the parked count, an unqualified headline. The first attempt at that run was noise — the script
+wrote each mutant on top of the last and restored only at the end, so two results were attributed to
+the wrong test; the corrected version restores the original bytes before each mutant.
+
+Gates: **measured on this tree.** `pytest` collected 1164 tests — 1149 passed, 15 skipped, 0 failed,
+0 errors, counted from the JUnit XML — up exactly three from the 1161 before this slice, so the new
+cases ran rather than being collected and skipped. `ruff check` passes, `ruff format --check` finds
+133 files already formatted, `mypy` is clean in 74 files, `bandit` is clean, `smoke_journey.py`
+passes all 108 checks over a real socket. Not measured yet: the pre-commit and CI runs for this
+commit, MySQL, a live gateway.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

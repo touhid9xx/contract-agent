@@ -86,14 +86,30 @@ _RAISED_HEADLINE = (
     "The contract agent health check needs a person.\n"
     "\n"
     "These are states that raise no alarm of their own: an outbox event parked\n"
-    "in the dead-letter state, a notification that ended failed or suppressed,\n"
-    "an extracted-field value still stored in the clear, or an escalation whose\n"
-    "SLA deadline has passed with nobody working it. None of them gets better on\n"
-    "its own.\n"
+    "in the dead-letter state on a deployment that has a transport to deliver\n"
+    "it, a notification that ended failed or suppressed, an extracted-field\n"
+    "value still stored in the clear, or an escalation whose SLA deadline has\n"
+    "passed with nobody working it. None of them gets better on its own.\n"
     "\n"
     "The last of those is not a delivery failure: the notice went out, the\n"
     "customer went quiet, and the row is then somebody's work rather than\n"
     "something that broke.\n"
+)
+
+#: Said only to a deployment that has the bus switched off *and* something parked.
+#:
+#: The headline above names a parked event as one of the reasons, and that sentence
+#: is false for exactly one configuration: with no event transport the check treats a
+#: park as explained and does not raise on it (``D10-39``), so a mail that names parks
+#: beside the counts is describing a reading it is not looking at. Both conditions are
+#: needed — a bus that is on makes every park a fault, and a bus-off deployment with
+#: nothing parked has nothing to explain — so either one alone would add a paragraph
+#: that does not apply.
+_EXPLAINED_PARKS = (
+    "Event delivery is switched off in this deployment, so a parked event is\n"
+    "what the configuration produces rather than a fault. The parked count\n"
+    "below is not one of the reasons for this message; it is shown because the\n"
+    "number is still worth knowing.\n"
 )
 
 _CLEARED_HEADLINE = (
@@ -118,9 +134,16 @@ def _body(headline: str, report: AttentionReport) -> str:
     the report shows up in both places or in neither. It is also why nothing here
     picks values out of the database — the report holds ids and counts only, so the
     mail cannot leak a contract value even by accident.
+
+    One paragraph is *not* fixed prose, which is the exception ``D10-101`` added:
+    the headline says a parked event is a reason, and with the bus switched off that
+    sentence is false (``D10-39``). The report carries the flag, so the mail can say
+    which reading it is describing instead of leaving the operator to infer it from
+    ``bus_disabled: true`` underneath. Nothing else in the body varies.
     """
     counts = "\n".join(f"{key}: {value}" for key, value in report.as_dict().items())
-    return f"{headline}\n{counts}\n{_FOOTER}"
+    explained = f"\n{_EXPLAINED_PARKS}" if report.bus_disabled and report.outbox_parked > 0 else ""
+    return f"{headline}{explained}\n{counts}\n{_FOOTER}"
 
 
 class AttentionAlerter(Protocol):

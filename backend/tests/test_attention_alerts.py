@@ -57,6 +57,7 @@ from app.db.enums import ContractStatus
 from app.db.models import Contract, ExtractedField, Tenant
 from app.db.session import session_scope
 from app.workers.attention_alerts import (
+    _EXPLAINED_PARKS,
     _RAISED_HEADLINE,
     SUBJECT_CLEARED,
     SUBJECT_RAISED,
@@ -516,6 +517,68 @@ def test_the_escalation_clause_says_it_is_not_a_delivery_failure() -> None:
     first move is the wrong one (``D10-99``).
     """
     assert "not a delivery failure" in _raised_headline()
+
+
+# --- the park count means something else with the bus switched off --------
+def _expected_parks_note() -> str:
+    """The paragraph composed for a switched-off event transport, flattened.
+
+    Flattened for the same reason the headline is: the prose is hard-wrapped at source
+    width, so searching it verbatim would start failing the day a re-wrap moved a
+    phrase across a line break — a false failure about formatting.
+    """
+    return " ".join(_EXPLAINED_PARKS.split())
+
+
+def test_the_headline_qualifies_the_park_condition() -> None:
+    """The one reading where "a parked event needs a person" is false.
+
+    With no event transport configured a park is what the configuration produces, and
+    the check deliberately does not raise on it (``D10-39``). So the headline cannot
+    name a park unqualified: the mail would describe a board this reading is not.
+    """
+    assert "a transport to deliver it" in _raised_headline()
+
+    explained = dataclasses.replace(
+        _calm(), outbox_parked=3, bus_disabled=True, event_transport="none"
+    )
+    assert explained.parks_explained == 3
+    assert explained.needs_attention is False
+
+
+def test_a_mail_from_a_bus_off_deployment_says_the_parks_are_expected() -> None:
+    """The count is still printed, so the mail has to say it is not a reason.
+
+    Both directions in one case, because the paragraph is a function of the report
+    rather than of the direction: a bus that is *on* must never tell an operator to
+    ignore the one count that really is a fault.
+    """
+    alerter, sent = _composer()
+    reason = dataclasses.replace(_calm(), notifications_failed=1)
+    switched_off = dataclasses.replace(
+        reason, outbox_parked=3, bus_disabled=True, event_transport="none"
+    )
+
+    alerter.raised(switched_off)
+    alerter.raised(dataclasses.replace(reason, outbox_parked=3))
+
+    bus_off = " ".join(sent[0].get_content().split())
+    bus_on = " ".join(sent[1].get_content().split())
+    assert _expected_parks_note() in bus_off
+    assert _expected_parks_note() not in bus_on
+
+
+def test_a_bus_off_deployment_with_nothing_parked_gets_the_plain_mail() -> None:
+    """A paragraph about zero parks is noise, and this is the common reading.
+
+    A deployment with no transport and a clean board is what every quiet install
+    looks like, so it is the one case where the note must stay out of the way.
+    """
+    alerter, sent = _composer()
+
+    alerter.cleared(dataclasses.replace(_calm(), bus_disabled=True, event_transport="none"))
+
+    assert _expected_parks_note() not in " ".join(sent[0].get_content().split())
 
 
 # --- settings decide whether an alert exists at all -----------------------

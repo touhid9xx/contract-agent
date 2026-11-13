@@ -7835,3 +7835,70 @@ checks, so they prove a clause exists and not that it is accurate — a paragrap
 "escalation" while describing it wrongly would pass. This pins the presence of coverage; nothing
 here reads the mail the way an operator does. `_CLEARED_HEADLINE` stays uncovered by any table
 because it names no findings and has nothing to enumerate.
+
+### D10-101 — A phrase check proves a clause exists, and the first one it cleared was wrong
+
+`D10-100` made the raised headline answerable to `needs_attention` and wrote down what that could
+not reach: the phrases are substring checks, so they prove a clause exists and not that it is
+accurate. The first paragraph to pass that guard was wrong in one configuration, which is the
+residue coming true on schedule rather than a surprise.
+
+**The defect.** `_RAISED_HEADLINE` listed "an outbox event parked in the dead-letter state" among
+the states somebody has to clear. With no event transport configured, `parks_explained` accounts
+for every park and `needs_attention` deliberately refuses to raise on one (`D10-39`), because a
+deployment with the bus off parks as a matter of course and a check that alarmed on it every five
+minutes is the alarm nobody reads. So on exactly the deployment that rule was written for, the mail
+sent the operator to work a queue configuration had produced — the noise `D10-39` removed from the
+verdict, put back into the sentence above it. Nothing failed: the count was right, the phrase was
+present, the coverage table was satisfied.
+
+**The fix has two halves, because either alone leaves a false sentence standing.** The static
+clause is conditional now — "parked in the dead-letter state on a deployment that has a transport
+to deliver it" — which is true in every configuration and still contains the phrase the coverage
+table looks for, so `D10-100`'s rot guard keeps its subject. And `_body` composes one paragraph,
+added only when the bus is off **and** something is parked: that this reading's parks are what the
+configuration produces rather than a fault, and are not one of the reasons for the message. Both
+conditions are load-bearing. A bus that is on makes every park a fault, so the paragraph would be
+an invitation to ignore a real one; a bus-off deployment with nothing parked has nothing to
+explain, and that is the shape every quiet install has.
+
+**What was not changed.** `attention.py` is untouched: the verdict, the counts and the
+explained/unexplained split are `D10-39`'s and `D10-99`'s, and this entry does not argue with
+them. No new report field, no new setting, no migration. The mail reads a flag the report already
+carried for exactly this reason — `event_transport` and `bus_disabled` are on the report so that a
+reading can be interpreted without knowing what the deployment was configured with that day.
+
+**Three cases, and three mutants that each fail exactly one.** The body stops composing the
+paragraph → the bus-off mail case fails alone. The paragraph ignores the parked count → the
+zero-parks case fails alone. The headline names a park unconditionally → the headline case fails
+alone. Each of the other two still passes under every mutant it was not written for, so none of the
+three is decoration for the same assertion.
+
+**The first mutant run was noise, and it is worth recording why.** The script rewrote the source,
+ran the suite and wrote the *next* mutant on top of the previous one, restoring only at the end.
+The printed results therefore described accumulated edits rather than single ones — two of the
+three attributed a failure to the wrong test, and the third hid one. It was caught because the
+predictions and the output disagreed, not because anything in the harness complained: a mutation
+run that tidies up after itself at the end is a run whose middle results cannot be trusted. The
+corrected script restores the original bytes before applying each mutant, and the results quoted
+above are from that version.
+
+**Gates: measured on this tree.** `pytest` over `backend/tests` collected **1164 tests — 1149
+passed, 15 skipped, 0 failed, 0 errors**, counted from the JUnit XML rather than trusted from the
+console. The suite stood at 1161 before this entry and the three cases here are the difference,
+which is the arithmetic that shows they ran rather than being collected and skipped. `ruff check`
+passed, `ruff format --check` found 133 files already formatted, `mypy` reported no issues in 74
+source files, `bandit` reported nothing beyond the annotated `nosec` on `config.py:80`,
+`smoke_journey.py` passed all 108 checks over a real socket, and the pre-commit hook ran the whole
+local gate at commit time. `git diff -- backend/app` names one file, `attention_alerts.py`, which is
+the only application change in the slice.
+
+**Limits.** The qualifier is pinned as a substring, so it proves the sentence says "a transport to
+deliver it" and not that the rest of the paragraph reads correctly — the same limit `D10-100`
+stated, one level further in. Nothing ties `_EXPLAINED_PARKS` to `parks_explained` mechanically: if
+that property ever stopped explaining every park under a dead bus, the paragraph would go on
+describing the old rule and no test would notice. The paragraph is prose composed in code, so it is
+a second place that has to be edited when the rule changes, and its table-driven sibling
+(`_HEADLINE_PHRASES`) does not cover it. `_CLEARED_HEADLINE` remains uncovered, and no test here
+reads the mail the way a person does; it pins what the message is allowed to claim, not that an
+operator is convinced.
