@@ -42,6 +42,11 @@ findings (``D10-103``). ``D10-99`` added a fourth finding to the report and left
 prose naming three; nothing failed, because the counts were right, the log line was
 right, and only the sentence above them described a smaller board than the operator was
 looking at.
+
+The **clearing** message needed the same treatment for a different reason (``D10-105``):
+nothing checked that it composed its own prose at all, and the prose it did compose
+called a truncated scan a clear board — a claim ``attention_report``'s own docstring
+warns against. Both are asserted now, against a reading the check really produces.
 """
 
 from __future__ import annotations
@@ -58,13 +63,15 @@ import structlog
 from sqlalchemy.orm import Session, sessionmaker
 from structlog.testing import capture_logs
 
-from app.core.attention import AttentionReport, TenantAttentionReport
+from app.core.attention import AttentionReport, TenantAttentionReport, attention_report
 from app.core.config import Settings
 from app.db.enums import ContractStatus
 from app.db.models import Contract, ExtractedField, Tenant
 from app.db.session import session_scope
 from app.workers.attention_alerts import (
+    _CLEARED_HEADLINE,
     _EXPLAINED_PARKS,
+    _PARTIAL_SCAN,
     _RAISED_HEADLINE,
     SUBJECT_CLEARED,
     SUBJECT_RAISED,
@@ -861,6 +868,85 @@ def test_a_bus_off_deployment_with_nothing_parked_gets_the_plain_mail() -> None:
     alerter.cleared(dataclasses.replace(_calm(), bus_disabled=True, event_transport="none"))
 
     assert _expected_parks_note() not in " ".join(sent[0].get_content().split())
+
+
+# --- the clearing sentence is a claim about the whole board ---------------
+def _cleared_headline() -> str:
+    """The clearing prose alone, flattened.
+
+    Same reason as ``_raised_headline``: reading it from the constant keeps a phrase
+    search out of the counts, whose *key names* are the same words.
+    """
+    return " ".join(_CLEARED_HEADLINE.split())
+
+
+def _expected_partial_scan_note() -> str:
+    """The paragraph composed for a scan that stopped on a full page, flattened."""
+    return " ".join(_PARTIAL_SCAN.split())
+
+
+def test_the_cleared_mail_carries_the_headline_these_tests_read() -> None:
+    """The guard the raised direction had and this one did not.
+
+    Measured before it was written (``D10-105``): ``cleared()`` was changed to compose
+    ``_RAISED_HEADLINE`` instead and the whole module passed. The only assertions about
+    a clearing message were its subject line and the *absence* of a paragraph, so
+    everything this file said about the clearing message was a claim about a constant
+    the sender was free not to use — the exact hole ``D10-99`` left on the other side.
+    """
+    alerter, sent = _composer()
+
+    alerter.cleared(_calm())
+
+    assert _cleared_headline() in " ".join(sent[0].get_content().split())
+
+
+def test_a_truncated_scan_does_not_let_the_mail_call_the_board_clear() -> None:
+    """``field_scan_truncated`` is the one flag that makes "clear" a weaker statement.
+
+    ``attention_report`` warns in its own docstring that "0 unsealed" from a truncated
+    scan is the answer the check must never report confidently, and the clearing
+    message reported it confidently: the headline said the health check was clear and
+    "the reading below is what is true right now" while the counts two lines down said
+    ``field_scan_truncated: True`` (``D10-105``).
+
+    Both directions, because a caveat that also appears when the scan *did* reach the
+    end of the table would train the operator to skip the paragraph that matters.
+    """
+    alerter, sent = _composer()
+
+    alerter.cleared(dataclasses.replace(_calm(), fields_scanned=500, field_scan_truncated=True))
+    alerter.cleared(_calm())
+
+    partial = " ".join(sent[0].get_content().split())
+    whole = " ".join(sent[1].get_content().split())
+    assert _expected_partial_scan_note() in partial
+    assert _expected_partial_scan_note() not in whole
+
+
+def test_the_partial_scan_note_follows_the_flag_the_check_really_sets(
+    session_factory: sessionmaker[Session], settings: Settings, contract: Contract
+) -> None:
+    """The flag is read off a real reading, not a hand-built one.
+
+    A case that constructs ``field_scan_truncated=True`` itself proves the sentence is
+    wired to a flag; it cannot show the check ever sets that flag. This one takes the
+    reading from :func:`~app.core.attention.attention_report` with a one-row scan limit
+    over one sealed field, which is the smallest table that produces a truncated *calm*
+    reading — the reading the old mail described as a clean board.
+    """
+    add_field(session_factory, contract, sealed=True)
+    with session_scope(session_factory) as session:
+        report = attention_report(session, limit=1, settings=settings)
+
+    assert report.fields_scanned == 1
+    assert report.field_scan_truncated is True
+    assert report.needs_attention is False
+
+    alerter, sent = _composer()
+    alerter.cleared(report)
+
+    assert _expected_partial_scan_note() in " ".join(sent[0].get_content().split())
 
 
 # --- settings decide whether an alert exists at all -----------------------

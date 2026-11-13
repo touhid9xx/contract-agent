@@ -112,12 +112,52 @@ _EXPLAINED_PARKS = (
     "number is still worth knowing.\n"
 )
 
+#: The one headline that makes a claim about the **whole** board rather than about the
+#: findings on it: "clear again" and "what is true right now" are statements about
+#: everything, and a scan that stopped on a full page has read a prefix of the table.
 _CLEARED_HEADLINE = (
     "The contract agent health check is clear again.\n"
     "\n"
     "Whatever the previous message reported has been dealt with, or was\n"
     "reported in error. The reading below is what is true right now.\n"
 )
+
+#: Said only when the clearing reading came from a scan that ended on a full page.
+#:
+#: ``field_scan_truncated`` is ``len(fields) == limit``, so the "0 unsealed" beneath a
+#: truncated scan is the absence of a finding *in the rows read*, not in the table.
+#: :func:`~app.core.attention.attention_report` says in its own docstring that this is
+#: the one answer the check must never report confidently — and the headline above
+#: reported it confidently, because nothing compared the sentence with the flag two
+#: lines under it (``D10-105``). The counts were right, the log line was right, and the
+#: operator was told a page of the table was the table.
+#:
+#: Only in the clearing direction. The raised message's counts are floors in the
+#: direction that *raises*, so a partial scan cannot make it claim something untrue;
+#: this is the message that asserts nothing is left.
+_PARTIAL_SCAN = (
+    "The field scan below stopped at its page limit, so clear here means that no\n"
+    "unsealed value turned up in the rows it read, not that none exists. Rows\n"
+    "past that limit were not read, and a finding among them would go unreported\n"
+    "by this check.\n"
+)
+
+
+def _cleared_mail_headline(report: AttentionReport) -> str:
+    """The clearing prose, with the caveat when the clearing reading was a partial one.
+
+    A separate function rather than a branch in :func:`_body` because the paragraph
+    qualifies the *headline's* claim, and :func:`_body` is handed a headline it did not
+    choose: putting it there would have put a caveat about "clear" underneath the raised
+    message too, where it qualifies nothing.
+
+    The flag is read from the report the alerter was handed, never from a second query,
+    so the sentence and the counts under it describe the same read.
+    """
+    if not report.field_scan_truncated:
+        return _CLEARED_HEADLINE
+    return f"{_CLEARED_HEADLINE}\n{_PARTIAL_SCAN}"
+
 
 _FOOTER = (
     "\n"
@@ -139,7 +179,9 @@ def _body(headline: str, report: AttentionReport) -> str:
     the headline says a parked event is a reason, and with the bus switched off that
     sentence is false (``D10-39``). The report carries the flag, so the mail can say
     which reading it is describing instead of leaving the operator to infer it from
-    ``bus_disabled: true`` underneath. Nothing else in the body varies.
+    ``bus_disabled: true`` underneath. Nothing else *this function composes* varies;
+    the headline it is handed may, which is how the clearing message qualifies a
+    partial scan (``D10-105``).
     """
     counts = "\n".join(f"{key}: {value}" for key, value in report.as_dict().items())
     explained = f"\n{_EXPLAINED_PARKS}" if report.bus_disabled and report.outbox_parked > 0 else ""
@@ -182,7 +224,7 @@ class SmtpAttentionAlerter:
         self._send(SUBJECT_RAISED, _RAISED_HEADLINE, report)
 
     def cleared(self, report: AttentionReport) -> None:
-        self._send(SUBJECT_CLEARED, _CLEARED_HEADLINE, report)
+        self._send(SUBJECT_CLEARED, _cleared_mail_headline(report), report)
 
     def _send(self, subject: str, headline: str, report: AttentionReport) -> None:
         composed = EmailMessage()
