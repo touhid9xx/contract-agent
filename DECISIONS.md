@@ -7834,7 +7834,8 @@ derived from `unsealed_field_values` rather than a reason of its own. The phrase
 checks, so they prove a clause exists and not that it is accurate — a paragraph mentioning
 "escalation" while describing it wrongly would pass. This pins the presence of coverage; nothing
 here reads the mail the way an operator does. `_CLEARED_HEADLINE` stays uncovered by any table
-because it names no findings and has nothing to enumerate.
+because it names no findings and has nothing to enumerate. **Amended by `D10-105`:** the reason
+still holds, the gap does not — three cases read it now, by name.
 
 ### D10-101 — A phrase check proves a clause exists, and the first one it cleared was wrong
 
@@ -7899,9 +7900,9 @@ stated, one level further in. Nothing ties `_EXPLAINED_PARKS` to `parks_explaine
 that property ever stopped explaining every park under a dead bus, the paragraph would go on
 describing the old rule and no test would notice. The paragraph is prose composed in code, so it is
 a second place that has to be edited when the rule changes, and its table-driven sibling
-(`_HEADLINE_PHRASES`) does not cover it. `_CLEARED_HEADLINE` remains uncovered, and no test here
-reads the mail the way a person does; it pins what the message is allowed to claim, not that an
-operator is convinced.
+(`_HEADLINE_PHRASES`) does not cover it. ~~`_CLEARED_HEADLINE` remains uncovered~~ **covered by
+`D10-105`**, and no test here reads the mail the way a person does; it pins what the message is
+allowed to claim, not that an operator is convinced.
 
 ### D10-102 — The rot guard skipped whatever it could not probe, and the silence read as coverage
 
@@ -7969,7 +7970,8 @@ it cannot tell a true reason from a plausible one, so that table's honesty is a 
 rather than a checked property. Bool probing assumes the calm value is the non-raising one. The
 guard still constrains the headline against the verdict and says nothing about whether a sentence
 reads correctly, which is `D10-100`'s and `D10-101`'s limit and is untouched here.
-`_CLEARED_HEADLINE` remains uncovered and no test reads the mail the way a person does.
+~~`_CLEARED_HEADLINE` remains uncovered~~ **covered by `D10-105`**; no test reads the mail the
+way a person does.
 
 ### D10-103 — The rot guard knew one shape at a time and only half the rule
 
@@ -8032,8 +8034,8 @@ companion rides along rather than that a pair survives a removal. A threshold ab
 reach of a fixed step, which `D10-102` already recorded and this entry does not change.
 `_UNPROBEABLE` can still silence the guard, and its honesty remains a written sentence. The
 agreement case compares the *rule*, not the counts, which legitimately differ between the two
-readers. `_CLEARED_HEADLINE` remains uncovered, no test reads the mail the way a person does,
-and none of this says whether a sentence reads correctly.
+readers. ~~`_CLEARED_HEADLINE` remains uncovered~~ **covered by `D10-105`**, no test reads the
+mail the way a person does, and none of this says whether a sentence reads correctly.
 
 **A defect in the apply script, caught by its own re-read.** `rewrap` joins its lines with
 `splitlines()`, which drops the trailing newline, so the first `--write` appended this entry
@@ -8089,8 +8091,75 @@ file, no application code, so the green run covering the shipped application sti
 raises nothing anywhere in this lattice, which `D10-102` recorded and this entry does not touch.
 `event_transport` stays unprobed and declared, and `_UNPROBEABLE`'s honesty is still a written
 sentence rather than a checked property — the proof above shows the walk reaches a three-field
-term, not that every declaration in that table is true. `_CLEARED_HEADLINE` remains uncovered, no
-test reads the mail the way a person does, and none of this says whether a sentence reads
-correctly, only that a field is named in it. The walk doubles per probeable field: 511 readings at
+term, not that every declaration in that table is true. ~~`_CLEARED_HEADLINE` remains
+uncovered~~ **covered by `D10-105`**, no test reads the mail the way a person does, and none of
+this says whether a sentence reads correctly, only that a field is named in it. The walk doubles
+per probeable field: 511 readings at
 nine, a thousand million at thirty, so it is cheap because the report is small, and the day the
 report is not small this wants a different shape rather than a larger constant.
+
+### D10-105 — The clearing message claimed a board it had not finished reading
+
+**What five entries filed and moved past.** `D10-100` through `D10-104` each list
+`_CLEARED_HEADLINE` under Limits, in the tone of bookkeeping: one constant nobody asserts.
+But that constant is the whole of what an operator is told when the board goes quiet, and it
+was unasserted in two ways at once.
+
+**Measured first: the cleared prose was free to say anything.** `cleared()` was changed to
+compose `_RAISED_HEADLINE`; `backend/tests/test_attention_alerts.py` passed 28 of 28, return
+code 0. A cleared message had only ever been asserted by its subject line and by the *absence*
+of the parks paragraph. That is the hole `D10-101` closed for the raised direction — with
+`test_the_mail_carries_the_headline_these_tests_read` — and it was still open in the other one:
+a guard on one of two call sites.
+
+**Measured second: the sentence it composes is not always true.** `field_scan_truncated` is
+`len(fields) == limit`, so a scan ending on a full page has read a prefix of the table.
+`attention_report` states the consequence in its own docstring: "0 unsealed" from a truncated
+scan "is the one answer this check must never report confidently", because the count it yields
+is a floor. The cleared headline answers with "The contract agent health check is clear again"
+and "The reading below is what is true right now" — a claim about the board, drawn from a
+reading that admits it never saw the board. Composed for a calm truncated report, the mail
+reads exactly that, with `field_scan_truncated: True` in the counts beneath and no sentence
+joining the two. `AttentionWatch` already logs the floor warning for this case; the mail a
+person actually reads had nothing to say about it.
+
+**Decision.** The cleared headline keeps its words and gains a caveat when the reading was a
+partial one. `_PARTIAL_SCAN` sits beside `_CLEARED_HEADLINE` and is composed by
+`_cleared_mail_headline(report)` only when `report.field_scan_truncated` is set. The paragraph
+says that "clear" here means no unsealed value in the rows read, that rows past the limit were
+not read, and that a finding among them would go unreported.
+
+Why prose rather than the flag alone: `field_scan_truncated: True` does travel in the counts,
+and `D10-101` settled the identical question the same way — `bus_disabled: true` travels too,
+and the parked paragraph was added anyway, because the headline above it is the sentence that
+reaches the wrong conclusion. A reader told the board is clear does not re-audit the JSON for a
+flag that contradicts the sentence they just read.
+
+Why only the cleared direction: the raised message's counts are floors in the direction that
+raises, so a partial scan can only undercount its findings, never overstate one — every finding
+it names is really there. The clearing message is the one that asserts nothing is left.
+
+**Three cases, and what each would catch.**
+`test_the_cleared_mail_carries_the_headline_these_tests_read` fails if `cleared()` composes
+anything but the headline these tests read; the mutant measured above now fails it, by name.
+`test_a_truncated_scan_does_not_let_the_mail_call_the_board_clear` composes a truncated reading
+and a whole one and asserts the caveat present in one and absent in the other, so neither an
+always nor a never implementation passes.
+`test_the_partial_scan_note_follows_the_flag_the_check_really_sets` drives `attention_report`
+at `limit=1` over one sealed field, so the caveat is proved to key on a flag the check sets
+rather than on one a test invented; it asserts the reading is calm first, because a caveat on a
+raising report would prove nothing about the cleared path.
+
+**Gates: measured on this tree.** `pytest` over `backend/tests` collected **1171 tests — 1156
+passed, 15 skipped, 0 failed, 0 errors**, counted from the JUnit XML, up exactly three from the
+1168 before this slice. `ruff check` passed, `ruff format --check` found 133 files already
+formatted, `mypy` reported no issues in 74 source files, and `bandit` is clean beyond the
+annotated `nosec` on `config.py:80`. Unlike the five slices before it this one changes shipped
+behaviour: `backend/app/workers/attention_alerts.py` plus one test file, and nothing else.
+
+**Limits.** One sentence about one flag. A reading truncated in some other way — a page whose
+rows happen to be sealed, a limit larger than the table — is still called clear, and this does
+not change that. Nothing here reads the mail the way a person does: the caveat and the headline
+are asserted by substring, so a paragraph containing the right words in an unreadable order
+still passes. A threshold above one and `_UNPROBEABLE`'s honesty remain as `D10-104` left them.
+And no relay was contacted: the paragraph is proved composed, not delivered.

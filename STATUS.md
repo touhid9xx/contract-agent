@@ -6780,12 +6780,43 @@ No application code changes: `git diff -- backend/app` is empty. One test file.
 Gates: **measured on this tree.** `pytest` collected 1168 tests — 1153 passed, 15 skipped, 0
 failed, 0 errors, from the JUnit XML — up exactly one from 1167. `ruff check` passes, `ruff
 format --check` finds 133 files already formatted, `mypy` is clean in 74 files. Still out of
-reach: a threshold above one, `_UNPROBEABLE`'s honesty, `_CLEARED_HEADLINE`, and any statement
-about whether a sentence reads correctly.
+reach: a threshold above one, `_UNPROBEABLE`'s honesty, ~~`_CLEARED_HEADLINE`~~ **covered by
+`D10-105`**, and any statement about whether a sentence reads correctly.
 
 The slice landed as `30db728`, and CI run `43462862482` is green on it: seven of seven jobs,
 including the real-socket smoke journey, the MySQL 8.4 suite that treats a skip as a failure, and
 the `CI gate`. The 1168 above is both suites together, as `D10-103`'s paragraph explains.
+
+### The clearing message claimed a board it had not finished reading (`D10-105`)
+
+`D10-100` through `D10-104` each filed `_CLEARED_HEADLINE` under Limits. Measured before fixing it:
+`cleared()` was changed to compose `_RAISED_HEADLINE` and the whole module passed, 28 of 28, its
+subject and one absent paragraph being all that had ever been asserted about a cleared message.
+And the prose it does compose is not always true: a scan that ends on a full page sets
+`field_scan_truncated`, `attention_report` calls that the answer it "must never report
+confidently", and the cleared headline answered "the health check is clear again" with
+`field_scan_truncated: True` sitting in the counts beneath and nothing joining the two. The
+watch logs the floor warning for this case; the mail did not.
+
+The cleared headline now gains `_PARTIAL_SCAN` when the reading was partial, composed by
+`_cleared_mail_headline(report)`. Only the cleared direction: a raised count is a floor in the
+direction that raises, so a partial scan cannot make it overstate a finding, while the clearing
+message is the one that asserts nothing is left.
+
+Three cases: the cleared mail must carry the headline these tests read (the mutant above now
+fails it, by name), the caveat must appear for a truncated reading and not for a whole one, and
+the flag must be the one the check really sets — driven through `attention_report` at `limit=1`,
+with the reading asserted calm first.
+
+This slice touches application code, unlike the five before it: `attention_alerts.py` and one
+test file.
+
+Gates: **measured on this tree.** `pytest` collected 1171 tests — 1156 passed, 15 skipped, 0
+failed, 0 errors, from the JUnit XML — up exactly three from 1168. `ruff check` passes, `ruff
+format --check` finds 133 files already formatted, `mypy` is clean in 74 files, and `bandit` is
+clean beyond the annotated `nosec` on `config.py:80`. Still out of reach: a threshold above one,
+`_UNPROBEABLE`'s honesty, a reading truncated some other way, and any statement about whether a
+sentence reads correctly.
 
 ## Non-negotiable reminders
 
