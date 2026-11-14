@@ -1,0 +1,38 @@
+# Alert rules for the local stack (D10-111).
+#
+# One rule, because exactly one rule is recorded anywhere in this repository: `D10-91` names
+# `escalation_email_failed_total` so that the expression below would need no rewrite, and
+# `D10-108`/`D10-109`/`D10-110` each found a new reason it could not fire. A rules file is not a
+# place to demonstrate diligence: every additional rule would be an alert nobody specified and
+# nobody has ever received, which is the shape of file that gets muted instead of fixed.
+#
+# `for: 0m` is not laziness. The counter is incremented once per failed alert *batch*, so a single
+# increment on a 15s scrape is already a sustained condition — there is nothing to debounce, and a
+# `for` window here would only delay the one message that tells an operator nobody was told about a
+# new escalation. The rule is about a mail that did not reach a human; it should not queue behind a
+# timer to say so.
+groups:
+  - name: escalation-alerts
+    rules:
+      # Measured live against a real refusing relay and a real Prometheus (D10-109), where it went
+      # from `<absent>` to `firing` once the counter gained a zero baseline. `increase()` over an
+      # absent series returns no data, not `0` — which is why `app/core/metrics.py` seeds a zero for
+      # an unlabelled counter, and why the comment in that file points back here.
+      #
+      # With the shipped scrape config all seven processes expose this family (the seed, D10-109),
+      # so the alert is not "is the series present" but "did any instance's increase exceed zero".
+      # `rules.test.yml` pins that: the scanner's instance fires, the six seeded zeros do not.
+      - alert: EscalationEmailFailed
+        expr: increase(escalation_email_failed_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          # `instance` is in the message because it is the whole diagnosis: the family exists in
+          # every process, so which target counted the failure says whether `ESCALATION_ALERT_TO`
+          # reached a relay at all or whether the wrong port was scraped (D10-110).
+          summary: "Escalation alert mail failed on {{ $labels.instance }}"
+          description: >-
+            An escalation was opened and the operator mail for it was refused. The escalations
+            themselves are committed and still in the queue — nothing was lost — but nobody was
+            told about them. Check SMTP settings and the relay behind ESCALATION_ALERT_TO.

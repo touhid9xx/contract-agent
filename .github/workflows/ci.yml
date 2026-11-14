@@ -372,8 +372,76 @@ jobs:
       - name: gitleaks
         run: pre-commit run gitleaks --all-files --hook-stage manual
 
+  # ------------------------------------------------------- observability
+  # `ops/prometheus/` is configuration, so nothing that runs Python or TypeScript
+  # ever reads it: a rule with a typo in its expression is a file an operator copies
+  # into a stack and learns about only when the alert that never fired is the one
+  # they needed. `promtool` is Prometheus's own loader and rule engine, in the same
+  # pinned image `docker-compose.yml` runs, so this asks Prometheus whether the
+  # files are valid instead of asking a YAML parser whether they parse.
+  #
+  # `-w /etc/prometheus` is not decoration: `rule_files` inside `rules.test.yml` is
+  # relative, and promtool resolves it against the working directory.
+  observability:
+    name: observability (prometheus config, alert rule)
+    runs-on: ubuntu-latest
+    # The tag lives here and is read from Compose below, so a version bump cannot
+    # make this job validate a Prometheus the stack does not run.
+    env:
+      PROM_VERSION: v2.55.0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: pull the pinned Prometheus image
+        run: docker pull "prom/prometheus:${PROM_VERSION}"
+
+      - name: the config loads, including the rule file it names
+        run: |
+          docker run --rm \
+            -v "$PWD/ops/prometheus:/etc/prometheus:ro" \
+            --entrypoint /bin/promtool "prom/prometheus:${PROM_VERSION}" \
+            check config /etc/prometheus/prometheus.yml
+
+      - name: the rule fires on one refusal and is silent on a fleet of zeros
+        run: |
+          docker run --rm \
+            -v "$PWD/ops/prometheus:/etc/prometheus:ro" \
+            -w /etc/prometheus \
+            --entrypoint /bin/promtool "prom/prometheus:${PROM_VERSION}" \
+            test rules /etc/prometheus/rules.test.yml
+
+      # Written in Python rather than sed so it is the same check here and on a
+      # developer's machine: `v2.55.0` in this file plus `v2.55.0` in
+      # docker-compose.yml is two places, and the interesting failure is the day
+      # one of them moves.
+      - name: the stack and this job pin the same Prometheus
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re, sys
+
+          version = os.environ["PROM_VERSION"]
+          compose = pathlib.Path("docker-compose.yml").read_text(encoding="utf-8")
+          found = re.search(r"image: prom/prometheus:(\S+)", compose)
+          if not found:
+              sys.exit("docker-compose.yml no longer names a prom/prometheus image")
+          tag = found.group(1).strip().strip('"')
+          if tag != version:
+              sys.exit(f"docker-compose.yml pins {tag}, this job validates {version}")
+          print(f"compose and CI both pin prom/prometheus:{tag}")
+          PY
+
+      # The Compose files are the only description of the stack, and a service
+      # block with a path typo fails at `up` — days later, on someone else's
+      # machine. The two variables are the ones Compose refuses to interpolate
+      # without; `.env` is copied because the worker services declare it.
+      - name: docker compose accepts the stack
+        run: |
+          cp .env.example .env
+          MYSQL_ROOT_PASSWORD=ci MYSQL_PASSWORD=ci docker compose config -q
+
+
   # --------------------------------------------------------------------- gate
-  # One job to name as a required status check, instead of six that have to be
+  # One job to name as a required status check, instead of the seven that have to be
   # re-listed whenever a job is added. `if: always()` is what makes it run when
   # an upstream job failed — otherwise the gate would be skipped, and a skipped
   # required check is a green light.
@@ -396,6 +464,7 @@ jobs:
       - frontend
       - demo-frontend
       - hygiene
+      - observability
     runs-on: ubuntu-latest
     steps:
       - name: Every required job must have succeeded

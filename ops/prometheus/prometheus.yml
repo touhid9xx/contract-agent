@@ -1,0 +1,64 @@
+# Prometheus for the local stack (D10-111).
+#
+# Why this file exists at all: every slice since D10-90 wrote counters and left the reading of
+# them to a scratch harness. `D10-91` recorded the rule `increase(escalation_email_failed_total[1h])
+# > 0` as the reason that family is named the way it is, and until D10-111 nothing in this
+# repository could load it: there was no config here, so the rule was prose an operator had to
+# retype. `D10-108` and `D10-109` evaluated it by generating a config into a temporary directory,
+# which proved the expression but left the tree unable to reproduce the run.
+#
+# The path is `/etc/prometheus`, not a project-local one, for a dull reason that matters: it is the
+# image's own default, so `docker-compose.yml` mounts this directory there, the CI check mounts it
+# there, and `promtool` reads the same path in both places. A `rule_files` entry that is absolute
+# and identical everywhere is one that cannot be "valid on my machine".
+#
+# **One job for six workers, deliberately.** Every worker container listens on 9101 inside its own
+# network namespace and publishes a different host port (D10-107), so on the Compose network the
+# targets differ by *service name* and share a port. Keeping them in one job means the `instance`
+# label is what names them, which is what makes the seeded zero readable: `D10-109` gave every
+# unlabelled counter a `0` from declaration, so `escalation_email_failed_total` is present in all
+# seven processes and only the scanner's copy ever moves. `increase(...)` over a flat zero is `0`,
+# so the rule fires on the one instance that counted a failure and stays quiet on the six that
+# cannot — measured in `rules.test.yml`, which is the point of putting those cases there.
+#
+# What is deliberately absent: no `alertmanager` block (the rules have no receiver yet, and a
+# target that resolves to nothing is worse than an unwritten stanza), no `depends_on` in the
+# service (a scrape target that is down is what a target list is *for*; making Prometheus wait for
+# six workers would turn every `docker compose up prometheus` into a full-stack start), no remote
+# write, no bearer token (every target is unauthenticated on this network, matching
+# `app/api/v1/metrics.py`), and no retention tuning beyond the compose command.
+global:
+  # Fifteen seconds for both loops. Fast enough that the stack is worth opening after a `up`, slow
+  # enough that six workers are not scraped more often than they tick.
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    # Names this in any expression that mixes results from more than one Prometheus. There is one,
+    # and naming it costs a label instead of a mystery later.
+    deployment: local
+
+rule_files:
+  - /etc/prometheus/rules.yml
+
+scrape_configs:
+  # The API's own registry: `notifications_sent_total` for client-initiated dispatches, the request
+  # counters, and the seeded zeros of families only a worker writes. Scraped because it is the one
+  # target that also answers `/health`, so "the API is up" and "the API can be scraped" are two
+  # questions with two answers.
+  - job_name: api
+    static_configs:
+      - targets: ["api:8000"]
+
+  # The six workers. Each serves `app.core.metrics.render()` from its own process — the same bytes
+  # the API serves, which is why no aggregation is needed here and none is attempted: summing across
+  # processes would invent a number for families whose absent-versus-zero distinction is
+  # load-bearing (D10-107).
+  - job_name: workers
+    static_configs:
+      - targets:
+          - "relay:9101"
+          - "scheduler:9101"
+          - "planner:9101"
+          - "expiry:9101"
+          - "scanner:9101"
+          - "attention:9101"

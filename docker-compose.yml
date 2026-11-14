@@ -12,6 +12,9 @@
 #               operator noticing by hand.
 #   documents — a named volume, not a service: uploaded contract documents, mounted
 #               at the same path in the API and in every worker (gap 12).
+#   prometheus — the scraper for the per-worker /metrics listeners (D10-107) and the
+#               loader for the escalation alert rule (D10-111). Its config is in
+#               ops/prometheus/ and is the same file CI validates with promtool.
 # Kafka: the transport landed in F4 (EVENT_TRANSPORT=kafka, read from .env by
 #        every worker), but no broker is defined here yet, so the relay defaults
 #        to EVENT_TRANSPORT=none and parks events instead of dropping them.
@@ -270,6 +273,50 @@ services:
     # listener shows up as a refused connection rather than as an empty chart.
     ports:
       - "127.0.0.1:${ATTENTION_METRICS_PORT:-9106}:9101"
+
+  prometheus:
+    # D10-111. `D10-91` wrote a rule nobody could load: there was no config in this
+    # tree, so `increase(escalation_email_failed_total[1h]) > 0` existed as prose
+    # and as a scratch harness. The config now lives in `ops/prometheus/` and is
+    # mounted at the image's own default path, so the file `promtool` validates in
+    # CI is byte-for-byte the file this service reads.
+    #
+    # Pinned, because the rule and the config are checked against this version in
+    # CI; a floating tag would let the check and the stack drift apart silently. No
+    # `depends_on`: a target that is down is what a target list is *for*, and
+    # Prometheus says so with `up == 0` instead of refusing to start until six
+    # workers are healthy.
+    image: prom/prometheus:v2.55.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # A local stack's series are a view, not records: six hours answers "what
+      # happened this afternoon" and bounds the tmpfs below.
+      - --storage.tsdb.retention.time=6h
+    volumes:
+      - ./ops/prometheus:/etc/prometheus:ro
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    # The image runs as `nobody`, so the default root-owned tmpfs made it panic on
+    # `/prometheus/queries.active` at boot — measured, exit 2, `permission denied`
+    # — and the explicit mode is the whole fix. A writable tmpfs is what lets
+    # `read_only` stay true; the cost is that history dies with the container,
+    # which is the trade a local view makes.
+    tmpfs:
+      - /prometheus:mode=1777,size=256m
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # `/-/healthy` answers before the first scrape completes, so this says "the
+      # process is serving", not "the stack is scraped". The second question is
+      # `up{job="workers"} == 1`, which only a scrape can answer.
+      test: ["CMD", "/bin/wget", "--spider", "-q", "http://127.0.0.1:9090/-/healthy"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
 
 volumes:
   mysql-data:

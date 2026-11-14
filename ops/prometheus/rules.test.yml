@@ -1,0 +1,85 @@
+# Unit tests for `rules.yml`, run by Prometheus's own rule engine (D10-111).
+#
+# `promtool test rules` builds an in-memory TSDB from `input_series`, evaluates the real rule set
+# over it, and compares the resulting `ALERTS` against `exp_alerts` — exactly the machinery that
+# sends a page in production, without a socket, a scrape interval or a container. It is the
+# strongest thing this repository can do against the complaint that the rule was only ever prose,
+# and it is cheap enough to gate every push on.
+#
+# The three cases are the three findings that took this rule from unwritable to working, in order:
+#
+#   1. It fires on the instance that counted a refusal, and *not* on the five that cannot.
+#      `D10-110` established that the seeded zero renders the family in every process, so
+#      "present" and "nonzero" stopped being the same question.
+#   2. A fleet of seeded zeros is silent. Before `D10-109` gave the counter a zero baseline the
+#      series was absent and this case could not be written; after it, the risk moved to the
+#      opposite direction — a rule that fires on a permanent `0` would page on every evaluation.
+#   3. An absent series cannot fire at all. That is `D10-109`'s original defect stated as a test:
+#      `increase()` over no data returns no data, so a counter with no baseline was invisible to
+#      the rule written for it.
+#
+# `rule_files` is absolute because `promtool` resolves it against the working directory, and CI runs
+# with `-w /etc/prometheus` against the same mount `docker-compose.yml` uses — one path, so the file
+# validated is the file Prometheus reads.
+rule_files:
+  - /etc/prometheus/rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # 1. Fires, on the scanner's instance only.
+  - interval: 1m
+    input_series:
+      # The five workers and the API render the seeded zero and never move it (D10-109).
+      - series: 'escalation_email_failed_total{instance="relay:9101"}'
+        values: "0 0 0 0 0"
+      - series: 'escalation_email_failed_total{instance="attention:9101"}'
+        values: "0 0 0 0 0"
+      # The scanner counts one refusal at t=2m.
+      - series: 'escalation_email_failed_total{instance="scanner:9101"}'
+        values: "0 0 1 1 1"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: EscalationEmailFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: "scanner:9101"
+            exp_annotations:
+              summary: "Escalation alert mail failed on scanner:9101"
+              description: >-
+                An escalation was opened and the operator mail for it was refused. The escalations
+                themselves are committed and still in the queue — nothing was lost — but nobody was
+                told about them. Check SMTP settings and the relay behind ESCALATION_ALERT_TO.
+
+  # 2. A whole fleet of seeded zeros stays silent.
+  - interval: 1m
+    input_series:
+      - series: 'escalation_email_failed_total{instance="relay:9101"}'
+        values: "0 0 0 0 0"
+      - series: 'escalation_email_failed_total{instance="scheduler:9101"}'
+        values: "0 0 0 0 0"
+      - series: 'escalation_email_failed_total{instance="planner:9101"}'
+        values: "0 0 0 0 0"
+      - series: 'escalation_email_failed_total{instance="expiry:9101"}'
+        values: "0 0 0 0 0"
+      - series: 'escalation_email_failed_total{instance="scanner:9101"}'
+        values: "0 0 0 0 0"
+      - series: 'escalation_email_failed_total{instance="attention:9101"}'
+        values: "0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: EscalationEmailFailed
+        exp_alerts: []
+
+  # 3. Absent data cannot fire — the defect D10-109 fixed, pinned so it cannot come back.
+  - interval: 1m
+    input_series:
+      # Only an unrelated family, so the rule's own series is absent rather than zero. Scraping and
+      # a rule that reads it are two different failures; this case keeps them apart.
+      - series: 'escalations_total{status="open",instance="scanner:9101"}'
+        values: "0 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: EscalationEmailFailed
+        exp_alerts: []
