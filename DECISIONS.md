@@ -8585,3 +8585,9 @@ failure mode of two. `free_port()` is still racy by construction. And `wait_for_
 deliberately proves less than `wait_for_sample` for five of the six: provoking a planner, a
 scheduler, a relay or a watcher into writing a counter needs a fixture each, and none of those
 fixtures exists yet.
+
+The slice landed as `77c2ad9` and `ab8b6e7`, and CI run `43639757850` is green on that tip, seven
+jobs of seven. The jobs API lists `smoke worker metrics (six real workers, six real sockets)` as
+`success` inside `backend tests (pytest, sqlite)`, so the sweep has now started six interpreter
+processes and read six sockets back on Ubuntu as well as on Windows; the platform limit `D10-108`
+left open is closed for this script.

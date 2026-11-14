@@ -7121,6 +7121,11 @@ did not remove. The relay's asynchronous bounce is still uncounted, `free_port()
 construction, and `wait_for_listener` proves less than `wait_for_sample` for five of the six,
 because each of those needs a fixture nobody has written.
 
+The slice landed as `77c2ad9` (the six-worker script and the renamed CI step) and `ab8b6e7` (both
+ledgers). CI run `43639757850` is green on that tip — seven jobs of seven — and the jobs API lists
+the `smoke worker metrics (six real workers, six real sockets)` step as `success`, so the script has
+now run on Ubuntu as well as on Windows.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.
