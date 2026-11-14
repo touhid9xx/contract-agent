@@ -7076,6 +7076,15 @@ the rule able to fire. The relay still accepts-then-bounces undetected, so only 
 is counted: one failure mode of two. Five of the six workers remain unscraped by anything but the
 compose file.
 
+The slice landed as `6789ff0`, with this record as `11179d0`, and CI run `43529294055` is green on
+it: seven of seven jobs, read from the run's own job list rather than inferred from the names. Its
+`backend tests (pytest, sqlite)` job lists a `smoke escalation alert (real refusal, real socket)`
+step that succeeded, which is the evidence for the last clause above: the two-phase script has now
+started the scanner, been refused a connection, and read the count back on Ubuntu as well as on
+Windows, so that limit is measured rather than argued. What the run does not cover is the rest of
+them — the gitignored harness that evaluated the rule, the relay that accepts and then bounces, and
+the five workers nothing scrapes — exactly as listed.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

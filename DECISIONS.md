@@ -8508,3 +8508,11 @@ scrape, which is the cost of making the rule able to fire at all. The relay stil
 accepts-then-bounces undetected, so only a refused connection is counted: this proves the rule for
 one failure mode of two, and five of the six workers remain unscraped by anything but the compose
 file.
+
+**Landed.** `6789ff0`, with this entry as `11179d0`. CI run `43529294055` is green on the tip, seven
+of seven jobs, and its `backend tests (pytest, sqlite)` job lists the
+`smoke escalation alert (real refusal, real socket)` step as succeeded — so the two-phase script has
+started the scanner, been refused, and read the count back on Ubuntu as well, and the last clause of
+the Limits paragraph above is measured rather than open. The scratch harness that drove the rule
+evaluation is still gitignored and still not reproducible from the repository, and that clause
+stands.
