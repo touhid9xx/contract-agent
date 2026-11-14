@@ -440,8 +440,91 @@ jobs:
           MYSQL_ROOT_PASSWORD=ci MYSQL_PASSWORD=ci docker compose config -q
 
 
+  # ------------------------------------------------------------------- image
+  # `Dockerfile.backend` is the artifact `docker-compose.yml` runs, and until this
+  # job existed nothing in this repository built it: no `docker build` appeared
+  # anywhere in this file, so the only thing that ever constructed it was
+  # `docker compose up` on somebody's machine — and that is not a gate. Every
+  # failure it can carry is silent until then: a `requirements.txt` pin that does
+  # not resolve for 3.13, a `COPY` of a path that moved, `USER app` dropped while
+  # making something write. The suite above cannot see any of them, because it
+  # runs from a checkout with a prepared interpreter, not from this file.
+  #
+  # The worker list is *read out of* `docker-compose.yml` rather than restated
+  # here, for the same reason the Prometheus tag lives in `env:` above: a second
+  # copy is a second thing to forget. A seventh worker added to the stack is
+  # imported by this job on the next run without anybody editing it.
+  #
+  # The last step runs a real worker to completion rather than importing it,
+  # because "the module imports" and "the process works" are different claims:
+  # `--once` drains the expiry sweep, which queries, commits and exits with a
+  # status, against a throwaway SQLite file so no service container is needed.
+  # That also happens to be the first time any worker has been started from this
+  # image at all (`D10-112`).
+  image:
+    name: image (docker build, every entry point)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build the image the stack runs
+        run: docker build -f Dockerfile.backend -t contract-agent-api:ci .
+
+      # `USER app` is the line that keeps a compromised request from being a
+      # compromised host, and it is one word wide: deleting it changes nothing a
+      # test can see. Asserted as an id, not read back from the Dockerfile.
+      - name: the container runs as the unprivileged account
+        run: |
+          uid=$(docker run --rm --entrypoint id contract-agent-api:ci -u)
+          if [ "$uid" != "1001" ]; then
+            echo "::error::the image runs as uid $uid, not the unprivileged 1001"
+            exit 1
+          fi
+          echo "the image runs as uid $uid"
+
+      - name: every process the stack starts imports inside it
+        run: |
+          modules=$(python3 -c 'import pathlib,re; c=pathlib.Path("docker-compose.yml").read_text(encoding="utf-8"); f=sorted(set(re.findall(r"^\s+- (app\.workers\.[a-z_]+)$", c, re.M))); assert len(f) == 6, f"expected six worker entry points in docker-compose.yml, found {len(f)}"; print(", ".join(f))')
+          echo "importing app.main, $modules"
+          docker run --rm contract-agent-api:ci python -c "import app.main, $modules"
+
+      # Liveness, not readiness: nothing here provisions MySQL, and `/health` is
+      # the probe that deliberately answers without touching a dependency. The
+      # metric is the point of the step — `escalation_email_failed_total` at zero
+      # before its first increment is what `D10-109` fixed, and this is the only
+      # place that reads it out of the *shipped* artifact rather than a test.
+      - name: the API answers liveness and publishes its metrics from the image
+        run: |
+          docker run -d --name image-api -p 127.0.0.1:18000:8000 contract-agent-api:ci
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18000/health >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:18000/health
+          echo
+          scrape=$(curl -fsS http://127.0.0.1:18000/metrics)
+          sample=$(echo "$scrape" | grep -E '^escalation_email_failed_total ')
+          if [ "$sample" != "escalation_email_failed_total 0" ]; then
+            echo "::error::expected the seeded zero, got: ${sample:-<no sample>}"
+            exit 1
+          fi
+          echo "$sample"
+
+      - name: a worker completes a tick inside the image
+        run: |
+          docker run --rm --tmpfs /data \
+            -e DATABASE_URL=sqlite+pysqlite:////data/ci.db \
+            contract-agent-api:ci sh -c "python -c 'from app.db.base import Base; import app.db.models; from app.core.config import get_settings; from app.db.session import build_engine; Base.metadata.create_all(build_engine(get_settings()))' && python -m app.workers.expiry --once" \
+            | tee "$RUNNER_TEMP/tick.log"
+          grep -q expiry_sweep_drained "$RUNNER_TEMP/tick.log" \
+            || { echo "::error::the sweep logged no drained verdict"; exit 1; }
+
+      - name: remove the container
+        if: always()
+        run: docker rm -f image-api || true
+
   # --------------------------------------------------------------------- gate
-  # One job to name as a required status check, instead of the seven that have to be
+  # One job to name as a required status check, instead of the eight that have to be
   # re-listed whenever a job is added. `if: always()` is what makes it run when
   # an upstream job failed — otherwise the gate would be skipped, and a skipped
   # required check is a green light.
@@ -465,6 +548,7 @@ jobs:
       - demo-frontend
       - hygiene
       - observability
+      - image
     runs-on: ubuntu-latest
     steps:
       - name: Every required job must have succeeded

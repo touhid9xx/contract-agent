@@ -27,11 +27,16 @@
 #        runs — gap 17, and the reason the default is the provable backend.
 name: contract-agent
 
-# One image, five processes: each worker is the API image with a different
-# `command`, so worker code is never a second copy of the application. The shared
-# half is anchored rather than repeated — three near-identical service blocks are
-# exactly where a `read_only` or a `no-new-privileges` line goes missing in one of
-# them, and then one worker is quietly less contained than the other two.
+# One image, seven processes: the API and six workers, each worker being the API
+# image with a different `command`, so worker code is never a second copy of the
+# application. `.github/workflows/ci.yml` builds this file and starts every entry
+# point named below (`D10-112`), so that list is not a note about deployment — it
+# is what CI executes.
+#
+# The shared half is anchored rather than repeated — six near-identical service
+# blocks are exactly where a `read_only` or a `no-new-privileges` line goes
+# missing in one of them, and then one worker is quietly less contained than the
+# others.
 x-worker: &worker
   build:
     context: .
