@@ -6990,8 +6990,11 @@ collected. `ruff check` passes, `ruff format --check` finds 136 files already fo
 clean in 75, `bandit` is clean beyond the annotated `nosec` on `config.py:80`, and
 `evaluate-extraction --golden tests/golden/extraction/manifest.json` exits 0 at pooled F1 0.974.
 
-Limits: one worker, not six, so the compose port mapping is still verified by parsing the file
-rather than by a metric arriving in a container. ~~`escalation_email_failed_total` — the family
+Limits: ~~one worker, not six, so the compose port mapping is still verified by parsing the file
+rather than by a metric arriving in a container.~~ **`D10-110` starts all six**, each on its own
+port, so six sockets now stand where the compose file used to. They are processes, not containers,
+so the image, the volume and the published host-port mapping stay unexercised.
+~~`escalation_email_failed_total` — the family
 `D10-91`'s rule actually names — never fired, because that needs the scanner plus a relay that
 refuses.~~ **`D10-109` built exactly that, and the rule still did not fire:** the counter carried no
 sample until its first increment, so `increase()` had no baseline to subtract. Nothing here covers a
@@ -7073,8 +7076,11 @@ and the process control, the container orchestration is scratch. Everything abov
 Windows with Python 3.14.7, so CI is the first Linux run. A counter reporting `0` from declaration
 and a counter never written are no longer distinguishable at the scrape, which is the cost of making
 the rule able to fire. The relay still accepts-then-bounces undetected, so only a refused connection
-is counted: one failure mode of two. Five of the six workers remain unscraped by anything but the
-compose file.
+is counted: one failure mode of two. ~~Five of the six workers remain unscraped by anything but the
+compose file.~~ **`D10-110` scraped all six**, and measured that the seeding `D10-109` added renders
+`escalation_email_failed_total` as `0` in every process — the relay included, though it can never
+write it. A rule aimed at the wrong port therefore reads a constant `0` and never fires, where the
+old absent series at least made that mistake visible.
 
 The slice landed as `6789ff0`, with this record as `11179d0`, and CI run `43529294055` is green on
 it: seven of seven jobs, read from the run's own job list rather than inferred from the names. Its
@@ -7082,8 +7088,38 @@ it: seven of seven jobs, read from the run's own job list rather than inferred f
 step that succeeded, which is the evidence for the last clause above: the two-phase script has now
 started the scanner, been refused a connection, and read the count back on Ubuntu as well as on
 Windows, so that limit is measured rather than argued. What the run does not cover is the rest of
-them — the gitignored harness that evaluated the rule, the relay that accepts and then bounces, and
-the five workers nothing scrapes — exactly as listed.
+them — the gitignored harness that evaluated the rule, and the relay that accepts and then bounces
+~~, and the five workers nothing scrapes~~ — exactly as listed. **`D10-110` scraped those five**, so
+the container and the scraper are the only things that slice left unmeasured.
+
+### Six workers, six sockets, and the target the seed made indistinguishable (`D10-110`)
+
+The previous slice scraped one worker and left the other five to be checked by reading
+`docker-compose.yml`. This one starts all six modules as processes, each on a port of its own, and
+asserts of every one that it answers a scrape, declares the shared families, holds no sample for a
+family another worker writes, and releases its port on death. Twenty-one steps, ~13s.
+
+It did not find a broken worker. It found what `D10-109`'s seed did to the rule's *targets*. A
+labelless counter's declaration is its series, so `escalation_email_failed_total 0` now renders in
+every process that imports `app.core.metrics` — the API and `outbox_relay` included, neither of
+which can increment it. Point the rule at the wrong port and `increase()` stays flat for ever while
+every dashboard says the service is fine. Before the seed that mistake was an absent series; now
+only the target's identity tells health apart from a rule that cannot fire. The relay's `0` is
+therefore asserted, and the assertion *is* the sentence "a zero here means nothing".
+
+Gates: `ruff check` passes, `ruff format --check` finds 137 files, `mypy` is clean in 75, `bandit`
+exits 0, and pytest is `1188 passed, 2 skipped, 19 deselected` — the same numbers as `11179d0`,
+because what changed is a script pytest does not collect. Non-vacuity:
+`.agent-cache/mutate_d110.py` breaks each new claim and requires its own message — `emits
+contracts_expired_total samples`, `outbox_relay never answered a scrape`, `the relay renders` — then
+restores the file byte-identically.
+
+Limits: six processes, not six containers. Nothing in this tree scrapes the six ports — no
+`prometheus.yml`, no Prometheus service — so the alert rule is still prose and would still not load
+into a real Prometheus from this repository, which is the residue `D10-109` recorded and this slice
+did not remove. The relay's asynchronous bounce is still uncounted, `free_port()` is still racy by
+construction, and `wait_for_listener` proves less than `wait_for_sample` for five of the six,
+because each of those needs a fixture nobody has written.
 
 ## Non-negotiable reminders
 

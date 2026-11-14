@@ -8406,8 +8406,12 @@ XML. `ruff check` passes, `ruff format --check` finds 136 files formatted, `mypy
 `bandit` exits 0, and `evaluate-extraction --golden tests/golden/extraction/manifest.json` exits
 0 at pooled F1 0.974.
 
-**Limits.** One worker, not six: the compose port mapping is still verified by parsing the file, so
-this journey proves the process, the environment variable and the sample, not the container. The
+**Limits.** ~~One worker, not six~~: the compose port mapping is still verified by parsing the
+file, so this journey proves the process, the environment variable and the sample, not the
+container. **`D10-110` amended the first clause:** the journey now starts all six worker modules,
+each on its own port, so the six-port claim is measured by six sockets rather than parsed out of
+the compose file — but it is still six *processes*, not six containers, so the image, the volume,
+the namespace and the published host-port mapping are all unexercised. The
 rule fired against a generated config, not a shipped one, and ~~`D10-91`'s own series
 (`escalation_email_failed_total`) never fired — that needs the scanner plus a refusing relay.~~
 **`D10-109` did that work, and found the rule dead for a second reason:** it built the scanner plus
@@ -8506,8 +8510,12 @@ on Windows with Python 3.14.7, so CI is the first Linux run of the two-phase scr
 reporting `0` from declaration and a counter never written are no longer distinguishable at the
 scrape, which is the cost of making the rule able to fire at all. The relay still
 accepts-then-bounces undetected, so only a refused connection is counted: this proves the rule for
-one failure mode of two, and five of the six workers remain unscraped by anything but the compose
-file.
+one failure mode of two. ~~and five of the six workers remain unscraped by anything but the compose
+file.~~ **`D10-110` scraped all six**, and in doing so pinned a consequence of the seeding that
+changes which target a rule may name: `escalation_email_failed_total` now renders `0` in *every*
+process, the relay included, and the relay can never write it — so a rule aimed at the wrong port
+reads a constant `0` and looks healthy for ever, where before that mistake was visible as an absent
+series.
 
 **Landed.** `6789ff0`, with this entry as `11179d0`. CI run `43529294055` is green on the tip, seven
 of seven jobs, and its `backend tests (pytest, sqlite)` job lists the
@@ -8516,3 +8524,64 @@ started the scanner, been refused, and read the count back on Ubuntu as well, an
 the Limits paragraph above is measured rather than open. The scratch harness that drove the rule
 evaluation is still gitignored and still not reproducible from the repository, and that clause
 stands.
+
+### D10-110 — Six workers, six sockets, and the target the seeding made indistinguishable
+
+**Decision.** Finish what `D10-108` left at one worker. The committed smoke script now starts every
+one of the six worker modules as its own process on its own port and asserts four things of each:
+that it answers a scrape at all, that the body carries the shared family declarations, that it emits
+**no sample** for a family another worker owns, and that it gives its port back when it dies. The
+six-port claim that had only ever been read out of `docker-compose.yml` is now measured by six
+sockets.
+
+**Why not a unit test.** `tests/test_metrics_server.py` fills the registry itself, so its
+`publish_metrics` cases prove the listener's behaviour and not that any worker starts. The gap was
+between the wiring and the process, and only a process closes it. The file stays outside pytest
+because it spawns six interpreters and takes ~13s; naming it `smoke_` keeps it collected once per CI
+run rather than once per case.
+
+**What the second phase found.** Not a crash: all six bind, answer and release, including the two —
+`outbox_relay` and `attention_watch` — that write no family of their own. It found the consequence
+of `D10-109`'s seed instead. A labelless counter's *declaration* is its series, so
+`escalation_email_failed_total 0` renders in every process that imports `app.core.metrics`,
+including the API and the relay, neither of which can ever increment it. Before the seed, pointing
+the rule at the wrong target produced an absent series — visible. After it, the wrong target
+produces a constant `0`: `increase()` over it is flat for ever, the rule never fires, and nothing
+about it looks wrong. **So which port the rule names is now load-bearing in a way it was not
+before**, and that is why the relay's `0` is asserted rather than tolerated: the assertion is the
+sentence "a zero here is indistinguishable from health".
+
+**What was changed.**
+- `backend/tests/smoke_worker_metrics.py` — a `Worker` table of the six modules, `start_worker`
+  parameterized by row instead of hardcoding `app.workers.expiry`, and two new helpers:
+  `wait_for_listener` (weaker than `wait_for_sample`, and says why) and `verify_worker` (start →
+  scrape → locality → stop → release). The docstring's "it runs one worker, not six" is struck
+  rather than deleted.
+- `SINGLE_WRITER_FAMILIES` states ownership once and deliberately omits two families:
+  `notifications_sent_total`, because the API writes it too, and `escalation_email_failed_total`,
+  because the seed makes its absence unavailable. Both omissions are the trap being pinned.
+- `.github/workflows/ci.yml` — the step is renamed to say six, and the comment records that the
+  seeded zero is why the rule must name a port.
+
+**Gates.** `ruff check` passes. `ruff format --check` finds 137 files already formatted. `mypy` is
+clean in 75 source files. `bandit -c pyproject.toml -r backend/app -q` exits 0. pytest is `1188
+passed, 2 skipped, 19 deselected` — **unchanged**, because the six-worker coverage lives in a script
+pytest does not collect, which is the same property that keeps it out of the 1209. The script itself
+passes all 21 steps on Windows in ~13s.
+
+**Non-vacuity.** `.agent-cache/mutate_d110.py` breaks each new claim in turn and requires the run to
+fail with that claim's own message: attributing the sweep's family to the planner fails with `emits
+contracts_expired_total samples`; pointing one worker at a module that does not exist fails with
+`outbox_relay never answered a scrape`; expecting the seeded zero to be one fails with `the relay
+renders`. All three fail, nothing else fires, and the file is restored byte-identically.
+
+**Limits.** Six *processes*, not six containers: the image, the volume, the network namespace and
+the published host-port mapping are all still unexercised, so "a series in a container" remains
+unproven. Nothing is configured to scrape the six ports — there is no `prometheus.yml` in the
+repository and no Prometheus service in `docker-compose.yml` — so the rule still lives only as prose
+and would not load into a real Prometheus from this tree. That is the residue `D10-109` named, and
+it is untouched here. The relay's bounce blindness stands: only a refused connection is counted, one
+failure mode of two. `free_port()` is still racy by construction. And `wait_for_listener`
+deliberately proves less than `wait_for_sample` for five of the six: provoking a planner, a
+scheduler, a relay or a watcher into writing a counter needs a fixture each, and none of those
+fixtures exists yet.
