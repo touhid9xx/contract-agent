@@ -146,10 +146,17 @@ jobs:
       # `contracts_expired_total{outcome="unknown_timezone"}` arrives over the
       # socket while a family the sweep never writes arrives with no sample.
       #
+      # ~~That was one worker of six.~~ **`D10-110` finished the sentence:** the step
+      # now starts all six worker modules, each on its own port, and fails unless
+      # every one answers a scrape, holds no sample for a family another worker
+      # writes, and releases its port on death. The seeded zero `D10-109` added is
+      # asserted in the relay, which can never write it — which is why the alert
+      # rule has to name the scanner's *port* and not merely some port.
+      #
       # No service container, no new dependency, and not collected by pytest: the
       # file is `smoke_worker_metrics.py`, so it runs here once rather than as a
       # test that spawns an interpreter per case.
-      - name: smoke worker metrics (real worker process, real socket)
+      - name: smoke worker metrics (six real workers, six real sockets)
         run: python backend/tests/smoke_worker_metrics.py
 
       # And the companion `D10-108` left open. That step scraped a worker whose

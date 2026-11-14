@@ -1,4 +1,4 @@
-"""One real worker process, one real socket, one real scrape.
+"""Six real worker processes, six real sockets, one scrape each.
 
 Why this file exists
 --------------------
@@ -22,15 +22,25 @@ there, because the registry is shared) and carries no sample, which is the
 absent-series-not-zero distinction the module documents. Finally it stops the
 process and proves the port was released.
 
+That is the first phase. A second phase then repeats it for all six worker
+modules — the expiry sweep twice, so that one check applies to all six rather
+than to five of them — each on its own port, and asserts of every one that it
+answers a scrape, declares the families the shared registry holds, emits **no
+sample** for a family another worker owns, and gives its port back when it dies.
+Until ``D10-110`` only the expiry sweep had ever been scraped and the six-port
+claim rested on reading ``docker-compose.yml``.
+
 What it does not prove
 ----------------------
 It is not a unit test of the listener: path, verb, header and error-body details
-belong to ``tests/test_metrics_server.py``. It does not scrape a *container* —
-the six ports Compose publishes are still verified by parsing the compose file,
-and this script is about the process, the socket and the sample. It runs one
-worker, not six. And it says nothing about fidelity to Prometheus: parsing the
-text here is not the same as Prometheus parsing it, which is why the rule that
-reads this series is evaluated in the ledger's measurement rather than here.
+belong to ``tests/test_metrics_server.py``. It does not scrape a *container*:
+the six published ports are exercised here as six local *processes*, so nothing
+below proves the image, the volume or the network namespace. ~~It runs one
+worker, not six.~~ **Amended by ``D10-110``:** it runs all six, but a process is
+not a container and this file is still about the process, the socket and the
+sample. And it says nothing about fidelity to Prometheus: parsing the text here
+is not the same as Prometheus parsing it, which is why the rule that reads this
+series is evaluated in the ledger's measurement rather than here.
 
 How to run it
 -------------
@@ -55,6 +65,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
@@ -89,7 +100,9 @@ SCRAPE_DEADLINE_SECONDS = 60.0
 #: this, so the wait is dominated by process start, not by the poller.
 RETRY_SECONDS = 0.2
 
-#: A fast sweep, so the first scrape attempt does not race a one-hour default.
+#: A fast tick, so the first scrape attempt does not race a one-hour default.
+#: Every worker setting it drives has ``gt=0`` in ``app.core.config``, so a
+#: half-second is legal for all six.
 POLL_INTERVAL_SECONDS = "0.5"
 
 #: The only family this script expects to *see* a sample for.
@@ -105,6 +118,76 @@ EXPECTED_SAMPLE = f'{EXPECTED_FAMILY}{{outcome="{EXPECTED_OUTCOME}"}}'
 
 #: Families the sweep never writes, asserted present-but-empty.
 UNWRITTEN_FAMILIES = ("reminder_plans_total", "extractions_total")
+
+#: The one family ``D10-109`` seeded. It carries no labels, so its declaration
+#: *is* its series and ``Counter.render`` prints ``0`` for it in every process
+#: that imports ``app.core.metrics``. Named apart from :data:`EXPECTED_FAMILY`,
+#: which is the sweep's labelled family and is absent until the sweep writes it —
+#: conflating the two is the mistake this constant exists to prevent.
+SEEDED_ZERO_FAMILY = "escalation_email_failed_total"
+
+
+@dataclass(frozen=True)
+class Worker:
+    """One worker process and the dial that makes it tick.
+
+    The six rows are the same six ``tests/test_metrics_server.py`` maps to
+    ``publish_metrics`` call sites, and the same six ``docker-compose.yml``
+    publishes a host port for. The module path and the worker name are kept
+    together on purpose: a scrape body cannot tell you which process answered, so
+    the only identity a journey has is the port it chose to ask.
+
+    It carries no list of the families the worker writes: :data:`SINGLE_WRITER_FAMILIES`
+    is the single statement of that, and a second copy here would be a second
+    thing to drift.
+    """
+
+    name: str
+    module: str
+    poll_env: str
+
+
+#: Every worker module that serves its own registry. Order is the order the
+#: Compose file lists them in, and the expiry sweep is first because it is the
+#: one this file asserts a *sample* for.
+WORKERS: tuple[Worker, ...] = (
+    Worker("expiry", "app.workers.expiry", "EXPIRY_SWEEP_POLL_INTERVAL_SECONDS"),
+    Worker(
+        "reminder_planner", "app.workers.reminder_planner", "REMINDER_SCAN_POLL_INTERVAL_SECONDS"
+    ),
+    Worker(
+        "notification_scheduler",
+        "app.workers.notification_scheduler",
+        "NOTIFICATION_POLL_INTERVAL_SECONDS",
+    ),
+    Worker(
+        "escalation_scanner",
+        "app.workers.escalation_scanner",
+        "ESCALATION_SCAN_POLL_INTERVAL_SECONDS",
+    ),
+    # These two write no family of their own: their registry holds the API's
+    # zeros, and the listener answers "did this process start?" rather than "is
+    # it working?". They are here because a port nothing ever asks is a port
+    # nobody would notice going missing.
+    Worker("outbox_relay", "app.workers.outbox_relay", "OUTBOX_POLL_INTERVAL_SECONDS"),
+    Worker("attention_watch", "app.workers.attention_watch", "ATTENTION_POLL_INTERVAL_SECONDS"),
+)
+
+#: Family -> the one worker allowed to emit a sample for it. Every entry here
+#: carries labels, so a process that never wrote one renders **no sample at
+#: all** — absence is the evidence that the registry is process-local, which is
+#: what ``app/workers/metrics_server.py`` claims and what nothing had measured
+#: outside the expiry sweep. ``notifications_sent_total`` is deliberately absent:
+#: the API writes it too, so its presence in a worker proves nothing either way.
+#: ``escalation_email_failed_total`` is absent for the opposite reason: since
+#: ``D10-109`` it is seeded at declaration, so it renders ``0`` in *every*
+#: process and its absence is no longer available as evidence — which is itself
+#: pinned below, because it changes which target a rule may safely name.
+SINGLE_WRITER_FAMILIES: dict[str, str] = {
+    "contracts_expired_total": "expiry",
+    "reminder_plans_total": "reminder_planner",
+    "escalations_total": "escalation_scanner",
+}
 
 
 class SmokeError(RuntimeError):
@@ -169,8 +252,10 @@ def free_port() -> int:
         return int(probe.getsockname()[1])
 
 
-def start_worker(database: Path, port: int, log_path: Path) -> subprocess.Popen[bytes]:
-    """Start the expiry worker as a real process, logging to a file.
+def start_worker(
+    worker: Worker, database: Path, port: int, log_path: Path
+) -> subprocess.Popen[bytes]:
+    """Start one worker module as a real process, logging to a file.
 
     Logs go to a file rather than a pipe on purpose: a pipe nobody drains fills
     at ~64 KB and then blocks the child mid-tick, which looks exactly like a
@@ -184,18 +269,21 @@ def start_worker(database: Path, port: int, log_path: Path) -> subprocess.Popen[
             "DATABASE_URL": f"sqlite:///{database.as_posix()}",
             "WORKER_METRICS_HOST": "127.0.0.1",
             "WORKER_METRICS_PORT": str(port),
-            "EXPIRY_SWEEP_POLL_INTERVAL_SECONDS": POLL_INTERVAL_SECONDS,
+            worker.poll_env: POLL_INTERVAL_SECONDS,
             # Quiet, but not silent: a crash before the bind is the case the tail
             # is printed for, and it logs at warning or above.
             "LOG_LEVEL": "WARNING",
             "LOG_JSON": "false",
+            # Both stand-ins, so a journey never needs a broker, a relay or a
+            # phone. A worker whose transport is missing refuses at the point of
+            # use, not at import, so the listener still binds and is still asked.
             "EVENT_TRANSPORT": "none",
             "NOTIFICATION_TRANSPORT": "none",
         }
     )
     log_file = log_path.open("wb")
-    return subprocess.Popen(
-        [sys.executable, "-m", "app.workers.expiry"],
+    return subprocess.Popen(  # noqa: S603 - argv is this module's own table, not input
+        [sys.executable, "-m", worker.module],
         cwd=str(_BACKEND_DIR),
         env=env,
         stdout=log_file,
@@ -314,8 +402,81 @@ def assert_port_released(port: int, deadline_seconds: float = 10.0) -> None:
     raise SmokeError(f"port {port} was never released after the worker exited ({last_error})")
 
 
+def wait_for_listener(worker: Worker, port: int, deadline_seconds: float) -> str:
+    """Poll until the worker answers a scrape, and return the body.
+
+    Weaker than :func:`wait_for_sample` on purpose. Four of the six workers write
+    no family this journey can provoke without inventing a due outbox row, a due
+    notification and a silent contract apiece, so for them the honest readiness
+    signal is a ``200`` whose body carries the declarations every process holds.
+    That is not vacuous: it fails for a worker that never binds, and for one whose
+    body is not this registry.
+
+    The declaration asserted is ``escalation_email_failed_total`` — the family
+    ``D10-109`` made readable — because it is declared by ``app.core.metrics``
+    itself, so it must appear in *every* process regardless of what that process
+    does.
+    """
+    deadline = time.monotonic() + deadline_seconds
+    last_error = "no attempt made"
+    marker = f"# HELP {SEEDED_ZERO_FAMILY}"
+    while time.monotonic() < deadline:
+        try:
+            status, raw = scrape(port)
+        except (urllib.error.URLError, ConnectionError, TimeoutError) as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+        else:
+            need(
+                status == 200,
+                f"{worker.name}: GET /metrics answered {status}, expected 200",
+            )
+            body = raw.decode("utf-8")
+            if marker in body:
+                return body
+            last_error = f"200 without a '{marker}' declaration"
+        time.sleep(RETRY_SECONDS)
+    raise SmokeError(f"{worker.name} never answered a scrape ({last_error})")
+
+
+def verify_worker(worker: Worker, database: Path, workdir: Path) -> str:
+    """Start one worker, prove it answers and is process-local, stop, prove release.
+
+    Returns the body so a caller can assert on one specific family. The absence
+    checks are the interesting half: a family another worker owns must have **no
+    sample**, which is a different observation from a sample of zero and is what
+    "each worker serves its own registry" actually means.
+    """
+    port = free_port()
+    log_path = workdir / f"{worker.name}.log"
+    process = start_worker(worker, database, port, log_path)
+    try:
+        body = wait_for_listener(worker, port, SCRAPE_DEADLINE_SECONDS)
+        for family, owner in SINGLE_WRITER_FAMILIES.items():
+            if owner == worker.name:
+                continue
+            present = samples(body, family)
+            need(
+                not present,
+                f"{worker.name} emits {family} samples ({present}), but only "
+                f"{owner} writes it, so the registry is not process-local after "
+                f"all and this assertion proves nothing",
+            )
+        say(
+            f"{worker.name} answers a scrape and holds no other worker's series",
+            f"127.0.0.1:{port}",
+        )
+    except SmokeError:
+        print(f"\n--- {worker.name} log ---\n" + log_tail(log_path), flush=True)
+        raise
+    finally:
+        stop_worker(process)
+    assert_port_released(port)
+    say(f"{worker.name} gave the port back when the process died", f"127.0.0.1:{port}")
+    return body
+
+
 def run() -> None:
-    """The journey itself: seed, start, scrape, assert, stop, release."""
+    """The journey itself: seed, start, scrape, assert, stop, release — six times."""
     with tempfile.TemporaryDirectory(prefix="smoke-worker-metrics-") as raw_dir:
         workdir = Path(raw_dir)
         database = workdir / "smoke.sqlite"
@@ -326,7 +487,7 @@ def run() -> None:
             say("seeded one contract with an unresolvable time zone", UNKNOWN_ZONE)
 
             port = free_port()
-            process = start_worker(database, port, log_path)
+            process = start_worker(WORKERS[0], database, port, log_path)
             try:
                 body, found = wait_for_sample(port, SCRAPE_DEADLINE_SECONDS)
                 value = found[EXPECTED_SAMPLE]
@@ -362,6 +523,36 @@ def run() -> None:
 
             assert_port_released(port)
             say("the port was released when the process died", f"127.0.0.1:{port}")
+
+            # Phase two. The expiry sweep above is the one worker this journey can
+            # provoke into writing a counter without inventing a fixture per
+            # worker. Every worker is verified again here, expiry included, because
+            # the locality check is the same check for all six and because the
+            # expiry body is the only one *guaranteed* to carry a worker-only
+            # sample — which is what makes that check falsifiable instead of
+            # merely quiet.
+            say("--- every worker, each on its own port ---")
+            bodies: dict[str, str] = {}
+            for worker in WORKERS:
+                bodies[worker.name] = verify_worker(worker, database, workdir)
+
+            # The seeded zero is a *declaration*, not a recording, so it renders in
+            # a process that can never write it. Pinned because it is the reason
+            # `EscalationEmailFailed` has to be aimed at the scanner's port: pointed
+            # at the relay, the rule reads a constant `0` for ever and looks
+            # healthy. Before `D10-109` that mistake was at least visible as an
+            # absent series; now only the target's identity tells the two apart.
+            relay_baseline = samples(bodies["outbox_relay"], SEEDED_ZERO_FAMILY)
+            need(
+                relay_baseline == {SEEDED_ZERO_FAMILY: 0.0},
+                f"the relay renders {relay_baseline} for {SEEDED_ZERO_FAMILY}, expected "
+                f"the seeded zero: an absent series here would mean the counter is "
+                f"unreadable again in the process that owns it",
+            )
+            say(
+                "the seeded zero renders in a process that cannot write it",
+                f"{SEEDED_ZERO_FAMILY} 0",
+            )
         finally:
             engine.dispose()
 
