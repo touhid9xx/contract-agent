@@ -7114,10 +7114,12 @@ because what changed is a script pytest does not collect. Non-vacuity:
 contracts_expired_total samples`, `outbox_relay never answered a scrape`, `the relay renders` — then
 restores the file byte-identically.
 
-Limits: six processes, not six containers. Nothing in this tree scrapes the six ports — no
+Limits: six processes, not six containers. ~~Nothing in this tree scrapes the six ports — no
 `prometheus.yml`, no Prometheus service — so the alert rule is still prose and would still not load
 into a real Prometheus from this repository, which is the residue `D10-109` recorded and this slice
-did not remove. The relay's asynchronous bounce is still uncounted, `free_port()` is still racy by
+did not remove.~~ **Amended, not deleted (`D10-111`):** the tree now ships the config and the
+service, and CI loads the rule with `promtool`; what remains is the containers, not the rule. The
+relay's asynchronous bounce is still uncounted, `free_port()` is still racy by
 construction, and `wait_for_listener` proves less than `wait_for_sample` for five of the six,
 because each of those needs a fixture nobody has written.
 
@@ -7125,6 +7127,40 @@ The slice landed as `77c2ad9` (the six-worker script and the renamed CI step) an
 ledgers). CI run `43639757850` is green on that tip — seven jobs of seven — and the jobs API lists
 the `smoke worker metrics (six real workers, six real sockets)` step as `success`, so the script has
 now run on Ubuntu as well as on Windows.
+
+### D10-111 — The alert rule now loads from the repository
+
+The alert rule existed only as prose. `ops/prometheus/prometheus.yml` scrapes the API and all six
+worker listeners and reads `ops/prometheus/rules.yml`, which holds
+`increase(escalation_email_failed_total[1h]) > 0` — the one rule this project names, with nothing
+invented beside it. `docker compose up prometheus` mounts that directory at `/etc/prometheus`, the
+image's own default path, so the file CI checks is the file the stack reads. A new `observability`
+job runs `promtool check config`, `promtool test rules` and `docker compose config -q`, and `gate`
+now waits on seven jobs.
+
+What the rule tests assert, in Prometheus's own format: a failure on the scanner fires the alert on
+that instance alone; a fleet of six seeded zeros stays silent; a series that was never written
+cannot fire. The third case is `D10-109`'s reason for existing, written as a test instead of a
+paragraph.
+
+What was measured here: six containers named as the config names them, serving this tree's real
+`render()` output, with Prometheus from the pinned image — six of six worker targets `up`, `api` up,
+silence at the seeded zero, then `firing` on `instance="scanner:9101"` after the counter went
+`0 -> 1`. The first compose start died on `/prometheus/queries.active: permission denied`, because
+the image runs as `nobody`, so the service carries `tmpfs: /prometheus:mode=1777,size=256m` under
+`read_only: true`.
+
+Gates: `pytest` is `1188 passed, 2 skipped, 19 deselected`, unchanged because no Python changed;
+`ruff check` passes, `ruff format --check backend` finds 137, `mypy` is clean in 75, `bandit` exits
+0, both smoke scripts pass every step (21 and 8), and the compose service reports `healthy`.
+
+Limits: six processes, not six containers — the workers that answered were `python -m http.server`
+serving this tree's exposition bytes, so no worker has run from `Dockerfile.backend`. There is no
+Alertmanager and no receiver, so the rule fires into an empty `ALERTS` series, which is not the same
+as somebody being paged. The TSDB is a tmpfs: history dies with the container. The mutation,
+live-scrape and drift-guard harnesses are gitignored, so `promtool` through the CI job is the
+reproducible part. Bounce blindness, `free_port()`'s race and `wait_for_listener`'s weaker
+assertion all stand.
 
 ## Non-negotiable reminders
 

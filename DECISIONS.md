@@ -8395,10 +8395,15 @@ scrape_configs:
 **Blocked alternatives.** Parsing `docker-compose.yml` from a pytest test needs a YAML parser, and
 this project declares none: `PyYAML` would be present only transitively through `pre-commit`, so the
 choice is a new dependency or a test that breaks when the tooling does. Letting pytest collect the
-script would spawn an interpreter per case. Shipping a Prometheus config now would mean six
+script would spawn an interpreter per case. ~~Shipping a Prometheus config now would mean six
 `service:9101` targets that nothing on this machine can scrape — no image is built here — so half of
 such a file would be asserted by reading rather than by scraping, which is the habit `D10-107` was
-amended for.
+amended for.~~ **Amended, not deleted (`D10-111`):** the objection was right about the container and
+wrong about the config. A shipped `ops/prometheus/prometheus.yml` is measurable without any worker
+in an image — `promtool check config` loads it, `promtool test rules` evaluates the rule in
+Prometheus's own engine — so the half that reading would have asserted is now the half nothing
+claims: the six `service:9101` targets were exercised by a live scrape across a Docker network, and
+only "a worker inside `Dockerfile.backend` answered" stays unmeasured.
 
 **Gates.** Measured on this tree: `pytest` collected **1204** — unchanged, which is how the
 script is known not to be collected — 1189 passed, 15 skipped, 0 failed, 0 errors, from the JUnit
@@ -8577,17 +8582,90 @@ renders`. All three fail, nothing else fires, and the file is restored byte-iden
 
 **Limits.** Six *processes*, not six containers: the image, the volume, the network namespace and
 the published host-port mapping are all still unexercised, so "a series in a container" remains
-unproven. Nothing is configured to scrape the six ports — there is no `prometheus.yml` in the
+unproven. ~~Nothing is configured to scrape the six ports — there is no `prometheus.yml` in the
 repository and no Prometheus service in `docker-compose.yml` — so the rule still lives only as prose
 and would not load into a real Prometheus from this tree. That is the residue `D10-109` named, and
-it is untouched here. The relay's bounce blindness stands: only a refused connection is counted, one
-failure mode of two. `free_port()` is still racy by construction. And `wait_for_listener`
-deliberately proves less than `wait_for_sample` for five of the six: provoking a planner, a
-scheduler, a relay or a watcher into writing a counter needs a fixture each, and none of those
-fixtures exists yet.
+it is untouched here.~~ **Amended, not deleted (`D10-111`):** `ops/prometheus/` now holds the config
+and the rule, `docker-compose.yml` runs it, and `promtool` plus a live scrape measure both, so the
+residue is closed. What survives from this paragraph is the sentence before it — the containers —
+because no API image is built here. The relay's bounce blindness stands: only a refused connection
+is counted, one failure mode of two. `free_port()` is still racy by construction. And
+`wait_for_listener` deliberately proves less than `wait_for_sample` for five of the six: provoking a
+planner, a scheduler, a relay or a watcher into writing a counter needs a fixture each, and none of
+those fixtures exists yet.
 
 The slice landed as `77c2ad9` and `ab8b6e7`, and CI run `43639757850` is green on that tip, seven
 jobs of seven. The jobs API lists `smoke worker metrics (six real workers, six real sockets)` as
 `success` inside `backend tests (pytest, sqlite)`, so the sweep has now started six interpreter
 processes and read six sockets back on Ubuntu as well as on Windows; the platform limit `D10-108`
 left open is closed for this script.
+
+### D10-111 — The rule loads, and it loads from this repository
+
+**Decision.** Ship the scraper. `ops/prometheus/prometheus.yml` names the API and all six worker
+listeners and reads `/etc/prometheus/rules.yml`; `ops/prometheus/rules.yml` holds the one rule the
+ledger names — `increase(escalation_email_failed_total[1h]) > 0` — and no second rule, because a
+rules file nobody specified is decoration; `ops/prometheus/rules.test.yml` states three cases in
+Prometheus's own rule-test format. `docker-compose.yml` gains a `prometheus` service that mounts the
+directory at the image's default path, so the file CI validates is byte-for-byte the file the stack
+reads. A new CI job does the validating, with `promtool` from the same pinned image.
+
+**Why the rule needed shipping, not only proving.** `D10-91` wrote it, `D10-108` fired it against a
+config generated inside a scratch harness, `D10-109` made the counter able to fire it, and `D10-110`
+measured why the target matters: the seeded zero renders the family in processes that can never
+increment it, so a rule aimed at the wrong port reads a constant `0` for ever. All four left the
+rule in exactly one place — a ledger — where the operator who wants it must retype it, and `D10-110`
+had just priced a retyping mistake. A rule that exists only as prose has one test: whether somebody
+remembered it.
+
+**Shape of the config, and what is deliberately absent.** One job with six targets, not six jobs:
+six jobs is six places to edit when a worker is added. No aggregation across processes: `D10-107`
+spent a slice on the absent-versus-zero distinction, and `sum()` over six registries would invent a
+number for every family. No `depends_on`: a scrape target that is down is what a target list is for,
+and Prometheus reports it as `up == 0` instead of refusing to start until six workers are healthy.
+No `alerting:` block, which is a limit below rather than an oversight.
+
+**Non-vacuity, measured.** `.agent-cache/mutate_d111.py` breaks the rule and the requirements one at
+a time, each against its own copy of the directory: tightening the expression to `> 5` fails the
+firing case at `3m`; relaxing it to `>= 0` fires the seeded fleet; expecting `instance="relay:9101"`
+fails on the labels; giving the absent-series case a real increment makes it refuse to stay empty;
+and repointing `rule_files` at a file that does not exist makes `check config` fail, which is how
+the config check is known to read the rule file rather than the top level. The sixth case is a
+control: a target changed to `scanner:9100` still passes, because `promtool` validates syntax and
+not reachability — which is exactly why the live run below exists.
+
+**The live run.** A Docker network, six containers named exactly as the config names them, each
+serving this tree's own `app.core.metrics.render()` output — 958 bytes,
+`escalation_email_failed_total 0` among them — plus one on `api:8000`. Prometheus `v2.55.0` started
+with the shipped config: six of six worker targets `up`, `api` up, the rule silent while every
+counter sat at the seeded zero, then the scanner's body flipped `0 -> 1` and
+`ALERTS{alertname="EscalationEmailFailed",alertstate="firing"}` appeared with
+`instance="scanner:9101"`, `value=1`. So the shipped target list resolves and scrapes on a Docker
+network, and the shipped rule fires in a real Prometheus against a scrape of the shipped config. The
+harness reads its published port back from `docker port` rather than choosing one, so it does not
+repeat `free_port()`'s race.
+
+**The panic the first attempt hit, and the flag it produced.** `Error opening query log file
+/prometheus/queries.active: permission denied`, exit 2, on the first compose start: the image runs
+as `nobody`, and `--tmpfs /prometheus` is root-owned. `mode=1777` measured working, and the service
+carries `tmpfs: /prometheus:mode=1777,size=256m` under `read_only: true`, with
+`--storage.tsdb.retention.time=6h`. The cost is recorded rather than hidden: the TSDB lives and dies
+with the container, so this service answers "since it came up", not "last week".
+
+**Gates.** `pytest` is `1188 passed / 2 skipped / 19 deselected`, unchanged from `ce09675` because
+no Python changed. `ruff check` passes; `ruff format --check backend` finds 137; `mypy` is clean in
+75; `bandit` exits 0. Both smoke scripts pass every step (21 and 8). `promtool check config` and
+`promtool test rules` exit 0. `docker compose config -q` exits 0 once `.env` exists, which is what
+the CI step creates from `.env.example`, and the service reports `healthy` with `/-/healthy`
+answering.
+
+**Limits.** Still six *processes*, not six containers: no API image is built on this machine, so no
+worker has been started from `Dockerfile.backend`, mounted a volume, or answered across a published
+port — the containers that answered served this tree's exposition bytes from `python -m
+http.server`, which proves the config's wiring and not the image's. Nothing is wired to receive an
+alert: there is no Alertmanager and no receiver, so the rule fires into an empty `ALERTS` series and
+nobody is paged; Prometheus holding a firing alert is not an operator learning about it. The
+harnesses (mutations, live scrape, drift guard) are gitignored like every one before them, so what
+is reproducible from the tree is `promtool` through the pinned image and the CI job that runs it —
+more than the previous slices left, and still not the whole proof. The bounce blindness,
+`free_port()`'s race and `wait_for_listener`'s weaker assertion all stand.
