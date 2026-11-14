@@ -8669,3 +8669,13 @@ harnesses (mutations, live scrape, drift guard) are gitignored like every one be
 is reproducible from the tree is `promtool` through the pinned image and the CI job that runs it —
 more than the previous slices left, and still not the whole proof. The bounce blindness,
 `free_port()`'s race and `wait_for_listener`'s weaker assertion all stand.
+
+The slice landed as `2c0bd3f` and `fdc83da`, and CI run `43647971810` is green on that tip,
+eight jobs of eight. The steps API lists `observability (prometheus config, alert rule)` as
+`success`, with every real step green: the pinned image pulled, `promtool check config` read
+the config and the rule file it names, `promtool test rules` fired on one refusal and stayed
+silent on a fleet of zeros, the drift guard compared the two tags, and
+`docker compose config -q` accepted the stack in the environment that job builds. So the ops
+files are validated by the same pinned `promtool` the stack runs, on Linux, on every push —
+and the gate waits on that job, which makes a broken alert rule a merge that cannot land
+rather than a habit.

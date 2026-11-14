@@ -7162,6 +7162,14 @@ live-scrape and drift-guard harnesses are gitignored, so `promtool` through the 
 reproducible part. Bounce blindness, `free_port()`'s race and `wait_for_listener`'s weaker
 assertion all stand.
 
+The slice landed as `2c0bd3f` (the ops files and the CI job) and `fdc83da` (both ledgers). CI
+run `43647971810` is green on that tip — eight jobs of eight — and the steps API lists
+`observability (prometheus config, alert rule)` as `success`, with its five real steps green:
+the pinned image pulled, `promtool check config` and `promtool test rules` both accepted the
+shipped files on Linux, the tag drift guard matched, and `docker compose config -q` accepted
+the stack. What was a config nobody had run on this platform is now checked by the same
+`promtool` the stack runs, on every push, and `gate` waits on it.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.
