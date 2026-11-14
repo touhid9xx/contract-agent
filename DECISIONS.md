@@ -8403,7 +8403,9 @@ wrong about the config. A shipped `ops/prometheus/prometheus.yml` is measurable 
 in an image — `promtool check config` loads it, `promtool test rules` evaluates the rule in
 Prometheus's own engine — so the half that reading would have asserted is now the half nothing
 claims: the six `service:9101` targets were exercised by a live scrape across a Docker network, and
-only "a worker inside `Dockerfile.backend` answered" stays unmeasured.
+~~only "a worker inside `Dockerfile.backend` answered" stays unmeasured~~ **amended
+(`D10-112`):** a worker now runs inside `Dockerfile.backend` on every push — `expiry --once`
+against a throwaway schema — so this sentence is no longer asserted by reading.
 
 **Gates.** Measured on this tree: `pytest` collected **1204** — unchanged, which is how the
 script is known not to be collected — 1189 passed, 15 skipped, 0 failed, 0 errors, from the JUnit
@@ -8659,16 +8661,18 @@ no Python changed. `ruff check` passes; `ruff format --check backend` finds 137;
 the CI step creates from `.env.example`, and the service reports `healthy` with `/-/healthy`
 answering.
 
-**Limits.** Still six *processes*, not six containers: no API image is built on this machine, so no
-worker has been started from `Dockerfile.backend`, mounted a volume, or answered across a published
-port — the containers that answered served this tree's exposition bytes from `python -m
-http.server`, which proves the config's wiring and not the image's. Nothing is wired to receive an
-alert: there is no Alertmanager and no receiver, so the rule fires into an empty `ALERTS` series and
-nobody is paged; Prometheus holding a firing alert is not an operator learning about it. The
-harnesses (mutations, live scrape, drift guard) are gitignored like every one before them, so what
-is reproducible from the tree is `promtool` through the pinned image and the CI job that runs it —
-more than the previous slices left, and still not the whole proof. The bounce blindness,
-`free_port()`'s race and `wait_for_listener`'s weaker assertion all stand.
+**Limits.** Still six *processes*, not six containers: ~~no API image is built on this machine, so
+no worker has been started from `Dockerfile.backend`, mounted a volume, or answered across a
+published port~~ **amended (`D10-112`):** the image is built and started on every push and
+`expiry --once` completes a sweep inside it, so what stands is narrower — no worker *container* has
+been scraped and no worker mounts a volume. The containers that answered here served this tree's
+exposition bytes from `python -m http.server`, which proves the config's wiring and not the image's.
+Nothing is wired to receive an alert: there is no Alertmanager and no receiver, so the rule fires
+into an empty `ALERTS` series and nobody is paged; Prometheus holding a firing alert is not an
+operator learning about it. The harnesses (mutations, live scrape, drift guard) are gitignored like
+every one before them, so what is reproducible from the tree is `promtool` through the pinned image
+and the CI job that runs it — more than the previous slices left, and still not the whole proof.
+The bounce blindness, `free_port()`'s race and `wait_for_listener()`'s weaker assertion all stand.
 
 The slice landed as `2c0bd3f` and `fdc83da`, and CI run `43647971810` is green on that tip,
 eight jobs of eight. The steps API lists `observability (prometheus config, alert rule)` as
@@ -8679,3 +8683,68 @@ silent on a fleet of zeros, the drift guard compared the two tags, and
 files are validated by the same pinned `promtool` the stack runs, on Linux, on every push —
 and the gate waits on that job, which makes a broken alert rule a merge that cannot land
 rather than a habit.
+
+### D10-112 — The image the stack runs is built, and every entry point in it is started
+
+**The defect.** `Dockerfile.backend` is the artifact `docker-compose.yml` runs, and nothing in this
+repository built it. `.github/workflows/ci.yml` named the file once, in a comment about which
+interpreter it ships; `docker build` appeared nowhere in it. The first thing that ever constructed
+the image was therefore `docker compose up` on a developer's machine, which is not a gate — and
+everything a Dockerfile expresses is invisible to a suite that runs from a checkout with a prepared
+interpreter: a `requirements.txt` pin that does not resolve for 3.13, a `COPY` of a path that moved,
+`USER app` deleted while making something writable, a `CMD` naming a module that was renamed. This
+slice found no live breakage — the image built on its first attempt and all seven entry points
+imported in it — and records that plainly. The defect was the missing check, not a broken file, and
+a slice that dressed its absence up as a repair would be lying about what it measured.
+
+**Six steps, each able to fail.** The new `image (docker build, every entry point)` job builds
+`-f Dockerfile.backend`, then asserts, in this order:
+
+- that the container runs as uid `1001`, read back with `id -u` rather than by grepping the file —
+  `USER app` is one word wide and deleting it changes nothing else any check can see.
+- that `app.main` **and every worker module named in `docker-compose.yml`** import inside the image.
+  The list is extracted from the compose file at run time, so a seventh worker joins this job
+  without an edit here; the count is asserted to be six so that a regex which silently matched
+  nothing cannot pass by importing `app.main` alone.
+- that the container answers `/health` across a published port (liveness, not readiness: nothing
+  provisions MySQL in this job) and that its scrape contains exactly `escalation_email_failed_total
+  0` — D10-109's seeded zero, read out of the shipped artifact for the first time instead of out of
+  a test.
+- that a real worker process completes a tick inside it: `python -m app.workers.expiry --once`
+  after `Base.metadata.create_all` against a `--tmpfs` SQLite file, requiring the
+  `expiry_sweep_drained` verdict. "The module imports" and "the process works" are different
+  claims, and `--once` queries, commits and exits with a status.
+- that the container is removed under `if: always()`, so a failed assertion above cannot leave it
+  holding the port for the next run.
+
+**Four mutations, four bites.** A fake pin (`definitely-not-a-real-package==0.0.0`) fails the build
+with `No matching distribution found`. `USER app` → `USER root` builds *fine* and fails only the
+uid assertion, which is what makes that assertion load-bearing rather than decorative. Renaming one
+compose command to `app.workers.outbox_relai` carries the typo into the derived list and fails with
+`ModuleNotFoundError`. Adding a seventh `- app.workers.*` line makes the derivation refuse:
+`expected six worker entry points in docker-compose.yml, found 7`. Both mutated files were restored
+byte-exactly — `git checkout` for `requirements.txt` and `Dockerfile.backend`, and a saved copy
+compared by sha256 for `docker-compose.yml`, which still carried this slice's uncommitted comment
+edit.
+
+**Why the list is read out of Compose.** A second copy of the six module names is a second thing to
+forget — the reason D10-111 keeps the Prometheus tag in the job's `env:` and compares it against the
+Compose image rather than trusting that they agree. The cost is that adding a seventh worker now
+trips the count assertion, deliberately: the gate re-reads rather than narrowing in silence.
+
+**Gates.** `pytest -m "not integration"` is 1188 passed, 2 skipped, 19 deselected, 0 failed, 0
+errors — `tests=1190` in the JUnit XML — measured in this slice rather than borrowed from the last
+one, because the first question was whether anything collects the files being edited: every
+reference to `docker-compose.yml` under `backend/` is a docstring, and no test reads `ci.yml`. The
+workflow parses as 9 jobs, with `gate.needs` naming all eight and 7 steps in the new job.
+`docker compose config -q` exits 0 with `.env` copied from `.env.example`, the way the
+observability job runs it.
+
+**Limits.** One worker runs in the image, not six: `--once` is the only entry point with a
+terminating mode, so the other five are imported and never started. The schema the sweep ticks
+against is `Base.metadata`, created by a one-liner in the same step, not `alembic upgrade head` —
+`Dockerfile.backend` copies `backend/app` and `requirements.txt` and neither `backend/migrations`
+nor `alembic.ini`, so this image cannot apply a migration at all. Nothing beyond the API's own
+`/metrics` is scraped, no worker answers across a published port, and neither the demo nor the
+frontend image is built by any gate. Whether the job is green on Linux is a claim for the paragraph
+that follows, not this one.

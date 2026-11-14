@@ -6916,7 +6916,10 @@ retyping another's label, each failed exactly one test and nothing else.
 ~~Still out of reach: no container was scraped and no Prometheus rule was run, so the six ports are
 verified by parsing the compose file rather than by a metric arriving anywhere.~~ **`D10-108`
 amended this:** a worker's own registry has now been scraped over a socket and a rule over its
-series has been evaluated by Prometheus and fired. The container half of the sentence still stands.
+series has been evaluated by Prometheus and fired. ~~The container half of the sentence still
+stands.~~ **`D10-112` narrowed it again:** the image's own container now answers `/health` and
+`/metrics` across a published port on every push, so what still stands is worker *containers*,
+which only Compose starts.
 `attention_watch` and `outbox_relay` write no metric of their own, so two of the six serve a
 declared-but-empty registry — a listener waiting for a first counter, not a number.
 
@@ -7155,7 +7158,8 @@ Gates: `pytest` is `1188 passed, 2 skipped, 19 deselected`, unchanged because no
 0, both smoke scripts pass every step (21 and 8), and the compose service reports `healthy`.
 
 Limits: six processes, not six containers — the workers that answered were `python -m http.server`
-serving this tree's exposition bytes, so no worker has run from `Dockerfile.backend`. There is no
+serving this tree's exposition bytes, ~~so no worker has run from `Dockerfile.backend`~~ **which
+`D10-112` has since made false:** a worker now runs inside that image on every push. There is no
 Alertmanager and no receiver, so the rule fires into an empty `ALERTS` series, which is not the same
 as somebody being paged. The TSDB is a tmpfs: history dies with the container. The mutation,
 live-scrape and drift-guard harnesses are gitignored, so `promtool` through the CI job is the
@@ -7169,6 +7173,39 @@ the pinned image pulled, `promtool check config` and `promtool test rules` both 
 shipped files on Linux, the tag drift guard matched, and `docker compose config -q` accepted
 the stack. What was a config nobody had run on this platform is now checked by the same
 `promtool` the stack runs, on every push, and `gate` waits on it.
+
+### D10-112 — CI builds the image the stack runs
+
+`docker-compose.yml` runs `Dockerfile.backend`, and until this slice no gate had ever built it:
+`docker build` did not appear in `ci.yml` at all, so the only thing that constructed the image was
+`docker compose up` on a machine where somebody was already debugging. A new `image (docker build,
+every entry point)` job now does — and `gate` waits on it, so it is one of the eight checks rather
+than a step someone remembers to run.
+
+What it asserts, in order: that the image builds; that it runs as uid `1001`; that `app.main` and
+**every worker module named in `docker-compose.yml`** import inside it (the list is read from the
+compose file rather than restated, so a seventh worker arrives in the job by itself and a renamed
+one fails it); that the container answers `/health` across a published port and serves
+`escalation_email_failed_total 0` — `D10-109`'s seeded zero, now read out of the artifact instead of
+out of a test; that `python -m app.workers.expiry --once` completes a sweep inside it, on a
+throwaway SQLite schema, and logs `expiry_sweep_drained`; and that the container is removed even
+when an earlier step failed.
+
+Four mutations, each caught by its own step: a nonexistent requirements pin fails the build; a
+`USER app` → `USER root` edit builds perfectly well and fails only the uid check; a typo'd compose
+command fails the import; and a seventh `- app.workers.*` line makes the extraction refuse rather
+than quietly check six of seven.
+
+Gates: `pytest -m "not integration"` is `1188 passed, 2 skipped, 19 deselected, 0 failed, 0 errors`
+— measured this slice, the first question having been whether anything collects the files touched,
+which nothing does. `docker compose config -q` exits 0, and the workflow parses as 9 jobs with 7
+steps in the new one.
+
+Limits: one worker runs in the image and five are only imported, because `--once` is the only
+terminating mode; the schema it ticks against is `Base.metadata`, not the migrations a deployment
+applies, since the image copies `backend/app` and `requirements.txt` and neither
+`backend/migrations` nor `alembic.ini`; and neither the demo nor the frontend image is built by any
+gate.
 
 ## Non-negotiable reminders
 
