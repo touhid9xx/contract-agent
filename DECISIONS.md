@@ -5875,6 +5875,13 @@ refusal `D10-51` itself fixed. Run `42817738711`, on `eb21e8e`, is seven jobs an
 successes. So "no CI — gating runs from `pre-commit` on a developer's machine" described
 a repository that stopped existing at `D10-46`, which is the commit that added the file.
 
+That list is the workflow as it stood and is left as written; it is not a description of the
+file today. `ci.yml` defines nine jobs now — `observability` and `image` were added afterwards
+— which is the same drift this entry is about, one layer up, and `D10-121` answers it the same
+way `D10-70` answered the screen claim: `backend/tests/test_readme.py` derives the count from
+`ci.yml`'s own `jobs:` block, so the README's number is under test instead of re-counted by
+hand.
+
 **The screen claim, with its interval measured rather than described.** The sentence was
 written at `e165ae8`. At that commit `git ls-tree -r --name-only e165ae8 -- frontend/src/app`
 lists exactly two `page.test.tsx` files, so 9 − 2 = 7 was **true when it was written**. The
@@ -9514,3 +9521,71 @@ by the two-server contract `test_outbox.py` and `test_mysql_integration.py` alre
 clause elsewhere. This closing commit is documentation-only and its own run is not named, for the
 reason `D10-115` through `D10-119` all gave: a paragraph cannot contain the id of the run that
 publishes it.
+
+### D10-121 — The front door was the one document nothing read
+
+`README.md` is the first file anyone opens and, until this slice, the only document in the
+repository no test read. Two of its present-tense claims had gone false and stayed false through
+several green runs: it said `.github/workflows/ci.yml` runs **seven jobs** when the workflow defines
+nine — `observability` and `image` were added without it — and it said the migration chain was at
+head `0007` when `D10-120` had already shipped `0008`. Neither sentence had a second copy anywhere
+in the tree to disagree with it, which is the whole of why both survived: the ledgers record
+history, `ci.yml` records itself, and nothing read the prose that described them.
+
+**A test rather than a more careful edit, because that edit had already been made once.** `D10-114`
+corrected the same sentence from `0006` to `0007`; one slice later it was wrong again. There was
+already a precedent for this exact failure on this exact file — `frontend/src/app/screens.test.ts`
+exists because the README's screen claim rotted the same way — and `D10-69` states the rule both
+follow: a number a person re-counts is a number that drifts, a number written into the tree is not.
+So this slice writes no number down twice. `backend/tests/test_readme.py` parses the job count out
+of `ci.yml`'s own `jobs:` block and takes the head from Alembic's
+`ScriptDirectory.get_current_head()`, which reads the scripts and never opens a database. The README
+is only the claim under test.
+
+**Both anchors are short on purpose, and a missing anchor fails.** The patterns are `runs **N
+jobs**` and `currently at head` followed by the revision in backticks — the smallest phrases a
+rewording is likely to keep. A longer anchor would break on the next cosmetic edit and take the
+check with it; a silently absent one would leave a test that reads nothing and passes. So an anchor
+that disappears is a failure, and the message says to either restore it or delete the test with the
+sentence.
+
+**What the guard does not cover, stated rather than implied.** It checks the count and the head, not
+the words around them: a job could be renamed, or split in two with another merged into it, and the
+count stay nine while the README describes the old shape. Catching that would mean writing all nine
+job ids into the README, which is the duplication the test exists to avoid, so it is left uncaught
+rather than paid for. The same holds for every other claim in that file — no frontend container, no
+`P2-F` code — except the screen one, which `screens.test.ts` already checks independently.
+
+**What the correction changed in the sentence itself.** The old text named six jobs and a `gate`;
+the new one says what the two added jobs *do* — `observability` validates the Prometheus config and
+its alert rule, `image` builds the container and runs every entry point — because a description of
+nine jobs does not rot the way a list of six does, and the count beside it is now the part under
+test.
+
+**Proof the guard bites rather than merely passing.** Four mutations, each caught: seven against
+nine, `0007` against `0008`, a reworded count sentence, and a tenth job appended to `ci.yml`. The
+untouched control stayed green, and every mutated file was restored byte-identical.
+
+**A commit that proved its own point about stale copies.** The first attempt carried `D10-119`'s
+message verbatim: the message file it was given still held the previous slice's text, and
+`git commit -F` reads the file, not the intent. The tree was right and the record was wrong — the
+same failure this slice exists to catch, one level up. It was amended before the push, `cfbaf74`
+becoming `2026439`, so no wrong message ever reached the remote; the ledger keeps it because "the
+file you commit is the file on disk" is worth having in writing.
+
+Gates, on the tree that commit carries: `ruff check backend` and `ruff format --check backend` clean
+over `144` files, `python -m mypy` bare from the repository root reporting "no issues found in `76`
+source files", `bandit -c pyproject.toml -r backend/app -q` exit 0, and `pytest -o addopts="" -m
+"not integration"` `1235 passed, 2 skipped, 19 deselected` — two more than `D10-120`'s `1233`, which
+is this slice's whole addition. One note on measuring that number: `addopts` in `pyproject.toml`
+ends in `-q`, so an explicit `-q` prints only the warning summary and no count, and `-o addopts=""`
+is what produces the figure quoted here.
+
+Whether that is green on the remote is the paragraph that follows.
+
+The answer is yes. `D10-121` landed as `2026439` and CI run `43743455561` built it green: nine jobs
+of nine, read from the jobs API rather than inferred. The two that matter here are `python static`,
+which type-checks the new test module, and `backend tests (pytest, sqlite)`, which collects it — a
+guard nothing collects would be the same defect wearing a test's clothes. This closing commit is
+documentation-only and its own run is not named, for the reason `D10-115` through `D10-120` all
+gave: a paragraph cannot contain the id of the run that publishes it.
