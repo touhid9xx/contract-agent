@@ -57,6 +57,12 @@ from app.workers.metrics_server import (
 
 #: The workers that must serve their own registry, and the name each must
 #: publish under — the label an operator uses to tell which process answered.
+#:
+#: One of five places a worker is declared, and the only one this file owns.
+#: Membership is not asserted here: ``test_worker_wiring`` derives the set from
+#: the worker modules' own ASTs and holds this table, ``docker-compose.yml`` and
+#: ``prometheus.yml`` to it, so a row added here alone fails there instead of
+#: quietly proving a listener for a process the stack never starts.
 WORKERS = {
     "app.workers.outbox_relay": "outbox_relay",
     "app.workers.notification_scheduler": "notification_scheduler",

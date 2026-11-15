@@ -178,9 +178,16 @@ class Worker:
     poll_env: str
 
 
-#: Every worker module that serves its own registry. Order is the order the
-#: Compose file lists them in, and the expiry sweep is first because it is the
-#: one this file asserts a *sample* for.
+#: Every worker module that serves its own registry. The expiry sweep is first
+#: because it is the one this file asserts a *sample* for; the rest are in no
+#: particular order. (This block used to claim the order was Compose's, which it
+#: is not — Compose runs relay first and the sweep fourth. Nothing compares the
+#: two orders, so nothing here is worth keeping in step with the stack.)
+#:
+#: Membership is likewise not this file's to assert: ``test_worker_wiring``
+#: derives the set from the worker modules and fails on a worker missing here, a
+#: row starting a module that serves no registry, or a ``name`` that disagrees
+#: with the label the module publishes.
 WORKERS: tuple[Worker, ...] = (
     Worker("expiry", "app.workers.expiry", "EXPIRY_SWEEP_POLL_INTERVAL_SECONDS"),
     Worker(
