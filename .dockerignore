@@ -1,0 +1,35 @@
+# Build context, trimmed to what the images read (`D10-114`).
+#
+# There was no such file, so `docker build .` sent the whole repository — including
+# `venv/`, every `node_modules/` and the running tree's `__pycache__` — to the
+# daemon, and the `COPY` of `backend/migrations` imported whatever byte-compiled
+# files happened to be lying in the developer's checkout. An image that depends on
+# which commands were run before it was built is not the artifact CI signs off on.
+#
+# Nothing needed by a `COPY` or a `pip install` is listed here: `backend/app`,
+# `backend/requirements*.txt`, `backend/alembic.ini` and `backend/migrations` are
+# all still in context, and anything a build genuinely needs that is missing would
+# fail the build loudly rather than silently ship a thinner image.
+
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+
+# The virtualenv, the JavaScript dependency trees and the two frontend sources:
+# no Dockerfile here copies from any of them, and between them they are the bulk
+# of the context.
+venv/
+frontend/node_modules/
+frontend/.next/
+demo/frontend/node_modules/
+demo/frontend/.next/
+node_modules/
+
+# VCS and agent scratch space, never useful inside an image.
+.git/
+.gitattributes
+.agent-cache/
+.env
+!.env.example

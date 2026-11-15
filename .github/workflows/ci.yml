@@ -510,11 +510,32 @@ jobs:
           fi
           echo "$sample"
 
-      - name: a worker completes a tick inside the image
+      # D10-114. Until this, the image shipped `app/` and nothing else: no
+      # `alembic.ini`, no `migrations/`, so `alembic` in the container had no script
+      # directory at all and the tick below had to conjure its schema with
+      # `Base.metadata.create_all` — a schema built from the models, which is the one
+      # schema nobody deploys. This applies the chain the image carries and reads the
+      # revision back out of the database. It asserts `(head)` rather than a revision
+      # number, so adding a migration needs no edit here: the claim is "the database
+      # agrees with the shipped scripts", and a `script_location` that resolved to the
+      # wrong directory would leave `current` empty rather than at head.
+      - name: the image applies the migrations it ships
         run: |
           docker run --rm --tmpfs /data \
             -e DATABASE_URL=sqlite+pysqlite:////data/ci.db \
-            contract-agent-api:ci sh -c "python -c 'from app.db.base import Base; import app.db.models; from app.core.config import get_settings; from app.db.session import build_engine; Base.metadata.create_all(build_engine(get_settings()))' && python -m app.workers.expiry --once" \
+            contract-agent-api:ci sh -c "alembic upgrade head && alembic current" 2>&1 \
+            | tee "$RUNNER_TEMP/migrate.log"
+          grep -q '(head)' "$RUNNER_TEMP/migrate.log" \
+            || { echo "::error::alembic current did not report the script head"; exit 1; }
+
+      # The same chain, then a real worker running on the schema it produced.
+      # `create_all` no longer stands in for the migrations anywhere in this job, so
+      # what completes a tick here is the sweep against the tables operators deploy.
+      - name: a worker completes a tick on the migrated schema
+        run: |
+          docker run --rm --tmpfs /data \
+            -e DATABASE_URL=sqlite+pysqlite:////data/ci.db \
+            contract-agent-api:ci sh -c "alembic upgrade head && python -m app.workers.expiry --once" \
             | tee "$RUNNER_TEMP/tick.log"
           grep -q expiry_sweep_drained "$RUNNER_TEMP/tick.log" \
             || { echo "::error::the sweep logged no drained verdict"; exit 1; }

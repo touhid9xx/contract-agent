@@ -19,6 +19,17 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY --chown=app:app backend/app ./app
 
+# The migrations, inside the artifact that needs them (`D10-114`). Before this the
+# image could serve requests but never create the database it served them from:
+# `backend/migrations` and `backend/alembic.ini` were not copied, so `alembic` in
+# the container had no script directory to run and every deployment needed the
+# schema made by hand from a checkout that had them. `script_location = migrations`
+# in `alembic.ini` resolves against the working directory, which is `/app`, which is
+# why these land at the top level rather than under `app/`. Nothing here is written
+# at runtime, so the image stays read-only-safe.
+COPY --chown=app:app backend/alembic.ini ./alembic.ini
+COPY --chown=app:app backend/migrations ./migrations
+
 USER app
 EXPOSE 8000
 

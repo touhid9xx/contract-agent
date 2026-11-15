@@ -1,5 +1,7 @@
 # Local stack.
 #   mysql     — the real database (F2)
+#   migrate   — one-shot `alembic upgrade head` (D10-114). The schema comes from
+#               the image, and the API and every worker wait for it to finish.
 #   api       — FastAPI behind uvicorn
 #   relay     — outbox relay worker (F2); a separate process on purpose, because
 #               the API must never publish synchronously and the relay must
@@ -27,11 +29,13 @@
 #        runs — gap 17, and the reason the default is the provable backend.
 name: contract-agent
 
-# One image, seven processes: the API and six workers, each worker being the API
-# image with a different `command`, so worker code is never a second copy of the
-# application. `.github/workflows/ci.yml` builds this file and starts every entry
-# point named below (`D10-112`), so that list is not a note about deployment — it
-# is what CI executes.
+# One image, eight processes: the API, six workers and one one-shot migration, each
+# being the API image with a different `command`, so worker code is never a second
+# copy of the application. `.github/workflows/ci.yml` builds this file and starts
+# every entry point named below (`D10-112`), so that list is not a note about
+# deployment — it is what CI executes. The eighth, `migrate`, is the one entry point
+# the import list cannot cover, because it starts a console script rather than an
+# `app.workers` module; the image job runs it instead (`D10-114`).
 #
 # The shared half is anchored rather than repeated — six near-identical service
 # blocks are exactly where a `read_only` or a `no-new-privileges` line goes
@@ -79,6 +83,13 @@ x-worker: &worker
   depends_on:
     mysql:
       condition: service_healthy
+    # D10-114. Ordered, not merely co-started: a worker that starts against a
+    # database whose schema is still at revision zero does not fail — it queries
+    # tables that do not exist yet, logs the error and retries for ever, which is
+    # a crash loop dressed as a healthy stack. `migrate` completes first or
+    # nothing started by this anchor starts at all.
+    migrate:
+      condition: service_completed_successfully
   restart: unless-stopped
   read_only: true
   tmpfs:
@@ -120,6 +131,39 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  # D10-114. The schema arrives with the image and is applied by the image: the
+  # same container as everything else with `alembic upgrade head` as its entry
+  # point, so a deployment runs the migrations this repository ships, at the
+  # revision this repository is at. It could not do this before — `Dockerfile
+  # .backend` copied `app/` and nothing else, so the chain existed only in a
+  # checkout, and "which revision is this deployment on?" was a question about
+  # somebody's laptop.
+  #
+  # It exits, and every service with a schema waits for that exit to be a success,
+  # so a failed migration stops the stack rather than letting it boot against a
+  # half-built database. `restart: "no"` for the same reason: a migration that
+  # fails will fail again, and retrying it for ever hides the error in a restart
+  # count. The image is read-only and this writes no file, so it needs no volume —
+  # the database is the only thing that changes.
+  migrate:
+    <<: *worker
+    command:
+      - alembic
+      - upgrade
+      - head
+    restart: "no"
+    # Explicitly overrides the anchor's, which now names `migrate` itself; merged
+    # as-is this service would wait for its own completion and never start. MySQL
+    # is all it needs, and it is all it declares.
+    depends_on:
+      mysql:
+        condition: service_healthy
+    # Inherited from the anchor and wrong here: it probes a metrics port that only
+    # a worker module opens, so the container would be judged unhealthy for the
+    # few seconds it exists for no reason at all.
+    healthcheck:
+      disable: true
+
   api:
     build:
       context: .
@@ -141,6 +185,10 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+      # D10-114. The API's first request may touch any table; it waits for the
+      # schema rather than answering 500s until someone notices.
+      migrate:
+        condition: service_completed_successfully
     ports:
       - "${API_PORT:-8000}:8000"
     healthcheck:
