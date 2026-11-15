@@ -7572,6 +7572,58 @@ jobs, with `observability` executing the rule and its four new cases, and
 `003cb94` — now waiting for a second family. This closing commit is documentation-only and its own
 run is not named here, for the reason `D10-115`, `D10-116` and `D10-117` all gave.
 
+### D10-119 — the living ledger said these states raise nothing, and they do
+
+`D10-118` shipped the undelivered gauge and closed in `d99cbb0`, leaving the
+living index saying the opposite. Gap 22's entry still called its
+notification half an open hole, and four chains downstream repeated the
+claim, so this slice corrects the prose and changes no behaviour.
+
+Gap 22's header sentence, the paragraph calling the notification half open,
+and the entry's closing paragraph are all struck and amended in the house
+form: both terminal states are published, the `failed` one pages, the entry
+stays open on the *residue* — a row stuck `pending` under
+`NOTIFICATION_TRANSPORT=none` — and `suppressed` is published but never
+paged, because paging a deployment for doing what it was told is the alert
+nobody keeps. The GATE 2 conditions paragraph, the MySQL caveat and signed
+sign-off item 2 carry the same false claim and are amended the same way, as
+are `doctor`'s help text and docstring, `.env.example`'s attention comment,
+and two test docstrings.
+
+Two of those places were not on the plan and both were living claims: "it
+still raises no alert on a stock install, because the address the mail needs
+is unset" is true of the mail and false as stated, since the gauge pages
+with no address at all, and is now narrowed to "for a *mailed* verdict";
+and the exit code is no longer "the only machine-readable form of the
+verdict either way". Both were found by grepping for the residual sentence
+rather than trusting the list describing the sweep, which had called itself
+complete.
+
+One mistake is recorded because it nearly produced a false alarm: a width
+script holding *every* line of both ledgers to 100 columns reported hundreds
+of offenders, since that has never been the rule — it governs the lines a
+slice adds. It was deleted rather than adjusted, and
+`apply_d117_correction.py` already scopes the check that way.
+
+What it does not close: gap 17 stays struck through, and gaps 5, 18 and 25
+still want an owner's decision — gap 18's remaining half being the consent
+*screen*, `D10-14` having built the bulk import.
+
+Gates: ruff check and format clean over `140` files, mypy strict clean over
+`75` source files, bandit exit 0, `pytest -o addopts="" -m "not integration"`
+`1209 passed, 2 skipped, 19 deselected` — unchanged, as a prose slice should
+be. `check_ledger_close.py` reports `16` blocks from `D10-111` onward, `11`
+deferring, none failed.
+
+Whether that is green on the remote is the paragraph that follows.
+
+The answer is yes. `D10-119` landed as `c0a6785` and CI run `43734543135` built it
+green: nine jobs, `python static` and `backend tests (pytest, sqlite)`
+included, which are the jobs that read the two edited modules. This closing
+commit is documentation-only and its own run is not named here, for the
+reason `D10-115`, `D10-116`, `D10-117` and `D10-118` all gave: a paragraph
+cannot contain the id of the run that publishes it.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

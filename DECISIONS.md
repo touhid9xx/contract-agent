@@ -9352,3 +9352,76 @@ now with a second family in the series it waits for. So the gauge, the matcher a
 assertion are green on the remote, not merely in a local shell. This closing commit is
 documentation-only and its own run is not named here, for the reason `D10-115`, `D10-116` and
 `D10-117` all gave: a paragraph cannot contain the id of the run that publishes it.
+
+### D10-119 — the living ledger said these states raise nothing, and they do
+
+`D10-118` shipped the undelivered gauge and closed in `d99cbb0`, and left
+the document a reader plans against saying the opposite. Gap 22's entry
+still opened by calling its second half an open hole, and four chains
+downstream repeated the claim in their own words: neither terminal
+notification state raises an alert. That was true before `fd992b6` and
+false after it. Nothing was hidden, which is what makes it worth a slice:
+the next reader would have planned work against a hole already filled.
+
+**Decision.** Correct the prose and change no behaviour. The code was right
+and the words were wrong, so every edit here is a sentence, a docstring or
+an `.env` comment. No test changed, and the suite reports the same count
+afterwards, which is the only assertion this kind of slice can make.
+
+**Struck, not deleted, in the house form.** Gap 22's header sentence is
+struck with the amendment that both terminal states are published and the
+`failed` one pages. The paragraph calling the notification half open becomes
+the closed statement, including why `suppressed` must not page — paging a
+deployment for doing what it was told is the alert nobody keeps. The entry's
+closing paragraph now says what keeps it open is the *residue*, a row stuck
+`pending` under `NOTIFICATION_TRANSPORT=none`, not the hole. Three further
+chains carrying the same false claim are amended the same way: the GATE 2
+conditions paragraph, the MySQL caveat, and signed sign-off item 2.
+`doctor`'s help text and module docstring, `.env.example`'s attention
+comment, and two test docstrings lose the clause as well, because a helper
+telling an operator these states are silent is the same lie somewhere more
+expensive.
+
+**Two of those places were not on the plan, and both were living claims.**
+Neither was struck text. One read that the verdict "still raises no alert on
+a stock install, because the address the mail needs is unset" — true of the
+mail, false as stated, since the gauge pages with no address configured at
+all — and is now narrowed to "for a *mailed* verdict". The other called the
+exit code "still the only machine-readable form of the verdict either way",
+which is simply no longer true. Both were found by grepping for the residual
+sentence rather than by trusting the list that described the sweep, and that
+is why they are recorded: the earlier description called the sweep complete
+and it was not.
+
+**A mistake of mine, and what the house pattern already said about it.** A
+width script written for this slice held every line of both ledgers to 100
+columns and reported hundreds of offenders, because that has never been the
+rule — it governs the lines a slice adds. The script was deleted rather than
+adjusted. `apply_d117_correction.py` scopes the check to added lines and
+says so in a comment, which is the second reason to reuse a pattern instead
+of rewriting it: the rewrite dropped the one distinction the original argues
+for, and the comparison is now part of this script.
+
+**What it does not close.** Gap 17 stays struck through. Gaps 5, 18 and 25
+still want an owner's decision — gap 18's remaining half is the consent
+*screen*, `D10-14` having built the bulk import — and the ledger says not to
+guess at them, so nothing here guesses. This block corrects claims about
+what shipped; it adds no claim that anything new did.
+
+Gates, measured on this tree: `ruff check` and `ruff format --check` clean
+over `140` files, `python -m mypy app` strict-clean over `75` source files,
+`bandit -c pyproject.toml -r backend/app -q` exit 0, and
+`pytest -o addopts="" -m "not integration"` `1209 passed, 2 skipped, 19
+deselected` — unchanged, which is the assertion for a slice that touches no
+statement a test executes. `check_ledger_close.py` reports `16` blocks from
+`D10-111` onward, `11` of them deferring, none failed.
+
+Whether that is green on the remote is the paragraph that follows.
+
+The answer is yes. `D10-119` landed as `c0a6785` and CI run `43734543135` built it
+green: nine jobs passed, and the two that matter here are `python static`,
+which type-checks the edited `doctor` module, and `backend tests (pytest,
+sqlite)`, which collects both edited test modules. This closing commit is
+documentation-only and its own run is not named here, for the reason
+`D10-115`, `D10-116`, `D10-117` and `D10-118` all gave: a paragraph cannot
+contain the id of the run that publishes it.
