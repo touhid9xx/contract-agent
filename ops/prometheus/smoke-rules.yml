@@ -1,0 +1,19 @@
+# The rule behind `smoke.yml` (D10-116). Loaded by nothing but the delivery smoke.
+#
+# `up == 1` is deliberately the whole condition. A smoke that fabricates a metric to fire would be
+# testing its own fixture; a smoke that waits for a real counter to move would be testing a worker
+# that CI is not running. "There is a target Prometheus scraped successfully" is a fact about the
+# process under test that is true when it works and false when it does not.
+#
+# `for: 0s` because a smoke has no patience to spend on a hold-down, and `severity: info` because the
+# value is in the delivery, not in the alarm.
+groups:
+  - name: smoke
+    rules:
+      - alert: SmokeStackDeliversAlerts
+        expr: up == 1
+        for: 0s
+        labels:
+          severity: info
+        annotations:
+          summary: Prometheus scraped a target and delivered the result to Alertmanager.

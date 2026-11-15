@@ -382,13 +382,21 @@ jobs:
   #
   # `-w /etc/prometheus` is not decoration: `rule_files` inside `rules.test.yml` is
   # relative, and promtool resolves it against the working directory.
+  #
+  # `D10-116` added the other half: a rule that fires into nothing is not an alert.
+  # `promtool` cannot see the difference — an `alerting:` block naming a host that
+  # resolves to nothing passes every check above — so the receiver's own config is
+  # validated by Alertmanager's loader, and the last step runs the hop for real:
+  # Prometheus -> Alertmanager -> SMTP -> a mailbox, in the pinned images the stack
+  # runs. That step is the only one in this job that can answer "is a person told".
   observability:
-    name: observability (prometheus config, alert rule)
+    name: observability (prometheus config, alert rule, alert delivery)
     runs-on: ubuntu-latest
-    # The tag lives here and is read from Compose below, so a version bump cannot
-    # make this job validate a Prometheus the stack does not run.
+    # The tags live here and are read from Compose below, so a version bump cannot
+    # make this job validate a Prometheus or an Alertmanager the stack does not run.
     env:
       PROM_VERSION: v2.55.0
+      AM_VERSION: v0.27.0
     steps:
       - uses: actions/checkout@v4
 
@@ -410,24 +418,56 @@ jobs:
             --entrypoint /bin/promtool "prom/prometheus:${PROM_VERSION}" \
             test rules /etc/prometheus/rules.test.yml
 
+      # D10-116. The receiver file `ops/prometheus/rules.yml` has needed since D10-111
+      # and never had: `promtool` reads the *sender* side only, so an `alerting:` block
+      # pointing at an Alertmanager that does not exist is a file that passes every
+      # check above. This asks Alertmanager whether the file it is handed is valid —
+      # the route, the receiver, the `to`, the SMTP relay — from the image the stack
+      # pins. Exit 0 means "a real Alertmanager would load this", which is still not
+      # delivery; the last step in this job is.
+      - name: the receiver's config loads in Alertmanager
+        run: |
+          docker run --rm \
+            -v "$PWD/ops/alertmanager:/etc/alertmanager:ro" \
+            --entrypoint /bin/amtool "prom/alertmanager:${AM_VERSION}" \
+            check-config /etc/alertmanager/alertmanager.yml
+
+      # The smoke's config, which no other step reads: `smoke.yml` loads
+      # `smoke-rules.yml` and aims at the same receiver. Validated here so a typo in
+      # either file is this job going red in ten seconds, rather than the delivery step
+      # below failing a hundred and twenty seconds later with a parse error that reads
+      # like a delivery failure.
+      - name: the delivery smoke's own config loads
+        run: |
+          docker run --rm \
+            -v "$PWD/ops/prometheus:/etc/prometheus:ro" \
+            --entrypoint /bin/promtool "prom/prometheus:${PROM_VERSION}" \
+            check config /etc/prometheus/smoke.yml
+
       # Written in Python rather than sed so it is the same check here and on a
       # developer's machine: `v2.55.0` in this file plus `v2.55.0` in
       # docker-compose.yml is two places, and the interesting failure is the day
-      # one of them moves.
-      - name: the stack and this job pin the same Prometheus
+      # one of them moves. `D10-116` made that true of the receiver as well, and
+      # widened the check rather than copying it, because a second near-identical
+      # block is where one of the two pins stops being compared.
+      - name: the stack and this job pin the same images
         run: |
           python3 - <<'PY'
           import os, pathlib, re, sys
 
-          version = os.environ["PROM_VERSION"]
           compose = pathlib.Path("docker-compose.yml").read_text(encoding="utf-8")
-          found = re.search(r"image: prom/prometheus:(\S+)", compose)
-          if not found:
-              sys.exit("docker-compose.yml no longer names a prom/prometheus image")
-          tag = found.group(1).strip().strip('"')
-          if tag != version:
-              sys.exit(f"docker-compose.yml pins {tag}, this job validates {version}")
-          print(f"compose and CI both pin prom/prometheus:{tag}")
+          wanted = {
+              "prom/prometheus": os.environ["PROM_VERSION"],
+              "prom/alertmanager": os.environ["AM_VERSION"],
+          }
+          for image, version in wanted.items():
+              found = re.search(rf"image: {re.escape(image)}:(\S+)", compose)
+              if not found:
+                  sys.exit(f"docker-compose.yml no longer names a {image} image")
+              tag = found.group(1).strip().strip('"')
+              if tag != version:
+                  sys.exit(f"docker-compose.yml pins {tag}, this job validates {version}")
+              print(f"compose and CI both pin {image}:{tag}")
           PY
 
       # The Compose files are the only description of the stack, and a service
@@ -439,6 +479,36 @@ jobs:
           cp .env.example .env
           MYSQL_ROOT_PASSWORD=ci MYSQL_PASSWORD=ci docker compose config -q
 
+      # D10-116. Every step above asks a loader whether a file is well formed, and all
+      # of them would pass on a stack where nobody is ever told anything. This is the
+      # only step that answers the question `D10-111` left open by name — "the rule
+      # fires into an empty `ALERTS`, nobody paged" — because it waits for the mail to
+      # arrive in a mailbox:
+      #
+      #   prometheus (smoke.yml, `up == 1`) -> alertmanager (email receiver) -> SMTP ->
+      #   mailpit -> asserted over Mailpit's HTTP API
+      #
+      # Why a separate config rather than the stack's own: `ops/prometheus/rules.yml`
+      # alerts on `increase(escalation_email_failed_total[1h]) > 0`, which only moves
+      # when a real worker's real relay refuses a real mail. Nothing can make that fire
+      # on a runner without a worker and a broken relay, so executing it would prove
+      # nothing about delivery. `ops/prometheus/smoke.yml` runs in its place — same
+      # `/etc/prometheus` mount, same `alertmanager:9093` target — with one rule that is
+      # `up == 1`: true of a working Prometheus, false of a broken one, and needing no
+      # fixture. The script also asserts statically that the smoke and the stack name
+      # the *same* receiver and that the stack loads the file declaring the real alert,
+      # so "the smoke proved a different config" cannot be the pass.
+      #
+      # Three containers, started by the script under the network aliases the configs
+      # resolve (`prometheus`, `alertmanager`, `mailpit`) rather than under those
+      # container names, so this runs beside a developer's real stack instead of
+      # refusing to start until it is stopped. Image tags are read out of
+      # `docker-compose.yml`, so it cannot prove a hop the stack does not have.
+      #
+      # What it does not prove: that `EscalationEmailFailed` itself was delivered. It
+      # proves the path is real, which is exactly the claim `D10-111` could not make.
+      - name: a firing rule reaches a mailbox (prometheus -> alertmanager -> mailpit)
+        run: python3 backend/tests/smoke_alert_delivery.py
 
   # ------------------------------------------------------------------- image
   # `Dockerfile.backend` is the artifact `docker-compose.yml` runs, and until this

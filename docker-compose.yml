@@ -17,6 +17,17 @@
 #   prometheus — the scraper for the per-worker /metrics listeners (D10-107) and the
 #               loader for the escalation alert rule (D10-111). Its config is in
 #               ops/prometheus/ and is the same file CI validates with promtool.
+#   alertmanager — the receiver for that rule (D10-116). Until it existed the rule was
+#               evaluated and dropped: an entry under `/alerts` and nothing sent, so the
+#               page an operator had to act on also had to be open and watched.
+#   mailpit   — a catch-all SMTP server with a web UI (D10-116), and the reason a mail this
+#               stack produced can be *read* instead of inferred from a log line claiming it
+#               was sent. Alertmanager's receiver is aimed here out of the box; the
+#               application's own two mail paths reach it by setting
+#               NOTIFICATION_TRANSPORT=smtp and SMTP_HOST=mailpit, which `.env.example`
+#               shows commented out rather than defaulting — overriding a deployment's
+#               transport choice is what decides whether customers get mail at all, so this
+#               file does not make that decision for it.
 # Kafka: the transport landed in F4 (EVENT_TRANSPORT=kafka, read from .env by
 #        every worker), but no broker is defined here yet, so the relay defaults
 #        to EVENT_TRANSPORT=none and parks events instead of dropping them.
@@ -370,6 +381,73 @@ services:
       timeout: 3s
       retries: 3
       start_period: 10s
+
+  # D10-116. The receiver the rule never had. `D10-111` recorded the gap in its own words —
+  # "no Alertmanager, the rule fires into an empty `ALERTS`, nobody paged" — and the shape
+  # of it was: `promtool` validated the rule, Prometheus evaluated it, `/alerts` listed it,
+  # and that list was the only place it ever existed. A page that has to be open and watched
+  # is not a page.
+  #
+  # Pinned for the same reason the Prometheus service is: `amtool check-config` in CI reads
+  # this service's own file, so a floating tag would let the check validate an Alertmanager
+  # the stack does not run. No `depends_on: mailpit` either — the same argument the
+  # Prometheus block makes about its targets: a relay that is down is what a retry and a log
+  # line are *for*, and making the receiver wait for a mail server would turn "start the
+  # receiver" into "start the stack".
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./ops/alertmanager:/etc/alertmanager:ro
+    ports:
+      # Loopback only, and not decoration: Alertmanager accepts unauthenticated posts on
+      # `/api/v2/alerts` on this interface, so publishing it would be an open endpoint that
+      # sends mail to the operator.
+      - "127.0.0.1:${ALERTMANAGER_PORT:-9093}:9093"
+    # The image runs as `nobody` (measured: uid 65534), so the root-owned-tmpfs trap the
+    # Prometheus service records applies here unchanged — the explicit mode is the whole fix
+    # — and `read_only` stays true. The cost is that silences and the notification log die
+    # with the container: this is a local stack's receiver, not a record of who was paged.
+    tmpfs:
+      - /alertmanager:mode=1777,size=64m
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # `/-/healthy` answers once the receiver is serving, which is the claim worth making:
+      # "Alertmanager is up", never "an alert was delivered". Delivery is the smoke in
+      # `.github/workflows/ci.yml`, because only an alert that arrives can answer that.
+      test: ["CMD", "/bin/wget", "--spider", "-q", "http://127.0.0.1:9093/-/healthy"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  # D10-116. A catch-all SMTP server with a web UI. The escalation scanner and the attention
+  # watcher can each mail the operator, and until this service existed the only evidence
+  # that either had was the log line saying so, on a transport whose real relay nobody runs
+  # locally.
+  #
+  # It accepts unauthenticated SMTP from the Compose network and keeps messages in memory
+  # (no `MP_DATABASE`), so nothing here is a record: the UI at http://127.0.0.1:8025 is a
+  # window that closes with the container. The SMTP port is deliberately NOT published — a
+  # relay already listening on :1025 is a collision a local stack does not need, and every
+  # container that mails it is already on the network.
+  mailpit:
+    image: axllent/mailpit:v1.33.1
+    ports:
+      - "127.0.0.1:${MAILPIT_PORT:-8025}:8025"
+    # The image's own HEALTHCHECK (`mailpit ready`) is the right probe, so unlike the workers
+    # it is left switched on: this is a server, not a tick that exits.
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
 
 volumes:
   mysql-data:

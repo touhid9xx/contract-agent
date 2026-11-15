@@ -21,12 +21,17 @@
 # so the rule fires on the one instance that counted a failure and stays quiet on the six that
 # cannot — measured in `rules.test.yml`, which is the point of putting those cases there.
 #
-# What is deliberately absent: no `alertmanager` block (the rules have no receiver yet, and a
-# target that resolves to nothing is worse than an unwritten stanza), no `depends_on` in the
-# service (a scrape target that is down is what a target list is *for*; making Prometheus wait for
-# six workers would turn every `docker compose up prometheus` into a full-stack start), no remote
-# write, no bearer token (every target is unauthenticated on this network, matching
-# `app/api/v1/metrics.py`), and no retention tuning beyond the compose command.
+# What is deliberately absent: no `depends_on` in the service (a scrape target that is down is what
+# a target list is *for*; making Prometheus wait for six workers would turn every `docker compose up
+# prometheus` into a full-stack start), no remote write, no bearer token (every target is
+# unauthenticated on this network, matching `app/api/v1/metrics.py`), and no retention tuning beyond
+# the compose command.
+#
+# The `alerting` block below is the one thing D10-111 left out on purpose and D10-116 added: until an
+# Alertmanager existed there was nowhere to route to, and the rule `promtool` validated was evaluated
+# and then dropped. A target that resolves to nothing is still worse than an unwritten stanza — so the
+# block arrives with the receiver (`ops/alertmanager/alertmanager.yml`), the service that runs it, and
+# a CI job that watches an alert make the whole trip.
 global:
   # Fifteen seconds for both loops. Fast enough that the stack is worth opening after a `up`, slow
   # enough that six workers are not scraped more often than they tick.
@@ -36,6 +41,17 @@ global:
     # Names this in any expression that mixes results from more than one Prometheus. There is one,
     # and naming it costs a label instead of a mystery later.
     deployment: local
+
+# D10-116. Without this the rule file below is evaluated and dropped: `EscalationEmailFailed`
+# would appear under `/alerts` and reach nobody, which is what "the rule fires into an empty `ALERTS`"
+# meant for four slices. The target is the Compose service by name, and the smoke config beside this
+# file (`smoke.yml`) names the same `alertmanager:9093`, so the target CI exercises is the target the
+# stack uses. No `scheme`/`timeout`/`api_version` overrides: `http` and v2 are the defaults of both
+# ends, and a value restated here is a value that can disagree with the receiver.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
 
 rule_files:
   - /etc/prometheus/rules.yml

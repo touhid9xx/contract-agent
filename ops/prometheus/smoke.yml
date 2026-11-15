@@ -1,0 +1,37 @@
+# Prometheus for the delivery smoke (D10-116). Not the stack's config.
+#
+# `prometheus.yml` is what `docker compose up prometheus` runs and what `promtool` validates. Its
+# single rule reads `escalation_email_failed_total`, which only moves when a real worker's SMTP relay
+# refuses a real mail — so nothing in it can fire on a CI runner, and "Prometheus delivers an alert to
+# Alertmanager" would stay a claim about a stanza nobody executed.
+#
+# This file makes the hop run. It scrapes nothing but itself, and the one rule in `smoke-rules.yml`
+# is `up == 1` — "Prometheus can reach a target it is configured to scrape". That is a true statement
+# about a working process and a false one about a broken one, which is exactly the property a smoke
+# needs: it cannot pass by accident on an idle stack, and it costs no fixture service to arrange.
+#
+# It lives beside the real config because both mount at `/etc/prometheus`, so the alertmanager target
+# below is the same `alertmanager:9093` the stack uses, not a rewritten stand-in for it.
+global:
+  # Five seconds, not fifteen: the smoke waits on a wall clock, and the shortest honest interval is
+  # the one that keeps the wait short rather than the one the stack ships.
+  scrape_interval: 5s
+  evaluation_interval: 5s
+  external_labels:
+    deployment: smoke
+
+rule_files:
+  - /etc/prometheus/smoke-rules.yml
+
+# The stanza `prometheus.yml` could not have until an Alertmanager existed. `promtool check config`
+# accepts an `alerting:` block naming a host that resolves to nothing, so the target has to be
+# exercised by a running Alertmanager to mean anything — which is what the smoke job does.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

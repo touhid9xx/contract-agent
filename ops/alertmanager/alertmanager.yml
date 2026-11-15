@@ -1,0 +1,78 @@
+# Alertmanager for the local stack (D10-116).
+#
+# Why this file exists at all: `ops/prometheus/rules.yml` has carried a real alert since D10-111 —
+# `EscalationEmailFailed`, on `increase(escalation_email_failed_total[1h]) > 0` — and nothing
+# could ever be told about it. A rule with no `alerting:` block is evaluated and dropped: the entry
+# appears under Prometheus's own `/alerts` page and reaches nobody, so the page an operator is meant
+# to act on had to be open *and* watched. `D10-111` recorded this as the largest remaining gap by
+# name ("no Alertmanager — the rule fires into an empty `ALERTS`, nobody paged"); this is the
+# receiver it was missing.
+#
+# The path is `/etc/alertmanager`, the image's own default, for the same reason the Prometheus config
+# uses `/etc/prometheus`: `docker-compose.yml` mounts this directory there, the CI check mounts it
+# there, and `amtool` reads the same path in both places, so "valid on my machine" is not a state
+# this file can be in.
+#
+# **The receiver is e-mail, and it is the same relay the application already speaks to.** One
+# delivery path in a deployment, not two: `NOTIFICATION_TRANSPORT=smtp`, `ATTENTION_ALERT_TO` and
+# `ESCALATION_ALERT_TO` all go out through `SMTP_HOST`, and so does this. In the local stack that
+# host is `mailpit`, the catch-all SMTP server `docker-compose.yml` defines (`D10-116`), which is
+# what makes the path observable: a message that arrives is a message the stack produced, and it is
+# readable in Mailpit's web UI instead of in a log line that claims something was sent.
+#
+# What is deliberately absent: no `slack_configs`/`webhook_configs`/`pagerduty_configs` (every one
+# of them is a credential or a second vendor, and none is a thing this project has), no `templates:`
+# (the default subject renders the alertname and a summary that the rule already writes, and a
+# custom template would be a second place for the alert's wording to drift), no `inhibit_rules`
+# (there is exactly one rule and it cannot inhibit anything), and no `route.routes` tree (a single
+# receiver with no children is the honest shape of "every alert goes to the operator").
+#
+# `repeat_interval: 4h` rather than the default 4h it would inherit — written out because the
+# number is a decision: this alert reports a relay that refused an operator mail, and repeating it
+# every four hours while the relay is still broken is the point. It is not a pager; a real one
+# belongs in the receiver an operator configures, not here.
+
+global:
+  # The catch-all relay in `docker-compose.yml`, by service name: Alertmanager runs on the Compose
+  # network, where `localhost` is itself.
+  #
+  # This value is NOT read from `.env`, and cannot be: Alertmanager has no environment expansion
+  # (measured on the pinned v0.27.0 — neither `--config.expand-env` nor `${VAR}` in the file). A
+  # deployment pointing this at a real relay edits this file, which is why the file is in `ops/`
+  # rather than baked into an image.
+  smtp_smarthost: 'mailpit:1025'
+  # `.invalid` is reserved by RFC 2606 and can never resolve, so a misconfigured deployment fails
+  # visibly at the relay instead of quietly claiming a domain that belongs to somebody else. The
+  # value is syntactically a mailbox, which is all `amtool check-config` and the SMTP client require.
+  smtp_from: 'alertmanager@contract-agent.invalid'
+  # Mailpit offers no STARTTLS by default, and Alertmanager's default is to require it whenever the
+  # server advertises it. Set false so the local stack's delivery is not a TLS negotiation that can
+  # fail for a reason unrelated to the alert. A deployment must set this back to `true`: without it
+  # the recipient address crosses the network in clear text, which is the same rule `SMTP_STARTTLS`
+  # carries in `app/core/config.py` and is refused there in staging and production.
+  smtp_require_tls: false
+
+route:
+  receiver: operator
+  # `alertname` groups by what fired; `deployment` is the external label Prometheus stamps, so two
+  # stacks reporting into one Alertmanager stay two groups instead of one muddled mail.
+  group_by: ['alertname', 'deployment']
+  # Ten seconds: long enough that one evaluation's worth of alerts arrives together, short enough
+  # that the stack is worth watching after a failure without waiting out the default 30s. Nothing
+  # here is a paging budget — this is a local stack's window.
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 4h
+
+receivers:
+  - name: operator
+    email_configs:
+      # The recipient is the deployment's operator, never a customer — the same rule
+      # `ESCALATION_ALERT_TO` and `ATTENTION_ALERT_TO` follow, for the same reason: the party able to
+      # act on a failing relay is whoever runs this. The alert the rule raises carries no customer
+      # data at all (it is a counter name and a count), so no consent gate could apply even if one
+      # were wanted. Change this address in a deployment; it is a placeholder, not a default.
+      - to: 'operator@contract-agent.invalid'
+        # A resolved alert is its own mail. Silence on recovery is what teaches an operator to
+        # distrust the channel: the last thing they heard was that something was broken.
+        send_resolved: true
