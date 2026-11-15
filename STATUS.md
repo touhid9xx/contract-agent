@@ -7090,7 +7090,10 @@ it: seven of seven jobs, read from the run's own job list rather than inferred f
 `backend tests (pytest, sqlite)` job lists a `smoke escalation alert (real refusal, real socket)`
 step that succeeded, which is the evidence for the last clause above: the two-phase script has now
 started the scanner, been refused a connection, and read the count back on Ubuntu as well as on
-Windows, so that limit is measured rather than argued. What the run does not cover is the rest of
+Windows, ~~so that limit is measured rather than argued.~~ **`D10-113` then saw that same step fail
+on bytes nobody had changed**: a green step is evidence the journey *can* pass, not that it is
+deterministic, and what went missing was a race in the script rather than a defect in the thing it
+measures. What the run does not cover is the rest of
 them — the gitignored harness that evaluated the rule, and the relay that accepts and then bounces
 ~~, and the five workers nothing scrapes~~ — exactly as listed. **`D10-110` scraped those five**, so
 the container and the scraper are the only things that slice left unmeasured.
@@ -7206,6 +7209,33 @@ terminating mode; the schema it ticks against is `Base.metadata`, not the migrat
 applies, since the image copies `backend/app` and `requirements.txt` and neither
 `backend/migrations` nor `alembic.ini`; and neither the demo nor the frontend image is built by any
 gate.
+
+### D10-113 — The smoke step that failed on unchanged bytes
+
+`D10-109`'s journey failed in the pipeline on code it had already passed twice: run `43650623808`
+on `a267790`, `pytest` green, `smoke escalation alert (real refusal, real socket)` red, and nothing
+under `backend/` changed since the run before it. The log was not readable without a token, so the
+failure was reproduced instead — a Linux container, the committed tree, the script in a loop —
+where it failed three times in thirty-eight runs.
+
+It was a race between two signals the journey had treated as one fact. The scanner increments
+`escalation_email_failed_total` and then renders `escalation_alert_failed`; `scrape_until` returns
+on the counter; `stop_worker` kills the process from a `finally`; and the log was read once
+afterwards, from a process that was already dead. A kill landing inside the traceback render
+therefore destroyed the line and then failed the assertion for its absence. `structlog` prints each
+line with `flush=True`, so buffering was never involved.
+
+The fix is both halves in one file: the read polls to a deadline, and the assertion runs while the
+worker is still alive. Waiting alone cannot help — the process is gone — and ordering alone still
+races a single read a millisecond behind the counter. Fifteen consecutive runs of the fixed script
+passed; `check_d113.py` asserts the three structural facts the reasoning rests on, and
+`mutate_d113.py` breaks each in turn and requires its own message.
+
+Limits: three failures in thirty-eight is an empirical rate, so fifteen clean runs is evidence
+rather than proof; the reproduction ran in a container on a different kernel from the runner's;
+`pytest` collects none of this script, so the pipeline step is its only coverage; and the loop, the
+container and both harnesses are gitignored. Log content is asserted in exactly one place in this
+repository, so the other two smoke scripts were read rather than swept for the same shape.
 
 ## Non-negotiable reminders
 

@@ -8748,3 +8748,56 @@ nor `alembic.ini`, so this image cannot apply a migration at all. Nothing beyond
 `/metrics` is scraped, no worker answers across a published port, and neither the demo nor the
 frontend image is built by any gate. Whether the job is green on Linux is a claim for the paragraph
 that follows, not this one.
+
+It is green. Run `43650623808` on `a267790` reports `image (docker build, every entry point)` as a
+success, and its step list — read from the jobs API rather than inferred from the job's name —
+holds six executed steps: the build, the unprivileged account, the every-process-imports check, the
+API's liveness with `escalation_email_failed_total 0` read across a published port, the worker's
+tick, and the container's removal. The run as a whole is not green, and the step that failed it is
+the subject of `D10-113`.
+
+### D10-113 — The step that failed on bytes nobody had changed
+
+`D10-109`'s two-phase journey failed in CI on code it had already passed twice. Run `43650623808`
+on `a267790` reports `pytest` as a success and `smoke escalation alert (real refusal, real socket)`
+as a failure, and the two commits between the previous green run (`43649374806`, on `c49ab03`) and
+this one touch `ci.yml`, a comment in `docker-compose.yml` and two ledgers — nothing under
+`backend/`. A step that fails on unchanged code is flaky, and flaky is worth writing down only once
+it has been made to happen.
+
+The failure message was not readable: the log endpoints answer `403` without a token, and the
+public annotations carry nothing but `Process completed with exit code 1`. So it was reproduced
+rather than read — `python:3.13-slim`, the committed tree, `pip install -r
+backend/requirements-dev.txt`, the script in a loop. Three failures in thirty-eight runs: one in
+fifteen, none in eight, two in fifteen.
+
+The mechanism is a race between two signals the journey treated as one. `escalation_scanner`
+increments `escalation_email_failed_total` and *then* renders `escalation_alert_failed`, so the
+counter is visible strictly before the line exists. `scrape_until` returns the moment the counter
+reads one, `stop_worker` sends `SIGKILL` from a `finally`, and `logged` then read the log once, with
+the process already dead and reaped. A kill that lands between the increment and the write does not
+delay the evidence: it deletes it, and the assertion then fails for its absence. The window is the
+traceback render, which is how a race of a few milliseconds lands about one run in thirteen.
+
+Buffering was ruled out rather than assumed. `structlog`'s `PrintLogger` prints with `flush=True`,
+so every line reaches the file as it is written — the missing line had not been written at all.
+
+The fix is two halves of one file, and each is useless alone. `logged` now polls to a deadline,
+because the counter is the earlier of two signals the scanner writes in that order. The assertion
+moved inside the block that runs *before* the worker is stopped, because waiting for a line cannot
+succeed after `SIGKILL`. The production order was left alone: an increment that depended on a log
+write would make the machine-readable signal depend on the human-readable one, which is backwards.
+
+Verification: fifteen consecutive runs of the fixed script, no failures. `check_d113.py` asserts the
+three structural facts the reasoning rests on — the scanner counts before it renders, the assertion
+precedes the kill, and the read polls — and `mutate_d113.py` breaks each in turn and requires its
+own message.
+
+**Limits.** The rate is empirical — three in thirty-eight — so fifteen clean runs plus a structural
+argument is evidence that this race is gone, not proof that nothing else in the script is
+timing-dependent. The reproduction ran in Docker Desktop's Linux VM, whose `build_database` takes
+twelve seconds against a runner's fraction of that: the shape transferred, the timings did not. Log
+content is asserted in exactly one place in this repository, so the other two smoke scripts were
+read rather than swept for the same shape. `pytest` still collects none of this file, so the CI step
+is its only coverage. And the loop, the container and both harnesses are gitignored, so the
+counting above is readable here and not reproducible from a clone.
