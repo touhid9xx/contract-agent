@@ -7287,6 +7287,11 @@ own.
 
 Whether the job is green on Linux is a claim for the paragraph that follows, not this one.
 
+Run `43658722601` on `da2730f`: nine jobs of nine, with `the image applies the migrations it ships` and
+`a worker completes a tick on the migrated schema` listed among the succeeded steps of `image (docker
+build, every entry point)`. The stack's ordering is still read from the resolved config rather than
+watched.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.
