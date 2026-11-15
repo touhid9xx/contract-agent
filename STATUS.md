@@ -8129,10 +8129,14 @@ only after thirteen services, a `migrate` exit 0, `/health` and `/health/ready` 
 `extractor` at `RestartCount=0` with `worker_metrics_listening` logged had all been read off the
 running system.
 
-**What this does not fix, stated rather than implied.** The mysql healthcheck's roughly 150 second
+~~**What this does not fix, stated rather than implied.** The mysql healthcheck's roughly 150 second
 grace is shorter than a cold datadir initialisation, which takes about three minutes, so on a
 genuinely fresh volume MySQL reports `unhealthy` while it is still bootstrapping and settles
-afterwards. Nothing here changes that, and raising the grace is its own decision.
+afterwards. Nothing here changes that, and raising the grace is its own decision.~~ **Amended by
+`D10-126`, `86fe729`:** both of those figures were carried forward as estimates rather than taken,
+and measured they are 147.8s and 188.1s. The consequence was understated as well: the first `up` on
+a virgin volume does not merely report `unhealthy`, it exits 1 with `migrate` never running. The
+grace is now `300s`.
 
 Gates, on the tree that commit carries: `ruff check` and `ruff format --check` clean over `147`
 files, `python -m mypy` bare from the repository root reporting "no issues found in `76` source
@@ -8149,6 +8153,89 @@ imports from the built image, though it does not *start* the worker, which is wh
 check above exists. This closing commit is documentation only, and its own run is not named, for the
 reason `D10-115` through `D10-124` all gave: a paragraph cannot contain the id of the run that
 publishes it.
+
+### D10-126 — the stack called a working database dead on its first start
+
+**The residual item was a severity claim, and nobody had tested it.** `D10-125`'s ledger ended on
+the mysql healthcheck's `30s` + `12 x 10s` grace being shorter than a cold datadir initialisation,
+and called raising it its own decision. That is the shape of a note written from arithmetic rather
+than from a stopwatch: 150 seconds against "about three minutes" reads like a near miss, and a near
+miss gets deferred. The distance between *probably too short* and *the first `up` on a fresh machine
+fails and the schema is never migrated* is the entire decision, and prose cannot be run.
+
+**Two probes took the two numbers.** `backend/tests/smoke_mysql_cold_boot.py` boots mysql alone from
+the shipped compose file under an isolated project, on a virgin volume, and read the datadir
+answering at `188.1s` against the healthcheck declaring the container `unhealthy` at `147.8s`. The
+second probe ran the thing that actually matters: `docker compose up -d mysql migrate` on a virgin
+volume exited `1` at `147.5s` with `dependency failed to start: container ... is unhealthy`.
+`migrate` never ran. A stack whose database is healthy and whose schema is missing is worse than a
+stack that is plainly broken.
+
+**The check everyone runs is a second `up`, and a second `up` is the one case that passes.** The
+datadir exists by then, so MySQL answers well inside 150 seconds and the stack looks healthy. The
+defect is reachable only from `down -v` or a first clone — which is also why the running-stack
+verification in the previous slice did not catch it: that run was itself a second `up`, on a volume
+written on 2026-11-02. Thirteen healthy services were the evidence that the stack worked, and they
+were evidence of nothing about the first start.
+
+**The fix is one number, and the number is the arithmetic Compose actually applies.** During
+`start_period` failed probes are not counted at all — the container reads `starting` — and only
+after it elapses do `retries` further failures turn that into `unhealthy`. So the deadline is
+`start_period + interval x retries`: `150s` before, `420s` now that `start_period` is `300s`. Three
+hundred rather than a rounder larger value because it covers a datadir initialising half again as
+slowly as this machine's, and because every second added is a second a genuinely broken server goes
+undeclared.
+
+**Two guards, both derived from the file rather than listing it.** The first asserts the *deadline*
+is at least the measured boot, not that `start_period` equals a string, and it parses Compose
+duration syntax with `(?:\d+h)?(?:\d+m)?(?:\d+s)?` so `5 minutes` is an error rather than a silent
+comparison of unlike things. The second discovers the services a dependent waits on by matching
+`condition: service_healthy` in the compose text, then requires each to declare a `start_period`, so
+a new dependency on a new service is covered the day it is written. Anchor merges are deliberately
+*not* resolved: the reader sees what a service writes down, so a key moved into an anchor fails
+loudly instead of being inherited silently.
+
+**Proof the guards bite rather than merely pass.** Four mutations, applied to the real files one at
+a time, each caught by the test meant to catch it, with the unmutated tree green beside them:
+- `start_period` back to `30s`, which must fail the deadline test naming 147s against 188s
+- `start_period` deleted from mysql, which must fail the dependency test naming `mysql`
+- `300s` rewritten as `5 minutes`, which must fail with `147 < 188`
+- a dependent's condition changed away from `service_healthy`
+All mutated files were restored and compared by SHA-256. The third mutation is the one that matters
+most: without it, the deadline test would be satisfied by a reader that compared strings and never
+noticed it was reading a different quantity.
+
+**The probe is a script and not a test, on purpose.** `smoke_mysql_cold_boot.py` moves the real
+datadir initialisation and takes about three minutes, so it is excluded from pytest and from CI the
+same way `smoke_alert_delivery.py` and `smoke_journey.py` are. It exists so the constant the unit
+guard compares against can be re-taken on another machine instead of being re-counted from memory,
+and it fails if the container is ever `unhealthy` or if it reaches `healthy` outside the window the
+compose file allows.
+
+**What this does not fix, stated rather than implied.** It does not make the first boot faster, and
+it does not make a slow start observable — a database taking 260 seconds still looks exactly like
+one taking 20 until it answers. It also trades detection speed for correctness: a server that is
+genuinely broken is now declared dead at `420s` instead of `150s`, which is the price of not
+declaring a working one dead first. Raising the grace was the right call only because the failure it
+prevents is a failed first `up`, and a first `up` is the one run a deployer does not get to repeat
+for free.
+
+Gates, on the tree that commit carries: `ruff check` and `ruff format --check` clean over `148`
+files, `python -m mypy` bare from the repository root reporting "no issues found in `76` source
+files", `bandit -c pyproject.toml -r backend/app` exit 0, `pytest -o addopts="" -m "not
+integration"` `1261 passed, 2 skipped, 19 deselected` — two more than `D10-125`'s `1259`, which is
+this slice's two guards and nothing else; `smoke_mysql_cold_boot.py` run green on a virgin volume
+with mysql `healthy` at `176.5s` and never `unhealthy`; nineteen pre-commit hooks; `gitleaks`
+passing over the whole history with no entry added.
+
+The answer is yes. `D10-126` landed as `86fe729` and CI run `43775779260` built it green: nine jobs
+of nine, read from the jobs API. Two of them matter more than they did last time: `backend
+integration tests (mysql 8.4)` starts a real server, so a compose file that could not wait for one
+long enough is at least exercised against a server there, though on a warm volume rather than a
+virgin datadir — which is precisely the case that hid this defect, and why the script above is the
+only check that covers it. This closing commit is documentation only, and its own run is not named,
+for the reason `D10-115` through `D10-125` all gave: a paragraph cannot contain the id of the run
+that publishes it.
 
 ## Non-negotiable reminders
 
