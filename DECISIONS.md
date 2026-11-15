@@ -9250,3 +9250,105 @@ the job whose `smoke worker metrics` step failed on `003cb94`. Gates on the fix:
 clean, mypy clean over both files, and `pytest -m "not integration"` `1204 passed, 2 skipped, 19
 deselected` — the `1200` above plus the four new cases — with the journey standalone exiting 0 on
 five consecutive runs, the last of them immediately before the commit.
+
+### D10-118 — Gap 22's other half: the verdict is published, and only the fault pages
+
+`D10-117` closed the outbox half of gap 22 and ended its "does not close" paragraph with the other
+half: a notification parked `failed` after exhausting `notification_retry_max`, or `suppressed` by
+a policy refusal, still raised nothing. Nothing was hidden, either. Since `D10-79` and `D10-80`
+the tenant's admin could read both counts at `GET /attention`, `doctor` counted them for the
+operator, and the attention verdict folded them into its one line. But all three are pull-based:
+each answers an operator who is already looking, and each depends on somebody having built or
+configured that reader. `app/core/metrics.py` declared nine families after `D10-117`, and not one
+of them counted a message that never reached a customer.
+
+**Decision.** `notifications_undelivered{status}` — a gauge published by the same `AttentionWatch`
+tick that carries the park gauge, which is why `_publish_parks` became `_publish_gauges` — and one
+rule, `NotificationsUndelivered`, in a third `notification-delivery` group of
+`ops/prometheus/rules.yml`, matching `status="failed"` and nothing else. The tokens
+`NOTIFICATION_UNDELIVERED_FAILED` and `NOTIFICATION_UNDELIVERED_SUPPRESSED` are spelled once in
+`app/core/metrics.py` for the reason the park tokens are: the writer, the rule, and every test that
+asserts a row was counted read one spelling, and a typo in any of them would look exactly like
+"nothing is stuck".
+
+**`failed` is a fault; `suppressed` is a verdict.** That distinction is the design, and it was read
+out of the dispatch path rather than assumed. `dispatch_notification` raises `SENDER_UNAVAILABLE`
+*before* `attempts += 1`, so under the shipped `NOTIFICATION_TRANSPORT=none` the retry budget is
+never consumed and a row stays `pending` for ever — a default install publishes `failed 0` and
+cannot page itself however long it runs. Reaching `failed` therefore means a transport was
+configured, was reached, refused the message, and the budget ran out: the exact analogue of
+`relay_failed`, and the population nothing in the deployment clears without a person. `suppressed`
+means this codebase decided not to send — the contract closed, the customer withdrew consent, a
+reviewer flagged the field. Those rows do want a person, and `/attention` already names them to
+one; but a deployment whose customers exercise their rights is behaving correctly, and an alarm
+that fires on correct behaviour is answered by muting it. So `suppressed` is published and never
+paged. Unlike the park gauge, no second "explained" label was needed to say this: there the split
+had to be invented, here the two stored states already carry it.
+
+**A gauge, not a counter.** `POST /notifications/{id}/retry` lifts a row out of both states, so the
+number has to be able to fall. A count of "failures ever" would sit above zero for ever after the
+first one was answered — an alarm that fixing the thing it names cannot silence.
+
+**Both series on every tick, the zeros included.** A family written only when something is wrong is
+indistinguishable, from Prometheus' side, from a process that is not running — the `D10-109` defect
+that cost this repository an alarm which could not fire because nobody had decided what "nothing
+happened" looks like as a series. `for: 0m`, as the rules file argues above both earlier rules: a
+single increment is already a sustained condition and `> 0` on a gauge states a standing one, so
+there is no burst to debounce and every evaluation a `failed` row survives is a customer who was
+still never told.
+
+**No new query.** Both counts arrive on the `AttentionReport` this tick already builds, from the
+same `undelivered_counts` that `doctor`, `/attention` and the verdict read, so the gauge cannot
+drift from the number an operator is given on the command line.
+
+**The five tests.** `backend/tests/test_attention_watch.py` pins both statuses at zero on a clean
+board; a `suppressed` row counted and absent from the series the rule reads; a `failed` row landing
+on it; the two counted separately, which is the only input that catches publishing one number under
+both labels; and a retry lowering the gauge. `backend/tests/smoke_worker_metrics.py` gained
+`UNDELIVERED_STATUS_SERIES`, the family in `SINGLE_WRITER_FAMILIES`, `EVERY_TICK_SERIES` as the
+union of both tuples, and a presence-only assertion — under `NOTIFICATION_TRANSPORT=none` a live
+deployment legitimately holds `suppressed` rows, so asserting zero would be flaky. In
+`backend/tests/test_smoke_worker_metrics.py` the wiring case was renamed to assert the union,
+because `D10-117`'s lesson was that the one line deciding whether CI waits has to be pinned by
+something.
+
+**Four promtool cases and a three-stage control.** `ops/prometheus/rules.test.yml` gained cases
+8–11: the rule fires on `failed` while four `suppressed` rows sit on the same instance; a
+deployment whose customers withdraw consent pages nobody; an absent family cannot fire; and a retry
+drains the alert. The control gained a stage rather than being reused as written, because case 8
+reddens under the same mutation as case 9 — a one-stage control could not distinguish "case 9
+detects the matcher" from "case 8 failed and case 9 was never exercised".
+
+**A test of mine that would have passed for the wrong reason.** An edit of mine deleted the replay
+mutation from `test_a_replayed_row_lowers_the_gauge`, leaving it asserting that the gauge falls with
+no state change to make it fall. `ruff` found it second: the now-unused `event_id` raised `F841`,
+and following that flagged the test rather than the import. The mutation is restored verbatim.
+Recorded because the suite was green while the assertion was empty, which is the failure mode this
+repository keeps paying for.
+
+**What it does not close, said here rather than discovered later.** Gaps 5, 18 and 25 are
+untouched: each needs an owner's decision, and the ledger says not to guess at them. A row stuck
+`pending` for ever under `NOTIFICATION_TRANSPORT=none` is invisible to this gauge by design — it
+measures the two terminal states, and that population is a configuration the watcher's startup
+warning already names aloud. And the series arrives with one worker's tick, so a watcher that stops
+publishing goes stale in five minutes and takes its alert with it; a liveness series would close
+that, nothing has asked for one, and inventing one here would be the extra alert the rules file's
+own header warns about.
+
+Gates: `promtool check config` SUCCESS, `3 rules found`, and `promtool test rules` SUCCESS through
+the pinned `prom/prometheus:v2.55.0`; ruff and format clean, mypy strict clean over `75` source
+files, `bandit -c pyproject.toml -r backend/app -q` exit 0; `pytest -o addopts="" -m "not
+integration"` `1209 passed, 2 skipped, 19 deselected` — the `1204` above plus the five new cases —
+and `backend/tests/smoke_worker_metrics.py` exit 0 with both status series rendered by a real
+process.
+
+Whether that is green on the remote is the paragraph that follows.
+
+The answer is yes. `D10-118` landed as `fd992b6` and CI run `43719064945` built it green: nine jobs
+passed, and two of them are the ones that matter here. `observability` executed the rule and its
+four new cases — `promtool check config` and `promtool test rules` against the pinned image — and
+`backend tests (pytest, sqlite)` ran the `smoke worker metrics` step that had reddened `003cb94`,
+now with a second family in the series it waits for. So the gauge, the matcher and the presence
+assertion are green on the remote, not merely in a local shell. This closing commit is
+documentation-only and its own run is not named here, for the reason `D10-115`, `D10-116` and
+`D10-117` all gave: a paragraph cannot contain the id of the run that publishes it.

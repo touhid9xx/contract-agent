@@ -7480,6 +7480,65 @@ interval. `43714382178` built `68ec593` green, nine jobs, `backend tests (pytest
 them; gates on the fix were ruff and format clean, mypy clean, `pytest -m "not integration"` `1204
 passed, 2 skipped, 19 deselected`, and the journey standalone exiting 0 five consecutive times.
 
+### D10-118 — Gap 22's other half: the verdict is published, and only the fault pages
+
+`D10-117` closed the outbox half of gap 22 and said the notification half still raised nothing.
+Nothing was hidden: `GET /attention`, `doctor` and the attention verdict all counted `failed` and
+`suppressed` rows — but all three are pull-based, answering an operator who is already looking, and
+each depends on somebody having built or configured it. `app/core/metrics.py` declared nine
+families after `D10-117`, none of them counting a message that never reached a customer.
+
+`notifications_undelivered{status}` is a gauge published by the same `AttentionWatch` tick, which is
+why `_publish_parks` became `_publish_gauges`, and `NotificationsUndelivered` pages on
+`status="failed"` alone, in a third `notification-delivery` group. Both tokens are constants in
+`app/core/metrics.py`, because a typo in the rule or the writer would look like "nothing is stuck".
+
+`failed` is a fault and `suppressed` is a verdict, and the dispatch path is why. The dispatch worker
+raises `SENDER_UNAVAILABLE` before `attempts += 1`, so under the shipped
+`NOTIFICATION_TRANSPORT=none` the budget is never consumed and a row stays `pending` for ever: a
+default install publishes `failed 0` and cannot page itself. Reaching `failed` means a transport was
+configured, reached, refused and the budget ran out — the analogue of `relay_failed`. `suppressed`
+means this codebase declined to send: contract closed, consent withdrawn, field flagged. Those rows
+want a person and `/attention` names them to one; paging on them would page on correct behaviour. No
+second "explained" label was needed here: the two stored states already carry the distinction the
+park gauge had to invent.
+
+**A gauge, not a counter,** because `POST /notifications/{id}/retry` lifts a row out of both states.
+**Both series every tick, the zeros included,** for the `D10-109` reason: a family written only on
+failure is indistinguishable from a dead process. `for: 0m`, since `> 0` on a gauge is a standing
+state. Both counts arrive on the `AttentionReport` the tick already built, so no query was added and
+the gauge cannot drift from what `doctor` prints.
+
+Five cases in `test_attention_watch.py` pin the zeros, the suppressed row being published but not on
+the paged series, the failed row landing on it, the two counted separately, and a retry lowering the
+gauge. `smoke_worker_metrics.py` gained `UNDELIVERED_STATUS_SERIES`, the family in
+`SINGLE_WRITER_FAMILIES`, `EVERY_TICK_SERIES` as the union of both tuples, and a presence-only
+assertion, since a live default install legitimately holds `suppressed` rows. `rules.test.yml`
+gained cases 8–11 and the negative control a third stage: case 8 reddens under the same mutation as
+case 9, so a one-stage control could not tell "case 9 detects the matcher" from "case 8 failed and
+case 9 never ran".
+
+One test of mine would have passed for the wrong reason: an edit deleted the replay mutation from
+`test_a_replayed_row_lowers_the_gauge`, and `ruff`'s `F841` on the now-unused `event_id` is what
+found it. Restored verbatim, and recorded because the suite was green while the assertion was empty.
+
+What it does not close: gaps 5, 18 and 25, each an owner's decision; a row stuck `pending` under
+`NOTIFICATION_TRANSPORT=none`, which this gauge does not measure because it watches the two terminal
+states; and a watcher that stops ticking goes stale in five minutes and takes the alert with it.
+
+Gates: `promtool check config` SUCCESS, `3 rules found`, `promtool test rules` SUCCESS through the
+pinned `prom/prometheus:v2.55.0`; ruff and format clean, mypy `75` files, bandit exit 0; `pytest -m
+"not integration"` `1209 passed, 2 skipped, 19 deselected`; and `smoke_worker_metrics.py` exit 0
+with both status series rendered by a real process.
+
+Whether that is green on the remote is the paragraph that follows.
+
+The answer is yes. `D10-118` landed as `fd992b6`, and CI run `43719064945` built it green: nine
+jobs, with `observability` executing the rule and its four new cases, and
+`backend tests (pytest, sqlite)` running the `smoke worker metrics` step that had reddened
+`003cb94` — now waiting for a second family. This closing commit is documentation-only and its own
+run is not named here, for the reason `D10-115`, `D10-116` and `D10-117` all gave.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.
