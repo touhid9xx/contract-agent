@@ -7972,6 +7972,82 @@ sqlite)`, which collects the new module. This closing commit is documentation on
 is not named, for the reason `D10-115` through `D10-122` all gave: a paragraph cannot contain the id
 of the run that publishes it.
 
+### D10-124 — the paths the browser calls were never compared with the routes
+
+A route is written down twice in this tree, and each copy is validated in a room of its own.
+`backend/app/api/v1/*.py` carries the decorator that makes the endpoint answer;
+`frontend/src/lib/api.ts` carries the `request<…>(…)` call whose string decides what the browser
+asks for. The backend suite reaches its own route literals through `TestClient`. The frontend suite
+stubs `fetch` and then asserts about the arguments the stub was handed, which any string at all
+satisfies. Nothing imports the other side, and no gate reads both.
+
+**So one rename in one file is enough to break a screen with every gate green.** Rename
+`/contracts/{contract_id}/fields` to `…/extracted-fields` on the server and `ruff`, `mypy`,
+`bandit`, the whole backend suite, `tsc`, `eslint`, `vitest` and all nine CI jobs pass. The screen
+then waits on a 404 that renders as its loading state, and a loading state is indistinguishable from
+a slow server. This is `D10-120`'s defect — a name written in two compartments, each validated alone
+— one layer out from the HTTP client.
+
+**`api.ts` opened by claiming the guarantee it does not have, and the claim was corrected** rather
+than left standing. Its docstring said every endpoint is a typed function, so that a route rename
+becomes a compile error instead of a 404 at run time. That is true of the *function* name and of the
+wire types the module declares. It is not true of the path or the verb, which are strings `tsc`
+never reads. It now says which rename is a compile error and names the test that holds the strings;
+the mount comment in `app/main.py`, which made the same promise about the prefix, got the same
+treatment.
+
+**Nothing restated, everything derived.** The routes come from `create_app(settings).routes`
+filtered to `APIRoute`. The calls are parsed out of `api.ts`'s own source: quote-aware argument
+splitting, so a `)` inside a string cannot end a call, every path parameter collapsed to one
+placeholder — `{contract_id}` in Python, `${contractId}` in TypeScript — and the verb read from the
+call site or defaulting to `GET`, which is `request`'s own default rather than an assumption about
+the common case. 29 calls, 0 unmatched, against 37 routes. No path and no verb is a literal in the
+new file.
+
+**Four tests, one per way the seam opens.** A call no route declares. A call the reader cannot
+resolve to a path, which fails instead of being skipped, because a skipped call would leave the
+suite green over an unchecked site. The client's `NEXT_PUBLIC_API_BASE` fallback against
+`settings.api_v1_prefix`, since changing that one setting renames every route while each suite keeps
+following its own copy. And `probeHealth`'s direct `fetch("/health")`, the one call that bypasses
+`request` because it targets a path outside the versioned prefix, where a typo leaves the health
+indicator reporting the API down while it is up.
+
+**What it does not cover, stated rather than implied.** It compares which route a call reaches,
+never what the route does with the request: a call sending the wrong *payload shape* to the right
+route passes here, and the TS interfaces are the only guard on that, underived from the Pydantic
+models. It does not check the reverse direction — a route nothing calls — because legitimately
+uncalled routes exist: `/inbound/sms` is called by the SMS relay, `/metrics` and `/health` by the
+orchestrator, and several routes by the smoke journeys rather than by a screen.
+
+**Proof the guard bites rather than merely passing.** Nine mutations, applied to the real files one
+at a time, each caught by the test meant to catch it, with the unmutated tree green beside them:
+- the API renames a route the browser calls
+- the API mounts a route under a new path
+- the API changes a route's verb
+- the client asks for a path nothing serves
+- the client changes the verb of a call
+- the app is mounted under a new API version
+- the client prepends a prefix the app does not mount
+- the liveness probe points at a path nothing answers
+- a call whose path is a variable, which the reader refuses to skip
+All five mutated files were restored and compared by SHA-256.
+
+Gates, on the tree that commit carries: `ruff check` and `ruff format --check` clean over `151`
+files, `python -m mypy` bare from the repository root reporting "no issues found in `76` source
+files", `bandit -c pyproject.toml -r backend/app` exit 0, and `pytest -o addopts="" -m "not
+integration"` `1253 passed, 2 skipped, 19 deselected` — exactly four more than `D10-123`'s `1249`,
+which is this file's four tests and nothing else.
+
+Whether that is green on the remote is the paragraph that follows.
+
+The answer is yes. `D10-124` landed as `e1b06ee` and CI run `43759731794` built it green: nine jobs
+of nine, read from the jobs API. The two that matter here are `backend tests (pytest, sqlite)`,
+which collects the new module — a guard nothing collects is the defect wearing a test's clothes —
+and `frontend (typecheck, eslint, vitest, build)`, which proves the corrected docstring still passes
+the linter it was corrected under. This closing commit is documentation only, and its own run is not
+named, for the reason `D10-115` through `D10-123` all gave: a paragraph cannot contain the id of the
+run that publishes it.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.
