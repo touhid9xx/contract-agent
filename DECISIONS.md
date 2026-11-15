@@ -9205,3 +9205,12 @@ backend/app -q` exit 0; `pytest -m "not integration"` `1200 passed, 2 skipped, 1
 `the park gauge publishes every outcome it declares`.
 
 Whether that is green on the remote is the paragraph that follows.
+
+The answer is yes. `D10-117` landed as `e443080` and CI run `43711445238` built it green: nine jobs
+passed and `observability` was one of them, which is where the rule and its four new cases were
+actually executed — `promtool check config` and `promtool test rules` against the pinned
+`prom/prometheus:v2.55.0`, beside the two-image pin-drift check that keeps the compose file honest.
+So the matcher that pages on `relay_failed` alone and holds its tongue on the explained parks is
+green on the remote, not merely in a local shell. This closing commit is documentation-only and its
+own run is not named here, for the reason `D10-115` and `D10-116` both gave: a paragraph cannot
+contain the id of the run that publishes it.
