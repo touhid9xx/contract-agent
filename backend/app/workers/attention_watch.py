@@ -51,6 +51,16 @@ misleading, while a route authenticates a tenant principal. The alert did not so
 that problem — it went around it by addressing a person instead of a principal. If
 the route is ever wanted, the tenant question is an owner's decision, not an
 implementation detail. See ``D10-39`` and ``D10-40``.
+
+**What did change (``D10-117``): one count, and not to a principal.** The park count is
+now published as a Prometheus gauge — ``outbox_parked_events{outcome=...}`` — from this
+process's own ``/metrics`` listener. That is not the blocked route arriving by another
+name. It is unauthenticated, it carries no contract, notification, escalation or field
+data, it is scraped by the deployment rather than fetched by a tenant, and the question
+that blocked the route — *who may see a deployment-wide count* — is not a question a
+gauge asks of anyone. The gauge is split by the same explained/unexplained distinction
+the verdict uses, so a default install's parks are published as ``transport_disabled``
+rather than dropped: excluded is fine, invisible is not.
 """
 
 from __future__ import annotations
@@ -65,6 +75,11 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.attention import AttentionReport, attention_report
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
+from app.core.metrics import (
+    OUTBOX_PARK_RELAY_FAILED,
+    OUTBOX_PARK_TRANSPORT_DISABLED,
+    OUTBOX_PARKED_EVENTS,
+)
 from app.db.session import build_engine, build_session_factory, session_scope
 from app.workers.attention_alerts import AttentionAlerter, build_attention_alerter
 from app.workers.metrics_server import publish_metrics
@@ -108,6 +123,7 @@ class AttentionWatch:
         """
         with session_scope(self._session_factory) as session:
             report = attention_report(session, limit=self._limit, settings=self._settings)
+        self._publish_parks(report)
         self._record(report)
         self._alert(report)
         return report
@@ -144,6 +160,30 @@ class AttentionWatch:
                 break
 
         log.info("attention_watch_stopped")
+
+    def _publish_parks(self, report: AttentionReport) -> None:
+        """Publish the park count on this process's scrape, split by whether it is explained.
+
+        Both series are set on **every** tick, the zero included, because the shipped
+        alert rule reads this gauge directly (``ops/prometheus/rules.yml``). A family
+        that is only written when something is wrong is indistinguishable, from
+        Prometheus' side, from a process that is not running at all — and ``D10-109``
+        already cost this repo one alarm that could not fire because nobody had
+        decided what "nothing happened" looks like as a series.
+
+        The split is not decoration either. ``transport_disabled`` is the population
+        ``D10-39`` explains away — on a default install it is *every* event — and
+        ``relay_failed`` is the population no part of the deployment clears by itself.
+        The alert watches only the second. Both are published, so the first is
+        legible to whoever looks instead of merely unpaged.
+
+        What this does **not** buy, said here rather than discovered later: a watcher
+        that stops publishing goes stale in Prometheus after five minutes and takes
+        its alert with it. Closing that needs a liveness series nothing has asked for
+        yet; it is recorded in the ledger as a limit, not guessed at in code.
+        """
+        OUTBOX_PARKED_EVENTS.set(report.parks_unexplained, outcome=OUTBOX_PARK_RELAY_FAILED)
+        OUTBOX_PARKED_EVENTS.set(report.parks_explained, outcome=OUTBOX_PARK_TRANSPORT_DISABLED)
 
     def _record(self, report: AttentionReport) -> None:
         """Log exactly one verdict for one reading, plus a truncation warning.

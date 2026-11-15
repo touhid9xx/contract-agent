@@ -18,6 +18,15 @@
 #      `increase()` over no data returns no data, so a counter with no baseline was invisible to
 #      the rule written for it.
 #
+# Cases 4-7 are the same exercise for `OutboxEventsParked` (`D10-117`), and the one that earns its
+# place is 5: on the default `EVENT_TRANSPORT=none` every park is `transport_disabled`, and a rule
+# matching the whole family would page on the first `docker compose up` and be muted by Thursday.
+# Case 4 is what stops 5 from being a test that passes because the input was empty — the explained
+# parks are present on the same instance and the alert still fires on the unexplained one. Case 6
+# is `D10-109`'s lesson re-applied to a gauge. Case 7 exists because the family is a gauge: the
+# alert must be able to stop when a replay drains the backlog, which is a property a counter of
+# "parks ever" could not have.
+#
 # `rule_files` is absolute because `promtool` resolves it against the working directory, and CI runs
 # with `-w /etc/prometheus` against the same mount `docker-compose.yml` uses — one path, so the file
 # validated is the file Prometheus reads.
@@ -82,4 +91,81 @@ tests:
     alert_rule_test:
       - eval_time: 10m
         alertname: EscalationEmailFailed
+        exp_alerts: []
+
+  # 4. Fires on the unexplained park while the explained ones sit on the same instance.
+  - interval: 1m
+    input_series:
+      # A default install parking everything it claims. Nine rows, all explained.
+      - series: 'outbox_parked_events{outcome="transport_disabled",instance="attention:9101"}'
+        values: "9 9 9 9 9 9"
+      # One row parked with a transport configured: the event that was never delivered.
+      - series: 'outbox_parked_events{outcome="relay_failed",instance="attention:9101"}'
+        values: "0 0 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: OutboxEventsParked
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: "attention:9101"
+              outcome: relay_failed
+            exp_annotations:
+              summary: "Outbox events parked on attention:9101"
+              description: >-
+                The outbox relay exhausted its retry budget and parked a domain event while a
+                transport was configured, so that event was never delivered and nothing retries it.
+                Run `python -m app.cli outbox-replay --list` to see the parked rows, then
+                `python -m app.cli outbox-replay` once the cause is fixed. Parks from a deployment
+                with EVENT_TRANSPORT=none are published as transport_disabled and never reach this
+                alert.
+
+  # 5. A default install parks everything and pages nobody.
+  - interval: 1m
+    input_series:
+      - series: 'outbox_parked_events{outcome="transport_disabled",instance="attention:9101"}'
+        values: "42 42 42 42 42 42"
+      - series: 'outbox_parked_events{outcome="relay_failed",instance="attention:9101"}'
+        values: "0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: OutboxEventsParked
+        exp_alerts: []
+
+  # 6. No tick yet means no series, and no series cannot fire.
+  - interval: 1m
+    input_series:
+      # A family this rule does not read, so its own series is absent rather than zero.
+      - series: 'outbox_events_total{status="published",instance="relay:9101"}'
+        values: "0 1 2 3 4 5"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: OutboxEventsParked
+        exp_alerts: []
+
+  # 7. A replay drains the backlog, and the alert that fired stops firing.
+  - interval: 1m
+    input_series:
+      - series: 'outbox_parked_events{outcome="relay_failed",instance="attention:9101"}'
+        values: "1 1 1 1 0 0 0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: OutboxEventsParked
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: "attention:9101"
+              outcome: relay_failed
+            exp_annotations:
+              summary: "Outbox events parked on attention:9101"
+              description: >-
+                The outbox relay exhausted its retry budget and parked a domain event while a
+                transport was configured, so that event was never delivered and nothing retries it.
+                Run `python -m app.cli outbox-replay --list` to see the parked rows, then
+                `python -m app.cli outbox-replay` once the cause is fixed. Parks from a deployment
+                with EVENT_TRANSPORT=none are published as transport_disabled and never reach this
+                alert.
+      # The same run, after the operator fixed the cause and replayed the rows.
+      - eval_time: 11m
+        alertname: OutboxEventsParked
         exp_alerts: []

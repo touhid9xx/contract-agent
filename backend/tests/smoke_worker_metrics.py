@@ -126,6 +126,16 @@ UNWRITTEN_FAMILIES = ("reminder_plans_total", "extractions_total")
 #: conflating the two is the mistake this constant exists to prevent.
 SEEDED_ZERO_FAMILY = "escalation_email_failed_total"
 
+#: Every series ``outbox_parked_events`` must carry once the watcher has ticked
+#: (``D10-117``). Both, not "some": the explained population is what a writer that
+#: published only findings would drop, and the unexplained one is what the alert
+#: reads — a body missing either is a half-published gauge, and the half it is
+#: missing is invisible from Prometheus' side.
+PARKED_EVENT_SERIES: tuple[str, ...] = (
+    'outbox_parked_events{outcome="relay_failed"}',
+    'outbox_parked_events{outcome="transport_disabled"}',
+)
+
 
 @dataclass(frozen=True)
 class Worker:
@@ -165,10 +175,13 @@ WORKERS: tuple[Worker, ...] = (
         "app.workers.escalation_scanner",
         "ESCALATION_SCAN_POLL_INTERVAL_SECONDS",
     ),
-    # These two write no family of their own: their registry holds the API's
-    # zeros, and the listener answers "did this process start?" rather than "is
-    # it working?". They are here because a port nothing ever asks is a port
-    # nobody would notice going missing.
+    # The relay writes no family of its own: its registry holds the API's zeros,
+    # and its listener answers "did this process start?" rather than "is it
+    # working?". It is here because a port nothing ever asks is a port nobody
+    # would notice going missing. ``attention_watch`` shared that description until
+    # ``D10-117`` gave it ``outbox_parked_events``; it stays in the sweep because a
+    # listener that binds before the first tick is exactly where "the port is
+    # missing" and "the worker is still starting" have to be told apart by asking.
     Worker("outbox_relay", "app.workers.outbox_relay", "OUTBOX_POLL_INTERVAL_SECONDS"),
     Worker("attention_watch", "app.workers.attention_watch", "ATTENTION_POLL_INTERVAL_SECONDS"),
 )
@@ -187,6 +200,10 @@ SINGLE_WRITER_FAMILIES: dict[str, str] = {
     "contracts_expired_total": "expiry",
     "reminder_plans_total": "reminder_planner",
     "escalations_total": "escalation_scanner",
+    # ``D10-117``. Labelled like the three above and written by one worker like them:
+    # only the attention watcher reports the dead-letter backlog, so finding a sample
+    # in another worker's body would mean the registry had stopped being process-local.
+    "outbox_parked_events": "attention_watch",
 }
 
 
@@ -553,6 +570,22 @@ def run() -> None:
                 "the seeded zero renders in a process that cannot write it",
                 f"{SEEDED_ZERO_FAMILY} 0",
             )
+
+            # ``D10-117``. Both outcome series must be on the wire from a watcher that
+            # has ticked, and *presence* is the whole assertion: the value is a reading
+            # of this throwaway database, where the relay may legitimately have parked
+            # something under ``EVENT_TRANSPORT=none`` by the time this scrape happens.
+            # What must never be true is "neither series is here", because an absent
+            # gauge and a dead watcher are the same observation to `OutboxEventsParked`.
+            parks = samples(bodies["attention_watch"], "outbox_parked_events")
+            need(
+                set(parks) == set(PARKED_EVENT_SERIES),
+                f"the attention watcher renders {sorted(parks)} for outbox_parked_events, "
+                f"expected {sorted(PARKED_EVENT_SERIES)}: a missing outcome would make the "
+                f"alert unfireable for it, and an extra one would mean a label value "
+                f"nobody declared",
+            )
+            say("the park gauge publishes every outcome it declares", str(parks))
         finally:
             engine.dispose()
 

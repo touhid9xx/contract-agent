@@ -389,6 +389,39 @@ CONTRACTS_EXPIRED_TOTAL: Final = _declare(
 )
 
 
+#: ``outcome`` tokens for :data:`OUTBOX_PARKED_EVENTS`, named once here because the
+#: writer and every test that asserts a park was counted read the same spelling, and
+#: a typo in one of them would look exactly like "no parks".
+OUTBOX_PARK_RELAY_FAILED: Final = "relay_failed"
+OUTBOX_PARK_TRANSPORT_DISABLED: Final = "transport_disabled"
+
+#: The dead-letter backlog, as one reading of the table rather than a running count.
+#:
+#: A gauge, not a counter: replay un-parks rows, so the number has to be able to fall,
+#: and a counter of "parks ever" would stay permanently above zero after the first one
+#: was cleared — an alarm nobody can silence is the same thing as one nobody reads.
+#: It reads :func:`app.db.repositories.outbox.dead_letter_count`, the identical query
+#: `doctor` and the attention verdict already use, so the metric cannot drift from the
+#: number an operator is told on the command line.
+#:
+#: The ``outcome`` label is `D10-39`'s distinction, given a series. With
+#: ``EVENT_TRANSPORT=none`` — the default — every event the relay claims parks, so a
+#: bare ``outbox_parked_events > 0`` would fire on the first ``docker compose up`` and
+#: be muted by Thursday, which is how the module docstring of
+#: :mod:`app.workers.attention` says a real alarm stops being read. ``transport_disabled``
+#: is that explained population; ``relay_failed`` is a deployment that had a transport
+#: and could not deliver, which nothing clears by itself. Only the second one is
+#: alerted on (``ops/prometheus/rules.yml``), and both are published so the first stays
+#: visible instead of merely excluded.
+OUTBOX_PARKED_EVENTS: Final = _declare(
+    Gauge(
+        "outbox_parked_events",
+        "Outbox events parked in the dead-letter state, by why delivery stopped.",
+        ("outcome",),
+    )
+)
+
+
 def render() -> str:
     """Return the whole registry in Prometheus text exposition format."""
     lines: list[str] = []

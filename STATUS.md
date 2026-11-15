@@ -3803,7 +3803,13 @@ above read "passed" because a hook finally ran and passed.
     inherited — a claim lock that is a no-op on SQLite — is now **closed**: on MySQL
     two schedulers are proven not to receive the same row (D10-08). On SQLite the
     no-op remains true by construction, so the offline suite still cannot prove it.
-    **No alert when rows park** is still open, and it is a real weakness at GATE 2.
+    ~~**No alert when rows park** is still open, and it is a real weakness at GATE 2.~~
+    **Its outbox half is closed by `D10-117`:** a parked outbox row now carries an
+    `outbox_parked_events{outcome}` gauge on the attention watcher's own scrape, and
+    `OutboxEventsParked` pages through the Alertmanager hop `D10-116` proved whenever the park
+    is a `relay_failed` one — no `ATTENTION_ALERT_TO` in the path. **Its notification half is
+    still open:** a notification parked `failed`, or `suppressed` by a policy refusal, raises
+    nothing, because the gauge counts outbox events.
     **Amended, not closed:** `python -m app.cli doctor` now counts parked outbox rows and
     `failed`/`suppressed` notifications and exits `EXIT_ATTENTION` (5) on any of them
     (`D10-12`), so the state is machine-checkable instead of requiring a hand-written
@@ -3811,8 +3817,12 @@ above read "passed" because a hook finally ran and passed.
     running it and a route for the exit code to reach a person. **Amended by `D10-39` and
     `D10-40`, not deleted:** the scheduler exists (`2572f53`) and, for a deployment that sets
     `ATTENTION_ALERT_TO`, the verdict now reaches a person by mail when it *changes*
-    (`d9530b5`). Neither is true of the default install, so the entry stays open rather than
-    struck.
+    (`d9530b5`). ~~Neither is true of the default install, so the entry stays open rather than
+    struck.~~ The mail is still conditional on that variable, but the alert is not: a
+    `relay_failed` park pages whether or not anybody configured a recipient. A default
+    `EVENT_TRANSPORT=none` install instead produces `transport_disabled` parks, which are
+    published and deliberately not paged, so what keeps this entry open is the notification
+    half rather than the outbox one.
 23. ~~**The double-send serialisation is proven by reasoning, not by a concurrent
     test.**~~ — **closed against MySQL (D10-08).** The gap was real and correctly
     stated: `0003` (`0f5da36`) makes the second dispatch block on
@@ -7386,6 +7396,60 @@ receiver deleted.
 Run `43674960533` on `08f5169` answers the ledger half: nine jobs of nine, the same nine names,
 this time over the tree that carries this entry — so the block was pushed green, not only the code
 it describes. The commit carrying this paragraph adds no code to what that run built.
+
+### D10-117 — A parked row gets a series, and only one of the two kinds pages
+
+Gap 22 has said the same thing through three slices: a parked row sits there until an operator
+looks. `D10-12` made that machine-checkable and `D10-39`/`D10-40` made the verdict reach a person —
+but only when `ATTENTION_ALERT_TO` names an address. What the state never had was a series:
+`ops/prometheus/rules.yml` held one rule, `EscalationEmailFailed`, and `app/core/metrics.py`
+declared eight families, none of them about the outbox.
+
+`outbox_parked_events{outcome}` is a gauge `AttentionWatch.run_once` publishes on the same
+per-worker listener `D10-107` gave that process, and `OutboxEventsParked` pages on
+`outcome="relay_failed"` alone. Both outcome tokens are constants in `app/core/metrics.py`, because
+a typo in the rule or in the writer would look exactly like "no parks".
+
+Three choices, each made against the obvious alternative. **A gauge, not a counter:**
+`outbox-replay` un-parks a row, so a count of "parks ever" would sit above zero forever — an alarm
+that fixing the thing it names cannot silence. It reads the same `dead_letter_count` query `doctor`
+uses, so the series cannot drift from the number on the command line. **Both series every tick, the
+zero included:** a family written only on failure is indistinguishable from a dead process, which
+is the `D10-109` defect. **Only `relay_failed` pages:** `transport_disabled` is the population a
+switched-off bus explains, which on the default install is every event; it is published and
+deliberately not alerted on, because excluded is acceptable and invisible is not.
+
+A gauge is not the blocked `/attention` route arriving by another name, and the watcher's docstring
+now says so: it is unauthenticated, it carries no contract, notification, escalation or field data,
+and the question that blocked the route — *who may see a deployment-wide number* — is not one a
+gauge asks anyone.
+
+The caveat was investigated rather than assumed. `metrics.render()` does emit HELP and TYPE for a
+declared family, but `Gauge` seeds no series: an unscheduled watcher leaves the family declared and
+sample-free, which keeps "never ran" and "ran and found zero" distinguishable on the wire. Nothing
+was changed to paper over it.
+
+`test_attention_watch.py` pins five behaviours, and its autouse fixture was not decoration: the
+registry is process-wide, and without it the new gauge leaked into `test_metrics.py`, which asserts
+which families report *before* being written — a failure that would have looked like a metrics bug
+in a file that never touched parks. `smoke_worker_metrics.py` gained the family in
+`SINGLE_WRITER_FAMILIES` and asserts both outcome series are present rather than zero, since a
+default install legitimately parks. `rules.test.yml` gained four cases, and a negative control
+demanding the *explained* parks fire FAILED with `got:[]` — which is what makes the passing case a
+statement about the matcher rather than about an empty expectation.
+
+What it does not close: a notification parked `failed` or `suppressed` still raises nothing, because
+the gauge counts outbox events; `EVENT_TRANSPORT=none`'s semantics are untouched, since whether it
+should enqueue at all is an owner's decision; and a watcher that stops ticking goes stale in five
+minutes and takes the alert with it, which a liveness series would fix and no rule has asked for.
+
+Gates: `promtool check config` SUCCESS, `2 rules found`, and `promtool test rules` SUCCESS through
+the pinned `prom/prometheus:v2.55.0`; ruff clean, format `139` files, mypy `75` files, bandit exit
+0 on `backend/app`; `pytest -m "not integration"` `1200 passed, 2 skipped, 19 deselected`; and
+`smoke_worker_metrics.py` all steps passed, ending on
+`the park gauge publishes every outcome it declares`.
+
+Whether that is green on the remote is the paragraph that follows.
 
 ## Non-negotiable reminders
 

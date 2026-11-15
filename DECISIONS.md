@@ -9109,3 +9109,99 @@ Run `43674960533` on `08f5169` answers the ledger half of the same claim: nine j
 the same nine names as above, over the tree that carries this entry — so the block you are
 reading was pushed green, not only the code it describes. The commit carrying this paragraph
 adds no code to what that run built.
+
+### D10-117 — A parked row gets a series, and only one of the two kinds pages
+
+Gap 22 has carried the same sentence through three slices: a row that parks sits there until an
+operator looks. `D10-12` made it machine-checkable — `doctor` counts parked outbox rows and exits
+`EXIT_ATTENTION` — and `D10-39`/`D10-40` made the verdict reach a person, but only when
+`ATTENTION_ALERT_TO` names an address, and `D10-39` also taught the verdict that a park under
+`EVENT_TRANSPORT=none` is *explained*: the default install parks every event the relay claims, and
+an alarm that fires on the first `docker compose up` gets muted by Thursday. So the state had a
+word for itself, an exit code, and two ways to speak that both depend on somebody having
+configured them. What it did not have was a series: `ops/prometheus/rules.yml` held exactly one
+rule, `EscalationEmailFailed`, and `app/core/metrics.py` declared eight families, none of them
+about the outbox.
+
+**Decision.** `outbox_parked_events{outcome}` — a gauge, published by `AttentionWatch.run_once`
+on the same per-worker `/metrics` listener `D10-107` gave that process — and one rule,
+`OutboxEventsParked`, matching `outcome="relay_failed"` and nothing else. The two outcome tokens,
+`relay_failed` and `transport_disabled`, are constants in `app/core/metrics.py` rather than
+literals repeated in a rule and a writer, because a typo in either would look exactly like "no
+parks".
+
+Three of the choices were made against the obvious alternative.
+
+**A gauge, not a counter.** `python -m app.cli outbox-replay` un-parks a row, so the number has to
+be able to fall. A counter of "parks ever" would sit permanently above zero after the first one
+was cleared — an alarm that fixing the thing it names cannot silence, which is a slower way of
+building an alarm nobody reads. The gauge reads `dead_letter_count`, the identical query `doctor`
+and the verdict already use, so the series cannot drift from the number an operator is given on
+the command line.
+
+**Both series on every tick, the zero included.** A family written only when something is wrong is
+indistinguishable, from Prometheus' side, from a process that is not running — the `D10-109`
+defect, which cost this repository an alert that could not fire because nobody had decided what
+"nothing happened" looks like as a series. The rule carries `for: 0m` for a related reason: `> 0`
+on a gauge is a standing state rather than an increment, so there is nothing to debounce, and
+every evaluation a parked row survives is an event that is still undelivered.
+
+**Only `relay_failed` pages.** This is `D10-39`'s distinction given a series instead of being
+re-argued. `transport_disabled` is the population a switched-off bus explains — on the default
+install, every event — and it is published as a series and deliberately not alerted on. Both are
+visible on the gauge, so the explained parks stay legible to whoever looks rather than merely
+unpaged: excluded is acceptable, invisible is not.
+
+**Not the blocked route arriving by another name.** The module docstring of
+`app/workers/attention_watch.py` records that a tenant-scoped read of a deployment-wide count is
+blocked by a question, not by effort: the counts are read across tenants on purpose, and a route
+authenticates a tenant principal. A gauge is not that reader — it is unauthenticated, it carries
+no contract, notification, escalation or field data, it is scraped by the deployment rather than
+fetched by a tenant, and the question that blocked the route, *who may see a deployment-wide
+number*, is not a question a gauge asks anyone. The docstring already made that argument about the
+mail; it now makes it about the series too.
+
+**A caveat investigated rather than assumed.** `metrics.render()` was believed to emit *declared*
+families so that a scrape always names every metric. It does emit HELP and TYPE for a declared
+family, but `Gauge` seeds no series: samples exist only once a tick sets them, so an unscheduled
+watcher leaves the family declared and sample-free. That is the right shape — it keeps "never ran"
+and "ran and found zero" distinguishable on the wire — so nothing was changed to paper over it.
+
+**The five tests, and the leak the tests found.** `backend/tests/test_attention_watch.py` pins
+that the family and both outcome tokens are declared; that a clean tick publishes both zeros; that
+a park under `EVENT_TRANSPORT=none` lands on `transport_disabled` and never on the alerting
+series; that a park with a transport configured lands on `relay_failed`; and that the gauge falls
+after a park is replayed. An autouse `clean_registry` fixture, mirroring `test_metrics.py`, was not
+decoration either — the registry is process-wide, and without it the new gauge leaked into
+`test_metrics.py`, which asserts which families report *before* being written. The suite would
+have passed or failed on file ordering, and failed looking like a metrics bug in a file that never
+touched parks. `backend/tests/smoke_worker_metrics.py` gained the family in
+`SINGLE_WRITER_FAMILIES` (which proves no other worker leaks a sample), had a comment corrected
+that claimed `attention_watch` writes no family of its own, and asserts the presence of both
+outcome series rather than their value: under `EVENT_TRANSPORT=none` the relay may legitimately
+have parked rows, so asserting zero would be flaky.
+
+**Both directions of silence are pinned.** `ops/prometheus/rules.test.yml` gained four cases and
+`promtool test rules` reports SUCCESS, but "the alert stayed silent" and "the alert stayed silent
+because it looked away" are the same green test. So a negative control,
+`.agent-cache/neg/neg_rules.test.yml`, was run demanding that the *explained* parks fire — and it
+FAILED as required, `got:[]`, which is what makes the passing case a statement about the matcher
+rather than about an empty expectation.
+
+**What it does not close, said here rather than discovered later.** Gap 22's other half: a
+notification parked `failed` after exhausting `notification_retry_max`, or `suppressed` by a
+policy refusal, still raises nothing, and this gauge is about outbox events. Gap 25's semantics
+are untouched on purpose — whether `EVENT_TRANSPORT=none` should enqueue nothing at all is an
+owner's decision, and this slice publishes that population rather than re-deciding it. And the
+series comes from one worker's tick, so a watcher that stops publishing goes stale in five minutes
+and takes its alert with it; a liveness series would close that, nothing has asked for one, and a
+third rule invented to cover it is the extra alert the rules file's own header warns about.
+
+Gates: `promtool check config` SUCCESS, `2 rules found`, and `promtool test rules` SUCCESS, both
+through the pinned `prom/prometheus:v2.55.0` with the same mount and working directory CI uses;
+ruff clean, `ruff format --check` 139 files, mypy 75 source files, `bandit -c pyproject.toml -r
+backend/app -q` exit 0; `pytest -m "not integration"` `1200 passed, 2 skipped, 19 deselected`; and
+`backend/tests/smoke_worker_metrics.py` all steps passed, ending on
+`the park gauge publishes every outcome it declares`.
+
+Whether that is green on the remote is the paragraph that follows.

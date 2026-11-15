@@ -1,10 +1,12 @@
 # Alert rules for the local stack (D10-111).
 #
-# One rule, because exactly one rule is recorded anywhere in this repository: `D10-91` names
-# `escalation_email_failed_total` so that the expression below would need no rewrite, and
-# `D10-108`/`D10-109`/`D10-110` each found a new reason it could not fire. A rules file is not a
-# place to demonstrate diligence: every additional rule would be an alert nobody specified and
-# nobody has ever received, which is the shape of file that gets muted instead of fixed.
+# Two rules, and each is recorded somewhere in this repository before it is written here. `D10-91`
+# names `escalation_email_failed_total` so that the first expression would need no rewrite, and
+# `D10-108`/`D10-109`/`D10-110` each found a new reason it could not fire. `D10-117` adds the
+# second: `STATUS.md`'s gap 22 has said since `D10-39` that a parked outbox row is announced by
+# nothing, and there was no series to announce it with. A rules file is not a place to demonstrate
+# diligence: every additional rule would be an alert nobody specified and nobody has ever
+# received, which is the shape of file that gets muted instead of fixed.
 #
 # `for: 0m` is not laziness. The counter is incremented once per failed alert *batch*, so a single
 # increment on a 15s scrape is already a sustained condition — there is nothing to debounce, and a
@@ -36,3 +38,43 @@ groups:
             An escalation was opened and the operator mail for it was refused. The escalations
             themselves are committed and still in the queue — nothing was lost — but nobody was
             told about them. Check SMTP settings and the relay behind ESCALATION_ALERT_TO.
+
+  - name: outbox-parks
+    rules:
+      # A gauge, unlike the rule above, and that difference is the design rather than an accident:
+      # `python -m app.cli outbox-replay` un-parks a row, so the series has to be allowed to fall.
+      # A counter of "parks ever" would sit permanently above zero after the first one was cleared,
+      # which is an alarm that cannot be answered by fixing the thing it names.
+      #
+      # `for: 0m` for the same reason as the rule above, reached differently: `> 0` on a gauge is a
+      # statement about a standing state, not about an increment, so there is no burst to smooth
+      # out. A parked row is terminal — the relay exhausted its budget and nothing retries it — so
+      # every evaluation it survives is an event that has still not been delivered, and delaying
+      # the first message only lengthens that.
+      #
+      # The `outcome="relay_failed"` matcher is load-bearing, not decoration. The gauge carries
+      # both populations, and on the default `EVENT_TRANSPORT=none` *every* event the relay claims
+      # parks as `transport_disabled` — a configuration, not a fault, and exactly the distinction
+      # `D10-39` taught the attention verdict to make. Matching the label keeps a fresh
+      # `docker compose up` quiet without hiding what it parked: both series are published, so the
+      # explained parks are visible on the gauge and merely unpaged. `rules.test.yml` pins both
+      # directions, because "the alert is silent" and "the alert is silent because it looked away"
+      # are the same green test otherwise.
+      #
+      # Limit, stated here rather than found later: the series comes from one worker's tick, so a
+      # watcher that stops publishing goes stale after five minutes and this alert resolves with
+      # it. A liveness series is what would close that hole; nothing has asked for one, and a third
+      # rule invented to cover it would be the extra alert the header warns about.
+      - alert: OutboxEventsParked
+        expr: outbox_parked_events{outcome="relay_failed"} > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbox events parked on {{ $labels.instance }}"
+          description: >-
+            The outbox relay exhausted its retry budget and parked a domain event while a transport
+            was configured, so that event was never delivered and nothing retries it. Run
+            `python -m app.cli outbox-replay --list` to see the parked rows, then
+            `python -m app.cli outbox-replay` once the cause is fixed. Parks from a deployment with
+            EVENT_TRANSPORT=none are published as transport_disabled and never reach this alert.

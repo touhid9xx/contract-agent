@@ -5,7 +5,7 @@ code (``D10-36``). ``D10-39`` added a second caller with a different job —
 :class:`~app.workers.attention_watch.AttentionWatch` — because a check nobody runs
 finds nothing, and this stack ships a Compose file rather than a crontab.
 
-The properties worth pinning are not "the worker starts". They are the four
+The properties worth pinning are not "the worker starts". They are the five
 decisions in that module, each of which could be made wrongly without failing a
 test:
 
@@ -23,10 +23,19 @@ test:
   exists to avoid.
 * **A failed tick is logged, not fatal.** A worker that dies on a transient
   connection error stops watching exactly when something is wrong.
+* **The park count is published on every tick, the zero included** (``D10-117``).
+  A family written only when something is wrong is indistinguishable, from
+  Prometheus' side, from a process that stopped ticking — which is ``D10-109``'s
+  defect one worker over. Both ``outcome`` series are set every tick, so the only
+  way this worker's scrape stops carrying them is that it stopped.
 
-What this file deliberately does **not** test is delivery. Nothing here reads the
-log; the log is where the verdict goes, and the remaining half of gap 22 — making
-it reach a person by itself — is open and blocked on a decision (``D10-39``).
+What this file deliberately does **not** test is delivery: nothing here reads the
+log. ``D10-117`` did not change that, and it did not reopen the question ``D10-39``
+closed — it gave the park *count* a series, split by the explained/unexplained
+distinction the verdict already made, so ``OutboxEventsParked`` has something to
+read. A gauge is still scraped by the deployment rather than fetched by a tenant,
+so *who may see a deployment-wide count* never became a question for a route, and
+the tenant-facing board stays blocked on an owner's decision.
 """
 
 from __future__ import annotations
@@ -42,8 +51,10 @@ from sqlalchemy.orm import Session, sessionmaker
 from structlog.testing import capture_logs
 from structlog.typing import EventDict
 
+from app.core import metrics
 from app.core.config import Settings
 from app.core.crypto import FieldCipher
+from app.core.metrics import OUTBOX_PARK_RELAY_FAILED, OUTBOX_PARK_TRANSPORT_DISABLED
 from app.db.base import utc_now
 from app.db.enums import ContractStatus, FieldName, FieldStatus, OutboxStatus
 from app.db.models import Contract, ExtractedField, OutboxEvent, Tenant
@@ -82,6 +93,21 @@ def _capture_at_debug() -> None:
     file red rather than silently passing.
     """
     structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG))
+
+
+@pytest.fixture(autouse=True)
+def clean_registry():
+    """Empty the registry around every test, as ``tests/test_metrics.py`` does.
+
+    Not tidiness: the gauge is process-wide, so a park published here would still be
+    set when a later file scrapes the same registry — and ``test_metrics.py`` asserts
+    which families report before anything records one. Without this the suite would
+    pass or fail on file ordering, and the failure would look like a metrics bug in
+    a place that never touched parks.
+    """
+    metrics.reset()
+    yield
+    metrics.reset()
 
 
 # --- helpers ---------------------------------------------------------------
@@ -153,6 +179,25 @@ def events(captured: Sequence[EventDict]) -> list[str]:
     was a claim the caller could not satisfy.
     """
     return [str(entry["event"]) for entry in captured]
+
+
+def parked() -> dict[str, float]:
+    """The park gauge as a scrape reads it: ``outcome`` -> value, absent omitted.
+
+    Parsed out of ``render()`` rather than read with ``value()``, because those two
+    disagree in exactly the case that matters: ``value()`` answers ``0.0`` for a
+    series that was never set, and *no series* is the state ``D10-109`` proved can
+    make an alert unfireable. A helper that could not tell the two apart would pass
+    on the defect.
+    """
+    prefix = f'{metrics.OUTBOX_PARKED_EVENTS.name}{{outcome="'
+    found: dict[str, float] = {}
+    for line in metrics.render().splitlines():
+        if not line.startswith(prefix):
+            continue
+        outcome, _, value = line[len(prefix) :].partition('"}')
+        found[outcome] = float(value)
+    return found
 
 
 # --- one line per tick, and it names the verdict --------------------------
@@ -332,3 +377,100 @@ def test_a_failed_tick_is_logged_and_the_loop_survives(
         watch.run_forever(stop)  # returns normally; does not raise
 
     assert "attention_watch_tick_failed" in events(captured)
+
+
+# --- the park count, published -------------------------------------------
+def test_the_family_is_declared_before_the_first_tick() -> None:
+    """Declared and sample-free, which is a different state from a zero.
+
+    A gauge has no single series to seed — ``outcome`` names them, and inventing
+    outcomes here would publish numbers for paths no call site produces (the reason
+    ``Counter._seed_its_one_series`` stops at unlabelled families). So before a tick
+    the scrape carries the announcement and no number, and "absent cannot fire" is
+    the one behaviour ``rules.test.yml`` case 6 pins rather than this file.
+    """
+    assert "# TYPE outbox_parked_events gauge" in metrics.render()
+    assert parked() == {}
+
+
+def test_a_clean_board_publishes_both_outcomes_at_zero(
+    session_factory: sessionmaker[Session], settings: Settings
+) -> None:
+    """The zero is published, per outcome, on a board with nothing to report.
+
+    This is the test that fails if ``_publish_parks`` is ever moved inside an
+    ``if report.outbox_parked`` branch: a clean install would then render no series,
+    the rule would read "no data", and a watcher that had died would look exactly
+    like a deployment with nothing parked. That is ``D10-109`` again, one worker over
+    — the defect was a counter whose first increment was invisible, and its
+    equivalent here is a gauge whose zero is.
+    """
+    AttentionWatch(session_factory, settings=settings).run_once()
+
+    assert parked() == {
+        OUTBOX_PARK_TRANSPORT_DISABLED: 0.0,
+        OUTBOX_PARK_RELAY_FAILED: 0.0,
+    }
+
+
+def test_a_park_with_the_bus_switched_off_lands_on_transport_disabled(
+    session_factory: sessionmaker[Session], settings: Settings, tenant: Tenant
+) -> None:
+    """The default install's parks are published as explained, not dropped.
+
+    ``EVENT_TRANSPORT=none`` parks every event it claims, so this is what a fresh
+    ``docker compose up`` looks like: one row parked, and the series that carries it
+    is the one the alert does not read. The count stays on the wire — excluded from
+    paging, not hidden from view.
+    """
+    add_parked_event(session_factory, tenant)
+
+    AttentionWatch(session_factory, settings=settings).run_once()
+
+    assert parked() == {
+        OUTBOX_PARK_TRANSPORT_DISABLED: 1.0,
+        OUTBOX_PARK_RELAY_FAILED: 0.0,
+    }
+
+
+def test_a_park_with_a_configured_transport_lands_on_relay_failed(
+    session_factory: sessionmaker[Session], tenant: Tenant
+) -> None:
+    """Same row, same count, the other series — the transport decides, as it does for the verdict."""
+    add_parked_event(session_factory, tenant)
+
+    AttentionWatch(session_factory, settings=CONFIGURED).run_once()
+
+    assert parked() == {
+        OUTBOX_PARK_TRANSPORT_DISABLED: 0.0,
+        OUTBOX_PARK_RELAY_FAILED: 1.0,
+    }
+
+
+def test_a_replayed_row_lowers_the_gauge(
+    session_factory: sessionmaker[Session], tenant: Tenant
+) -> None:
+    """The reason it is a gauge: fixing the cause has to be able to silence the alert.
+
+    ``outbox-replay`` un-parks a row, so the next tick must publish a smaller number —
+    which ``rules.test.yml`` case 7 relies on when it asserts the alert resolves. A
+    counter of "parks ever" would sit above zero for ever after the first one was
+    cleared, and an alarm nobody can answer by doing the right thing is one that gets
+    muted instead.
+    """
+    event_id = add_parked_event(session_factory, tenant)
+    watch = AttentionWatch(session_factory, settings=CONFIGURED)
+
+    watch.run_once()
+    assert parked()[OUTBOX_PARK_RELAY_FAILED] == 1.0
+
+    with session_scope(session_factory) as session:
+        row = session.get(OutboxEvent, event_id)
+        assert row is not None
+        row.status = OutboxStatus.PUBLISHED
+
+    watch.run_once()
+    assert parked() == {
+        OUTBOX_PARK_TRANSPORT_DISABLED: 0.0,
+        OUTBOX_PARK_RELAY_FAILED: 0.0,
+    }
