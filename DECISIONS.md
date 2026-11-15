@@ -8801,3 +8801,14 @@ content is asserted in exactly one place in this repository, so the other two sm
 read rather than swept for the same shape. `pytest` still collects none of this file, so the CI step
 is its only coverage. And the loop, the container and both harnesses are gitignored, so the
 counting above is readable here and not reproducible from a clone.
+
+The run that would have caught this is green. Run `43656378323` on `b188018` reports all nine jobs
+succeeding, and the job that held the failing step — `backend tests (pytest, sqlite)` — lists
+`smoke escalation alert (real refusal, real socket)` among its succeeded steps. That list is read
+from the steps API, not from the job's own conclusion: a job can be green with a step inside it
+skipped, which is exactly the substitution this slice refuses.
+
+One execution is not the claim. At three failures in thirty-eight, passing once was the likelier
+outcome before the fix as well, so what carries the conclusion is the ordering argument and the
+mutations that break it; this run is the fact that the argument survives contact with a runner on a
+different kernel from the reproduction.

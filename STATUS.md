@@ -7237,6 +7237,12 @@ rather than proof; the reproduction ran in a container on a different kernel fro
 container and both harnesses are gitignored. Log content is asserted in exactly one place in this
 repository, so the other two smoke scripts were read rather than swept for the same shape.
 
+The run that would have caught this is green: `43656378323` on `b188018`, nine jobs of nine, with
+`smoke escalation alert (real refusal, real socket)` listed among the succeeded steps of `backend
+tests (pytest, sqlite)`. One execution is not the claim — at three failures in thirty-eight it was
+the likelier outcome before the fix too — so the claim stays the ordering argument and the
+mutations that break it, with this run as the argument meeting a runner rather than a container.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.
