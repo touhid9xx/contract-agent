@@ -474,6 +474,145 @@ def test_every_compose_only_key_is_one_the_compose_file_reads() -> None:
     )
 
 
+# --- what the stack waits for before it starts, not just what it builds -----
+
+#: Compose's duration syntax: `300s`, `1m30s`, `1h`, or a bare count for `retries`.
+DURATION = re.compile(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?")
+
+#: How long a virgin MySQL datadir took to start answering on this machine, in
+#: seconds. Measured rather than assumed: `backend/tests/smoke_mysql_cold_boot.py`
+#: starts `mysql` from this compose file on a throwaway volume and prints the
+#: number, so the one figure below can be re-taken instead of re-counted.
+MYSQL_COLD_BOOT_SECONDS = 188
+
+
+def _seconds(raw: str) -> int:
+    """A Compose duration as whole seconds."""
+    text = raw.strip()
+    if text.isdigit():
+        return int(text)
+    match = DURATION.fullmatch(text)
+    assert text, f"docker-compose.yml carries an empty duration: {raw!r}"
+    assert match is not None, (
+        f"docker-compose.yml carries a duration this reader cannot read: {raw!r}"
+    )
+    parts = [int(part) if part else 0 for part in match.groups()]
+    hours, minutes, seconds = parts
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def _compose_services() -> dict[str, list[str]]:
+    """Service name -> the lines of its own block, read off the file's indentation.
+
+    Anchor merges (``<<: *worker``) are deliberately not resolved: this reads the
+    block a service *writes down*, so a value supplied by an anchor is reported
+    missing rather than inherited. That is the direction a guard should err in — it
+    costs a false failure when someone moves a key into an anchor, and it cannot
+    silently lose a key that moved out of one.
+    """
+    services: dict[str, list[str]] = {}
+    block: list[str] | None = None
+    under_services = False
+    for line in COMPOSE_FILE.read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith(" "):
+            under_services = line.strip() == "services:"
+            block = None
+            continue
+        if not under_services:
+            continue
+        header = re.fullmatch(r"  ([\w-]+):", line)
+        if header is not None:
+            block = []
+            services[header.group(1)] = block
+        elif block is not None:
+            block.append(line)
+    return services
+
+
+def _healthcheck(block: list[str]) -> dict[str, str]:
+    """The scalar keys under one service's ``healthcheck:``, e.g. ``start_period``."""
+    values: dict[str, str] = {}
+    inside = False
+    for line in block:
+        stripped = line.strip()
+        if stripped == "healthcheck:":
+            inside = True
+            continue
+        if not inside:
+            continue
+        if not line.startswith("      "):
+            break
+        if ":" not in stripped:
+            continue
+        key, value = stripped.split(":", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+
+def test_the_database_cannot_be_declared_dead_while_it_is_initialising() -> None:
+    """A first `up` on a fresh volume must not fail because MySQL is still booting.
+
+    A virgin datadir has no socket to answer ``mysqladmin ping`` on, so every probe
+    fails until ``--initialize`` finishes, and the healthcheck has one number that
+    decides how long that is tolerated. ``D10-126`` measured both sites: the datadir
+    answered at 188.1s, while ``30s + 12 x 10s`` declared the container ``unhealthy``
+    at 147.8s — and ``docker compose up -d mysql migrate`` exited 1 with
+    ``dependency failed to start: container ... is unhealthy``, with ``migrate``
+    never running. Nothing caught it, because the obvious check is a second ``up``,
+    by which time the datadir exists and the stack looks healthy.
+
+    The deadline here is the arithmetic Compose itself applies — during
+    ``start_period`` failed probes are not counted at all, then ``retries`` further
+    failures are what turn ``starting`` into ``unhealthy`` — rather than the value of
+    ``start_period`` alone, so the assertion says at which second the container can
+    first be called dead.
+    """
+    health = _healthcheck(_compose_services()["mysql"])
+    deadline = _seconds(health["start_period"]) + _seconds(health["interval"]) * int(
+        health["retries"]
+    )
+
+    assert deadline >= MYSQL_COLD_BOOT_SECONDS, (
+        f"the mysql healthcheck can be judged `unhealthy` {deadline}s after `up`, and a "
+        f"virgin datadir was measured at {MYSQL_COLD_BOOT_SECONDS}s: a first `up` on a "
+        "fresh volume fails with `dependency failed to start` and `migrate` never runs"
+    )
+
+
+def test_every_service_a_dependency_waits_for_gives_it_time_to_start() -> None:
+    """``condition: service_healthy`` is a gate, and the gate has to be one a boot survives.
+
+    ``depends_on`` with a health condition waits for ``healthy`` and gives up on
+    ``unhealthy``. A service whose healthcheck has no grace therefore makes every
+    dependent's start depend on it being up within ``retries`` intervals — true of a
+    warm container, false of a first boot. The services are read out of the compose
+    file rather than listed, so a new dependency on a new service is covered the day
+    it is written.
+    """
+    targets = set(
+        re.findall(
+            r"^[ ]+([\w-]+):\n[ ]+condition: service_healthy",
+            COMPOSE_FILE.read_text(encoding="utf-8"),
+            re.MULTILINE,
+        )
+    )
+    assert targets, "no `condition: service_healthy` found: has docker-compose.yml changed?"
+
+    services = _compose_services()
+    unknown = {name for name in targets if name not in services}
+    assert not unknown, (
+        f"docker-compose.yml waits on services it does not define: {sorted(unknown)}"
+    )
+
+    without_grace = {name for name in targets if "start_period" not in _healthcheck(services[name])}
+    assert not without_grace, (
+        f"{sorted(without_grace)} are waited for with `condition: service_healthy` but declare "
+        "no `start_period`, so a dependent fails on the first slow boot"
+    )
+
+
 # --- what the stack needs to start, not just what Settings accepts ----------
 
 WORKERS_DIR = Path(__file__).resolve().parents[2] / "backend" / "app" / "workers"

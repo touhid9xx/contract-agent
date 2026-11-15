@@ -139,7 +139,22 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
-      start_period: 30s
+      # D10-126. The one number here that could be wrong in silence. During
+      # `start_period` failed probes are not counted — the container reads
+      # `starting` — and once it elapses, `retries` failures are enough to declare a
+      # server that is still initialising a dead one. First boot is exactly that
+      # case: a virgin datadir has no socket to answer on, so every probe fails
+      # until `--initialize` finishes.
+      #
+      # Measured, not estimated (`D10-126`): on a virgin volume the datadir took
+      # 188.1s to answer, while 30s + 12 x 10s declared it `unhealthy` at 147.8s.
+      # `docker compose up -d mysql migrate` therefore exited 1 with
+      # `dependency failed to start: container ... is unhealthy` and `migrate` never
+      # ran — on the first `up` after a `down -v`, and on nobody's second attempt,
+      # which is why the earlier run of this stack looked like it worked. 300s
+      # covers a datadir initialising twice as slowly as this one, and a server that
+      # is genuinely broken is still declared unhealthy at 300 + 12 x 10s.
+      start_period: 300s
     restart: unless-stopped
 
   # D10-114. The schema arrives with the image and is applied by the image: the
