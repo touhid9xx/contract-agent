@@ -7326,6 +7326,63 @@ scoped to the `### D10-115` heading reported the block clean. Both ledgers are n
 `cc562dc` and refuse any line this slice added past 100 columns, and a case pads that amended
 paragraph to show the wider scope biting where the block-scoped one could not.
 
+### D10-116 — The rule gets a receiver, and a mail is watched arriving
+
+`D10-111` shipped the rule and `D10-113` proved it fires on a real refusal; neither gave it anywhere
+to go. With no `alerting:` block in `prometheus.yml`, `EscalationEmailFailed` is evaluated, written
+into `ALERTS`, and dropped — the gap `D10-111` named as the largest remaining one.
+`ops/alertmanager/alertmanager.yml` is the receiver it was missing: one route, one `operator`
+receiver, email to `operator@contract-agent.invalid` over `smtp_smarthost: 'mailpit:1025'`.
+`docker-compose.yml` gains `alertmanager` (loopback `:9093`, tmpfs `/alertmanager` at `mode=1777`
+because the image runs as uid 65534 — measured, and the same trap `prometheus` hit) and `mailpit`
+(`axllent/mailpit:v1.33.1`, `127.0.0.1:8025`, no database, so nothing in it is a record). Mailpit is
+what makes the path observable instead of asserted: a message that arrives is a message the stack
+produced.
+
+`backend/tests/smoke_alert_delivery.py` proves the hop. Static: the stack defines and pins both
+services, `smoke.yml` and `prometheus.yml` name the same receiver, and `prometheus.yml` loads a file
+declaring `EscalationEmailFailed`. Live: three containers, a synthetic `up == 1` rule through the
+smoke's own config, and the assertion that Mailpit received `[FIRING:1] SmokeStackDeliversAlerts`.
+It does not prove `EscalationEmailFailed` itself was delivered — `D10-113` proves that rule's
+arithmetic on a real refusal; what this pins is everything that could quietly drift, which is why
+the static half compares the two configs rather than trusting them to agree.
+
+Three defects, all found by running it. The static checks ran after image resolution, so "the stack
+has no `alertmanager`" printed as "`alertmanager` has no pinned `image:`" — a true sentence about a
+consequence, standing in for the cause. `"alert: EscalationEmailFailed" in rules` was a substring
+test, satisfied by `EscalationEmailFailedRenamed`. And the comment this slice first wrote cited
+`EscalationAlertRelayFailing`, a rule that has never existed; `grep` now finds that name nowhere.
+
+`.agent-cache/mutate_d116.py` runs twelve cases, each naming the sentence it must produce, so a case
+caught for the wrong reason reports `WRONG` rather than passing: none missed, none wrong, files
+restored byte-exactly. Two reach the live half only and are the argument for having one — a broken
+`rule_files` path leaves every static check green, and `group_wait: 10s → 10m` passes the statics,
+passes Alertmanager's load, passes "the alert is active", and dies only because the mail is still in
+the batching window. The smoke also had to move out of `scripts/`, which no hook lints (`files:
+^backend/`); it lives in `backend/tests/` with the other cross-process journeys.
+
+Gates: `pytest -m "not integration"` is `1195 passed, 2 skipped, 19 deselected`; ruff clean, format
+`139` files, mypy `75` files, bandit exit 0 on `backend/app` and `backend/tests`;
+`amtool check-config` and `promtool check config` both report SUCCESS and `docker compose config -q`
+exits 0 — each as a succeeded CI step rather than only on this machine. The close-guard lesson is
+retired rather than repeated: `.agent-cache/check_ledger_close.py` replaces the per-slice checkers
+that `D10-111`, `D10-113`, `D10-114` and `D10-115` each had to add after shipping, and refuses any
+block from `D10-111` onward that names a following paragraph and then ends on it, or closes without
+the run id and short sha that answered it. Twelve blocks, seven of them deferring, none failing;
+nine mutation cases, none missed. Two of those cases were wrong expectations rather than lint bugs —
+`D10-111` and `D10-113` never defer, so exit 0 is correct for them — and one caught a real hole: a
+deferral wrapped across two lines was invisible until the paragraph was matched flattened.
+
+Whether that is green on the remote is the paragraph that follows.
+
+Run `43673514273` on `b51d8e0` answers it: nine jobs of nine, with
+`the receiver's config loads in Alertmanager`, `the delivery smoke's own config loads`,
+`the stack and this job pin the same images` and
+`a firing rule reaches a mailbox (prometheus -> alertmanager -> mailpit)` all listed as succeeded
+steps of `observability (prometheus config, alert rule, alert delivery)`. The live step being a step
+of its own is what makes that a claim about delivery: the pin-drift check would still pass with the
+receiver deleted.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.
