@@ -138,6 +138,16 @@ POLL_INTERVAL_SECONDS = "0.5"
 #: instead of hanging it. A refused port answers immediately on both platforms.
 RELAY_TIMEOUT_SECONDS = "5"
 
+#: The event the scanner writes when the relay refuses it. Evidence that the
+#: failure was reported to a person as well as counted for a dashboard.
+ALERT_FAILED_EVENT = "escalation_alert_failed"
+
+#: How long the line may lag the counter that describes it. The scanner increments
+#: ``escalation_email_failed_total`` and *then* renders the event, so the two are
+#: milliseconds apart by construction and this deadline only bounds a real defect
+#: (a scanner that counted a failure and never said so).
+LOG_DEADLINE_SECONDS = 10.0
+
 
 def build_database(path: Path, *, silence_days: int) -> tuple[Engine, sessionmaker[Session], int]:
     """Create the schema and one contract last contacted ``silence_days`` ago.
@@ -292,17 +302,33 @@ def scrape_until(
     raise SmokeError(f"the scanner never {waiting_for} (last scrape: {last_error})")
 
 
-def logged(path: Path, needle: str) -> bool:
-    """Whether the worker wrote ``needle`` anywhere in its log.
+def logged(path: Path, needle: str, *, deadline: float = LOG_DEADLINE_SECONDS) -> bool:
+    """Whether the worker wrote ``needle`` anywhere in its log, waiting for it.
+
+    Waiting is the contract here, not a tolerance. The scanner increments the
+    counter and *then* renders the event (``escalation_scanner.py``), and rendering
+    it means formatting a traceback — so a scrape can legitimately read the counter
+    before the line describing it exists. Reading once, the moment the counter
+    appears, made this journey fail about one run in thirteen on bytes that had not
+    changed: the scrape *is* what triggers the shutdown, so the kill landed inside
+    that render and took the line with it. Waiting is therefore only half the fix —
+    :func:`stop_worker` has to come later, which is why the caller asserts this
+    before stopping the worker rather than after.
 
     The whole file rather than a tail: the refusal is logged once, on the first
     tick, and a later tick on a quiet board writes nothing — so a tail can be
     nothing but idle ticks by the time the scrape succeeds.
     """
-    try:
-        return needle in path.read_text(encoding="utf-8", errors="replace")
-    except OSError:  # pragma: no cover - only on a vanished temp dir
-        return False
+    expiry = time.monotonic() + deadline
+    while True:
+        try:
+            if needle in path.read_text(encoding="utf-8", errors="replace"):
+                return True
+        except OSError:  # pragma: no cover - only on a vanished temp dir
+            pass
+        if time.monotonic() >= expiry:
+            return False
+        time.sleep(RETRY_SECONDS)
 
 
 def count_escalations(factory: sessionmaker[Session], contract_id: int) -> list[Escalation]:
@@ -458,21 +484,25 @@ def check_a_refused_alert_is_counted() -> None:
                     "the escalation was still opened and counted",
                     f"{EXPECTED_OPENED} {opened[EXPECTED_OPENED]:g}",
                 )
+                # The log is evidence the failure was *noticed* rather than merely
+                # counted: the module promises a counter and one log line, because a
+                # series nobody reads and a log nobody writes are the same silence.
+                #
+                # Asserted *here*, before ``stop_worker`` kills the process, and with
+                # a deadline. The counter this scan just read is written before the
+                # line is rendered, so stopping on the counter can land the kill
+                # inside that render and destroy the very evidence being asserted.
+                need(
+                    logged(log_path, ALERT_FAILED_EVENT),
+                    f"the worker never logged {ALERT_FAILED_EVENT}; the failure was "
+                    "counted but not reported, and the log tail is:\n" + log_tail(log_path),
+                )
+                say("the refusal was logged, not only counted", ALERT_FAILED_EVENT)
             except SmokeError:
                 print("\n--- worker log ---\n" + log_tail(log_path), flush=True)
                 raise
             finally:
                 stop_worker(process)
-
-            # The log is evidence the failure was *noticed* rather than merely
-            # counted: the module promises a counter and one log line, because a
-            # series nobody reads and a log nobody writes are the same silence.
-            need(
-                logged(log_path, "escalation_alert_failed"),
-                "the worker never logged escalation_alert_failed; the failure was "
-                "counted but not reported, and the log tail is:\n" + log_tail(log_path),
-            )
-            say("the refusal was logged, not only counted", "escalation_alert_failed")
 
             # Across the process boundary, in the database the worker wrote: the
             # alert runs after the commit, so a refused relay cannot cost a row.
