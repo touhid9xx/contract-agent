@@ -185,6 +185,9 @@ def create_app(
     app.include_router(metrics_router)
     # Everything that is actual API lives under the configured prefix, which is
     # also what the frontend proxies and what `frontend/src/lib/api.ts` assumes.
+    # `tests/test_frontend_routes.py` holds both halves of that sentence to this
+    # router list rather than trusting it: a route renamed here, or a prefix
+    # changed in `settings`, fails there instead of 404ing in a browser.
     app.include_router(auth_router, prefix=app_settings.api_v1_prefix)
     app.include_router(contracts_router, prefix=app_settings.api_v1_prefix)
     app.include_router(review_router, prefix=app_settings.api_v1_prefix)

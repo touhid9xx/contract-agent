@@ -2,9 +2,13 @@
  * The one place the browser talks HTTP.
  *
  * Every wire shape the UI consumes is declared here and every endpoint is a
- * typed function, so a route rename becomes a compile error instead of a 404 at
- * run time. Components never call `fetch` themselves — the error envelope is
- * parsed once, in this module, and surfaces as {@link ApiError}.
+ * typed function, so renaming a *function* is a compile error rather than a
+ * silent no-op. The path and the verb are not: they are strings `tsc` never
+ * reads, so a route renamed on the server is a 404 whose screen shows a loading
+ * state, which is why `backend/tests/test_frontend_routes.py` compares this
+ * module's calls with the app's own route table. Components never call `fetch`
+ * themselves — the error envelope is parsed once, in this module, and surfaces
+ * as {@link ApiError}.
  *
  * The base path is relative on purpose. `next.config.ts` rewrites `/api/*` to
  * the FastAPI process, so the browser stays on a single origin: no CORS
