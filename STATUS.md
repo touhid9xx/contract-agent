@@ -7794,6 +7794,93 @@ guard nothing collects would be the same defect wearing a test's clothes. This c
 documentation-only and its own run is not named here, for the reason `D10-115` through `D10-120` all
 gave: a paragraph cannot contain the id of the run that publishes it.
 
+### D10-122 — one worker, five copies, and nothing that compared them
+
+A worker process is declared five times in this tree, and every copy is load-bearing on its own. The
+module under `app/workers/` with a `main` and a `__main__` guard is the only copy that serves a
+registry. The `docker-compose.yml` service whose `command` starts that module is the only copy that
+makes the process exist. The target in `ops/prometheus/prometheus.yml` is the only copy that makes
+the numbers visible. `test_metrics_server.WORKERS` parametrizes the listener proof, and
+`smoke_worker_metrics.WORKERS` is the journey that dials the socket.
+
+`D10-120` added the seventh worker by hand to all five and needed no test to pass — and no test
+could have failed, because each copy is validated in its own compartment and none of the five
+readers has ever read another. `promtool` accepts the Prometheus config alone, `docker compose
+config` accepts the stack alone, and the two tables assert only about the modules already listed in
+them. Every gate was green while the five lists could disagree freely.
+
+**The failure this leaves open is the one an operator cannot see.** A worker that is started and
+never scraped runs, serves, logs clean, and its families are invisible; its mirror image, a scrape
+target pointing at a port nothing binds, renders as a worker permanently at `up == 0`, which reads
+exactly like one that died. Both are one forgotten line, and both were as reachable after `D10-120`
+as before it.
+
+**Nothing restated, everything derived — the rule `D10-121` set for the README, applied to a second
+kind of claim.** The worker set comes from the modules' own ASTs, a `main` plus a `__main__` guard,
+so libraries like `metrics_server` and `senders` drop out without being named anywhere. The services
+come from Compose's `services:` block, the targets from the `workers` job, and the published label
+from `published_labels()`, reused from `test_metrics_server` rather than reimplemented: one of the
+five lists *is* that list, and a second extractor would be a sixth copy able to disagree with the
+other five. No count of workers is written down in the new file, so an eighth worker needs no edit
+to it.
+
+**What the guard does not cover, stated rather than implied.** It compares which workers are
+declared where, not what each one does: a worker renamed consistently in its module, its label and
+all five places passes. It does not read the scrape interval, the `WORKER_METRICS_HOST` value, or
+whether any alert rule names a worker, so an eighth worker inherits the shared Compose anchor and is
+scraped without any rule mentioning it. Every comparison in it is static, so a worker declared
+everywhere and crashing on start still passes here; catching that is `smoke_worker_metrics`' job,
+and it costs a subprocess.
+
+**Proof the guard bites rather than merely passing.** Eight mutations, each caught by the test that
+should notice it, with an unmutated control staying green beside them: a dropped scrape target, a
+target naming a service that starts nothing, two workers publishing the same host port, a container
+port the shared anchor does not set, a dropped row in each of the two tables, a published label
+renamed away from its table, and a new eighth worker module with no service to run it. All five
+mutated files were restored byte-identically, compared by SHA-256.
+
+**Two comments that said something untrue, corrected rather than left standing.**
+`smoke_worker_metrics` claimed its tuple was in Compose's order; it is not, because Compose runs the
+relay first and the sweep fourth, and nothing compares the two orders anyway. Both tables also
+implied their membership was trusted. Each now says which test holds it to the tree, which is the
+same conclusion `D10-121` reached about the README's job count: a claim repeated in prose is not a
+check.
+
+**The file was linted after it was written, and ruff had six things to say.** A dict built by a loop
+became a comprehension, four list-emptiness comparisons became `assert not (...)`, and one equality
+was flipped to put the derived mapping on the right. The `assert not (missing + extra)` idiom in
+four messages is ruff's doing rather than a preference: `PT018` looks through `not`, so
+concatenating the two lists is what keeps both names inside the failure message. `bandit` proves
+nothing about this file either way — `[tool.bandit]` excludes `backend/tests`, so the gate that
+matters is `-r backend/app`.
+
+**One mistake in the commit that carries this, recorded rather than rewritten.** Its message says
+four mutations were run and then lists eight. The count is wrong and the list is right; it is pushed
+and a CI run is attached to that sha, so it is corrected here instead of by amending a commit the
+remote already has.
+
+**The guard's own first paragraph was false by one word, and was fixed rather than quoted.** It
+claimed no count of workers is written down in the file, and a parametrized docstring in it then
+read that all seven listen on the same port. That is the same class of claim these ledgers distrust
+everywhere else, so the sentence and the docstring were both reworded to say what is true — each
+worker binds the port the shared anchor sets, and no count is restated — rather than let this block
+repeat a number the file cannot keep.
+
+Gates, on the tree that commit carries: `ruff check backend` and `ruff format --check backend` clean
+over `145` files, `python -m mypy` bare from the repository root reporting "no issues found in `76`
+source files", `bandit -c pyproject.toml -r backend/app -q` exit 0, and `pytest -o addopts="" -m
+"not integration"` `1242 passed, 2 skipped, 19 deselected` — exactly seven more than `D10-121`'s
+`1235`, which is this file's seven tests and nothing else.
+
+Whether that is green on the remote is the paragraph that follows.
+
+The answer is yes. `D10-122` landed as `010d588` and CI run `43747598270` built it green: nine jobs
+of nine, read from the jobs API. The two that matter here are `python static`, which type-checks the
+new module, and `backend tests (pytest, sqlite)`, which collects it — a guard nothing collects is
+the defect wearing a test's clothes. This closing commit is documentation plus the one docstring it
+corrects, and its own run is not named, for the reason `D10-115` through `D10-121` all gave: a
+paragraph cannot contain the id of the run that publishes it.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

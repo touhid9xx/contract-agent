@@ -25,7 +25,7 @@ one forgotten line.
 The two smoke/metrics docstrings already *claim* the lists are the same rows. A claim
 repeated in prose is not a check, which is precisely what ``D10-121`` concluded about the
 README's job count, so the same treatment applies here: nothing is restated, everything is
-derived, and the number seven appears nowhere in this file.
+derived, and no count of workers is written down in this file.
 
 **What this does not cover, stated rather than implied.** It compares *which* workers are
 declared where, not what each one does. A worker renamed in its module and its label, in
@@ -250,7 +250,7 @@ def test_every_scrape_asks_the_port_the_anchor_declares() -> None:
 
 
 def test_every_worker_publishes_a_distinct_host_port() -> None:
-    """All seven listen on the same port inside their own namespaces; only the host differs."""
+    """Each binds the port the shared anchor sets; only the host side can collide."""
 
     host_ports: dict[int, str] = {}
     for service, (_, host, _) in _started().items():
