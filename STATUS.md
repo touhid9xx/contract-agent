@@ -7881,6 +7881,97 @@ the defect wearing a test's clothes. This closing commit is documentation plus t
 corrects, and its own run is not named, for the reason `D10-115` through `D10-121` all gave: a
 paragraph cannot contain the id of the run that publishes it.
 
+### D10-123 — the rules were validated twice and compared zero times
+
+A shipped alert rule and the worker that publishes its series are two halves of one contract, and
+this repository proves each half alone. `promtool check rules` proves
+`ops/prometheus/rules.yml` is well-formed: valid YAML, a known expression grammar, every rule with
+a name, an expression and a duration. `promtool test rules` proves the arithmetic, by driving an
+expression over synthetic series whose label values a human typed into `rules.test.yml`. Neither
+imports the application. Neither reads a line of `app/`.
+
+**So one rename is enough to leave an alert unable to fire, with every gate green.** Change the
+*value* of `OUTBOX_PARK_RELAY_FAILED` from `relay_failed` to any other spelling. `ruff`, `mypy`,
+`bandit` and the whole backend suite still pass, because all of them read the constant rather than
+its value, as they should. `promtool check rules` passes, because the rule file did not change.
+`promtool test rules` passes, because its expected labels still say `relay_failed` and so does the
+expression. The shipped `OutboxEventsParked` now matches a label value no process can produce: a
+rule that cannot fire, and a rule that cannot fire is indistinguishable from a quiet deployment.
+It is the defect `D10-122` closed one layer down, for the worker lists, where a target and a
+service could disagree while every gate stayed green.
+
+**Nothing restated, everything derived — `D10-121`'s rule, applied to a third kind of claim.** The
+families come from `metrics.REGISTRY`, so a family the code stops declaring leaves the comparison
+without an edit here. The label values the code *can* write are walked out of the AST of every call
+site under `app/` that calls `.set`, `.inc`, `.dec` or `.observe` on a metric object: a named token
+is resolved through `app.core.metrics` to the string it holds, and a computed value is deliberately
+left unresolved rather than guessed, so the test can say "not proven" instead of inventing a
+member. The rules come from the shipped YAML. No metric name and no label value is a literal in the
+new file.
+
+**Seven tests, one per way the two halves can disagree.** A rule reading a family nothing declares.
+A rule matching a label its family does not carry. A rule matching a label value no writer can
+produce. A rule with no case in `rules.test.yml`, and a case naming a rule that no longer exists. A
+call site typing its token as a literal instead of naming it — the same string written in two
+places is how these values drift apart to begin with. And the two `undelivered` status tokens
+pinned to the values `NotificationStatus` actually stores, because an operator reads that gauge
+beside a row and the two have to mean the same thing.
+
+**What it does not cover, stated rather than implied.** It proves a rule *can* fire, never that it
+*will*: an expression can read a live family, match a label the code carries and still be
+meaningless, and the arithmetic stays `rules.test.yml`'s business. It does not read the scrape
+config, the scrape interval or the alertmanager target — `D10-122` owns the scrape targets and
+`D10-111` owns the config as a whole. And a value the AST shows is writable but which no code path
+ever writes passes here; proving reachability would mean executing the worker, which is what the
+smoke scripts are for.
+
+**Three bugs in the reader were found by the reader failing, and each is recorded because each
+would have produced a guard that passed for the wrong reason.** The first version read the
+`exp_labels:` map starting at the mapping node, whose end lands on the newline, so the first element
+of `splitlines()` was the empty remainder of that line: the reader saw no expected labels at all and
+then failed with "nothing proves the alert can fire". The second returned a set of writable values
+and then asked whether a value was `in` it, which asks whether the set is an element; it needed a
+loop over the sorted members. The third ran past the end of a mapping into the next list item, so a
+sibling key that followed was swallowed as though it were part of the labels.
+
+**Proof the guard bites rather than merely passing.** Ten mutations, applied to the real files one
+at a time, each caught by the test meant to catch it, with the unmutated tree green beside them:
+
+- the park token's value renamed to a spelling the rule does not match
+- the park family renamed, so the rule queries a name nothing declares
+- the undelivered status token renamed away from the stored enum value
+- a call site typing the park token as a literal instead of naming it
+- a rule renamed, orphaning every case that drives it
+- a rule matching a label its family does not carry
+- a rule reading a family the code does not declare
+- the promtool case expecting a label value no code publishes
+- a rule losing its `expr:`, keeping its name and threshold and no query at all
+- every rule deleted, so the alerting stack pages nobody
+
+All four mutated files were restored and compared by SHA-256.
+
+**The file was linted after it was written, and ruff had two things to say.** Both were `SIM300`: a
+comparison with the enum member on the right and the string constant on the left. Ruff wants the
+operand that is not an all-caps constant first, and it is right — the assertion reads better the way
+it now stands. Formatting then reflowed the file once. As in `D10-122`, `bandit` proves nothing
+about this file either way: `[tool.bandit]` excludes `backend/tests`, so the gate that matters is
+`-r backend/app`.
+
+Gates, on the tree that commit carries: `ruff check backend` and `ruff format --check backend` clean
+over `146` files, `python -m mypy` bare from the repository root reporting "no issues found in `76`
+source files", `bandit -c pyproject.toml -r backend/app -q` exit 0, and `pytest -o addopts="" -m
+"not integration"` `1249 passed, 2 skipped, 19 deselected` — exactly seven more than `D10-122`'s
+`1242`, which is this file's seven tests and nothing else.
+
+Whether that is green on the remote is the paragraph that follows.
+
+The answer is yes. `D10-123` landed as `ee508bb` and CI run `43754796794` built it green: nine jobs
+of nine, read from the jobs API. The two that matter here are `observability` — `promtool` now
+validates rules that a test has compared against the application — and `backend tests (pytest,
+sqlite)`, which collects the new module. This closing commit is documentation only, and its own run
+is not named, for the reason `D10-115` through `D10-122` all gave: a paragraph cannot contain the id
+of the run that publishes it.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.
