@@ -7281,9 +7281,9 @@ Limits: the image's own apply is SQLite, and the chain against MySQL is `test_my
 not the image's; no job boots the stack, so `migrate`'s ordering was read from the resolved config
 rather than watched; column types stay ungated; one worker still runs in the image and five are
 imported only. Found while measuring and half fixed here: `cp .env.example .env` crashed every
-`Settings()` on an empty `LOG_JSON`, which now reads `false`. The other half — a `.env` shadowing the
-defaults six `test_config` cases assert on — is `D10-115`'s, which found seven across two files and
-made the suite stop reading the file at all.
+`Settings()` on an empty `LOG_JSON`, which now reads `false`. The other half — a `.env` shadowing
+the defaults six `test_config` cases assert on — is `D10-115`'s, which found seven across two files
+and made the suite stop reading the file at all.
 
 Whether the job is green on Linux is a claim for the paragraph that follows, not this one.
 
@@ -7309,11 +7309,22 @@ to copy the file and try to boot. Green with the file present and absent alike �
 `1195 passed, 2 skipped, 19 deselected`; ruff clean, format 138, mypy 75 files, bandit exit 0.
 
 `check_d115.py` asserts the structural facts and exits 0 on the committed tree; `mutate_d115.py`
-breaks each in turn — nineteen cases, fifteen structural, three behavioural, one comment-only
+breaks each in turn — twenty-six cases, twenty-two structural, three behavioural, one comment-only
 control, none missed and none caught for the wrong reason — restoring every file byte-identically
-and comparing digests afterwards.
+and comparing digests afterwards. Six of those cases hold the close, and they were written after
+reading the committed entry rather than before: the block ended on the sentence that defers its CI
+claim with no paragraph after it, so it pointed at the next heading, and no gate above reads
+paragraph order — which is why the fix is a guard and a case for each fact it holds.
 
 Whether that is green on the remote is the paragraph that follows.
+
+Run `43663200023` on `5621b0e` answers it: nine jobs of nine, with `pytest`, `smoke journey`,
+`smoke worker metrics` and `smoke escalation alert` all listed as succeeded steps of
+`backend tests (pytest, sqlite)`. The run also exposed the ledger half: one line this slice added
+came to 101 columns, in the `D10-114` paragraph it amended rather than in its own block, so a check
+scoped to the `### D10-115` heading reported the block clean. Both ledgers are now measured against
+`cc562dc` and refuse any line this slice added past 100 columns, and a case pads that amended
+paragraph to show the wider scope biting where the block-scoped one could not.
 
 ## Non-negotiable reminders
 

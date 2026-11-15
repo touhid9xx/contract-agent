@@ -8892,14 +8892,14 @@ runs it instead. The image's own apply is SQLite; the chain against MySQL is pro
 stack to watch `migrate` gate it — CI validates the graph with `docker compose config -q`, and the
 ordering above was read from the resolved config rather than observed as a stack starting. Column
 types stay ungated on both dialects, the half `alembic check` would close. The new `.dockerignore`
-trims the build context to what the images read: without it the added `COPY` of
-`backend/migrations` shipped whatever `__pycache__` lay in the checkout — measured present in the
-image before and absent after — which makes an image depend on which commands were run before it was
-built. And one defect was found while measuring rather than fixed here: `cp .env.example .env`, the
-step the compose gate itself performs, made every `Settings()` raise on the empty `LOG_JSON=` at
-`.env.example:13`, so nothing loaded at all. That one line now reads `LOG_JSON=false`. What was left
-open here — a `.env` in the working directory shadowing the defaults `test_config.py` asserts on —
-was recorded as six named cases: `test_json_logs_default_to_on_in_production`, the loopback-CORS and
+trims the build context to what the images read: without it the added `COPY` of `backend/migrations`
+shipped whatever `__pycache__` lay in the checkout — measured present in the image before and absent
+after — which makes an image depend on which commands were run before it was built. And one defect
+was found while measuring rather than fixed here: `cp .env.example .env`, the step the compose gate
+itself performs, made every `Settings()` raise on the empty `LOG_JSON=` at `.env.example:13`, so
+nothing loaded at all. That one line now reads `LOG_JSON=false`. What was left open here — a `.env`
+in the working directory shadowing the defaults `test_config.py` asserts on — was recorded as six
+named cases: `test_json_logs_default_to_on_in_production`, the loopback-CORS and
 relative-document-path refusals, and all three Ollama-endpoint cases. `D10-115` measured the suite
 instead of the file and found **seven across two files**: those six, plus `test_senders`'
 SMTP-without-TLS refusal, where the file's `LOG_JSON=false` tripped a different production check
@@ -8963,13 +8963,13 @@ can satisfy the assertion — if the file is read, the construction raises; if t
 happens. `.env.example` loses the sentence that recorded the defect as unfixed, and `STATUS.md`
 records the corrected count.
 
-Nineteen cases run; each carries the sentence the checker or `pytest` must emit, so a mutation
-caught for an unrelated reason is reported wrong rather than counted. Fifteen assert structure.
+Twenty-six cases run; each carries the sentence the checker or `pytest` must emit, so a mutation
+caught for an unrelated reason is reported wrong rather than counted. Twenty-two assert structure.
 Three are behavioural, because the claims that matter are not visible in the shape of the code:
 deleting the pin makes the guard construct a `Settings` that reads `CORS_ORIGINS=*` and fail on
 `'*' is not permitted`; emptying the example's `LOG_JSON` makes the loading test fail on
 `Input should be a valid boolean`; adding a misspelled `LOG_LEVL` makes the names test fail naming
-that key. The nineteenth is a comment-only edit to this entry, which the checker has to ignore — a
+that key. One case is a comment-only edit to this entry, which the checker has to ignore — a
 check that reacts to prose is asserting an absence of something rather than the thing itself. Every
 file is restored from the bytes read before its mutation and compared by digest afterwards, so a
 harness that left a mutant behind reports a failed restore instead of success. Writing the cases
@@ -8977,4 +8977,27 @@ found two checks that were too weak: a substring test the guard's own docstring 
 `PROMETHEUS_PORT` match that would have been satisfied by prose. Both now read executable lines
 only.
 
+**What the margin caught.** One line this slice added came to 101 columns, and it sat in the
+`D10-114` paragraph amended above rather than in the `D10-115` block — so the width check, scoped to
+the block, reported it clean. That scoping assumes every edit lands under its own heading, which is
+exactly what amending someone else's paragraph is not. Both ledgers are now compared with `cc562dc`
+and any line this slice added past 100 columns is refused; the reflow that fixed the line preserved
+every word, and one case pads that amended paragraph so the wider scope is shown reporting what the
+block-scoped one could not.
+
+**What no check caught.** The block was first written ending on the sentence that defers its
+CI claim, with no paragraph after it, so it deferred to the next heading, and every gate above
+passed — none of them reads paragraph order. `check_d115.py` now finds each block by its
+heading and holds the close to the run that answered the deferral, the commit that run built,
+its verdict and the step names that make the verdict this slice's, with six cases breaking one
+of them apiece.
+
 Whether that is green on the remote is the paragraph that follows.
+
+Run `43663200023` on `5621b0e` answers it: nine jobs of nine, and the step list of
+`backend tests (pytest, sqlite)` carries `pytest`, `smoke journey`, `smoke worker metrics` and
+`smoke escalation alert` among its succeeded steps — the suite green on a runner rather than on
+this machine. Neither half of this slice is visible to a red run, which is why both are guarded
+rather than watched: the pin's regression needs a `.env` that CI does not check out, and the
+margin needs a width measurement no job makes. The commit carrying this paragraph adds no code
+to what the run built.
