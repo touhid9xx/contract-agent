@@ -136,6 +136,16 @@ PARKED_EVENT_SERIES: tuple[str, ...] = (
     'outbox_parked_events{outcome="transport_disabled"}',
 )
 
+#: Every series ``notifications_undelivered`` must carry once the watcher has ticked
+#: (``D10-118``). Both, and for the sharper of the two reasons above: the alert reads
+#: ``status="failed"`` while ``status="suppressed"`` is the number an operator is
+#: meant to *find* when they go looking — so a body carrying only the paged one is a
+#: half-published gauge whose missing half is invisible from Prometheus' side.
+UNDELIVERED_STATUS_SERIES: tuple[str, ...] = (
+    'notifications_undelivered{status="failed"}',
+    'notifications_undelivered{status="suppressed"}',
+)
+
 
 @dataclass(frozen=True)
 class Worker:
@@ -204,6 +214,10 @@ SINGLE_WRITER_FAMILIES: dict[str, str] = {
     # only the attention watcher reports the dead-letter backlog, so finding a sample
     # in another worker's body would mean the registry had stopped being process-local.
     "outbox_parked_events": "attention_watch",
+    # ``D10-118``. Same worker, same argument, and worth an entry of its own: the two
+    # families are two statements about two different tables, so one of them drifting
+    # into another process would not be visible in the other's body.
+    "notifications_undelivered": "attention_watch",
 }
 
 #: Worker -> the series that must already be on the wire before its listener counts
@@ -223,7 +237,9 @@ SINGLE_WRITER_FAMILIES: dict[str, str] = {
 #: minutes earlier — the pass-then-fail-on-identical-code shape that
 #: ``assert_port_is_free`` records for the port. Anything asserted after the return
 #: has to be waited for here, or it is read from a body that predates it.
-EVERY_TICK_SERIES: dict[str, tuple[str, ...]] = {"attention_watch": PARKED_EVENT_SERIES}
+EVERY_TICK_SERIES: dict[str, tuple[str, ...]] = {
+    "attention_watch": PARKED_EVENT_SERIES + UNDELIVERED_STATUS_SERIES
+}
 
 
 def required_series(worker: Worker) -> tuple[str, ...]:
@@ -641,6 +657,20 @@ def run() -> None:
                 f"nobody declared",
             )
             say("the park gauge publishes every outcome it declares", str(parks))
+
+            # ``D10-118``. Same shape of assertion, different table: presence only,
+            # because the value is a reading of this throwaway database. A body short
+            # of ``status="suppressed"`` would leave the backlog an operator is meant to
+            # find invisible while the alert still looked healthy.
+            undelivered = samples(bodies["attention_watch"], "notifications_undelivered")
+            need(
+                set(undelivered) == set(UNDELIVERED_STATUS_SERIES),
+                f"the attention watcher renders {sorted(undelivered)} for "
+                f"notifications_undelivered, expected {sorted(UNDELIVERED_STATUS_SERIES)}: "
+                f"a missing status would hide a backlog, and an extra one would mean a "
+                f"label value nobody declared",
+            )
+            say("the undelivered gauge publishes every status it declares", str(undelivered))
         finally:
             engine.dispose()
 

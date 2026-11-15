@@ -27,6 +27,14 @@
 # alert must be able to stop when a replay drains the backlog, which is a property a counter of
 # "parks ever" could not have.
 #
+# Cases 8-11 are the same exercise for `NotificationsUndelivered` (`D10-118`), and the one that
+# earns its place is 9: `suppressed` is this codebase refusing to contact someone because the
+# contract closed or consent was withdrawn, which is correct behaviour rather than a fault. A rule
+# matching the whole family would page on a customer exercising their rights. Case 8 is what stops
+# 9 from passing because the input was empty — the same instance carries a real failure and the
+# alert fires on it. Case 10 re-applies `D10-109` to the second gauge, and case 11 pins that a
+# retry, like a replay, can silence the alert.
+#
 # `rule_files` is absolute because `promtool` resolves it against the working directory, and CI runs
 # with `-w /etc/prometheus` against the same mount `docker-compose.yml` uses — one path, so the file
 # validated is the file Prometheus reads.
@@ -168,4 +176,84 @@ tests:
       # The same run, after the operator fixed the cause and replayed the rows.
       - eval_time: 11m
         alertname: OutboxEventsParked
+        exp_alerts: []
+
+  # 8. Fires on the transport fault, while suppressed rows sit on the same instance.
+  - interval: 1m
+    input_series:
+      # Four rows this codebase declined to send on purpose: a closed contract, a withdrawn
+      # consent. Correct behaviour, and not this rule's business.
+      - series: 'notifications_undelivered{status="suppressed",instance="attention:9101"}'
+        values: "4 4 4 4 4 4"
+      # One row whose transport was configured, refused, and burned its retry budget.
+      - series: 'notifications_undelivered{status="failed",instance="attention:9101"}'
+        values: "0 0 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: NotificationsUndelivered
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: "attention:9101"
+              status: failed
+            exp_annotations:
+              summary: "Notifications failed to send on attention:9101"
+              description: >-
+                A notification exhausted its dispatch attempts while a transport was configured,
+                so a customer was never told whatever the message said and nothing retries it.
+                Check the transport behind NOTIFICATION_TRANSPORT / SMS_TRANSPORT, then
+                `python -m app.cli doctor` for the rows and
+                `POST /api/v1/notifications/{id}/retry` once the cause is fixed. Notifications
+                suppressed by policy — consent withdrawn, contract closed, field awaiting review —
+                are published as status="suppressed" and never reach this alert.
+
+  # 9. A deployment whose customers withdraw consent pages nobody.
+  - interval: 1m
+    input_series:
+      - series: 'notifications_undelivered{status="suppressed",instance="attention:9101"}'
+        values: "17 17 17 17 17 17"
+      - series: 'notifications_undelivered{status="failed",instance="attention:9101"}'
+        values: "0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: NotificationsUndelivered
+        exp_alerts: []
+
+  # 10. No tick yet means no series, and no series cannot fire.
+  - interval: 1m
+    input_series:
+      # A family this rule does not read, so its own series is absent rather than zero.
+      - series: 'notifications_sent_total{status="sent",instance="scheduler:9101"}'
+        values: "0 1 2 3 4 5"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: NotificationsUndelivered
+        exp_alerts: []
+
+  # 11. A retry lifts the row, and the alert that fired stops firing.
+  - interval: 1m
+    input_series:
+      - series: 'notifications_undelivered{status="failed",instance="attention:9101"}'
+        values: "1 1 1 1 0 0 0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: NotificationsUndelivered
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: "attention:9101"
+              status: failed
+            exp_annotations:
+              summary: "Notifications failed to send on attention:9101"
+              description: >-
+                A notification exhausted its dispatch attempts while a transport was configured,
+                so a customer was never told whatever the message said and nothing retries it.
+                Check the transport behind NOTIFICATION_TRANSPORT / SMS_TRANSPORT, then
+                `python -m app.cli doctor` for the rows and
+                `POST /api/v1/notifications/{id}/retry` once the cause is fixed. Notifications
+                suppressed by policy — consent withdrawn, contract closed, field awaiting review —
+                are published as status="suppressed" and never reach this alert.
+      # The same run, after the operator fixed the transport and retried the rows.
+      - eval_time: 11m
+        alertname: NotificationsUndelivered
         exp_alerts: []

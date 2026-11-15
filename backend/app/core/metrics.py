@@ -422,6 +422,48 @@ OUTBOX_PARKED_EVENTS: Final = _declare(
 )
 
 
+#: ``status`` tokens for :data:`NOTIFICATIONS_UNDELIVERED`, spelled once for the same
+#: reason the park tokens are: the writer, the rule and every test that asserts a row
+#: was counted read one spelling, and a typo would look like "nothing is stuck".
+#:
+#: The names are the stored :class:`~app.db.enums.NotificationStatus` values, not
+#: invented labels, because an operator reading the gauge next to a row in the database
+#: should not have to translate between two vocabularies for the same state.
+NOTIFICATION_UNDELIVERED_FAILED: Final = "failed"
+NOTIFICATION_UNDELIVERED_SUPPRESSED: Final = "suppressed"
+
+#: The undelivered-message backlog, by the state that stopped it (gap 22).
+#:
+#: A gauge for the same reason as the park backlog: a retry lifts a row out of both
+#: states, so the number has to be able to fall, and a counter of "failures ever" would
+#: stay above zero for ever after the first one was answered.
+#:
+#: The two labels are **not** two severities of the same thing, and the alert reads the
+#: difference. ``failed`` means a transport was configured, was reached, and refused —
+#: ``dispatch_notification`` only parks a row there once ``attempts >= retry_max``, and
+#: the attempt counter is not incremented on the ``SENDER_UNAVAILABLE`` path, so a
+#: deployment with ``NOTIFICATION_TRANSPORT=none`` (the shipped default) cannot produce
+#: one however long it runs. ``suppressed`` is a policy verdict: the contract closed, the
+#: customer withdrew consent, a reviewer flagged the field. That is usually the system
+#: doing its job, and paging on it would page on correct behaviour — so both are
+#: published and only ``failed`` is alerted on (``ops/prometheus/rules.yml``).
+#:
+#: Published every tick including the zeros, for the ``D10-109`` reason: a family written
+#: only when something is wrong looks identical, from Prometheus' side, to a process that
+#: is not running.
+#:
+#: It reads :func:`app.db.repositories.notifications.undelivered_counts`, the identical
+#: query `doctor`, ``/attention`` and the attention verdict already use, so the metric
+#: cannot drift from the number an operator is told on the command line.
+NOTIFICATIONS_UNDELIVERED: Final = _declare(
+    Gauge(
+        "notifications_undelivered",
+        "Notifications that were never delivered, by the state that stopped them.",
+        ("status",),
+    )
+)
+
+
 def render() -> str:
     """Return the whole registry in Prometheus text exposition format."""
     lines: list[str] = []

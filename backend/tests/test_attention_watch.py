@@ -28,6 +28,14 @@ test:
   Prometheus' side, from a process that stopped ticking — which is ``D10-109``'s
   defect one worker over. Both ``outcome`` series are set every tick, so the only
   way this worker's scrape stops carrying them is that it stopped.
+* **The undelivered backlog rides the same tick, both statuses, zeros included**
+  (``D10-118``). Same defect class, the other counter. Here the two labels are not
+  explained-versus-unexplained but *fault versus verdict*: ``status="failed"`` is a
+  transport that was configured and refused, so nothing in the deployment clears it
+  by itself; ``status="suppressed"`` is this codebase deciding on purpose not to
+  send, which is usually the system working. Both are published, and the shipped
+  rule reads only the first — so the split has to be pinned, because a writer that
+  put the same number on both series would still render plausible-looking numbers.
 
 What this file deliberately does **not** test is delivery: nothing here reads the
 log. ``D10-117`` did not change that, and it did not reopen the question ``D10-39``
@@ -43,6 +51,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Sequence
+from datetime import date
 
 import pytest
 import structlog
@@ -54,12 +63,25 @@ from structlog.typing import EventDict
 from app.core import metrics
 from app.core.config import Settings
 from app.core.crypto import FieldCipher
-from app.core.metrics import OUTBOX_PARK_RELAY_FAILED, OUTBOX_PARK_TRANSPORT_DISABLED
+from app.core.metrics import (
+    NOTIFICATION_UNDELIVERED_FAILED,
+    NOTIFICATION_UNDELIVERED_SUPPRESSED,
+    OUTBOX_PARK_RELAY_FAILED,
+    OUTBOX_PARK_TRANSPORT_DISABLED,
+)
 from app.db.base import utc_now
-from app.db.enums import ContractStatus, FieldName, FieldStatus, OutboxStatus
-from app.db.models import Contract, ExtractedField, OutboxEvent, Tenant
+from app.db.enums import (
+    Channel,
+    ContractStatus,
+    FieldName,
+    FieldStatus,
+    NotificationStatus,
+    OutboxStatus,
+)
+from app.db.models import Contract, ExtractedField, Notification, OutboxEvent, Tenant
 from app.db.session import session_scope
 from app.workers.attention_watch import AttentionWatch
+from app.workers.dispatch import notification_idempotency_key
 
 #: The value that must never appear on a log line, and the key that seals it.
 PLAINTEXT_EMAIL = "a.rahman@example.test"
@@ -171,6 +193,40 @@ def add_parked_event(session_factory: sessionmaker[Session], tenant: Tenant) -> 
         return int(row.id)
 
 
+def add_notification(
+    session_factory: sessionmaker[Session],
+    contract: Contract,
+    status: NotificationStatus,
+    *,
+    template: str = "T-60",
+    slot: date = date(2025, 1, 2),
+) -> int:
+    """One notification row in a chosen state, written directly.
+
+    Reaching ``failed`` or ``suppressed`` through the real scheduler needs a refusing
+    transport and a spent retry budget, and under the shipped
+    ``NOTIFICATION_TRANSPORT=none`` the ``failed`` state is unreachable by design —
+    the attempt counter is not incremented on that path, so the row stays ``pending``
+    for ever. The state is the subject here, not the worker that would produce it, so
+    the row is written the way ``test_doctor`` and ``test_attention_route`` write it.
+    """
+    with session_scope(session_factory) as session:
+        row = Notification(
+            tenant_id=contract.tenant_id,
+            contract_id=contract.id,
+            channel=Channel.EMAIL,
+            template=template,
+            status=status,
+            scheduled_date=slot,
+            idempotency_key=notification_idempotency_key(contract.id, template, slot),
+            attempts=5 if status is NotificationStatus.FAILED else 0,
+            last_error="relay refused" if status is NotificationStatus.FAILED else None,
+        )
+        session.add(row)
+        session.flush()
+        return int(row.id)
+
+
 def events(captured: Sequence[EventDict]) -> list[str]:
     """The event names in the order they were logged.
 
@@ -181,8 +237,8 @@ def events(captured: Sequence[EventDict]) -> list[str]:
     return [str(entry["event"]) for entry in captured]
 
 
-def parked() -> dict[str, float]:
-    """The park gauge as a scrape reads it: ``outcome`` -> value, absent omitted.
+def _series(family: str, label: str) -> dict[str, float]:
+    """One labelled gauge as a scrape reads it: label value -> value, absent omitted.
 
     Parsed out of ``render()`` rather than read with ``value()``, because those two
     disagree in exactly the case that matters: ``value()`` answers ``0.0`` for a
@@ -190,14 +246,24 @@ def parked() -> dict[str, float]:
     make an alert unfireable. A helper that could not tell the two apart would pass
     on the defect.
     """
-    prefix = f'{metrics.OUTBOX_PARKED_EVENTS.name}{{outcome="'
+    prefix = f'{family}{{{label}="'
     found: dict[str, float] = {}
     for line in metrics.render().splitlines():
         if not line.startswith(prefix):
             continue
-        outcome, _, value = line[len(prefix) :].partition('"}')
-        found[outcome] = float(value)
+        key, _, value = line[len(prefix) :].partition('"}')
+        found[key] = float(value)
     return found
+
+
+def parked() -> dict[str, float]:
+    """The park gauge, by ``outcome``."""
+    return _series(metrics.OUTBOX_PARKED_EVENTS.name, "outcome")
+
+
+def undelivered() -> dict[str, float]:
+    """The undelivered-notification gauge, by ``status``."""
+    return _series(metrics.NOTIFICATIONS_UNDELIVERED.name, "status")
 
 
 # --- one line per tick, and it names the verdict --------------------------
@@ -398,7 +464,7 @@ def test_a_clean_board_publishes_both_outcomes_at_zero(
 ) -> None:
     """The zero is published, per outcome, on a board with nothing to report.
 
-    This is the test that fails if ``_publish_parks`` is ever moved inside an
+    This is the test that fails if ``_publish_gauges`` is ever moved inside an
     ``if report.outbox_parked`` branch: a clean install would then render no series,
     the rule would read "no data", and a watcher that had died would look exactly
     like a deployment with nothing parked. That is ``D10-109`` again, one worker over
@@ -473,4 +539,123 @@ def test_a_replayed_row_lowers_the_gauge(
     assert parked() == {
         OUTBOX_PARK_TRANSPORT_DISABLED: 0.0,
         OUTBOX_PARK_RELAY_FAILED: 0.0,
+    }
+
+
+# --- the undelivered backlog, published (D10-118) -------------------------
+def test_a_clean_board_publishes_both_notification_statuses_at_zero(
+    session_factory: sessionmaker[Session], settings: Settings
+) -> None:
+    """The park zero's defect class, on the counter next door.
+
+    Were these series set only when a row was stuck, a deployment where every message
+    was delivered would render no series at all — and a watcher that had died would
+    render the same nothing. An alert rule cannot fire on a series that does not
+    exist, so ``rules.test.yml`` case 10's "absent cannot fire" is a different
+    property and not a substitute for this one.
+    """
+    AttentionWatch(session_factory, settings=settings).run_once()
+
+    assert undelivered() == {
+        NOTIFICATION_UNDELIVERED_FAILED: 0.0,
+        NOTIFICATION_UNDELIVERED_SUPPRESSED: 0.0,
+    }
+
+
+def test_a_suppressed_row_is_published_but_not_on_the_series_the_rule_reads(
+    session_factory: sessionmaker[Session], settings: Settings, contract: Contract
+) -> None:
+    """A policy verdict is counted and shown to the tenant, and deliberately not paged on.
+
+    ``suppressed`` is this codebase deciding not to contact somebody — the contract
+    closed, consent was withdrawn, a reviewer flagged the field. It is a person's job
+    on ``/attention``, which is why the verdict raises it here at ``error``; and it is
+    usually the system behaving correctly, which is why the shipped rule reads only
+    ``status="failed"``. Both halves are asserted: keeping the count and dropping the
+    page are each half the design, and dropping either would still leave a
+    plausible-looking gauge.
+    """
+    add_notification(session_factory, contract, NotificationStatus.SUPPRESSED)
+
+    with capture_logs() as captured:
+        report = AttentionWatch(session_factory, settings=settings).run_once()
+
+    assert undelivered() == {
+        NOTIFICATION_UNDELIVERED_FAILED: 0.0,
+        NOTIFICATION_UNDELIVERED_SUPPRESSED: 1.0,
+    }
+    assert report.needs_attention is True
+    assert events(captured) == ["attention_watch_needs_attention"]
+
+
+def test_a_failed_row_lands_on_the_series_the_rule_reads(
+    session_factory: sessionmaker[Session], settings: Settings, contract: Contract
+) -> None:
+    """A transport that refused is the deployment's fault, so it is the one that pages.
+
+    Unreachable under the shipped ``NOTIFICATION_TRANSPORT=none``: the dispatcher
+    raises ``SENDER_UNAVAILABLE`` before ``attempts`` moves, so the retry budget never
+    runs out and no row arrives in ``failed`` however long a default install runs.
+    That is exactly what makes the state mean "something refused" rather than "nobody
+    configured a transport", and it is why the row is written directly here.
+    """
+    add_notification(session_factory, contract, NotificationStatus.FAILED)
+
+    AttentionWatch(session_factory, settings=settings).run_once()
+
+    assert undelivered() == {
+        NOTIFICATION_UNDELIVERED_FAILED: 1.0,
+        NOTIFICATION_UNDELIVERED_SUPPRESSED: 0.0,
+    }
+
+
+def test_the_two_states_are_counted_separately(
+    session_factory: sessionmaker[Session], settings: Settings, contract: Contract
+) -> None:
+    """Two rows in one state, one in the other, and the numbers must differ.
+
+    The cheap mistake is publishing ``notifications_failed`` on both series. It
+    renders a perfectly plausible gauge, and it makes the suppressed backlog invisible
+    to the reader who is looking for it. Unequal counts are the only input that
+    catches it — which is why this test does not use one row of each.
+    """
+    add_notification(session_factory, contract, NotificationStatus.FAILED, template="T-60")
+    add_notification(session_factory, contract, NotificationStatus.FAILED, template="T-30")
+    add_notification(session_factory, contract, NotificationStatus.SUPPRESSED, template="T-14")
+
+    AttentionWatch(session_factory, settings=settings).run_once()
+
+    assert undelivered() == {
+        NOTIFICATION_UNDELIVERED_FAILED: 2.0,
+        NOTIFICATION_UNDELIVERED_SUPPRESSED: 1.0,
+    }
+
+
+def test_a_retried_row_lowers_the_gauge(
+    session_factory: sessionmaker[Session], settings: Settings, contract: Contract
+) -> None:
+    """``POST /notifications/{id}/retry`` has to be able to silence the alert.
+
+    The same reason the park gauge is a gauge: the rule's resolution depends on the
+    number falling once the cause is fixed, exactly as ``OutboxEventsParked`` depends
+    on ``outbox-replay``. A counter of "failures ever" would sit above zero for ever
+    after the first one was answered, and an alarm nobody can answer by doing the
+    right thing is the alarm that gets muted instead.
+    """
+    notification_id = add_notification(session_factory, contract, NotificationStatus.FAILED)
+    watch = AttentionWatch(session_factory, settings=settings)
+
+    watch.run_once()
+    assert undelivered()[NOTIFICATION_UNDELIVERED_FAILED] == 1.0
+
+    with session_scope(session_factory) as session:
+        row = session.get(Notification, notification_id)
+        assert row is not None
+        row.status = NotificationStatus.PENDING
+        row.attempts = 0
+
+    watch.run_once()
+    assert undelivered() == {
+        NOTIFICATION_UNDELIVERED_FAILED: 0.0,
+        NOTIFICATION_UNDELIVERED_SUPPRESSED: 0.0,
     }

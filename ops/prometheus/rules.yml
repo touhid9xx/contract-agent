@@ -1,12 +1,14 @@
 # Alert rules for the local stack (D10-111).
 #
-# Two rules, and each is recorded somewhere in this repository before it is written here. `D10-91`
+# Three rules, and each is recorded somewhere in this repository before it is written here. `D10-91`
 # names `escalation_email_failed_total` so that the first expression would need no rewrite, and
 # `D10-108`/`D10-109`/`D10-110` each found a new reason it could not fire. `D10-117` adds the
 # second: `STATUS.md`'s gap 22 has said since `D10-39` that a parked outbox row is announced by
-# nothing, and there was no series to announce it with. A rules file is not a place to demonstrate
-# diligence: every additional rule would be an alert nobody specified and nobody has ever
-# received, which is the shape of file that gets muted instead of fixed.
+# nothing, and there was no series to announce it with. `D10-118` adds the third, for the other
+# half of the same gap sentence — an undelivered notification was equally unannounced. A rules file
+# is not a place to demonstrate diligence: every additional rule would be an alert nobody specified
+# and nobody has ever received, which is the shape of file that gets muted instead of fixed. The
+# third rule is the last of gap 22; what remains of that gap needs an owner's decision, not a rule.
 #
 # `for: 0m` is not laziness. The counter is incremented once per failed alert *batch*, so a single
 # increment on a 15s scrape is already a sustained condition — there is nothing to debounce, and a
@@ -78,3 +80,54 @@ groups:
             `python -m app.cli outbox-replay --list` to see the parked rows, then
             `python -m app.cli outbox-replay` once the cause is fixed. Parks from a deployment with
             EVENT_TRANSPORT=none are published as transport_disabled and never reach this alert.
+
+  - name: notification-delivery
+    rules:
+      # The same gauge-versus-counter reasoning as the rule above: `POST
+      # /notifications/{id}/retry` lifts a row out of `failed` and `suppressed`, so the
+      # series must be allowed to fall. A counter of "failures ever" could not be
+      # answered by doing the thing it asks for.
+      #
+      # The `status="failed"` matcher is the whole design, not a refinement. The gauge
+      # carries both populations and they mean opposite things:
+      #
+      #   * `suppressed` is a **policy verdict** — the contract closed, the customer
+      #     withdrew consent, a reviewer flagged the field. That is this system refusing
+      #     to contact someone, correctly. Those rows still want a person, and they have
+      #     one: `GET /attention` names them to the tenant's admin and `doctor` counts
+      #     them. An alert here would fire on a deployment whose customers are exercising
+      #     their rights, and the first thing an operator does with an alarm that fires
+      #     on correct behaviour is silence it.
+      #   * `failed` is a **transport fault** — a transport was configured, was reached,
+      #     refused the message, and `NOTIFICATION_RETRY_MAX` attempts are spent. Nothing
+      #     in the deployment clears that by itself. Note what cannot reach it: with the
+      #     shipped `NOTIFICATION_TRANSPORT=none`, `dispatch_notification` raises
+      #     `SENDER_UNAVAILABLE` *before* incrementing `attempts`, so the budget is never
+      #     consumed and the row stays `pending` for ever. A default install therefore
+      #     publishes `failed 0` and this rule stays quiet, without needing a second
+      #     "explained" label the way the park gauge did.
+      #
+      # `for: 0m` for the reason given above both rules: `> 0` on a gauge states a
+      # standing condition, and a row parked `failed` is not retried by anything except a
+      # human, so every evaluation it survives is a message that is still undelivered.
+      #
+      # Limit, the same one the park gauge carries: the series arrives with one worker's
+      # tick, so a watcher that stops publishing goes stale after five minutes and this
+      # alert resolves with it. Nothing has asked for a liveness series; inventing one
+      # here would be the extra alert the header warns about.
+      - alert: NotificationsUndelivered
+        expr: notifications_undelivered{status="failed"} > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Notifications failed to send on {{ $labels.instance }}"
+          description: >-
+            A notification exhausted its dispatch attempts while a transport was
+            configured, so a customer was never told whatever the message said and
+            nothing retries it. Check the transport behind NOTIFICATION_TRANSPORT /
+            SMS_TRANSPORT, then `python -m app.cli doctor` for the rows and
+            `POST /api/v1/notifications/{id}/retry` once the cause is fixed.
+            Notifications suppressed by policy — consent withdrawn, contract closed,
+            field awaiting review — are published as status="suppressed" and never
+            reach this alert.

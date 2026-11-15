@@ -61,6 +61,15 @@ that blocked the route — *who may see a deployment-wide count* — is not a qu
 gauge asks of anyone. The gauge is split by the same explained/unexplained distinction
 the verdict uses, so a default install's parks are published as ``transport_disabled``
 rather than dropped: excluded is fine, invisible is not.
+
+**And one more (``D10-118``): the other half of gap 22.** The same paragraph argued the
+park count onto a gauge and left the sentence after it untouched — nothing announced a
+notification either. ``notifications_undelivered{status=...}`` now rides the same tick,
+split by *fault versus verdict* rather than explained versus unexplained: ``failed`` is a
+transport that was configured and refused until the budget ran out, ``suppressed`` is
+this codebase declining to send because a contract closed or consent was withdrawn. Only
+the first pages. The same two counts the verdict already reads, so no query was added —
+and the same stale-while-not-publishing limit applies to it, for the same reason.
 """
 
 from __future__ import annotations
@@ -76,6 +85,9 @@ from app.core.attention import AttentionReport, attention_report
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.core.metrics import (
+    NOTIFICATION_UNDELIVERED_FAILED,
+    NOTIFICATION_UNDELIVERED_SUPPRESSED,
+    NOTIFICATIONS_UNDELIVERED,
     OUTBOX_PARK_RELAY_FAILED,
     OUTBOX_PARK_TRANSPORT_DISABLED,
     OUTBOX_PARKED_EVENTS,
@@ -123,7 +135,7 @@ class AttentionWatch:
         """
         with session_scope(self._session_factory) as session:
             report = attention_report(session, limit=self._limit, settings=self._settings)
-        self._publish_parks(report)
+        self._publish_gauges(report)
         self._record(report)
         self._alert(report)
         return report
@@ -161,29 +173,53 @@ class AttentionWatch:
 
         log.info("attention_watch_stopped")
 
-    def _publish_parks(self, report: AttentionReport) -> None:
-        """Publish the park count on this process's scrape, split by whether it is explained.
+    def _publish_gauges(self, report: AttentionReport) -> None:
+        """Publish both backlogs on this process's scrape, each split by what stopped it.
 
-        Both series are set on **every** tick, the zero included, because the shipped
-        alert rule reads this gauge directly (``ops/prometheus/rules.yml``). A family
+        Every series is set on **every** tick, the zeros included, because the shipped
+        alert rules read these gauges directly (``ops/prometheus/rules.yml``). A family
         that is only written when something is wrong is indistinguishable, from
         Prometheus' side, from a process that is not running at all — and ``D10-109``
         already cost this repo one alarm that could not fire because nobody had
         decided what "nothing happened" looks like as a series.
 
-        The split is not decoration either. ``transport_disabled`` is the population
-        ``D10-39`` explains away — on a default install it is *every* event — and
-        ``relay_failed`` is the population no part of the deployment clears by itself.
-        The alert watches only the second. Both are published, so the first is
-        legible to whoever looks instead of merely unpaged.
+        Neither split is decoration.
+
+        On the park gauge, ``transport_disabled`` is the population ``D10-39`` explains
+        away — on a default install it is *every* event — and ``relay_failed`` is the
+        population no part of the deployment clears by itself.
+
+        On the notification gauge the distinction is not explained-versus-unexplained
+        but *fault versus verdict*. ``suppressed`` is this codebase deciding, on
+        purpose, not to send: the contract closed, consent was withdrawn, a reviewer
+        flagged the field. Those rows need a person, and ``/attention`` already says so
+        to that person — but a deployment whose customers withdraw consent is behaving
+        correctly, and an alert that fired on it would be answered by muting it. So
+        ``suppressed`` is published and not paged. ``failed`` means a transport was
+        configured, was reached, refused, and the retry budget ran out; the attempt
+        counter is not incremented on the ``SENDER_UNAVAILABLE`` path, so the shipped
+        ``NOTIFICATION_TRANSPORT=none`` cannot manufacture one however long it runs.
+        That population needs no person to have done anything wrong and nothing in the
+        deployment clears it, which is exactly what the second rule watches.
+
+        Both counts arrive on the report this tick already built, so this method adds
+        no query: :func:`~app.core.attention.attention_report` reads them from the same
+        ``undelivered_counts`` the verdict, ``doctor`` and ``/attention`` read, and the
+        gauge cannot drift from the number those report.
 
         What this does **not** buy, said here rather than discovered later: a watcher
         that stops publishing goes stale in Prometheus after five minutes and takes
-        its alert with it. Closing that needs a liveness series nothing has asked for
+        its alerts with it. Closing that needs a liveness series nothing has asked for
         yet; it is recorded in the ledger as a limit, not guessed at in code.
         """
         OUTBOX_PARKED_EVENTS.set(report.parks_unexplained, outcome=OUTBOX_PARK_RELAY_FAILED)
         OUTBOX_PARKED_EVENTS.set(report.parks_explained, outcome=OUTBOX_PARK_TRANSPORT_DISABLED)
+        NOTIFICATIONS_UNDELIVERED.set(
+            report.notifications_failed, status=NOTIFICATION_UNDELIVERED_FAILED
+        )
+        NOTIFICATIONS_UNDELIVERED.set(
+            report.notifications_suppressed, status=NOTIFICATION_UNDELIVERED_SUPPRESSED
+        )
 
     def _record(self, report: AttentionReport) -> None:
         """Log exactly one verdict for one reading, plus a truncation warning.

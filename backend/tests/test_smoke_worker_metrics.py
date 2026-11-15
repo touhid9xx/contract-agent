@@ -1,4 +1,4 @@
-"""What the worker-metrics journey waits for before it asserts (``D10-117``).
+"""What the worker-metrics journey waits for before it asserts (``D10-117``, ``D10-118``).
 
 Why this file exists
 --------------------
@@ -53,13 +53,18 @@ PRETICK_BODY = (
     "escalation_email_failed_total 0\n"
     "# HELP outbox_parked_events Dead-lettered outbox events, by whether it is explained.\n"
     "# TYPE outbox_parked_events gauge\n"
+    "# HELP notifications_undelivered Reminders not in the customer's hands, by why.\n"
+    "# TYPE notifications_undelivered gauge\n"
 )
 
-#: The same body one tick later. Both outcomes, because the watcher writes both every
-#: tick — the property that makes the alert fireable and the series waitable-for.
+#: The same body one tick later. Both outcomes and both statuses, because the watcher
+#: writes every series every tick — the property that makes the alerts fireable and the
+#: series waitable-for.
 TICKED_BODY = PRETICK_BODY + (
     'outbox_parked_events{outcome="relay_failed"} 0\n'
     'outbox_parked_events{outcome="transport_disabled"} 0\n'
+    'notifications_undelivered{status="failed"} 0\n'
+    'notifications_undelivered{status="suppressed"} 0\n'
 )
 
 #: The worker the park assertions are made against. Only its *name* reaches anything
@@ -127,27 +132,38 @@ def test_the_park_series_are_waited_for_rather_than_assumed() -> None:
     Two requests and not one is the whole assertion. With the pre-tick body accepted,
     the journey's later ``set(parks) == set(PARKED_EVENT_SERIES)`` reads an empty set
     and fails on code that is correct — the failure mode ``43711886352`` recorded.
+
+    Since ``D10-118`` the wait covers two families, and the body served second carries
+    the park samples first: a ``wait_for_listener`` that returned as soon as *one* of
+    the required families appeared would still be green on a single-family body and
+    would read an empty ``notifications_undelivered`` a moment later. Requiring the
+    union means both halves have to be on the wire before the journey looks.
     """
+    required = journey.PARKED_EVENT_SERIES + journey.UNDELIVERED_STATUS_SERIES
     with serving([PRETICK_BODY, TICKED_BODY]) as (port, seen):
-        body = journey.wait_for_listener(
-            WORKER, port, DEADLINE_SECONDS, journey.PARKED_EVENT_SERIES
-        )
+        body = journey.wait_for_listener(WORKER, port, DEADLINE_SECONDS, required)
 
     assert len(seen) == 2
     assert set(journey.samples(body, "outbox_parked_events")) == set(journey.PARKED_EVENT_SERIES)
+    assert set(journey.samples(body, "notifications_undelivered")) == set(
+        journey.UNDELIVERED_STATUS_SERIES
+    )
 
 
-def test_the_journey_asks_for_the_park_series_and_nothing_else() -> None:
+def test_the_journey_asks_for_every_series_it_later_asserts_on() -> None:
     """The wiring, not just the function: what ``verify_worker`` actually passes.
 
     The two tests above drive ``wait_for_listener`` with the tuple spelled out, so on
     their own they stay green if ``verify_worker`` stops passing it — which is the one
     line that decides whether CI waits at all. Emptying ``EVERY_TICK_SERIES`` left them
     all passing, which is how this test came to exist. Both halves are asserted: the
-    watcher requires the park series, and a worker with nothing to publish requires
+    watcher requires both gauges, and a worker with nothing to publish requires
     nothing, so the map cannot silently grow into a way to make a scrape hang.
     """
-    assert journey.required_series(WORKER) == journey.PARKED_EVENT_SERIES
+    assert (
+        journey.required_series(WORKER)
+        == journey.PARKED_EVENT_SERIES + journey.UNDELIVERED_STATUS_SERIES
+    )
     assert journey.required_series(journey.WORKERS[0]) == ()
 
 
