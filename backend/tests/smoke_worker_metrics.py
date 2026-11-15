@@ -206,6 +206,37 @@ SINGLE_WRITER_FAMILIES: dict[str, str] = {
     "outbox_parked_events": "attention_watch",
 }
 
+#: Worker -> the series that must already be on the wire before its listener counts
+#: as ready (``D10-117``).
+#:
+#: Only the attention watcher belongs here. The other five write no family this
+#: journey can provoke without inventing a due outbox row, a due notification and a
+#: silent contract apiece, so a declaration is the strongest honest signal for them.
+#: This one publishes both park series on *every* tick, zeros included — the same
+#: property that makes its alert fireable makes its series waitable-for.
+#:
+#: Why the wait is not optional, stated as the defect it fixes: declarations are
+#: rendered by the registry at import, while samples are written by a tick, and the
+#: listener binds *before* the first tick. So "200 plus declarations" is a state the
+#: process really sits in, and asserting a sample after returning on it is a race.
+#: CI run ``43711886352`` lost that race on a commit identical to one that had won it
+#: minutes earlier — the pass-then-fail-on-identical-code shape that
+#: ``assert_port_is_free`` records for the port. Anything asserted after the return
+#: has to be waited for here, or it is read from a body that predates it.
+EVERY_TICK_SERIES: dict[str, tuple[str, ...]] = {"attention_watch": PARKED_EVENT_SERIES}
+
+
+def required_series(worker: Worker) -> tuple[str, ...]:
+    """The series :func:`wait_for_listener` must see before this worker is ready.
+
+    A function rather than a bare ``.get`` at the call site so the mapping has one
+    tested seam: ``tests/test_smoke_worker_metrics.py`` asserts both halves of it, and
+    emptying :data:`EVERY_TICK_SERIES` fails there instead of only in a race. Nothing
+    else may call this directly — ``verify_worker`` is its only caller, and a second
+    copy of the lookup is the drift this exists to prevent.
+    """
+    return EVERY_TICK_SERIES.get(worker.name, ())
+
 
 class SmokeError(RuntimeError):
     """A step of the journey did not hold."""
@@ -419,7 +450,12 @@ def assert_port_released(port: int, deadline_seconds: float = 10.0) -> None:
     raise SmokeError(f"port {port} was never released after the worker exited ({last_error})")
 
 
-def wait_for_listener(worker: Worker, port: int, deadline_seconds: float) -> str:
+def wait_for_listener(
+    worker: Worker,
+    port: int,
+    deadline_seconds: float,
+    require_series: tuple[str, ...] = (),
+) -> str:
     """Poll until the worker answers a scrape, and return the body.
 
     Weaker than :func:`wait_for_sample` on purpose. Four of the six workers write
@@ -433,6 +469,12 @@ def wait_for_listener(worker: Worker, port: int, deadline_seconds: float) -> str
     ``D10-109`` made readable — because it is declared by ``app.core.metrics``
     itself, so it must appear in *every* process regardless of what that process
     does.
+
+    ``require_series`` is for the worker that publishes a family every tick
+    (:data:`EVERY_TICK_SERIES`), and it is not a convenience: a declaration arrives
+    before the first tick while a sample arrives with it, so a body can be complete
+    by the first measure and empty by the second. Waiting on both here is what makes
+    the assertions *after* the return statements about this body.
     """
     deadline = time.monotonic() + deadline_seconds
     last_error = "no attempt made"
@@ -448,9 +490,19 @@ def wait_for_listener(worker: Worker, port: int, deadline_seconds: float) -> str
                 f"{worker.name}: GET /metrics answered {status}, expected 200",
             )
             body = raw.decode("utf-8")
-            if marker in body:
-                return body
-            last_error = f"200 without a '{marker}' declaration"
+            if marker not in body:
+                last_error = f"200 without a '{marker}' declaration"
+            else:
+                # A series reads as its family for parsing: ``samples`` keys on the
+                # head, so ``name{outcome="x"}`` is looked up as ``name``.
+                missing = [
+                    series
+                    for series in require_series
+                    if series not in samples(body, series.partition("{")[0])
+                ]
+                if not missing:
+                    return body
+                last_error = f"200 without {', '.join(missing)} yet"
         time.sleep(RETRY_SECONDS)
     raise SmokeError(f"{worker.name} never answered a scrape ({last_error})")
 
@@ -467,7 +519,7 @@ def verify_worker(worker: Worker, database: Path, workdir: Path) -> str:
     log_path = workdir / f"{worker.name}.log"
     process = start_worker(worker, database, port, log_path)
     try:
-        body = wait_for_listener(worker, port, SCRAPE_DEADLINE_SECONDS)
+        body = wait_for_listener(worker, port, SCRAPE_DEADLINE_SECONDS, required_series(worker))
         for family, owner in SINGLE_WRITER_FAMILIES.items():
             if owner == worker.name:
                 continue
@@ -577,6 +629,9 @@ def run() -> None:
             # something under ``EVENT_TRANSPORT=none`` by the time this scrape happens.
             # What must never be true is "neither series is here", because an absent
             # gauge and a dead watcher are the same observation to `OutboxEventsParked`.
+            # "Has ticked" is not assumed here: ``EVERY_TICK_SERIES`` made the scrape
+            # wait for these series, so this asserts on a body that already carries them
+            # and can only fail on an *extra* label value — which is the other half.
             parks = samples(bodies["attention_watch"], "outbox_parked_events")
             need(
                 set(parks) == set(PARKED_EVENT_SERIES),
