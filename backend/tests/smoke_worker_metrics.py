@@ -1,4 +1,4 @@
-"""Six real worker processes, six real sockets, one scrape each.
+"""Seven real worker processes, seven real sockets, one scrape each.
 
 Why this file exists
 --------------------
@@ -22,25 +22,26 @@ there, because the registry is shared) and carries no sample, which is the
 absent-series-not-zero distinction the module documents. Finally it stops the
 process and proves the port was released.
 
-That is the first phase. A second phase then repeats it for all six worker
-modules — the expiry sweep twice, so that one check applies to all six rather
-than to five of them — each on its own port, and asserts of every one that it
-answers a scrape, declares the families the shared registry holds, emits **no
-sample** for a family another worker owns, and gives its port back when it dies.
-Until ``D10-110`` only the expiry sweep had ever been scraped and the six-port
-claim rested on reading ``docker-compose.yml``.
+That is the first phase. A second phase then repeats it for every worker module
+— the expiry sweep twice, so that one check applies to all of them rather than to
+all but one — each on its own port, and asserts of every one that it answers a
+scrape, declares the families the shared registry holds, emits **no sample** for a
+family another worker owns, and gives its port back when it dies. Until ``D10-110``
+only the expiry sweep had ever been scraped and the port claim rested on reading
+``docker-compose.yml``.
 
 What it does not prove
 ----------------------
 It is not a unit test of the listener: path, verb, header and error-body details
 belong to ``tests/test_metrics_server.py``. It does not scrape a *container*:
-the six published ports are exercised here as six local *processes*, so nothing
-below proves the image, the volume or the network namespace. ~~It runs one
-worker, not six.~~ **Amended by ``D10-110``:** it runs all six, but a process is
-not a container and this file is still about the process, the socket and the
-sample. And it says nothing about fidelity to Prometheus: parsing the text here
-is not the same as Prometheus parsing it, which is why the rule that reads this
-series is evaluated in the ledger's measurement rather than here.
+the published ports are exercised here as local *processes*, so nothing below
+proves the image, the volume or the network namespace. ~~It runs one worker, not
+six.~~ **Amended by ``D10-110``:** it runs every one of them — six when that
+paragraph was written, seven since ``D10-120`` — but a process is not a container
+and this file is still about the process, the socket and the sample. And it says
+nothing about fidelity to Prometheus: parsing the text here is not the same as
+Prometheus parsing it, which is why the rule that reads this series is evaluated
+in the ledger's measurement rather than here.
 
 How to run it
 -------------
@@ -77,6 +78,7 @@ _BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_BACKEND_DIR))
 os.environ.setdefault("APP_ENV", "test")
 
+from cryptography.fernet import Fernet  # noqa: E402
 from sqlalchemy import Engine, create_engine, event  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 
@@ -102,8 +104,17 @@ RETRY_SECONDS = 0.2
 
 #: A fast tick, so the first scrape attempt does not race a one-hour default.
 #: Every worker setting it drives has ``gt=0`` in ``app.core.config``, so a
-#: half-second is legal for all six.
+#: half-second is legal for all seven.
 POLL_INTERVAL_SECONDS = "0.5"
+
+#: Key material for the one worker that refuses to start without it (``D10-120``).
+#: ``ExtractionWorker.__init__`` builds its cipher and its contact blind index up
+#: front, so a missing key fails at start-up rather than on the first contract —
+#: which is the right shape for a deployment, and an inconvenient one for a smoke
+#: that wants the listener to bind on an empty database. The 32-character floor is
+#: ``app.core.config.MIN_BLIND_INDEX_KEY_LENGTH``; the value itself is fixed rather
+#: than generated because nothing here reads it back.
+SMOKE_BLIND_INDEX_KEY = "smoke-blind-index-key-0123456789abcdef"
 
 #: The only family this script expects to *see* a sample for.
 EXPECTED_FAMILY = "contracts_expired_total"
@@ -151,8 +162,8 @@ UNDELIVERED_STATUS_SERIES: tuple[str, ...] = (
 class Worker:
     """One worker process and the dial that makes it tick.
 
-    The six rows are the same six ``tests/test_metrics_server.py`` maps to
-    ``publish_metrics`` call sites, and the same six ``docker-compose.yml``
+    The rows are the same ones ``tests/test_metrics_server.py`` maps to
+    ``publish_metrics`` call sites, and the same ones ``docker-compose.yml``
     publishes a host port for. The module path and the worker name are kept
     together on purpose: a scrape body cannot tell you which process answered, so
     the only identity a journey has is the port it chose to ask.
@@ -194,6 +205,16 @@ WORKERS: tuple[Worker, ...] = (
     # missing" and "the worker is still starting" have to be told apart by asking.
     Worker("outbox_relay", "app.workers.outbox_relay", "OUTBOX_POLL_INTERVAL_SECONDS"),
     Worker("attention_watch", "app.workers.attention_watch", "ATTENTION_POLL_INTERVAL_SECONDS"),
+    # ``D10-120``. Last, which is where ``docker-compose.yml`` lists it. It shares
+    # the relay's description rather than the watcher's: on an empty database it
+    # writes no *labelled* family at all, so this sweep can prove only that its
+    # listener binds and answers — which is exactly the thing that would otherwise
+    # go missing unnoticed.
+    Worker(
+        "extraction",
+        "app.workers.extraction_worker",
+        "EXTRACTION_SCAN_POLL_INTERVAL_SECONDS",
+    ),
 )
 
 #: Family -> the one worker allowed to emit a sample for it. Every entry here
@@ -218,6 +239,12 @@ SINGLE_WRITER_FAMILIES: dict[str, str] = {
     # families are two statements about two different tables, so one of them drifting
     # into another process would not be visible in the other's body.
     "notifications_undelivered": "attention_watch",
+    # ``D10-120``. The extraction worker's other family is ``extraction_backlog``,
+    # which carries no labels and so renders in *every* process — absence is not
+    # available as evidence for it, which is why it gets no entry here. This one is
+    # labelled, so a sample in any other worker's body would mean the registry had
+    # stopped being process-local.
+    "contracts_extracted_total": "extraction",
 }
 
 #: Worker -> the series that must already be on the wire before its listener counts
@@ -343,6 +370,14 @@ def start_worker(
             # use, not at import, so the listener still binds and is still asked.
             "EVENT_TRANSPORT": "none",
             "NOTIFICATION_TRANSPORT": "none",
+            # ``D10-120``: the extraction worker builds its cipher and blind index in
+            # ``__init__``, so it refuses to start without both — a different shape
+            # from the workers above, which refuse at the point of use and are
+            # therefore scrapable with nothing configured. Seeded here rather than in
+            # the worker so the refusal stays where it is: a deployment that cannot
+            # encrypt extracted values must not silently run extraction.
+            "ENCRYPTION_KEY": Fernet.generate_key().decode(),
+            "CONTACT_BLIND_INDEX_KEY": SMOKE_BLIND_INDEX_KEY,
         }
     )
     log_file = log_path.open("wb")
@@ -474,8 +509,8 @@ def wait_for_listener(
 ) -> str:
     """Poll until the worker answers a scrape, and return the body.
 
-    Weaker than :func:`wait_for_sample` on purpose. Four of the six workers write
-    no family this journey can provoke without inventing a due outbox row, a due
+    Weaker than :func:`wait_for_sample` on purpose. Most of the workers write no
+    family this journey can provoke without inventing a due outbox row, a due
     notification and a silent contract apiece, so for them the honest readiness
     signal is a ``200`` whose body carries the declarations every process holds.
     That is not vacuous: it fails for a worker that never binds, and for one whose
@@ -561,7 +596,7 @@ def verify_worker(worker: Worker, database: Path, workdir: Path) -> str:
 
 
 def run() -> None:
-    """The journey itself: seed, start, scrape, assert, stop, release — six times."""
+    """The journey itself: seed, start, scrape, assert, stop, release — once per worker."""
     with tempfile.TemporaryDirectory(prefix="smoke-worker-metrics-") as raw_dir:
         workdir = Path(raw_dir)
         database = workdir / "smoke.sqlite"
@@ -612,7 +647,7 @@ def run() -> None:
             # Phase two. The expiry sweep above is the one worker this journey can
             # provoke into writing a counter without inventing a fixture per
             # worker. Every worker is verified again here, expiry included, because
-            # the locality check is the same check for all six and because the
+            # the locality check is the same check for every worker and because the
             # expiry body is the only one *guaranteed* to carry a worker-only
             # sample — which is what makes that check falsifiable instead of
             # merely quiet.

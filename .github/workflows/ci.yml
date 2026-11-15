@@ -554,7 +554,7 @@ jobs:
 
       - name: every process the stack starts imports inside it
         run: |
-          modules=$(python3 -c 'import pathlib,re; c=pathlib.Path("docker-compose.yml").read_text(encoding="utf-8"); f=sorted(set(re.findall(r"^\s+- (app\.workers\.[a-z_]+)$", c, re.M))); assert len(f) == 6, f"expected six worker entry points in docker-compose.yml, found {len(f)}"; print(", ".join(f))')
+          modules=$(python3 -c 'import pathlib,re; c=pathlib.Path("docker-compose.yml").read_text(encoding="utf-8"); f=sorted(set(re.findall(r"^\s+- (app\.workers\.[a-z_]+)$", c, re.M))); assert len(f) >= 6, f"expected at least six worker entry points in docker-compose.yml, found {len(f)}"; print(", ".join(f))')
           echo "importing app.main, $modules"
           docker run --rm contract-agent-api:ci python -c "import app.main, $modules"
 

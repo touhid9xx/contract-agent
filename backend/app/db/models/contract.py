@@ -80,6 +80,20 @@ class Contract(Base, TimestampMixin):
     sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     storage_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
+    #: When the extraction worker last read this contract's stored document and ran
+    #: extraction over it (``D10-120``). ``NULL`` means "never attempted", and that is
+    #: the whole claim predicate for the queue: ``storage_path IS NOT NULL AND
+    #: extraction_attempted_at IS NULL``.
+    #:
+    #: A stamp rather than a status, because it is not a state machine: it answers
+    #: "has the work been done", and the answer never changes back. It is stamped only
+    #: on a run that got as far as reading the document's text, so a document that
+    #: cannot be loaded, decrypted or parsed keeps its place in the queue — see
+    #: ``0008_extraction_attempted_at`` for why that is the safe direction.
+    extraction_attempted_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, index=True
+    )
+
     # --- contact policy inputs ------------------------------------------
     #: Resolved per contract from the tenant/customer jurisdiction. Drives the
     #: quiet-hours window checked deterministically before any dispatch.

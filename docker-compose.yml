@@ -338,6 +338,34 @@ services:
     ports:
       - "127.0.0.1:${ATTENTION_METRICS_PORT:-9106}:9101"
 
+  extractor:
+    <<: *worker
+    # Gap 5. `extract_contract` has been complete since F7 and nothing called it on a
+    # timer: the only caller was `python -m app.cli extract --contract-id N`, run by a
+    # person. So "the system reads the contract you uploaded" was a promise the
+    # deployment kept by hand, and the review queue, the decision policy and the planner
+    # were all reading a table that stayed empty until somebody remembered.
+    #
+    # It takes a stamp, not a row count, as its queue predicate. "Has a stored document
+    # and no extracted fields" cannot finish: a scan with no text layer yields no row,
+    # so it would match for ever. `extraction_attempted_at` makes "looked, found nothing"
+    # a state the queue can leave (0008_extraction_attempted_at).
+    #
+    # A contract it cannot read — bytes that will not decrypt, a document over
+    # EXTRACTION_MAX_DOCUMENT_CHARS — is deliberately left unstamped and retried: those
+    # are a volume, key-ring or setting problem, and the retry is what a redeploy
+    # repairs. The id cursor keeps them from starving anything behind them.
+    command:
+      - python
+      - -m
+      - app.workers.extraction_worker
+    # `contracts_extracted_total{outcome}` and `extraction_backlog` are written here and
+    # nowhere else. The backlog is a gauge for a reason: the queue has to be able to
+    # fall, and "how many documents does this deployment still owe" is the one question
+    # that tells a worker keeping up apart from a worker with nothing to do.
+    ports:
+      - "127.0.0.1:${EXTRACTOR_METRICS_PORT:-9107}:9101"
+
   prometheus:
     # D10-111. `D10-91` wrote a rule nobody could load: there was no config in this
     # tree, so `increase(escalation_email_failed_total[1h]) > 0` existed as prose

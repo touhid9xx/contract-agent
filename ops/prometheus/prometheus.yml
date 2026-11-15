@@ -12,17 +12,17 @@
 # there, and `promtool` reads the same path in both places. A `rule_files` entry that is absolute
 # and identical everywhere is one that cannot be "valid on my machine".
 #
-# **One job for six workers, deliberately.** Every worker container listens on 9101 inside its own
+# **One job for every worker, deliberately.** Every worker container listens on 9101 inside its own
 # network namespace and publishes a different host port (D10-107), so on the Compose network the
 # targets differ by *service name* and share a port. Keeping them in one job means the `instance`
 # label is what names them, which is what makes the seeded zero readable: `D10-109` gave every
 # unlabelled counter a `0` from declaration, so `escalation_email_failed_total` is present in all
-# seven processes and only the scanner's copy ever moves. `increase(...)` over a flat zero is `0`,
-# so the rule fires on the one instance that counted a failure and stays quiet on the six that
+# eight processes and only the scanner's copy ever moves. `increase(...)` over a flat zero is `0`,
+# so the rule fires on the one instance that counted a failure and stays quiet on the seven that
 # cannot — measured in `rules.test.yml`, which is the point of putting those cases there.
 #
 # What is deliberately absent: no `depends_on` in the service (a scrape target that is down is what
-# a target list is *for*; making Prometheus wait for six workers would turn every `docker compose up
+# a target list is *for*; making Prometheus wait for seven workers would turn every `docker compose up
 # prometheus` into a full-stack start), no remote write, no bearer token (every target is
 # unauthenticated on this network, matching `app/api/v1/metrics.py`), and no retention tuning beyond
 # the compose command.
@@ -34,7 +34,7 @@
 # a CI job that watches an alert make the whole trip.
 global:
   # Fifteen seconds for both loops. Fast enough that the stack is worth opening after a `up`, slow
-  # enough that six workers are not scraped more often than they tick.
+  # enough that seven workers are not scraped more often than they tick.
   scrape_interval: 15s
   evaluation_interval: 15s
   external_labels:
@@ -65,7 +65,7 @@ scrape_configs:
     static_configs:
       - targets: ["api:8000"]
 
-  # The six workers. Each serves `app.core.metrics.render()` from its own process — the same bytes
+  # Every worker. Each serves `app.core.metrics.render()` from its own process — the same bytes
   # the API serves, which is why no aggregation is needed here and none is attempted: summing across
   # processes would invent a number for families whose absent-versus-zero distinction is
   # load-bearing (D10-107).
@@ -78,3 +78,4 @@ scrape_configs:
           - "expiry:9101"
           - "scanner:9101"
           - "attention:9101"
+          - "extractor:9101"

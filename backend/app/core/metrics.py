@@ -464,6 +464,68 @@ NOTIFICATIONS_UNDELIVERED: Final = _declare(
 )
 
 
+#: ``outcome`` tokens for :data:`CONTRACTS_EXTRACTED_TOTAL`, spelled once for the reason
+#: the park and undelivered tokens are: the writer, every test that asserts a contract
+#: was counted, and whoever reads the series all use one spelling, and a typo in one of
+#: them would look exactly like "nothing happened".
+#:
+#: The five are one per *thing an operator would do differently*, not one per branch in
+#: the worker: ``extracted`` and ``empty`` are the two success paths (values stored, and
+#: "read it, it says nothing we store") and both leave the queue; ``reviewed`` is a
+#: contract whose stored values are all human-owned, so nothing was overwritten;
+#: ``unavailable`` is a backend that was down and will be retried next tick; and
+#: ``unreadable`` is bytes this deployment cannot get text out of at all. Only the last
+#: keeps a row in the queue for what may be for ever — see
+#: ``0008_extraction_attempted_at`` — so a standing ``unreadable`` is the one series
+#: that names work for a person.
+EXTRACTION_OUTCOME_EXTRACTED: Final = "extracted"
+EXTRACTION_OUTCOME_EMPTY: Final = "empty"
+EXTRACTION_OUTCOME_REVIEWED: Final = "reviewed"
+EXTRACTION_OUTCOME_UNAVAILABLE: Final = "unavailable"
+EXTRACTION_OUTCOME_UNREADABLE: Final = "unreadable"
+
+#: One tick of the extraction worker, counted per contract it leased.
+#:
+#: Separate from ``extractions_total`` — which :func:`app.workers.extraction.extract_contract`
+#: already increments with ``status="ok"`` — because the two answer different questions
+#: and one of them cannot answer this: ``extractions_total`` counts runs of the *function*,
+#: including runs that stored nothing and runs started by the CLI, so a rate over it says
+#: how often somebody ran extraction rather than how much work there was. This counts
+#: contracts the *worker* leased, by what became of each one.
+#:
+#: It is a counter and not a gauge because these are events, not a backlog. The backlog
+#: is :data:`EXTRACTION_BACKLOG`, published alongside it on the same tick.
+CONTRACTS_EXTRACTED_TOTAL: Final = _declare(
+    Counter(
+        "contracts_extracted_total",
+        "Contracts the extraction worker leased, by outcome.",
+        ("outcome",),
+    )
+)
+
+#: How many stored documents are still waiting to be extracted.
+#:
+#: A gauge because the number falls, and it is the only series here that can answer "is
+#: the worker keeping up". ``contracts_extracted_total`` only ever says how many
+#: contracts have *left* the queue; an ingest far faster than
+#: ``extraction_scan_batch_size`` over ``extraction_scan_poll_interval_seconds`` leaves
+#: that counter rising monotonically while the queue behind it grows, which is a
+#: deployment that looks healthy and is not.
+#:
+#: Published every tick including the zero, for the `D10-109` reason: a family written
+#: only when there is a backlog is indistinguishable, from Prometheus' side, from a
+#: worker that is not running. There is no alert rule on it — a standing backlog is a
+#: tuning question, not a page — and none of the five outcome tokens above is in a
+#: danger the way ``unreadable`` is, so the gauge is for the dashboard and the counter is
+#: for the question.
+EXTRACTION_BACKLOG: Final = _declare(
+    Gauge(
+        "extraction_backlog",
+        "Contracts holding a stored document that no worker has extracted yet.",
+    )
+)
+
+
 def render() -> str:
     """Return the whole registry in Prometheus text exposition format."""
     lines: list[str] = []

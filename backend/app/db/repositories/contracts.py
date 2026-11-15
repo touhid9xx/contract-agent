@@ -25,7 +25,7 @@ from collections.abc import Mapping
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.orm import Session
 
 from app.db.base import utc_now
@@ -323,6 +323,111 @@ def claim_reminder_candidates(
             Contract.end_date.is_not(None),
             Contract.end_date >= earliest_end_date,
             Contract.end_date <= latest_end_date,
+            Contract.id > after_id,
+        )
+        .order_by(Contract.id)
+        .limit(limit)
+        .with_for_update(skip_locked=True, of=Contract)
+    )
+    return list(session.execute(statement).scalars())
+
+
+def _extraction_queue() -> tuple[ColumnElement[bool], ...]:
+    """The conditions meaning "a stored document nobody has extracted yet".
+
+    Written once and shared by :func:`claim_extraction_candidates` and
+    :func:`count_extraction_backlog` because the two answer the same question in
+    different tenses: the claim takes the rows, the count reports how many are left.
+    Two copies of this predicate would eventually disagree, and the failure is silent
+    in the worst direction — a dashboard reading zero backlog while the worker keeps
+    finding work, or the reverse, which is an operator chasing a queue that is empty.
+    """
+    return (Contract.storage_path.is_not(None), Contract.extraction_attempted_at.is_(None))
+
+
+def count_extraction_backlog(session: Session) -> int:
+    """How many stored documents the extraction worker still owes, **unscoped**.
+
+    Unscoped for the reason the claim is: this is the system actor's view of its own
+    queue, and the number exists to be put on a gauge (``EXTRACTION_BACKLOG``), not
+    shown to a tenant. It is one indexed count — ``ix_contracts_extraction_attempted_at``
+    is declared over the ``IS NULL`` rows — so the worker can afford to publish it on
+    every tick rather than making an operator guess whether the worker is behind or
+    merely idle. Those two look identical on a counter and are nothing alike.
+
+    The ``flush()`` is load-bearing, and it is the ``autoflush=False`` lesson this
+    codebase has now learned three times (see ``app.db.session`` and the two bulk-update
+    sites in ``security.py``). The caller stamps ``extraction_attempted_at`` on rows the
+    claim has already handed it, and a committed stamp is pending ORM state until the
+    session flushes — so without this line the ``SELECT`` cannot see the stamps it was
+    called to measure, and the count reports the queue as it stood **before** the page.
+    The gauge would then only fall on a tick that found nothing to do, which is the
+    exact inversion of the number's purpose. Flushing here rather than at each call site
+    keeps the trap shut for the next caller: a count of this predicate only means
+    "still queued" once the pending stamps are visible to the transaction.
+    """
+    session.flush()
+    statement = select(func.count()).select_from(Contract).where(*_extraction_queue())
+    return int(session.execute(statement).scalar_one())
+
+
+def claim_extraction_candidates(
+    session: Session,
+    *,
+    after_id: int = 0,
+    limit: int,
+) -> list[Contract]:
+    """Lease contracts holding a document no one has extracted yet, **unscoped**.
+
+    The tenant predicate is absent for the reason :func:`claim_reminder_candidates`
+    gives: the extraction worker is a system actor with a database connection, not a
+    principal, so a tenant-scoped query could not see the contracts it exists to
+    process. The *write* it enables stays tenant-scoped — ``extract_contract`` builds
+    its field repository from each row's own ``tenant_id``, and takes the tenant from
+    the contract rather than from an argument, so no caller can retarget it.
+
+    The predicate is ``storage_path IS NOT NULL AND extraction_attempted_at IS NULL``.
+
+    ``storage_path IS NOT NULL``
+        A contract with no document has nothing to extract. It is not filtered out of
+        the *supply* of documents by anything else: JSON ingestion and document upload
+        are separate routes (``app.api.v1.contracts``), so a deployment that ingests
+        manifests will simply never see this worker do anything.
+
+    ``extraction_attempted_at IS NULL``
+        The finish line, and the reason this function exists rather than reusing
+        "no rows in ``extracted_fields``". A document that legitimately yields nothing
+        — a scan with no text layer, a contract that never states an e-mail — produces
+        no field row, so a row-absence predicate would match it for ever and the tick
+        would retry, log and warn on the same documents until the deployment was
+        replaced. The worker stamps this column instead (see
+        ``0008_extraction_attempted_at``), which makes "looked, found nothing" a state
+        the queue can leave. Nothing else in this codebase writes it, so a stamp means
+        exactly what it says.
+
+    There is deliberately no ``status`` filter. Extraction is what *produces* the fields
+    that review, the decision policy and the planner all read; a contract that is
+    already ``expired`` still needs its values stored, and refusing it here would leave
+    the newest contracts — the ones ingested after their term started — permanently
+    without fields.
+
+    ``FOR UPDATE SKIP LOCKED`` (a no-op on SQLite) so two worker replicas lease disjoint
+    rows rather than both decrypting and rewriting the same document. ``extract_contract``
+    is idempotent by ``(contract, field_name)``, so a double claim would corrupt nothing
+    — it would just do the most expensive work in this codebase twice.
+
+    ``after_id`` because the worker must be able to prove progress across pages even
+    though a row it cannot finish stays in the predicate: a permanently unparseable
+    document would otherwise occupy the front of every batch. See
+    :class:`app.workers.extraction_worker.ExtractionWorker` for how the cursor moves,
+    and for which outcomes advance it past a permanently failing row.
+    """
+    if limit <= 0:
+        return []
+    statement = (
+        select(Contract)
+        .where(
+            *_extraction_queue(),
             Contract.id > after_id,
         )
         .order_by(Contract.id)

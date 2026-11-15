@@ -23,8 +23,8 @@ undo:
 * **Off means nothing bound.** ``WORKER_METRICS_PORT=0`` is a deployment that
   scrapes nothing; it must not leave a port open, and it must not be reachable
   by accident through the ``start`` path.
-* **Every worker is wired, under its own name.** Six ``main()`` functions is six
-  chances to add a seventh worker and forget the listener.
+* **Every worker is wired, under its own name.** Seven ``main()`` functions is seven
+  chances to add an eighth worker and forget the listener.
 """
 
 from __future__ import annotations
@@ -64,6 +64,7 @@ WORKERS = {
     "app.workers.attention_watch": "attention_watch",
     "app.workers.reminder_planner": "reminder_planner",
     "app.workers.expiry": "expiry",
+    "app.workers.extraction_worker": "extraction",
 }
 
 #: Long enough for a loopback round trip on a loaded CI box, short enough that a
@@ -327,7 +328,7 @@ def test_a_stopped_listener_releases_the_port_for_the_next_worker() -> None:
         second.stop()
 
 
-# --- the wiring: six workers, six listeners --------------------------------
+# --- the wiring: seven workers, seven listeners ----------------------------
 
 
 def call_name(call: ast.Call) -> str:
@@ -361,7 +362,7 @@ def published_labels(module: ModuleType) -> list[str]:
 
 @pytest.mark.parametrize(("module_name", "label"), sorted(WORKERS.items()))
 def test_every_worker_serves_its_own_registry(module_name: str, label: str) -> None:
-    """Six workers, six listeners. A seventh that forgets is invisible otherwise."""
+    """Seven workers, seven listeners. An eighth that forgets is invisible otherwise."""
     module = importlib.import_module(module_name)
 
     assert published_labels(module) == [label]

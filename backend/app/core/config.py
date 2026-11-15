@@ -393,6 +393,29 @@ class Settings(BaseSettings):
     #: operator will ask about.
     expiry_sweep_poll_interval_seconds: float = Field(default=3600.0, gt=0, le=86400)
 
+    # --- document extraction ----------------------------------------------
+    # `extract_contract` has been complete since F7 and, until D10-120, reachable only
+    # through ``python -m app.cli extract`` one contract at a time. These two settings
+    # are the knob surface of the clock that replaced that: nothing else about the
+    # extraction pipeline is configurable, because nothing else about it was a choice.
+    #: Contracts the worker leases per query. Ten, where the two scanners use fifty: the
+    #: per-row cost here is a document load off the volume, a decrypt and a parse of up
+    #: to ``extraction_max_document_chars`` — the most expensive per-row work any worker
+    #: in this codebase does — and a batch that takes a minute is indistinguishable from
+    #: one that takes ten when the poll interval is a quarter of an hour. It bounds a
+    #: statement, not a lock: the worker commits each contract as it finishes it.
+    extraction_scan_batch_size: int = Field(default=10, gt=0, le=1000)
+    #: How long the worker waits between passes. Fifteen minutes — longer than any other
+    #: scanner here — because nothing downstream is waiting on it within the hour: a
+    #: contract is extracted once, ever, and the reminders that read the result are
+    #: planned days before its end date. The cost of being slow is a contract that sits
+    #: with unextracted fields for a few minutes; the cost of being fast is re-reading
+    #: the volume and re-parsing every document the deployment has just ingested. It is
+    #: still a poll rather than a cron for the reason the planner gives: a deployment
+    #: started at an arbitrary time must still do its work, and a tick lost to a restart
+    #: must be retried in minutes rather than at the same hour tomorrow.
+    extraction_scan_poll_interval_seconds: float = Field(default=900.0, gt=0, le=86400)
+
     # --- smtp transport --------------------------------------------------
     # Read only when ``notification_transport == "smtp"``. ``smtp_host`` is the
     # one field with no usable default: every other setting below has a sane
