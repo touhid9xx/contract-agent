@@ -2,13 +2,26 @@
 
 from __future__ import annotations
 
+import ast
 import base64
+import re
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
-from app.core.config import DEV_SECRET_PLACEHOLDER, MAX_RETIRED_ENCRYPTION_KEYS, Settings
+from app.core.config import (
+    DEV_BLIND_INDEX_KEY_PLACEHOLDER,
+    DEV_ENCRYPTION_KEY_PLACEHOLDER,
+    DEV_SECRET_PLACEHOLDER,
+    MAX_RETIRED_ENCRYPTION_KEYS,
+    Settings,
+)
+
+#: Which worker processes the stack starts, from `docker-compose.yml`. Reused rather
+#: than parsed again: that file already answers "which modules are processes" for
+#: `test_worker_wiring`, and a second reader would be a second thing to disagree.
+from tests.test_worker_wiring import _started
 
 VALID_PRODUCTION_SECRET = "a" * 40
 VALID_PRODUCTION_ORIGINS = "https://app.example.com"
@@ -302,9 +315,26 @@ def test_a_tls_remote_ollama_endpoint_is_accepted() -> None:
 #: The file `docker compose` interpolates, and the one a deployer is told to copy.
 EXAMPLE_ENV = Path(__file__).resolve().parents[2] / ".env.example"
 
+#: The stack that reads the example, and the second consumer this file answers to:
+#: `docker compose` parses it before it builds an image or starts a container.
+COMPOSE_FILE = Path(__file__).resolve().parents[2] / "docker-compose.yml"
+
 #: Entries in `.env.example` that are not settings. They belong to the stack's own
 #: interpolation, so the application never reads them and no field declares them.
-COMPOSE_ONLY_KEYS = frozenset({"PROMETHEUS_PORT"})
+#: ``PROMETHEUS_PORT`` is the port the scrape target publishes (``D10-111``); the
+#: ``MYSQL_*`` block is the database the stack creates for itself, which the example
+#: has to carry because two of those values are written ``${VAR:?…}`` — a refusal,
+#: not a default.
+COMPOSE_ONLY_KEYS = frozenset(
+    {
+        "PROMETHEUS_PORT",
+        "MYSQL_DATABASE",
+        "MYSQL_PASSWORD",
+        "MYSQL_PORT",
+        "MYSQL_ROOT_PASSWORD",
+        "MYSQL_USER",
+    }
+)
 
 
 def _example_env_entries() -> list[tuple[str, str]]:
@@ -388,3 +418,208 @@ def test_the_example_env_file_names_only_settings_that_exist() -> None:
     )
 
     assert unknown == set(), f".env.example names settings that do not exist: {sorted(unknown)}"
+
+
+def _compose_variables(pattern: str) -> set[str]:
+    """Variable names ``docker-compose.yml`` interpolates, matching ``pattern``."""
+    return set(re.findall(pattern, COMPOSE_FILE.read_text(encoding="utf-8")))
+
+
+def test_the_example_env_file_supplies_every_variable_compose_requires() -> None:
+    """``cp .env.example .env`` has to be a stack that starts, not a file that boots.
+
+    ``docker-compose.yml`` writes two variables as ``${VAR:?set VAR in .env}``. That
+    is not a default with a warning attached: Compose refuses to interpolate, stops
+    before it builds an image or starts a container, and prints an instruction to set
+    a variable in a file the example never offered a line for. The symptom is what a
+    developer reports as ``there is no container and no image`` — ``up`` answers with
+    a parse error, and ``docker image ls`` has no ``contract-agent-api:dev``, because
+    the build never began.
+
+    ``test_the_example_env_file_loads`` cannot see it: it asks whether the copy boots
+    the *application*, and ``Settings`` never reads a compose variable. The only other
+    gate is CI's ``docker compose config -q``, which passes both values on the command
+    line, so it never depends on the file a deployer copies.
+
+    Derived from the Compose file rather than listed here, so a third ``${VAR:?}``
+    added for any reason fails this test until the example carries it — and the
+    failure names the variable instead of leaving it to be discovered at ``up``.
+    """
+    required = _compose_variables(r"\$\{([A-Z][A-Z0-9_]*):\?")
+    assert required, "no required interpolation found: has docker-compose.yml changed shape?"
+
+    supplied = {key for key, value in _example_env_entries() if value}
+
+    assert required <= supplied, (
+        f".env.example does not set {sorted(required - supplied)}, which docker-compose.yml "
+        "refuses to run without: `cp .env.example .env` cannot start the stack"
+    )
+
+
+def test_every_compose_only_key_is_one_the_compose_file_reads() -> None:
+    """The allowlist is only honest while Compose still reads the keys held in it.
+
+    ``test_the_example_env_file_names_only_settings_that_exist`` uses
+    ``COMPOSE_ONLY_KEYS`` to forgive entries that are not settings, which makes the
+    set a place a mistake could hide: a misspelled ``MYSQL_PASSWROD`` would be
+    forgiven there, ignored by Compose, and the stack would keep asking for the value
+    it had been given. Asserting the other direction keeps every member earning its
+    place, and is what would notice a renamed variable after a Compose edit.
+    """
+    referenced = _compose_variables(r"\$\{([A-Z][A-Z0-9_]*)")
+    stray = COMPOSE_ONLY_KEYS - referenced
+
+    assert stray == set(), (
+        f".env.example excuses keys docker-compose.yml never reads: {sorted(stray)}"
+    )
+
+
+# --- what the stack needs to start, not just what Settings accepts ----------
+
+WORKERS_DIR = Path(__file__).resolve().parents[2] / "backend" / "app" / "workers"
+CORE_DIR = Path(__file__).resolve().parents[2] / "backend" / "app" / "core"
+
+#: An all-caps token inside a refusal message, e.g. ``ENCRYPTION_KEY``.
+ENV_TOKEN = re.compile(r"[A-Z][A-Z0-9_]{2,}")
+
+
+def _example_env_values() -> dict[str, str]:
+    """`.env.example` as ``KEY -> value``; a commented-out line is not an entry."""
+    return dict(_example_env_entries())
+
+
+def _refused_fields(function: ast.FunctionDef) -> set[str]:
+    """The settings fields named in the messages this function raises.
+
+    A builder that refuses to work without a key says so in the sentence an operator
+    reads, so that sentence is where the requirement is recorded. Reading it here
+    means the check cannot drift from the message the operator is given: if the
+    message is wrong, this test is wrong in the same direction, in the same place.
+    """
+    fields: set[str] = set()
+    for node in ast.walk(function):
+        if not isinstance(node, ast.Raise):
+            continue
+        parts = ast.walk(node.exc) if node.exc is not None else iter(())
+        for part in parts:
+            if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                for token in ENV_TOKEN.findall(part.value):
+                    if token.lower() in Settings.model_fields:
+                        fields.add(token.lower())
+    return fields
+
+
+def _fail_closed_builders() -> dict[str, set[str]]:
+    """Builder function -> the settings fields it refuses to run without."""
+    builders: dict[str, set[str]] = {}
+    for path in sorted(CORE_DIR.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            fields = _refused_fields(node)
+            if fields:
+                builders[node.name] = fields
+    return builders
+
+
+def _built_at_start_up() -> dict[str, list[str]]:
+    """Worker module -> the variables its own construction cannot do without.
+
+    Only ``__init__`` and ``main`` are read, because only they run at start-up: a
+    builder called from a tick is a refusal per row, not a container that never comes
+    up. ``ExtractionWorker`` is the one that builds in ``__init__`` — deliberately, so
+    a missing key fails at start-up instead of once per contract — and that is why a
+    copy of the example cannot be validated against ``Settings`` alone.
+    """
+    builders = _fail_closed_builders()
+    needed: dict[str, list[str]] = {}
+    for service, (stem, _host, _port) in _started().items():
+        path = WORKERS_DIR / f"{stem}.py"
+        assert path.is_file(), (
+            f"docker-compose.yml starts `{service}` from app.workers.{stem}, "
+            f"which does not exist at {path}"
+        )
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        fields: set[str] = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or node.name not in {"__init__", "main"}:
+                continue
+            for call in ast.walk(node):
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Name):
+                    fields |= builders.get(call.func.id, set())
+        if fields:
+            needed[f"app.workers.{stem}"] = sorted(field.upper() for field in fields)
+    return needed
+
+
+def test_the_example_env_file_carries_what_every_worker_needs_at_start_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A copy of the example has to start the stack, not merely boot one process.
+
+    The report that found this was ``no container and no image``, which was Compose
+    refusing to interpolate. One layer in there is a quieter version of the same
+    thing: the containers start and one of them never finishes. ``ExtractionWorker``
+    builds its cipher and its contact blind index in ``__init__``, so a copy whose
+    ``ENCRYPTION_KEY`` is empty — the example used to ship exactly that — or whose
+    ``CONTACT_BLIND_INDEX_KEY`` is commented out — also exactly what it shipped —
+    restarts the ``extractor`` service forever, and ``docker compose ps`` shows
+    twelve services up.
+
+    ``test_the_example_env_file_loads`` cannot see it: ``Settings`` permits both keys
+    to be absent, because the API fails closed at the point of use instead. Nor can
+    ``docker compose config -q``, which never constructs a worker. The requirement is
+    read out of ``app/core``'s own refusal messages and the workers' own constructors
+    rather than listed here, so a worker that starts building a keyed object at
+    start-up fails this test until the example carries the variable.
+    """
+    needed = _built_at_start_up()
+    assert needed, (
+        "no worker builds a fail-closed object at start-up, in the whole tree: that is "
+        "the parser, not the stack"
+    )
+
+    # The suite pins APP_ENV=test for the whole run and an exported variable outranks
+    # the file, so the one value that must come from the file is unset here.
+    monkeypatch.delenv("APP_ENV", raising=False)
+    settings = Settings(_env_file=EXAMPLE_ENV)  # type: ignore[call-arg]
+
+    missing = {
+        module: [name for name in names if not getattr(settings, name.lower())]
+        for module, names in needed.items()
+    }
+    missing = {module: names for module, names in missing.items() if names}
+
+    assert not missing, (
+        f"`.env.example` leaves {missing} unset, and those workers build that key in "
+        "`__init__`: `cp .env.example .env && docker compose up` starts containers that "
+        "crash-loop before they do any work, which reads as a stack that never came up"
+    )
+
+
+def test_the_example_env_file_carries_the_dev_keys_production_refuses() -> None:
+    """Two files have to name the same two keys, and this is what holds them together.
+
+    The example ships a key for the extractor; the refusal in
+    ``Settings._reject_insecure_production_defaults`` is what makes shipping one
+    acceptable. Either alone is worse than neither: a key in the example with no
+    refusal is a credential that follows a copy into a deployment, and a refusal with
+    no key is a stack that cannot start. Comparing the values is what stops the pair
+    drifting apart — changing one without the other now fails here rather than
+    silently leaving a published key that production accepts.
+    """
+    values = _example_env_values()
+
+    assert values["ENCRYPTION_KEY"] == DEV_ENCRYPTION_KEY_PLACEHOLDER
+    assert values["CONTACT_BLIND_INDEX_KEY"] == DEV_BLIND_INDEX_KEY_PLACEHOLDER
+
+
+def test_production_rejects_the_examples_encryption_key() -> None:
+    with pytest.raises(ValidationError, match="ENCRYPTION_KEY"):
+        make_production(encryption_key=DEV_ENCRYPTION_KEY_PLACEHOLDER)
+
+
+def test_production_rejects_the_examples_blind_index_key() -> None:
+    with pytest.raises(ValidationError, match="CONTACT_BLIND_INDEX_KEY"):
+        make_production(contact_blind_index_key=DEV_BLIND_INDEX_KEY_PLACEHOLDER)

@@ -59,6 +59,28 @@ AgentBackend = Literal["deterministic", "ollama"]
 #: still set, which is why the hardcoded-password warning is suppressed.
 DEV_SECRET_PLACEHOLDER = "dev-only-insecure-secret-key-change-me"  # noqa: S105  # nosec B105
 
+#: The two field keys `.env.example` ships, for the same reason and under the same
+#: rule as the secret above: never valid in staging/production, where start-up
+#: refuses them. They are here, and not only in the example, because the example is
+#: a file a deployer copies — the refusal is what makes shipping them safe.
+#:
+#: The encryption key is *deliberately* not random: it is 32 zero bytes, url-safe
+#: base64-encoded. A readable sentence encoded the same way is not enough — base64
+#: spreads the bits, so ``base64url(b"dev-only-not-a-credential...")`` measures 4.77
+#: bits of entropy per character and `generic-api-key` flags it in history, which is
+#: how the first version of this placeholder was caught (CI run 43764587165). All
+#: zero bytes measures 0.16: it is unmistakably filler, it is the value
+#: ``test_encryption_key_shape_detection`` already uses to prove the shape check, and
+#: a key generator that somehow produced zeros is refused in staging/production
+#: rather than sealing customer data under it.
+#:
+#: They exist because ``ExtractionWorker`` builds its cipher and its blind index in
+#: ``__init__`` — deliberately, so a deployment missing a key fails at start-up
+#: instead of once per contract — which means a copy of the example with either one
+#: empty crash-loops the ``extractor`` service before it reads a single document.
+DEV_ENCRYPTION_KEY_PLACEHOLDER = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+DEV_BLIND_INDEX_KEY_PLACEHOLDER = "not-a-credential-dev-blind-index-key"
+
 MIN_PRODUCTION_SECRET_LENGTH = 32
 #: How many retired encryption keys may be carried at once. A rotation that is
 #: finished carries none, so this only bounds the window between "new key in
@@ -935,6 +957,22 @@ class Settings(BaseSettings):
                     f"{self.ollama_base_url!r}. The feature vector and every "
                     "completion would otherwise cross the network unencrypted."
                 )
+        # The example's two field keys, refused on the same rule as the secret above
+        # and for a sharper version of the same reason: `ENCRYPTION_KEY` seals every
+        # stored contact value and `CONTACT_BLIND_INDEX_KEY` is what makes a digest
+        # match an inbound STOP. A deployment that copied the example and kept these
+        # would be sealing customer contact data under a key printed in the repo, and
+        # searching it with a second one. Neither is a placeholder that half-works.
+        if self.encryption_key == DEV_ENCRYPTION_KEY_PLACEHOLDER:
+            raise ValueError(
+                "ENCRYPTION_KEY still holds the value `.env.example` ships; set a real "
+                f"key in {self.app_env}"
+            )
+        if self.contact_blind_index_key == DEV_BLIND_INDEX_KEY_PLACEHOLDER:
+            raise ValueError(
+                "CONTACT_BLIND_INDEX_KEY still holds the value `.env.example` ships; "
+                f"set a real key in {self.app_env}"
+            )
 
     # --- derived values --------------------------------------------------
     @property
