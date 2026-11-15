@@ -9402,8 +9402,10 @@ says so in a comment, which is the second reason to reuse a pattern instead
 of rewriting it: the rewrite dropped the one distinction the original argues
 for, and the comparison is now part of this script.
 
-**What it does not close.** Gap 17 stays struck through. Gaps 5, 18 and 25
-still want an owner's decision — gap 18's remaining half is the consent
+**What it does not close.** Gap 17 stays struck through. ~~Gaps 5, 18 and 25
+still want an owner's decision~~ **Amended by `D10-120`:** gap 5's extraction
+half was asked about and decided, so what still wants an owner's decision is
+its event half, plus gaps 18 and 25 — gap 18's remaining half is the consent
 *screen*, `D10-14` having built the bulk import — and the ledger says not to
 guess at them, so nothing here guesses. This block corrects claims about
 what shipped; it adds no claim that anything new did.
@@ -9425,3 +9427,90 @@ sqlite)`, which collects both edited test modules. This closing commit is
 documentation-only and its own run is not named here, for the reason
 `D10-115`, `D10-116`, `D10-117` and `D10-118` all gave: a paragraph cannot
 contain the id of the run that publishes it.
+
+### D10-120 — A clock for extraction, and a stamp instead of a row count
+
+Gap 5 has two halves and only one of them was mine to decide. The *extraction* half asked whether
+something should read the documents the stack already stores; the *event* half asks whether the
+`contract.ingested` topic should get a consumer, which needs a broker this stack does not ship. The
+owner was asked which to build first and chose extraction, and chose it as a poll rather than as an
+event handler — so `app/workers/extraction_worker.py` is the seventh worker, and the outbox still
+publishes to nothing.
+
+**Two predicates were available and they are not equally correct.** The obvious one is a row count:
+"has a stored document and no extracted fields". It reads well and it cannot finish. A scanned page
+with no text layer produces no row, and neither does a contract that never states an e-mail, so the
+predicate matches the same contract on every tick and the head of the queue is a document that can
+never leave it — a worker that reports a healthy tick for ever while making no progress. The other
+predicate is a stamp: `backend/migrations/versions/0008_extraction_attempted_at.py` adds a nullable
+`contracts.extraction_attempted_at` with an index, and the queue is `storage_path IS NOT NULL AND
+extraction_attempted_at IS NULL`. The argument for the stamp is not that it is faster. It is that
+"looked and found nothing" is a state a queue can *leave*, which a count of rows cannot express.
+
+NULL was chosen to mean *never attempted* rather than *attempted and failed*, and that choice is why
+the migration needs no data statement. Every contract that existed before this slice is NULL under
+both predicates, so the schema change is its own backfill: nothing is rewritten, no ordering has to
+be got right, and a downgrade that drops the column loses only the fact of having looked.
+
+**Which outcomes leave the queue is the whole design.** `extracted`, `empty` and `reviewed` stamp,
+because each means the worker got as far as reading the text and running extraction over it —
+`empty` is exactly the case the predicate exists for, and `reviewed` means every candidate row was
+already a reviewer's. `unreadable` and `unavailable` do not stamp: bytes that will not decrypt, a
+document over `EXTRACTION_MAX_DOCUMENT_CHARS`, and a down backend are a volume, key-ring, build or
+configuration problem, and the retry is a retry of the *reading*, which is the part a restored key
+actually repairs. Stamping them would remove a contract from the queue for ever because of a
+credential. Starvation is prevented somewhere else instead, by the id cursor: a page is claimed
+`id > cursor`, the cursor advances only after the commit, and a short page wraps it to zero — the
+argument `ReminderPlanner` already makes, reused rather than re-derived.
+
+**The gauge found a real bug in the code that sets it.** `_extraction_queue()` is one helper that
+both `claim_extraction_candidates` and `count_extraction_backlog` call, so the backlog gauge cannot
+describe a queue the claim does not select. Writing it that way is what exposed the defect: the
+gauge is recorded after the page commits, but it was counted inside that same session, and
+`build_session_factory` sets `autoflush=False`, so the `SELECT` could not see the stamps the tick
+had just assigned and reported the queue as it stood *before* the page. That inverts the number's
+purpose: a backlog that does not fall when the worker is working is read as "the worker found
+nothing", which is the one thing it must not mean. The fix is `session.flush()` in
+`count_extraction_backlog`, and its docstring records this as the third instance of the same
+lesson after `app/db/session.py` and `app/core/security.py`.
+
+**Two of the slice's own test failures were the test's fault, and both are recorded for that
+reason.** Nine assertions compared an aware `datetime` to a stamp read back through
+`DateTime(timezone=False)`, which is naive by D2-01; the helpers were right and the constants were
+the anomaly, so the constants changed. And one test expected `reviewed` for a document that yields
+three fields when only one had been reviewed — the worker correctly said `extracted`, because
+`stored` outranks `skipped_reviewed`. Rather than loosen the test, that precedence got its own
+case and the genuine "nothing was written" document got its own fixture.
+
+A third decision is an absence: nothing pages on `EXTRACTION_BACKLOG` or on a standing `unreadable`
+count. Whether those are newsworthy depends on how many documents a deployment holds, and the rule
+`D10-105` left is that a page must be something a person can act on at three in the morning. An
+operator reads the gauge; the alert set stays as `D10-111` and `D10-113` left it.
+
+What this does not close: the `contract.ingested` consumer is still unwritten, so that topic still
+has no reader and the worker polls a table rather than consuming anything. That half stays blocked
+on the same owner decision, now narrower — whether to run a broker, and whether an event should
+replace this poll or run beside it.
+
+Gates, measured on this tree: `ruff check` and `ruff format --check` clean over `143` files,
+`python -m mypy` strict-clean reporting "no issues found in `76` source files" when run bare from
+the repository root as CI runs it, `bandit -c pyproject.toml -r backend/app -q` exit 0, and
+`pytest -o addopts="" -m "not integration"` `1233 passed, 2 skipped, 19 deselected`. The new
+`test_extraction_worker.py` accounts for `23 passed` of that and pins the stamp on three outcomes
+and its absence on two, the cursor carrying past a permanently unreadable contract at a batch size
+of one, an idempotent second tick, a reviewer's rows and `approved` status left untouched, a
+backend-down tick that survives, and counters recorded only after a commit. `test_migrations.py`
+applies `0008` to an empty database and finds the column, which is the assertion that the model and
+the migration agree.
+
+Whether that is green on the remote is the paragraph that follows.
+
+The answer is yes. `D10-120` landed as `671ce54` and CI run `43740631123` built it green, nine jobs
+of nine read from the jobs API rather than assumed: `python static` type-checks the new worker, and
+`backend tests (pytest, sqlite)` collects the new module. The `backend integration (MySQL 8.4)` job
+is also green, but it is not evidence for this slice: `SKIP LOCKED` is honoured on that server and
+ignored on SQLite, and no test drives *this* claim there yet, so the worker's locking is proven only
+by the two-server contract `test_outbox.py` and `test_mysql_integration.py` already pin for the same
+clause elsewhere. This closing commit is documentation-only and its own run is not named, for the
+reason `D10-115` through `D10-119` all gave: a paragraph cannot contain the id of the run that
+publishes it.

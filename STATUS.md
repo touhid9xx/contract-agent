@@ -272,7 +272,9 @@ tests whether it is `None`, ~~and nothing yet turns the bytes into text, so gap 
 stays half-closed and gap 5 stays blocked.~~ **Amended, not deleted (`D10-38`):** the bytes are
 turned into text now, by the one command that always needed them. It arrives too late to change
 this paragraph's own claim — at `67bf8f6` the clause was exactly true, and that is why it is kept —
-but gap 5 is still blocked, because nothing calls extraction on its own. The suite moved from **827** to **840**
+but ~~gap 5 is still blocked, because nothing calls extraction on its own~~ — **`D10-120`
+gave it a caller on a poll interval, so the surviving half is the event consumer only**. The suite
+moved from **827** to **840**
 (825 passed, the same 15 environmental skips). No migration: the head stays `0006`.
 
 **Then the listing gets a face** (`D10-28`, `feat(web)`): `/[locale]/contracts` is the
@@ -510,8 +512,9 @@ ran green on this tree from the repository root — `ruff check`, `ruff format -
 `mypy app` strict (59 files), `bandit` exit 0, `pytest -q` **860 tests, 0 failures, 15 skipped**
 (13 MySQL, 1 symlink, 1 Kafka). **No schema change, no migration (`0006`)**; **no real contract PDF
 has ever been parsed**, a scanned PDF still yields nothing (no OCR), and **nothing calls the reader
-on its own**, so gap 12 is narrowed in a third place rather than closed and gap 5 is still blocked
-on the owner decision.
+on its own**, so gap 12 is narrowed in a third place rather than closed and ~~gap 5 is still
+blocked on the owner decision~~ — **the owner was asked and chose local extraction on a poll
+interval, which `D10-120` built**, so what is left of that clause is the event half only.
 
 **Then the invisible-failure check gets a process** (`D10-39`, one commit: `feat(backend)` `2572f53`):
 `D10-12` made those states machine-checkable and gave them an exit code, and said plainly what was
@@ -3521,15 +3524,25 @@ above read "passed" because a hook finally ran and passed.
    **no alert fires when rows park and nothing requeues them automatically**
    (D5-03). The default `EVENT_TRANSPORT=none` keeps the refusing stand-in, so a
    fresh deployment retries and parks events rather than losing them (D4-03).
-   **Prerequisites now exist that did not when this was written, and the gap is
-   still open.** `D10-26` gave the contract a stored document, so the consumer
+   ~~**Prerequisites now exist that did not when this was written, and the gap is
+   still open.**~~ **Amended by `D10-120`:** the extraction half is closed and the
+   event half is not. `D10-26` gave the contract a stored document, so a consumer
    would have bytes to work on rather than only metadata, and `D10-27` gave the
    aggregate a listing, so a contract id can be found without reading one out of an
-   ingest response. What has not changed is the decision: no handler is written,
-   and writing one is a choice about *what a consumer does* — extract text locally,
-   call out to a service, or acknowledge and do nothing — that a slice should not
-   make on its own. It is recorded as **blocked on an owner decision**, not as
-   unstarted work.
+   ingest response; `D10-38` turned those bytes into text; `D10-120` put that reader
+   behind a poll interval, so a contract nobody asks about by hand is read anyway.
+   ~~What has not changed is the decision: no handler is written, and writing one is
+   a choice about *what a consumer does* — extract text locally, call out to a
+   service, or acknowledge and do nothing — that a slice should not make on its
+   own.~~ That choice was then put to the owner and answered on the cheap side:
+   **extract locally**, with the `PatternExtractor` F7 already shipped, **on a
+   clock rather than on an event**. It is recorded as answered, not as a decision
+   that is still owed. What survives is narrower and still true: there is **no
+   `contract.ingested` consumer**, so the topic still has no reader and the
+   publisher still publishes to nothing. That half stays **blocked on an owner
+   decision** for a reason that is a deployment's and not a slice's — wiring it
+   means running a broker this stack does not ship, and deciding whether an event
+   should *replace* the poll or run beside it.
 6. ~~**No refresh token.**~~ — **closed by `D10-17`.** `POST /auth/login` now also
    returns a single-use refresh token, and `POST /auth/refresh` spends it for a
    successor in the same family, so a 15-minute access token no longer means
@@ -3605,8 +3618,12 @@ above read "passed" because a hook finally ran and passed.
     above is kept because it was exactly true when written. `app/core/document_text.py`
     turns a stored document into text — PDF decided by **magic bytes**, never by a name
     or content type — and `extract` reads the contract's own stored document when
-    `--text-file` is omitted. Gap 5 is **still blocked**, which is the surviving claim:
-    nothing calls extraction on its own, so the consumer still has no producer. It is
+    `--text-file` is omitted. ~~Gap 5 is **still blocked**, which is the surviving
+    claim: nothing calls extraction on its own, so the consumer still has no
+    producer.~~ **Amended by `D10-120`:** something calls it on its own now — the
+    `extractor` service reads unstamped documents on a poll interval — so the
+    surviving claim is the narrower one item 5 above states, that no
+    `contract.ingested` consumer exists. It is
     also not sent over the wire at all, which is deliberate: an absolute path inside the
     API container has no use for a viewer and maps the deployment's filesystem for
     anyone who does.
@@ -5807,9 +5824,13 @@ deliberately the one needing no ruling — a way to test the server, not a new r
   closed:** `GET /contracts` reports `has_document` by testing the column for `None`, so
   it has an *existence* reader now. **Amended, not deleted (`D10-38`):** the *content*
   reader exists too — `app/core/document_text.py`, called by `extract` when `--text-file`
-  is omitted — so the column now has both. Gap 5 is **still** blocked exactly where
+  is omitted — so the column now has both. ~~Gap 5 is **still** blocked exactly where
   `D10-26` left it, for a different reason than absence of code: nothing calls the reader
-  on its own, so the `contract.ingested` consumer still has no producer.
+  on its own, so the `contract.ingested` consumer still has no producer.~~ **Amended by
+  `D10-120`:** the reader has a caller on a clock now — the `extractor` service scans for
+  unstamped documents, so extraction no longer waits for someone to run `extract` — and what
+  is still absent is the event consumer, which is a broker decision rather than a missing
+  caller.
 - `app/api/v1/` — `auth`, `health`, `contracts`, `agent`, `review` and now
   `notifications`. The backend is no longer *behind* the UI contract by a route; on
   the notification path it is ahead of it. The first screens now do call it:
@@ -7623,6 +7644,78 @@ included, which are the jobs that read the two edited modules. This closing
 commit is documentation-only and its own run is not named here, for the
 reason `D10-115`, `D10-116`, `D10-117` and `D10-118` all gave: a paragraph
 cannot contain the id of the run that publishes it.
+
+### D10-120 — the document nobody opened, and the stamp that says "I looked"
+
+Gap 5's extraction half, and gap 5's *only* half that a slice could decide. `extract_contract` has
+been complete since F7 and its one caller was an operator typing `python -m app.cli extract
+--contract-id N`; the review queue, the decision policy and the reminder planner were all reading a
+table that stayed empty until somebody remembered, so "the system reads the contract you uploaded"
+was a promise the deployment kept by hand. `app/workers/extraction_worker.py` is the seventh worker:
+`run_once` / `drain` / `run_forever`, `--once` for a single drained pass, SIGINT and SIGTERM for a
+stop that waits for the page in flight, and a `/metrics` listener on `9107` beside the six that
+already had one.
+
+**The queue predicate is a stamp, not a row count.** "Has a stored document and no extracted
+fields" cannot finish: a scanned page with no text layer, or a contract that never states an
+e-mail, yields no row, so it matches on every tick for ever and the head of the queue is a document
+that can never leave it. `0008_extraction_attempted_at` adds a nullable
+`contracts.extraction_attempted_at` with an index, and the queue is `storage_path IS NOT NULL AND
+extraction_attempted_at IS NULL`. NULL therefore means *never attempted*, which makes the migration
+its own backfill: every pre-existing contract is NULL under both predicates, so nothing is rewritten
+and no data statement runs. The stamp commits in the same transaction as the field rows — "we read
+it and ran extraction" is one fact, and a stamp that outlived a rolled-back write would take the
+contract out of the queue for good.
+
+**Which outcomes stamp, and which deliberately do not.** `extracted`, `empty` and `reviewed` stamp:
+each is a finished read, and `empty` is the case the predicate exists for. `unreadable` (bytes that
+will not load, decrypt or parse, or a document over `EXTRACTION_MAX_DOCUMENT_CHARS`) and
+`unavailable` (the backend was down) do not, because those are a volume, key-ring, build or
+configuration problem and the retry is a retry of the *reading* — the part a restored key actually
+repairs. Stamping them would silence a contract for ever over a credential. Starvation is prevented
+by the id cursor instead: each page is claimed `id > cursor`, the cursor advances only after the
+commit, and a short page wraps it, so a block of unfinishable contracts is paged past and revisited
+rather than sat in front of.
+
+**One predicate, two readers.** `_extraction_queue()` is a single helper that both
+`claim_extraction_candidates` and `count_extraction_backlog` call, so the gauge cannot describe a
+queue the claim does not select. That is not decoration — it caught a defect. The backlog gauge is
+recorded after the page commits, but it was *counted* inside the same session, and
+`build_session_factory` sets `autoflush=False`, so the `SELECT` could not see the stamps the tick
+had just assigned and reported the queue as it stood *before* the page. The number would then have
+fallen only on a tick that found nothing to do, inverting the one thing a backlog gauge is for.
+`count_extraction_backlog` now flushes first, and its docstring records this as the third instance
+of the `autoflush=False` lesson after `app/db/session.py` and `app/core/security.py`.
+
+**Two test corrections, both mine.** Nine assertions compared an aware `datetime` to a stamp read
+back through a `DateTime(timezone=False)` column, which is naive by D2-01; the constants were the
+anomaly — `test_expiry` and `test_reminder_planner` both use naive `NOW` — so the constants changed,
+not the helper. And one test asserted that a fully reviewed document reports `reviewed` when the
+document yields three fields and only one was marked reviewed: the worker was right to say
+`extracted`, because `stored` outranks `skipped_reviewed`. A second test now pins that precedence,
+and the true "nothing was written" case got its own single-field document.
+
+What it does not close: **the `contract.ingested` consumer is still unwritten**, so the topic still
+has no reader and the outbox still publishes to nothing — item 5 of the gap list is why that is a
+deployment decision and not a missing caller, and it is also why this worker polls the table instead
+of consuming the event.
+
+Gates, measured on this tree: `ruff check` and `ruff format --check` clean over `143` files,
+`python -m mypy` strict-clean reporting "no issues found in `76` source files" (run bare from the
+repository root as CI does — `mypy app tests` bypasses the config's file set and reports 24
+pre-existing errors across 13 files), `bandit -c pyproject.toml -r backend/app -q` exit 0, and
+`pytest -o addopts="" -m "not integration"` `1233 passed, 2 skipped, 19 deselected`, of which the
+new `test_extraction_worker.py` contributes `23 passed`. `test_migrations.py` applies `0008` to an
+empty database and finds the column, which is the assertion that the model and the migration agree.
+
+Whether that is green on the remote is the paragraph that follows.
+
+The answer is yes. `D10-120` landed as `671ce54` and CI run `43740631123` built it green: nine jobs
+of nine, read from the jobs API rather than inferred, and the two that matter here are `python
+static`, which type-checks the new worker, and `backend tests (pytest, sqlite)`, which collects the
+new module. This closing commit is documentation-only and its own run is not named here, for the
+reason `D10-115` through `D10-119` all gave: a paragraph cannot contain the id of the run that
+publishes it.
 
 ## Non-negotiable reminders
 
