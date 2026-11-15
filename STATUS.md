@@ -7280,10 +7280,10 @@ sweep drains on that schema; `docker compose config -q` exits 0.
 Limits: the image's own apply is SQLite, and the chain against MySQL is `test_mysql_integration`'s,
 not the image's; no job boots the stack, so `migrate`'s ordering was read from the resolved config
 rather than watched; column types stay ungated; one worker still runs in the image and five are
-imported only. Found while measuring and only half fixed: `cp .env.example .env` crashed every
-`Settings()` on an empty `LOG_JSON`, which now reads `false`; a `.env` still fails six named
-`test_config` cases by shadowing the defaults they assert on, which is a test-isolation slice of its
-own.
+imported only. Found while measuring and half fixed here: `cp .env.example .env` crashed every
+`Settings()` on an empty `LOG_JSON`, which now reads `false`. The other half — a `.env` shadowing the
+defaults six `test_config` cases assert on — is `D10-115`'s, which found seven across two files and
+made the suite stop reading the file at all.
 
 Whether the job is green on Linux is a claim for the paragraph that follows, not this one.
 
@@ -7291,6 +7291,29 @@ Run `43658722601` on `da2730f`: nine jobs of nine, with `the image applies the m
 and `a worker completes a tick on the migrated schema` listed among the succeeded steps of
 `image (docker build, every entry point)`. The stack's ordering is still read from the resolved
 config rather than watched.
+
+### D10-115 — The suite stops reading the developer's `.env`
+
+`Settings` honours a `.env` in the working directory because a deployment puts one there, and
+`pytest` runs from the same root the stack tells a deployer to copy it into
+(`cp .env.example .env`), so the suite ran inside that file. `D10-114` recorded six shadowed
+`test_config` cases; `D10-115` measured `-m "not integration"` with a `.env` in place and found
+**seven failures in two files** — those six, plus `test_senders`' SMTP-without-TLS refusal, whose
+message named `LOG_JSON` instead of the setting under test. `conftest` now sets
+`Settings.model_config["env_file"] = None` at import, so no test reads a file the checkout happens
+to hold, and `test_a_dotenv_in_the_working_directory_is_not_read` proves it with `CORS_ORIGINS=*` —
+refused in every environment, which matters because CI has no `.env` to fail on. `.env.example`
+becomes a subject rather than ambient state: loaded by name, every key checked against
+`Settings.model_fields`, so a line nothing can parse fails a test instead of waiting for a deployer
+to copy the file and try to boot. Green with the file present and absent alike —
+`1195 passed, 2 skipped, 19 deselected`; ruff clean, format 138, mypy 75 files, bandit exit 0.
+
+`check_d115.py` asserts the structural facts and exits 0 on the committed tree; `mutate_d115.py`
+breaks each in turn — nineteen cases, fifteen structural, three behavioural, one comment-only
+control, none missed and none caught for the wrong reason — restoring every file byte-identically
+and comparing digests afterwards.
+
+Whether that is green on the remote is the paragraph that follows.
 
 ## Non-negotiable reminders
 

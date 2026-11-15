@@ -8897,11 +8897,13 @@ trims the build context to what the images read: without it the added `COPY` of
 image before and absent after — which makes an image depend on which commands were run before it was
 built. And one defect was found while measuring rather than fixed here: `cp .env.example .env`, the
 step the compose gate itself performs, made every `Settings()` raise on the empty `LOG_JSON=` at
-`.env.example:13`, so nothing loaded at all. That one line now reads `LOG_JSON=false`; a `.env` in
-the working directory still overrides the defaults `test_config.py` asserts on and fails six named
-cases — `test_json_logs_default_to_on_in_production`, the loopback-CORS and relative-document-path
-refusals, and all three Ollama-endpoint cases — which is a test-isolation defect with its own slice
-to write.
+`.env.example:13`, so nothing loaded at all. That one line now reads `LOG_JSON=false`. What was left
+open here — a `.env` in the working directory shadowing the defaults `test_config.py` asserts on —
+was recorded as six named cases: `test_json_logs_default_to_on_in_production`, the loopback-CORS and
+relative-document-path refusals, and all three Ollama-endpoint cases. `D10-115` measured the suite
+instead of the file and found **seven across two files**: those six, plus `test_senders`'
+SMTP-without-TLS refusal, where the file's `LOG_JSON=false` tripped a different production check
+before the refusal under test could speak.
 
 Whether the job is green on Linux is a claim for the paragraph that follows, not this one.
 
@@ -8913,3 +8915,66 @@ in the same run. What it establishes is narrower than it sounds: the chain appli
 artifact, on Linux, to a database that then serves a real worker. It does not establish the ordering
 in `docker-compose.yml` — no job boots the stack — and it says nothing about MySQL, which stays
 `test_mysql_integration`'s claim.
+
+### D10-115 — The suite stops reading the developer's `.env`
+
+`Settings` reads a `.env` from the working directory, because a deployment puts one there
+(`env_file=".env"`). `pytest` reads its configuration from the same directory — `testpaths` is
+`backend/tests`, relative to the root — and the file the stack tells a deployer to create is created
+there: `cp .env.example .env`, which is what `D10-111`'s instructions say and what the compose gate
+does. So the whole suite ran inside the deployment's configuration file, and `D10-114` found it
+while measuring something else: six cases in `test_config` asserting defaults the file overrides.
+
+Measured instead of reasoned about. With `.env` in place, `pytest -m "not integration"` reports 1191
+passed, 2 skipped, **7 failed**. The seventh is the one that earns the slice: `test_senders`'
+`test_production_refuses_smtp_without_tls` fails with a message about `LOG_JSON`, because the file's
+`false` trips a production check that runs before the SMTP/TLS refusal the test is about. A stale
+`.env` does not merely fail seven tests — one of them fails for a reason naming a setting it never
+touched, which is the shape that costs an afternoon. The figure `D10-114` recorded was six, in one
+file.
+
+**Decision.** `backend/tests/conftest.py` sets `Settings.model_config["env_file"] = None` at module
+level, before the first fixture is defined and so before any test can construct a `Settings`. One
+assignment, at the seam where the ambient state enters, through the documented interface. The first
+draft of that comment claimed pydantic caches the class configuration and the pin would have to
+reach `__pydantic_config__`; measuring showed that attribute does not exist in pydantic 2.12.4 and
+the plain dict mutation is honoured at construction time, so the comment was cut back to what was
+observed.
+
+**What it does not cost.** A test that cares about a setting passes it as a keyword argument — that
+is how the 1195 pass. The half that was genuinely missing is the reverse: `.env.example`, the file
+the stack tells a deployer to copy, had no test at all, which is how `LOG_JSON=` shipped empty for a
+whole slice. It has two now. `test_the_example_env_file_loads` parses it *by name*
+(`Settings(_env_file=EXAMPLE_ENV)`) and asserts the result agrees with the file's own `APP_ENV`
+rather than with a literal — every value in the example is also the field's default, deliberately,
+so "loads" is the only claim there is to make, and it is exactly the claim that broke.
+`test_the_example_env_file_names_only_settings_that_exist` reads every key against
+`Settings.model_fields`, because `Settings` is `extra="ignore"`: a misspelled key in a `.env`
+changes nothing and reports nothing, the worst shape for a file whose job is to say which knobs
+exist. `PROMETHEUS_PORT` is named there as the one entry belonging to Compose's own interpolation
+rather than to the application.
+
+**The guard.** Deleting the pin would otherwise be undetectable, and that is the interesting half:
+CI checks out no `.env`, so the regression would go green there and red only on a developer's disk —
+the mirror image of the defect being fixed. `test_a_dotenv_in_the_working_directory_is_not_read`
+closes it: it writes `CORS_ORIGINS=*` into `tmp_path`, moves there, and constructs
+`Settings(app_env="development")`. A wildcard origin is refused in every environment, so no default
+can satisfy the assertion — if the file is read, the construction raises; if the pin holds, nothing
+happens. `.env.example` loses the sentence that recorded the defect as unfixed, and `STATUS.md`
+records the corrected count.
+
+Nineteen cases run; each carries the sentence the checker or `pytest` must emit, so a mutation
+caught for an unrelated reason is reported wrong rather than counted. Fifteen assert structure.
+Three are behavioural, because the claims that matter are not visible in the shape of the code:
+deleting the pin makes the guard construct a `Settings` that reads `CORS_ORIGINS=*` and fail on
+`'*' is not permitted`; emptying the example's `LOG_JSON` makes the loading test fail on
+`Input should be a valid boolean`; adding a misspelled `LOG_LEVL` makes the names test fail naming
+that key. The nineteenth is a comment-only edit to this entry, which the checker has to ignore — a
+check that reacts to prose is asserting an absence of something rather than the thing itself. Every
+file is restored from the bytes read before its mutation and compared by digest afterwards, so a
+harness that left a mutant behind reports a failed restore instead of success. Writing the cases
+found two checks that were too weak: a substring test the guard's own docstring satisfied, and a
+`PROMETHEUS_PORT` match that would have been satisfied by prose. Both now read executable lines
+only.
+
+Whether that is green on the remote is the paragraph that follows.
