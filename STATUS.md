@@ -1422,7 +1422,7 @@ that criterion.
 | Backend | `app/core/config.py` fail-fast settings, `app/core/logging.py` structlog + PII redaction, `app/core/middleware.py` request/trace IDs, `app/main.py` factory + error envelope, `/api/v1/health` |
 | Frontend | Next.js 16 + Tailwind 4 + TanStack Query + Zustand + next-themes + next-intl (en, bn), ESLint flat config, Prettier, `[locale]` routing |
 | Scripts | `scripts/bootstrap.mjs` (one-command setup), `scripts/run-frontend-check.mjs` |
-| Env | `.env.example` ~~documents every setting read by `Settings`~~ — **amended by `D10-107`:** it documents the variables an operator sets, and not every field `Settings` reads. The `AGENT_*` group, the `DB_*` pool group and the `OUTBOX_*` group are read from their defaults and never listed, deliberately: the first describes a backend the README says is off (`D7-03`), the other two are internal. The claim was read as true for several slices because nobody compared the two lists |
+| Env | `.env.example` ~~documents every setting read by `Settings`~~ — **amended by `D10-107`:** it documents the variables an operator sets, and not every field `Settings` reads. The `AGENT_*` group, the `DB_*` pool group and the `OUTBOX_*` group are read from their defaults and never listed, deliberately: the first describes a backend the README says is off (`D7-03`), the other two are internal. The claim was read as true for several slices because nobody compared the two lists. **Amended by `D10-125`:** it also carries a `MYSQL_*` block (`DATABASE`, `USER`, `PASSWORD`, `ROOT_PASSWORD`, `PORT`) that `docker-compose.yml` interpolates and `Settings` never reads at all — the application is given `DATABASE_URL` instead, and compose refuses to start without two of those five, which is why their absence was a stack that built nothing rather than one that failed after starting |
 
 ## F2 — MySQL 8 + SQLAlchemy 2.0 + Alembic + outbox relay ✅
 
@@ -8047,6 +8047,108 @@ and `frontend (typecheck, eslint, vitest, build)`, which proves the corrected do
 the linter it was corrected under. This closing commit is documentation only, and its own run is not
 named, for the reason `D10-115` through `D10-123` all gave: a paragraph cannot contain the id of the
 run that publishes it.
+
+### D10-125 — the example could boot the application and could not start the stack
+
+**The report was one sentence, and it named a symptom with two causes under it:** "there is no
+container active in docker, neither any image". Neither was a stack that had been started and then
+stopped. `docker-compose.yml` declares `MYSQL_ROOT_PASSWORD` and `MYSQL_PASSWORD` as `${VAR:?…}`,
+which is a refusal to interpolate rather than a default, and `.env.example` — the file every
+deployment is told to copy — defined neither one. So `cp .env.example .env` followed by `docker
+compose up` stopped at interpolation, before it built anything at all: no container, and no
+`contract-agent-api:dev` image either. The report was exact, and the usual first check, `docker ps`,
+could only ever have read as "nothing running".
+
+**Both CI jobs were green and neither could see it.** The compose gate passes the two values inline,
+so the file that refuses to interpolate on a developer's machine is never interpolated in CI. The
+only test that read `.env.example` asserted that copying it boots `Settings`, and `Settings` reads
+no compose variable. Two compartments, each validated in a room that could not see the other, in the
+one file a deployer touches first — the shape `D10-120`, `D10-123` and `D10-124` all found, one
+layer down from the API.
+
+**Behind it sat a quieter defect that only appeared once the stack started.** Twelve services came
+up and `extractor` crash-looped on `MissingBlindIndexKeyError`. `ExtractionWorker` builds
+`build_cipher(settings)` and `build_blind_index(settings)` in `__init__` — deliberately, so a
+deployment missing a key fails at start-up instead of once per contract — and the example shipped
+`ENCRYPTION_KEY=` empty with `CONTACT_BLIND_INDEX_KEY` commented out, on the reasoning that a copy
+should not look configured. That reasoning holds for the API, where both builders are called at the
+point of use and a missing key is a 503 on one route. It does not hold for a worker in the same
+compose file, started unconditionally. The example could not start the stack it ships, and the
+twelve healthy services were what hid the thirteenth.
+
+**Shipping a key in the example is only defensible because start-up refuses it.** Both now carry dev
+values, `DEV_ENCRYPTION_KEY_PLACEHOLDER` and `DEV_BLIND_INDEX_KEY_PLACEHOLDER`, defined beside
+`DEV_SECRET_PLACEHOLDER` in `app/core/config.py` and refused in staging and production by
+`_reject_insecure_production_defaults`, on the rule the secret placeholder already set. A deployment
+that copied the example and kept them would otherwise seal every stored contact value under a key
+printed in the repository, and search it with a second one.
+
+**The first encryption placeholder was wrong and CI said so, which is the only reason it is worth
+recording.** It was the base64url of the ASCII sentence it decodes to, chosen so that a reader could
+see it was not key material. base64 spreads the bits: the string measures 4.77 bits of entropy per
+character, and `generic-api-key` flagged it in `.env.example` and in `config.py` on run
+`43764587165` — the whole-history scan, not the tree. `.gitleaksignore` forbids adding an entry to
+quiet a new finding, so the value was replaced instead: 32 zero bytes, url-safe base64,
+`AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=`, measured at 0.156 bits per character by
+`.agent-cache/check_d125_keys.py`. Zeros specifically, because it is already the value
+`test_encryption_key_shape_detection` uses to prove the shape check and it is refused in production
+regardless. The commit that carried the flagged value was already on `main`, so the finding had to
+leave the history rather than the worktree: `bcb18f8` was amended in place and pushed with
+`--force-with-lease`, after `git grep` showed no commit, document or run cited it. A follow-up
+commit would have left the scan red forever.
+
+**Six tests, everything derived and nothing listed.** The `${VAR:?}` set is parsed out of the
+compose file itself, so the next required variable is covered the day it is written. Every key the
+compose-only allowlist excuses must be one the compose file still reads, so the list cannot hide a
+rename. The start-up requirements are read from each worker's own `__init__` and `main` — which
+builders it constructs — paired with the refusal messages in `app/core`, so a worker that begins
+constructing a keyed object fails the suite until the example carries the variable. The example and
+the two constants must name the same values, and production must refuse each one. There is one
+start-up requirement today and it is `app.workers.extraction_worker` needing both keys.
+
+**Proof the guard bites rather than merely passing.** Eight mutations, applied to the real files one
+at a time, each caught by the test meant to catch it, with the unmutated tree green beside them:
+- the example comments the blind index key back out
+- the example leaves the encryption key empty again
+- the example drops the encryption key line entirely
+- the example's blind index key drifts from the constant it must equal
+- the constant drifts from the value the example ships
+- production stops refusing the example's encryption key
+- production stops refusing the example's blind index key
+- a worker starts needing a key the example leaves unset
+All three mutated files were restored and compared by SHA-256.
+
+**A third defect was on the machine rather than in the tree, and it is recorded because the next
+person will meet it.** After the example was fixed, `migrate` still exited 1 with `Access denied for
+user 'contract_agent'`: the volume `contract-agent_mysql-data` held a 216 MB datadir written before
+this compose `.env` existed. MySQL honours `MYSQL_USER` and `MYSQL_PASSWORD` only while initialising
+an *empty* datadir, and an existing one keeps the credentials it was created with, so the repair is
+a volume rather than a password reset. It was preserved as `contract-agent_mysql-data.pre-env-fix`,
+the stack was then brought up from a fresh copy of `.env.example` alone, and the backup was dropped
+only after thirteen services, a `migrate` exit 0, `/health` and `/health/ready` both `200` and
+`extractor` at `RestartCount=0` with `worker_metrics_listening` logged had all been read off the
+running system.
+
+**What this does not fix, stated rather than implied.** The mysql healthcheck's roughly 150 second
+grace is shorter than a cold datadir initialisation, which takes about three minutes, so on a
+genuinely fresh volume MySQL reports `unhealthy` while it is still bootstrapping and settles
+afterwards. Nothing here changes that, and raising the grace is its own decision.
+
+Gates, on the tree that commit carries: `ruff check` and `ruff format --check` clean over `147`
+files, `python -m mypy` bare from the repository root reporting "no issues found in `76` source
+files", `bandit -c pyproject.toml -r backend/app` exit 0, `gitleaks` passing over the whole history
+with no entry added, nineteen pre-commit hooks, and `pytest -o addopts="" -m "not integration"`
+`1259 passed, 2 skipped, 19 deselected` — six more than `D10-124`'s `1253`, which is this slice's
+six tests and nothing else.
+
+The answer is yes. `D10-125` landed as `1ef5737` and CI run `43766432848` built it green: nine jobs
+of nine, read from the jobs API. The one that matters most here is `hygiene + secret scan`, which is
+the job that had already failed once on this slice and the reason the placeholder is zeros rather
+than a sentence; `image (docker build, every entry point)` proves the extractor's entry point
+imports from the built image, though it does not *start* the worker, which is why the running-stack
+check above exists. This closing commit is documentation only, and its own run is not named, for the
+reason `D10-115` through `D10-124` all gave: a paragraph cannot contain the id of the run that
+publishes it.
 
 ## Non-negotiable reminders
 
