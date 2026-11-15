@@ -8812,3 +8812,95 @@ One execution is not the claim. At three failures in thirty-eight, passing once 
 outcome before the fix as well, so what carries the conclusion is the ordering argument and the
 mutations that break it; this run is the fact that the argument survives contact with a runner on a
 different kernel from the reproduction.
+
+### D10-114 — The image that could not create the database it served
+
+`Dockerfile.backend` copied `backend/app` and `requirements.txt`. Not `backend/alembic.ini`, not
+`backend/migrations`. `D10-112` wrote that down as a limit — "the schema the sweep ticks against is
+`Base.metadata`, created by a one-liner in the same step, not `alembic upgrade head` ... so this
+image cannot apply a migration at all" — and *limit* was the wrong word for it. An artifact that
+cannot create the database it serves is not limited, it is unusable: the schema could only be made
+from a checkout, and "which revision is this deployment on?" had no answer inside the deployment.
+
+The first fact was measured rather than read. Rebuilding the image without the two lines and running
+the new step against it prints `FAILED: No 'script_location' key found in configuration.` and exits
+255, from a base image whose `alembic` is on `PATH` and whose working directory is `/app`. That is
+the pre-`D10-114` image exactly, and it is why the job that builds it had to conjure a schema with
+`Base.metadata.create_all` in the same step: the models, not the migrations — the one schema nobody
+deploys.
+
+The second was that nothing compared the two. Every test in the suite builds its tables with
+`create_all` from `conftest.py`, which is fast, hermetic, and structurally unable to notice drift
+between the models and the migrations: it checks the declarations against the tables it has just
+made from those same declarations. `alembic check` — the thing that would notice — is run by hand
+against MySQL and recorded in `STATUS.md`; it is in no workflow. A column added to a model without a
+migration therefore passed every gate on both dialects, and failed on the first query after
+deployment.
+
+Three changes, and the third is what keeps the other two from being decoration.
+
+1. The image ships them: `COPY backend/alembic.ini` and `COPY backend/migrations`, both landing at
+   `/app` because `script_location = migrations` resolves against the working directory. Owned by
+   `app` like everything else the image reads, and nothing is written at runtime, so `read_only`
+   still holds.
+2. The image applies them: a new step in the `image` job runs `alembic upgrade head && alembic
+   current` in the container against a fresh SQLite and refuses unless the output carries `(head)`.
+   `(head)` rather than a revision number, so adding a migration needs no edit here — the claim is
+   that the database agrees with the shipped scripts, and a `script_location` that resolved nowhere
+   would leave `current` empty instead. The tick step stopped calling `create_all` and started
+   calling `alembic upgrade head`, so the sweep now runs on the schema a deployment gets.
+3. The migrations are compared with the models in the suite, in 0.97s: `test_migrations.py` applies
+   the whole chain to a temp SQLite through a programmatic Alembic config and asserts three separate
+   facts — the database ends at the script's own head; the table set equals
+   `Base.metadata.tables` in both directions, so a forgotten table and a table nothing declares are
+   different failures; and every declared column name exists. Column *types* are deliberately not
+   compared: SQLite renders `ENUM` as `VARCHAR`, the 13-artefact noise `STATUS.md` already documents
+   for `alembic check` on SQLite, and `test_mysql_integration` is where real types live. The config
+   is built without `alembic.ini` on purpose — `env.py` calls `logging.fileConfig` whenever the
+   config names a file, and reconfiguring the root logger mid-session changes what every later test
+   captures.
+
+The figures were taken before the assertions were written, so any of them could have been false. On
+a fresh SQLite the chain reaches `0007`, and the migrated database holds 12 tables — no more and no
+fewer — with zero column mismatches against the models. The gate is satisfiable today and would bite
+tomorrow, which is the only state worth committing.
+
+Each assertion was then broken on purpose. Deleting `0007` fails the column check, and the table
+check before it passes. A `0008` creating `scratch_undeclared` fails the table check alone, naming
+the table. Pointing `script_location` at a directory that is not there fails the chain check. The
+untouched control passes, and `0007` was restored byte-identically: `git diff --stat --
+backend/migrations` is empty.
+
+The stack follows the artifact. `docker-compose.yml` gains a one-shot `migrate` service — the same
+image with `command: [alembic, upgrade, head]` and `restart: "no"` — and the `x-worker` anchor and
+the API now depend on it with `service_completed_successfully`. Ordered rather than co-started: a
+worker that starts before the schema exists does not fail, it queries tables that are not there,
+logs, and retries for ever, which is a crash loop reported as a healthy stack. `migrate` overrides
+the anchor's `depends_on`, which would otherwise name the service itself, and disables the inherited
+healthcheck, which probes a metrics port a migration never opens. Read from `docker compose config`:
+restart `no`, healthcheck disabled, no published ports, `depends_on` naming `mysql` alone, and seven
+services waiting on it.
+
+`README.md` said the chain was at head `0006` while `0007` had been in the tree for slices; it now
+says `0007` and names the service that applies it.
+
+**Limits.** One worker still runs in the image and five are only imported, because `--once` is the
+only terminating mode; `migrate` is the eighth entry point and the one the import list structurally
+cannot cover, since it starts a console script rather than an `app.workers` module — the new step
+runs it instead. The image's own apply is SQLite; the chain against MySQL is proven by
+`test_mysql_integration`'s `downgrade base` → `upgrade head`, not by the image, and no job boots the
+stack to watch `migrate` gate it — CI validates the graph with `docker compose config -q`, and the
+ordering above was read from the resolved config rather than observed as a stack starting. Column
+types stay ungated on both dialects, the half `alembic check` would close. The new `.dockerignore`
+trims the build context to what the images read: without it the added `COPY` of
+`backend/migrations` shipped whatever `__pycache__` lay in the checkout — measured present in the
+image before and absent after — which makes an image depend on which commands were run before it was
+built. And one defect was found while measuring rather than fixed here: `cp .env.example .env`, the
+step the compose gate itself performs, made every `Settings()` raise on the empty `LOG_JSON=` at
+`.env.example:13`, so nothing loaded at all. That one line now reads `LOG_JSON=false`; a `.env` in
+the working directory still overrides the defaults `test_config.py` asserts on and fails six named
+cases — `test_json_logs_default_to_on_in_production`, the loopback-CORS and relative-document-path
+refusals, and all three Ollama-endpoint cases — which is a test-isolation defect with its own slice
+to write.
+
+Whether the job is green on Linux is a claim for the paragraph that follows, not this one.

@@ -7205,10 +7205,12 @@ which nothing does. `docker compose config -q` exits 0, and the workflow parses 
 steps in the new one.
 
 Limits: one worker runs in the image and five are only imported, because `--once` is the only
-terminating mode; the schema it ticks against is `Base.metadata`, not the migrations a deployment
+terminating mode; ~~the schema it ticks against is `Base.metadata`, not the migrations a deployment
 applies, since the image copies `backend/app` and `requirements.txt` and neither
-`backend/migrations` nor `alembic.ini`; and neither the demo nor the frontend image is built by any
-gate.
+`backend/migrations` nor `alembic.ini`~~ — **amended by `D10-114`, not deleted:** both files ship in
+the image, the job applies the chain and reads the revision back, the tick runs on the migrated
+schema, and a one-shot `migrate` service gates the stack on it; and neither the demo nor the
+frontend image is built by any gate.
 
 ### D10-113 — The smoke step that failed on unchanged bytes
 
@@ -7242,6 +7244,48 @@ The run that would have caught this is green: `43656378323` on `b188018`, nine j
 tests (pytest, sqlite)`. One execution is not the claim — at three failures in thirty-eight it was
 the likelier outcome before the fix too — so the claim stays the ordering argument and the
 mutations that break it, with this run as the argument meeting a runner rather than a container.
+
+### D10-114 — The image that could not create the database it served
+
+`Dockerfile.backend` copied `backend/app` and `requirements.txt` and neither `alembic.ini` nor
+`migrations/`, so the artifact could serve requests and never create the database it served them
+from. `D10-112` recorded that as a limit. Rebuilding the image without the two `COPY` lines and
+running the new step against it prints `FAILED: No 'script_location' key found in configuration.`
+and exits 255 — the defect, reproduced — which is also why that job had to build its schema with
+`Base.metadata.create_all`: the models, not the migrations a deployment applies.
+
+Three changes. The image ships both files. A new `image` step applies the chain in the container
+(`alembic upgrade head && alembic current`) and refuses unless the output carries `(head)`, so
+adding a migration needs no edit and a script directory that resolved nowhere leaves `current`
+empty; the tick step stopped calling `create_all` and now runs on the migrated schema. And
+`test_migrations.py` compares the chain with the models where the suite can see it — every other
+test builds its tables from `create_all`, which cannot notice drift, and `alembic check` is run by
+hand against MySQL and is in no workflow. It asserts head convergence, the table set in both
+directions, and every declared column name, in 0.97s; measured first, on a fresh SQLite: 12 tables,
+zero column mismatches.
+
+Each assertion was broken on purpose and failed at its own sentence: deleting `0007` fails the
+column check while the table check before it passes, a `0008` creating `scratch_undeclared` fails
+the table check naming it, a `script_location` that is not there fails the chain check, the control
+passes, and `0007` restored byte-identically. `docker-compose.yml` gains a one-shot `migrate`
+service ordered ahead of the API and six workers with `service_completed_successfully`, so a failed
+migration stops the stack instead of hiding in a restart count; read from `docker compose config`:
+restart `no`, healthcheck disabled, no ports, `depends_on` naming `mysql` alone, seven services
+waiting on it.
+
+Gates: `pytest -m "not integration"` is `1192 passed, 2 skipped, 19 deselected, 0 failed` — `1188`
+plus the four new cases. The image builds, runs as uid `1001`, applies the chain to `0007`, and the
+sweep drains on that schema; `docker compose config -q` exits 0.
+
+Limits: the image's own apply is SQLite, and the chain against MySQL is `test_mysql_integration`'s,
+not the image's; no job boots the stack, so `migrate`'s ordering was read from the resolved config
+rather than watched; column types stay ungated; one worker still runs in the image and five are
+imported only. Found while measuring and only half fixed: `cp .env.example .env` crashed every
+`Settings()` on an empty `LOG_JSON`, which now reads `false`; a `.env` still fails six named
+`test_config` cases by shadowing the defaults they assert on, which is a test-isolation slice of its
+own.
+
+Whether the job is green on Linux is a claim for the paragraph that follows, not this one.
 
 ## Non-negotiable reminders
 

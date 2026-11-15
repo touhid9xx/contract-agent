@@ -46,7 +46,10 @@ and escalation to a human operator.
 The real stack is `backend/` + `frontend/` and needs MySQL, an `ENCRYPTION_KEY` and
 a `SECRET_KEY` (see `backend/app/core/config.py`, which refuses to start on unsafe
 settings rather than degrading). Bring it up with Docker Compose, then run the
-frontend against it. Migrations are Alembic, currently at head `0006`.
+frontend against it. Migrations are Alembic, currently at head `0007`, and they ship
+inside the image: the one-shot `migrate` service applies `alembic upgrade head`
+before the API or any worker starts (`D10-114`). To apply them by hand instead, the
+same image does it without a checkout — `docker compose run --rm migrate`.
 
 ## Run the demo
 
