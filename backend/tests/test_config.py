@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -294,3 +295,96 @@ def test_a_tls_remote_ollama_endpoint_is_accepted() -> None:
     )
 
     assert settings.ollama_base_url == "https://gpu.example.com:11434"
+
+
+# --- the env file nobody should be reading by accident ----------------------
+
+#: The file `docker compose` interpolates, and the one a deployer is told to copy.
+EXAMPLE_ENV = Path(__file__).resolve().parents[2] / ".env.example"
+
+#: Entries in `.env.example` that are not settings. They belong to the stack's own
+#: interpolation, so the application never reads them and no field declares them.
+COMPOSE_ONLY_KEYS = frozenset({"PROMETHEUS_PORT"})
+
+
+def _example_env_entries() -> list[tuple[str, str]]:
+    """Every ``KEY=value`` line in `.env.example`, in file order, comments out."""
+    entries: list[tuple[str, str]] = []
+    for line in EXAMPLE_ENV.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        entries.append((key.strip(), value.strip()))
+    return entries
+
+
+def test_a_dotenv_in_the_working_directory_is_not_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ambient files must not reach the settings these tests assert.
+
+    ``Settings`` reads ``.env`` from the working directory by design, and the repo
+    root is both where `docker compose` needs that file and where `pytest` runs.
+    A suite that honoured it would change behaviour with an untracked file and say
+    nothing about it: ``D10-115`` measured seven failures that way, in two files,
+    from values no test had passed.
+
+    ``CORS_ORIGINS=*`` is the sharpest probe available — it is refused in *every*
+    environment (see ``test_wildcard_cors_is_rejected_everywhere``), so reading the
+    file is a validation error and ignoring it is a quiet pass. This test is also
+    the only thing that would notice the pin in ``conftest`` going away, because CI
+    has no ``.env`` for the ordinary tests to trip over.
+    """
+    (tmp_path / ".env").write_text("CORS_ORIGINS=*\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    # Constructed, not just imported: the file is resolved at instantiation time.
+    assert Settings(app_env="development").cors_origins != "*"
+
+
+def test_the_example_env_file_loads(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``cp .env.example .env`` has to produce a file the application can boot on.
+
+    ``D10-114`` shipped ``LOG_JSON=`` — an empty value pydantic refuses to parse
+    into a ``bool`` — so the copy the compose gate makes was a checkout where every
+    ``Settings()`` raised before a single test ran. The suite could not see it: each
+    test pins the settings it asserts, and the copy was made in a compose check
+    rather than here.
+
+    Every value in the example is also the field's default, deliberately, so the
+    only thing left to assert is that the file *loads* — which is exactly what
+    broke. ``APP_ENV`` is unset for the length of this test because the suite pins
+    it to ``test`` and an exported variable outranks the file; the example declares
+    ``development``, so production-only refusals cannot confound the result.
+    """
+    assert EXAMPLE_ENV.is_file(), "the example env file is part of the deployment"
+
+    entries = dict(_example_env_entries())
+    # `conftest` pins APP_ENV=test for the whole run and an exported variable
+    # outranks the file, so the one value that must come *from* the file is unset
+    # here. It is restored by the fixture, before any other test runs.
+    monkeypatch.delenv("APP_ENV", raising=False)
+    settings = Settings(_env_file=EXAMPLE_ENV)  # type: ignore[call-arg]
+
+    assert settings.app_env == entries["APP_ENV"]
+    assert settings.is_production is False
+
+
+def test_the_example_env_file_names_only_settings_that_exist() -> None:
+    """A misspelled key is ignored in silence, so the example has to be checked.
+
+    ``Settings`` is configured ``extra="ignore"``: ``LOG_LEVL=INFO`` in a `.env`
+    changes nothing and reports nothing, which is the worst shape for the one file
+    whose job is to say which knobs exist. ``PROMETHEUS_PORT`` is the single entry
+    that is not a setting — it belongs to ``docker-compose.yml``'s interpolation
+    (``D10-111``) — so it is named rather than quietly tolerated.
+    """
+    declared = set(Settings.model_fields)
+    unknown = (
+        {key.lower() for key, _ in _example_env_entries()}
+        - declared
+        - {key.lower() for key in COMPOSE_ONLY_KEYS}
+    )
+
+    assert unknown == set(), f".env.example names settings that do not exist: {sorted(unknown)}"

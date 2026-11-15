@@ -37,6 +37,23 @@ from app.db.repositories import enqueue_event as enqueue_outbox_event
 from app.db.session import build_session_factory, session_scope
 from app.main import create_app
 
+# ``Settings`` reads a ``.env`` from the working directory, because a deployment
+# puts one there (``env_file=".env"`` in ``app.core.config``). Tests must not: the
+# repo root is where ``docker compose`` needs that file — the compose gate creates
+# it with ``cp .env.example .env``, and so does anyone following the stack's
+# instructions — while ``pytest`` runs there too (``testpaths`` is ``backend/tests``
+# relative to the root). Left alone the file reconfigures the suite in silence:
+# ``D10-115`` measured seven failures from it, six in ``test_config`` and one in
+# ``test_senders``, every one of them caused by a value the test never passed.
+#
+# Nothing loses coverage by not reading it. A test that cares about a setting
+# states it as a keyword argument, and ``test_config`` loads ``.env.example`` *by
+# name* when the example file is itself the subject
+# (``test_the_example_env_file_loads``) — a declared input rather than ambient
+# state. ``test_a_dotenv_in_the_working_directory_is_not_read`` proves this line
+# still holds, which matters because CI has no ``.env`` to notice with.
+Settings.model_config["env_file"] = None
+
 
 @pytest.fixture(autouse=True)
 def clear_settings_cache() -> Iterator[None]:
