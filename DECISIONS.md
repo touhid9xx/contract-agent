@@ -9214,3 +9214,39 @@ So the matcher that pages on `relay_failed` alone and holds its tongue on the ex
 green on the remote, not merely in a local shell. This closing commit is documentation-only and its
 own run is not named here, for the reason `D10-115` and `D10-116` both gave: a paragraph cannot
 contain the id of the run that publishes it.
+
+**Corrected: the commit that carried this slice was not green, and "present" was a race.** The
+paragraph above is true of `e443080` and incomplete about the commit that published it. `003cb94`'s
+own run, `43711886352`, failed — not in `pytest`, which passed, but in the `smoke worker metrics`
+step of the same job — and it had the pass-then-fail shape: `backend/tests/smoke_worker_metrics.py`
+was identical in both commits, and the job that runs it had passed minutes earlier. The first
+reading, recorded here and then discarded, was that a documentation-only commit cannot break a smoke
+test and the failure must therefore be a flake. It was not one. `wait_for_listener` returned as soon
+as a scrape carried every *declaration*; declarations are rendered by the registry at import while
+samples arrive with a tick; and the watcher binds its listener before `run_forever()` takes its
+first tick. So "200 plus declarations, no sample" is a body a healthy process really serves, the
+park assertion read it, and found no series. Presence is the whole assertion, this block said above
+— what it did not say is that presence has to be *waited for*.
+
+`68ec593` fixes that and nothing else. `wait_for_listener` gained `require_series`;
+`EVERY_TICK_SERIES` says which series a worker must already publish before its listener counts as
+ready, and `required_series(worker)` is the one seam `verify_worker` reads. Only the watcher is in
+that map: the property that made both park series worth publishing on every tick, the zero included,
+is what makes them waitable-for, while the other five write no family this journey can provoke
+without inventing a due outbox row, a due notification and a silent contract apiece — for them a
+declaration stays the strongest honest signal. `tests/test_smoke_worker_metrics.py` is new and
+drives the wait against a stub that serves the pre-tick body first, which makes the window
+deterministic instead of hoped for. One of its four cases exists because emptying
+`EVERY_TICK_SERIES` left the other three green: they passed the tuple explicitly, so nothing pinned
+the one line that decides whether CI waits at all.
+
+The race is established by construction and by CI passing then failing on identical code; it was not
+reproduced here. A probe never caught the window, because the poll loop's connect delay outlasted
+the tick interval on this machine. That is stated rather than smoothed over, and it is why the fix
+is held by a test of the readiness contract rather than by a reproduction.
+
+`43714382178` then built `68ec593` green: nine jobs, `backend tests (pytest, sqlite)` among them —
+the job whose `smoke worker metrics` step failed on `003cb94`. Gates on the fix: ruff clean, format
+clean, mypy clean over both files, and `pytest -m "not integration"` `1204 passed, 2 skipped, 19
+deselected` — the `1200` above plus the four new cases — with the journey standalone exiting 0 on
+five consecutive runs, the last of them immediately before the commit.

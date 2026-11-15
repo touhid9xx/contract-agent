@@ -7460,6 +7460,26 @@ green on the remote, not merely in a local shell. This closing commit is documen
 own run is not named here, for the reason `D10-115` and `D10-116` both gave: a paragraph cannot
 contain the id of the run that publishes it.
 
+**Corrected: the closing commit was not green.** `003cb94`'s own run, `43711886352`, failed in the
+`smoke worker metrics` step — not in `pytest`, which passed — while the identical
+`backend/tests/smoke_worker_metrics.py` had passed on `e443080` minutes earlier. That is not a
+flake. `wait_for_listener` returned on any body carrying the registry's *declarations*, and
+declarations arrive at import while park samples arrive with a tick, so a scrape can be complete by
+one measure and empty by the next; the assertion then read that body. "Both outcome series are
+present" was the right assertion and the wrong instrument: presence has to be waited for.
+
+`68ec593` adds `require_series` to the wait, an `EVERY_TICK_SERIES` map naming what each worker must
+already publish, and `required_series(worker)` as the single seam `verify_worker` reads. Only the
+watcher is in the map — the other five write no family the journey can provoke. Four new cases in
+`tests/test_smoke_worker_metrics.py` drive the wait against a stub serving the pre-tick body first,
+and one of them exists because emptying the map left the other three green.
+
+The race is established by construction and by CI's pass-then-fail on identical code, not by a local
+measurement: a probe never caught the window here, because the connect delay outlasted the tick
+interval. `43714382178` built `68ec593` green, nine jobs, `backend tests (pytest, sqlite)` among
+them; gates on the fix were ruff and format clean, mypy clean, `pytest -m "not integration"` `1204
+passed, 2 skipped, 19 deselected`, and the journey standalone exiting 0 five consecutive times.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.
