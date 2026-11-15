@@ -498,11 +498,14 @@ def build_parser() -> argparse.ArgumentParser:
         "doctor",
         help="report rows that need a human and are otherwise silent",
         description=(
-            "Read-only. Counts the states that need an operator and currently "
-            "raise no alert: outbox events parked in the dead-letter state, "
-            "notifications that failed or were suppressed, and extracted-field "
-            "values still stored as plaintext. Exits non-zero when anything is "
-            "found, so a scheduled run can act on it."
+            "Read-only. Counts the states that need an operator: outbox events "
+            "parked in the dead-letter state, notifications that failed or were "
+            "suppressed, and extracted-field values still stored as plaintext. "
+            "Since D10-117 and D10-118 the first two are also published as "
+            "gauges that the shipped alert rules page on, so a deployment which "
+            "scrapes them is told without this command; nothing publishes the "
+            "third. Exits non-zero when anything is found, so a scheduled run "
+            "can act on it."
         ),
     )
     doctor.add_argument(
@@ -1105,7 +1108,7 @@ def _doctor(
     session_factory: sessionmaker[Session],
     settings: Settings,
 ) -> int:
-    """``doctor``: report the states that need a human and raise no alert.
+    """``doctor``: report the states that need a human, as one count and exit code.
 
     The signed GATE 2 record names two of these as conditions of the sign-off
     rather than footnotes: a notification that parks ``failed`` or is
@@ -1113,6 +1116,13 @@ def _doctor(
     before gap 20 stays plaintext with nothing pointing at it. They are one defect
     wearing two hats — a state that needs a person and is invisible until somebody
     goes looking — so one read-only check answers both.
+
+    **Amended by ``D10-117`` and ``D10-118``, not deleted:** the first clause has
+    grown a pager. Both counts are published as gauges on the attention watcher's
+    own scrape, and the shipped Prometheus rules page on a ``relay_failed`` park and
+    on a ``failed`` send, so what is still reached by this command alone is the
+    ``suppressed`` verdict — a policy answer rather than a fault — and the
+    plaintext-field count, which has no gauge at all.
 
     What this **is**: the machine-readable half. A cron entry or a CI step runs it
     and acts on a non-zero exit code, which is the hook an external alerter needs

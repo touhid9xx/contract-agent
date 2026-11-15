@@ -3,7 +3,11 @@
 Two clauses of the signed GATE 2 record are the same defect: a notification that
 parks ``failed`` or is ``suppressed`` raises no alert, and a field value written
 before gap 20 stays plaintext with nothing pointing at it. Both are states that
-need a person and are invisible until somebody writes a query by hand.
+need a person and are invisible until somebody writes a query by hand. The first
+clause has since grown a pager — ``D10-117`` and ``D10-118`` publish both counts as
+gauges the shipped rules alert on — which is why ``doctor`` stays the machine's
+form of all three and the only form of the last one, rather than the only form of
+any of them.
 
 ``doctor`` turns them into one number and one exit code. The properties worth
 pinning are not "it prints something":

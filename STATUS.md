@@ -3795,10 +3795,12 @@ above read "passed" because a hook finally ran and passed.
     by two tests against a real MySQL server (D10-08).
 22. ~~**No scheduler polls notifications.**~~ — **closed by `4e7dd5c`**.
     `NotificationScheduler` claims `pending` rows whose `scheduled_at` is null or
-    past, so a quiet-hours deferral resumes on its own. What it is **not**: there is
-    still no alerting — a row parked `failed` after exhausting
+    past, so a quiet-hours deferral resumes on its own. What it is **not**:
+    ~~there is still no alerting — a row parked `failed` after exhausting
     `notification_retry_max`, or `suppressed` by a policy refusal, sits there until
-    an operator looks. Retry stays operator-initiated, like DLQ replay (D5-03); the
+    an operator looks.~~ **Amended by `D10-118`, not deleted:** both terminal states
+    are published now and the `failed` one pages; the paragraph below says which part
+    of that sentence survives. Retry stays operator-initiated, like DLQ replay (D5-03); the
     difference is that a *deferred* row now recovers itself. The gap 23 caveat it
     inherited — a claim lock that is a no-op on SQLite — is now **closed**: on MySQL
     two schedulers are proven not to receive the same row (D10-08). On SQLite the
@@ -3808,8 +3810,11 @@ above read "passed" because a hook finally ran and passed.
     `outbox_parked_events{outcome}` gauge on the attention watcher's own scrape, and
     `OutboxEventsParked` pages through the Alertmanager hop `D10-116` proved whenever the park
     is a `relay_failed` one — no `ATTENTION_ALERT_TO` in the path. **Its notification half is
-    still open:** a notification parked `failed`, or `suppressed` by a policy refusal, raises
-    nothing, because the gauge counts outbox events.
+    closed by `D10-118`:** `notifications_undelivered{status}` rides the same tick, and
+    `NotificationsUndelivered` pages through the same hop when the status is `failed` — a
+    transport that was configured and refused until the budget ran out. `suppressed` is
+    published and deliberately not paged: that is a verdict this codebase reached, not a
+    fault, and paging a deployment for doing what it was told is the alert nobody keeps.
     **Amended, not closed:** `python -m app.cli doctor` now counts parked outbox rows and
     `failed`/`suppressed` notifications and exits `EXIT_ATTENTION` (5) on any of them
     (`D10-12`), so the state is machine-checkable instead of requiring a hand-written
@@ -3819,10 +3824,13 @@ above read "passed" because a hook finally ran and passed.
     `ATTENTION_ALERT_TO`, the verdict now reaches a person by mail when it *changes*
     (`d9530b5`). ~~Neither is true of the default install, so the entry stays open rather than
     struck.~~ The mail is still conditional on that variable, but the alert is not: a
-    `relay_failed` park pages whether or not anybody configured a recipient. A default
-    `EVENT_TRANSPORT=none` install instead produces `transport_disabled` parks, which are
-    published and deliberately not paged, so what keeps this entry open is the notification
-    half rather than the outbox one.
+    `relay_failed` park pages whether or not anybody configured a recipient, and so, since
+    `D10-118`, does a `failed` send. A default `EVENT_TRANSPORT=none` install instead produces
+    `transport_disabled` parks, which are published and deliberately not paged. **Amended by
+    `D10-118`, not deleted:** the half that kept this entry open now pages, so the entry stays
+    open on its residue rather than on the hole — a row stuck `pending` for ever under
+    `NOTIFICATION_TRANSPORT=none` is invisible to both status series, and `D10-118` argues
+    there why a gauge watching the two terminal states does not count that population.
 23. ~~**The double-send serialisation is proven by reasoning, not by a concurrent
     test.**~~ — **closed against MySQL (D10-08).** The gap was real and correctly
     stated: `0003` (`0f5da36`) makes the second dispatch block on
@@ -5916,8 +5924,13 @@ per tick), so what is still absent moved one link down the chain: ~~**nothing re
 **amended again by `D10-40`, not deleted:** a deployment that sets `ATTENTION_ALERT_TO` gets the
 verdict mailed to its operator when it *changes* (`d9530b5`), and one that leaves it unset — the
 shipped default — still reads nothing, so the link moved one further down rather than closing: what
-is absent is now **an install that sets the address**; a line on a timer is not an alert; a human
-still has to look; no live Ollama has answered anything; and the `review`, `agent` and
+is absent is now **an install that sets the address**; a line on a timer is not an alert;
+~~a human still has to look;~~ **amended a fourth time by `D10-118`, not deleted:** for two of
+the three states, nobody has to. `D10-117` publishes the park count and `D10-118` the
+undelivered counts as gauges, and the shipped rules page on a `relay_failed` park and on a
+`failed` send without asking for an address; what the address still buys is the *suppressed*
+verdict and the plaintext-field count, which have no gauge between them. No live Ollama has
+answered anything; and the `review`, `agent` and
 `notification` routes have only ever been called by `TestClient`, because no screen talks to them
 yet.
 **Amended after this record was signed, not deleted:** `review` has a screen
@@ -5971,9 +5984,14 @@ there is not a pass.
 
 One caveat carried forward rather than retired: the *number* of sends is now safe on
 MySQL, but ~~a row that parks `failed` or `suppressed` still raises no alert (gap 22)~~ —
-**amended by `D10-40`, not deleted:** it still raises no alert on a stock install, because
-the address the mail needs is unset by default; the two paragraphs below say how far that
-has moved and where it has not.
+**amended by `D10-40`, not deleted:** for a *mailed* verdict it still raises no alert on a
+stock install, because the address the mail needs is unset by default; the two paragraphs
+below say how far that has moved and where it has not. **Amended again by `D10-117` and
+`D10-118`, not deleted:** the mail was never the whole route. Both counts are gauges on the
+attention watcher's own scrape, and the shipped rules page on them through the Alertmanager
+hop `D10-116` proved, so a `failed` send and a `relay_failed` park raise an alert on a stock
+install without anybody setting an address. What still raises nothing there is `suppressed`,
+which is a policy verdict rather than a fault.
 Correctness under concurrency and visibility of failure are different problems, and
 only the first one moved. The second one has since moved a little: `doctor` (`D10-12`)
 makes the parked row **countable by a machine** and gives it an exit code, which is the
@@ -5991,7 +6009,11 @@ verdict to `ATTENTION_ALERT_TO` when it **changes** — once when a finding appe
 board clears — through the same verified SMTP sender the reminders use, so there is now a mail and
 no longer *only* a log line. Still no shipper and still no dashboard query, and the address is
 unset by default, so for a stock install every word above remains true. A parked row raises an
-alert only where someone configured one to be raised.
+alert only where someone configured one to be raised — **amended a fourth time by `D10-118`, not
+deleted:** the mail needs an address, the gauges do not. `OutboxEventsParked` (`D10-117`) and
+`NotificationsUndelivered` (`D10-118`) page on a `relay_failed` park and a `failed` send through the
+Alertmanager hop `D10-116` wired, for any deployment that runs this compose file, so what is still
+log-and-mail only is the *suppressed* verdict and the plaintext-field count.
 
 ## GATE 2 — signed
 
@@ -6105,14 +6127,25 @@ sign-off, not footnotes:**
    the operator when the verdict changes, so a deployment that sets `ATTENTION_ALERT_TO` **does**
    get an alert when a row parks, and one that does not — the shipped default — gets exactly the
    behaviour signed above. The clause therefore stands for the default install and no longer
-   stands unconditionally; the exit code is still the only machine-readable form of the verdict
-   either way, because a mail is written for a person. Note also that an *explained* park — a
+   stands unconditionally; ~~the exit code is still the only machine-readable form of the verdict
+   either way, because a mail is written for a person~~ — **amended by `D10-117` and `D10-118`,
+   not deleted:** it is no longer the only one, for the reason the paragraph below gives: two of
+   the three states are gauges the shipped rules read. Note also that an *explained* park — a
    default install with `EVENT_TRANSPORT=none` — is now counted and no longer failed, so
    `EXIT_ATTENTION` no longer fires on that state at all, and `D10-40`'s alert follows the same
    rule: an explained park is recounted each tick and never mailed **on its own**, because a
    standing count that does not fail the check must not ring (the alert reads `needs_attention`,
    which excludes explained parks — a mail still goes out for a mixed reading, and its reason is
    then the unexplained part).
+   **Amended a fourth time by `D10-118`, not deleted:** the paragraphs above are about a *person*
+   being reached, and a second route to one now exists that sets no variable. `D10-117` publishes
+   the park count and `D10-118` the undelivered counts as gauges on the attention watcher's own
+   scrape, and the shipped rules page on a `relay_failed` park and a `failed` send through the
+   Alertmanager hop `D10-116` proved, so a deployment that runs this compose file is told without
+   configuring a recipient. The clause therefore stands for a deployment that runs neither
+   Prometheus nor Alertmanager, and for the two states no rule covers: a `suppressed` notification,
+   which is a verdict rather than a fault and must not page, and a field value still stored in
+   plaintext, which has no gauge at all.
 3. **Nothing has ever been sent to a real customer.** The shipped default transport
    refuses; SMTP has only spoken to a loopback relay this suite started and
    certified itself, so no handshake has chained to a public CA over a real network

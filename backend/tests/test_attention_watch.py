@@ -1,6 +1,6 @@
 """The scheduled attention check: gap 22's residue, and what "watching" means here.
 
-``doctor`` turned the states nobody is told about into one number and one exit
+``doctor`` turned the states nothing was publishing into one number and one exit
 code (``D10-36``). ``D10-39`` added a second caller with a different job —
 :class:`~app.workers.attention_watch.AttentionWatch` — because a check nobody runs
 finds nothing, and this stack ships a Compose file rather than a crontab.
