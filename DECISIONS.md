@@ -8905,10 +8905,11 @@ to write.
 
 Whether the job is green on Linux is a claim for the paragraph that follows, not this one.
 
-Run `43658722601` on `da2730f` answers it: nine jobs of nine, and the `image` job's step list carries
-`the image applies the migrations it ships` and `a worker completes a tick on the migrated schema` as
-succeeded — the two steps this slice added, on a runner rather than in a container on this machine,
-with `pytest` collecting `test_migrations.py` in the same run. What it establishes is narrower than it
-sounds: the chain applies, from the artifact, on Linux, to a database that then serves a real worker.
-It does not establish the ordering in `docker-compose.yml` — no job boots the stack — and it says
-nothing about MySQL, which stays `test_mysql_integration`'s claim.
+Run `43658722601` on `da2730f` answers it: nine jobs of nine, and the `image` job's step list
+carries `the image applies the migrations it ships` and
+`a worker completes a tick on the migrated schema` as succeeded — the two steps this slice added, on
+a runner rather than in a container on this machine, with `pytest` collecting `test_migrations.py`
+in the same run. What it establishes is narrower than it sounds: the chain applies, from the
+artifact, on Linux, to a database that then serves a real worker. It does not establish the ordering
+in `docker-compose.yml` — no job boots the stack — and it says nothing about MySQL, which stays
+`test_mysql_integration`'s claim.
