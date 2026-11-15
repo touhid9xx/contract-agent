@@ -9104,3 +9104,8 @@ Run `43673514273` on `b51d8e0` answers it: nine jobs of nine, and the step list 
 — the hop green on a runner with Docker, rather than on this machine. The live step has to be a step
 of its own for this to mean anything: the pin-drift check would still pass with the receiver
 deleted. The commit carrying this paragraph adds no code to what the run built.
+
+Run `43674960533` on `08f5169` answers the ledger half of the same claim: nine jobs of nine,
+the same nine names as above, over the tree that carries this entry — so the block you are
+reading was pushed green, not only the code it describes. The commit carrying this paragraph
+adds no code to what that run built.

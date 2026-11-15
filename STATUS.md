@@ -7383,6 +7383,10 @@ steps of `observability (prometheus config, alert rule, alert delivery)`. The li
 of its own is what makes that a claim about delivery: the pin-drift check would still pass with the
 receiver deleted.
 
+Run `43674960533` on `08f5169` answers the ledger half: nine jobs of nine, the same nine names,
+this time over the tree that carries this entry — so the block was pushed green, not only the code
+it describes. The commit carrying this paragraph adds no code to what that run built.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.
