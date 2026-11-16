@@ -44,13 +44,16 @@ and escalation to a human operator.
 
 ## Run the application
 
-The real stack is `backend/` + `frontend/` and needs MySQL, an `ENCRYPTION_KEY` and
-a `SECRET_KEY` (see `backend/app/core/config.py`, which refuses to start on unsafe
-settings rather than degrading). Bring it up with Docker Compose, then run the
-frontend against it. Migrations are Alembic, currently at head `0008`, and they ship
-inside the image: the one-shot `migrate` service applies `alembic upgrade head`
-before the API or any worker starts (`D10-114`). To apply them by hand instead, the
-same image does it without a checkout — `docker compose run --rm migrate`.
+The real stack is `backend/` + `frontend/` and needs MySQL, an `ENCRYPTION_KEY` and a
+`SECRET_KEY` (see `backend/app/core/config.py`, which refuses to start on unsafe
+settings rather than degrading). `docker compose up` brings up both tiers — the API and
+its workers, and the Next.js frontend in its own container on <http://localhost:3000>
+(`FRONTEND_PORT` moves it), proxying `/api` to the API service so the browser and its
+token share one origin (`D10-128`). Migrations are Alembic, currently at head `0008`,
+and they ship inside the image: the one-shot `migrate` service applies
+`alembic upgrade head` before the API or any worker starts (`D10-114`). To apply them by
+hand instead, the same image does it without a checkout —
+`docker compose run --rm migrate`.
 
 ## Run the demo
 

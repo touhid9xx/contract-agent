@@ -22,7 +22,7 @@ and the *head revision*, not the words around them. A job could be renamed, or s
 two and another merged into it, and the count stay nine with the README describing the
 old shape. Catching that would mean writing all nine job ids into the README — the
 duplication this file exists to avoid — so it is left uncaught rather than paid for. The
-same holds for every other claim in the README: that the frontend has no container, that
+same holds for every other claim in the README: that one command brings the stack up, that
 `P2-F` has no code, that every screen has a spec. `screens.test.ts` checks the last of
 those independently, and nothing checks the rest.
 """

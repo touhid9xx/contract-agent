@@ -10122,9 +10122,13 @@ asserts it found something before asserting anything about it — but failing lo
 as understanding. `NOTIFICATION_TRANSPORT=none` was never swapped for a live transport, so no mail
 crossed a socket from this stack; `smoke_alert_delivery.py` and the SMTP socket tests cover that
 seam separately, in a stack of their own. Extraction ran on the `pattern` backend only: no LLM
-backend, no live SMS gateway, no inbound webhook. And there is no frontend container in the compose
-file, so the browser was never part of this run — the journey is an HTTP client, and the UI's own
-contract with these routes is still only what `test_frontend_routes.py` compares statically.
+backend, no live SMS gateway, no inbound webhook. ~~And there is no frontend container in the
+compose file, so the browser was never part of this run — the journey is an HTTP client, and the
+UI's own contract with these routes is still only what `test_frontend_routes.py` compares
+statically.~~ **Amended by `D10-128`, `975de17`:** there is one now — `docker-compose.yml` builds
+and runs `frontend/`, so the browser is part of the stack an operator gets. The run this paragraph
+describes predates it and the browser was still not part of *that run*; the sentence is struck
+because it described the stack as well as the run, and about the stack it was wrong.
 
 Gates, on the tree that commit carries: `ruff check` and `ruff format --check` over `152` files,
 bare `mypy` from the repository root over `76` files, `bandit -c pyproject.toml -r backend/app` exit
@@ -10141,3 +10145,110 @@ through it, so the ownership half is proven by the journey above and by nothing 
 stated here rather than closed silently, because a green image job is the kind of evidence that gets
 mistaken for the other kind. This closing commit is documentation only and names no run of its own,
 for the reason `D10-115` through `D10-126` all gave.
+
+### D10-128 — The stack had no screen, and the first one proxied into its own loopback
+
+**Every service in `docker-compose.yml` served something an operator could call, and none of them
+served anything they could look at.** `frontend/` was built, typed, linted and unit-tested by CI and
+shipped to no container at all: `docker compose up` produced an API and its workers, and a UI that
+existed only on a developer's laptop under `npm run dev`. Every screen outside the curl-shaped ones
+— contracts, review, agent, notifications, escalations, attention, users, login — was reachable in a
+checkout and nowhere in a deployment. The gap was recorded in `STATUS.md` as "no frontend container"
+and in `README.md` as "then run the frontend against it", which is an instruction to do by hand what
+the stack was supposed to do.
+
+**What shipped, and the three facts in it that a reasonable reading of `next` gets wrong.**
+`output: "standalone"` is what makes a runtime stage possible at all: `next build` traces the
+modules each route reaches and writes a `server.js` that imports only those, so the runtime stage
+installs nothing. `.next/static` is *not* inside `standalone` and has to be copied separately —
+without it the container serves complete HTML whose every script and stylesheet is a 404, and the
+page renders unstyled and no client component ever hydrates. `HOSTNAME=0.0.0.0` is load-bearing: the
+standalone server binds `localhost` when nobody says otherwise, and a container listening only on
+its own loopback is unreachable from the Compose network while reporting itself healthy. And the
+healthcheck asks `/en`, not `/health`: the latter is proxied to the API, so probing it would restart
+a healthy web tier every time the API hiccuped — a repair `restart: unless-stopped` cannot perform.
+
+**The first container served pages and proxied every API call into its own loopback.** Built and
+run: `/en` answered `200`, the container reported healthy, and every screen that reads the API
+answered `500`. Its own log said why — `Failed to proxy http://127.0.0.1:8000/api/v1/health` /
+`Error: connect ECONNREFUSED 127.0.0.1:8000` — while `printenv API_PROXY_URL` inside that same
+container printed `http://api:8000` and `fetch('http://api:8000/health')` from inside it answered
+`200`. The network was fine. The rewrite destination is not read per request: `next build` evaluates
+`next.config.ts` and writes it into `.next/routes-manifest.json`, and the standalone server replays
+that file. The build had been given no value, so the fallback in `next.config.ts` was baked in. The
+container was **healthy throughout**, because `/en` never touches the proxy — the healthcheck that
+was right is also why nothing noticed.
+
+**The fix is a build input, and saying so is most of the correction.** `Dockerfile.frontend`
+declares `ARG API_PROXY_URL=http://api:8000` above `RUN npm run build` and promotes it to `ENV` for
+the duration of that run; `docker-compose.yml` supplies it under `build.args` and no longer under
+`environment:`. `next.config.ts` changed `??` to `||`, so an empty build argument falls back instead
+of producing a rewrite to the empty string. Two comments that claimed the address is "read per
+request" are corrected rather than deleted — that sentence is exactly what a reader would otherwise
+infer from a service that names its dependency — and the files now say that changing the address
+takes `docker compose build frontend`, because a runtime variable changes nothing and looks like it
+should.
+
+**Four new guards, all read out of the files rather than listing what they contain.** Every
+published container port must be one its own image `EXPOSE`s, or one the service configures for
+itself as the workers' metrics listener does; `3001:3000` against `EXPOSE 3000` now fails by name.
+Every `API_PROXY_URL` must name a service that exists in the compose file, because loopback and a
+service name are indistinguishable to a reader and only one of them can work. `Dockerfile.frontend`
+must declare the argument *above* the build and promote it to `ENV` — declared below, the file looks
+right and does nothing. And the image must be reachable and hydrated: `HOSTNAME`, the `.next/static`
+copy and `output: "standalone"` are read out of the files, because each is one deleted line away
+from a container that serves pages no browser can use. The ownership guard generalised rather than
+duplicated: `_services_built_from`, `_named_volume_mounts` and `_privileged_lines` take a Dockerfile
+name now, so the second image is covered by the same three questions instead of sitting outside
+them.
+
+**Twenty mutations, applied one at a time to the real files.** `HOSTNAME` dropped; the
+`.next/static` copy dropped; `3001:3000` published against `EXPOSE 3000`;
+`API_PROXY_URL=http://127.0.0.1:8000`; `output: "standalone"` removed; `read_only` removed; the
+address moved back to `environment:`; the `args:` level lost; the `ARG` deleted; the `ARG` placed
+below the build; the `ENV` promotion dropped; plus the six controls. All twenty were caught, each by
+the test meant to catch it, and every mutated file was restored and compared by SHA-256. Two of them
+first read as the wrong red: the guard lowercases keys (`frontend_port`), so the expectation was
+corrected with a comment rather than the test being re-aimed at whatever happened to be red.
+
+**CI caught two defects in this slice's own workflow edit, on its first run.** Run `43847557029`
+came back eight jobs of nine: the uid assertion ran `docker run contract-agent-frontend:ci` from a
+step placed *above* the step that builds that image, and `docker run` on a nonexistent image fails
+rather than skipping. The same edit reused the container name `image-api`, which an earlier step
+leaves running until the job's `always()` cleanup, so it would have failed a second way once the
+first was fixed. Both were invisible to every local gate, because no local command executes a
+workflow. Fixed as `3278a61` — the build moved ahead of the check that inspects it, the containers
+renamed `screen-*` — and run `43851632625` answers green, nine jobs of nine, with the new steps
+running rather than skipped.
+
+**What CI proves about the screen, and what it does not.** The `image` job builds
+`Dockerfile.frontend`, asserts uid `1001`, fetches a page through the published port, follows an
+asset the returned HTML names, and checks that a proxied path reaches a stand-in API rather than
+answering `502` from a rewrite that never ran. That is the shape of the defect above and it fails on
+it. It does not run the bundle: no browser executes the scripts, so a page that renders and never
+hydrates passes, and the stand-in answers every path, so a dropped `/api/v1` prefix would pass too.
+The screens themselves are covered in-process, against a `TestClient`, by `test_frontend_routes.py`
+and `screens.test.ts` — which is where a route contract belongs, and not where a container is
+proven.
+
+**What this does not fix, stated rather than implied.** `docker compose up` now runs both tiers, and
+the end-to-end evidence behind it is one session on one machine: `/en` `200` with `40921` bytes, all
+fourteen `/_next/static` assets that HTML names `200`, `/health` `200` with the real FastAPI body,
+and `/api/v1/contracts` answering `401` with the same trace-id envelope the API returns directly. No
+CI job boots the stack, so the `build.args` → `.next/routes-manifest.json` chain is proven on a
+runner only as far as one page fetch goes. The guards parse `docker-compose.yml` with a line reader,
+so a reshape past what they understand fails loudly instead of quietly, which is not the same as
+understanding. And the image ships the locales it was built with: a locale added to
+`frontend/src/i18n/config.ts` without a rebuild is a route that `404`s.
+
+Gates, on the tree this commit carries: `ruff check` and `ruff format --check` over `152` files,
+bare `mypy` from the repository root over `76` files, `bandit -c pyproject.toml -r backend/app` exit
+0, `pytest -o addopts="" -m "not integration"` `1269 passed, 2 skipped, 19 deselected` — five more
+than `D10-127`'s `1264`, being this slice's four new guards and one more parametrisation of the
+ownership check; nineteen pre-commit hooks; `gitleaks` over the whole history at the manual stage.
+The stack was built and run rather than inspected, which is the only reason the proxy defect exists
+in this record instead of in a deployment.
+
+`D10-128` landed as `975de17`, the workflow fix as `3278a61`, and CI run `43851632625` is nine jobs
+of nine, read from the jobs API. This closing commit is documentation only and names no run of its
+own, for the reason `D10-115` through `D10-127` all gave.
