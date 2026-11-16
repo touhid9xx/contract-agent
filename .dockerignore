@@ -17,9 +17,10 @@
 **/.mypy_cache
 **/.ruff_cache
 
-# The virtualenv, the JavaScript dependency trees and the two frontend sources:
-# no Dockerfile here copies from any of them, and between them they are the bulk
-# of the context.
+# The virtualenv, the JavaScript dependency trees and the two frontend sources.
+# `Dockerfile.backend` copies none of them; `Dockerfile.frontend` (D10-128) copies
+# `frontend/` itself but never its `node_modules` or `.next`, which are the bulk
+# of the context and are rebuilt inside the build stage anyway.
 venv/
 frontend/node_modules/
 frontend/.next/

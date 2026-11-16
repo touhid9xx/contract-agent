@@ -3,6 +3,10 @@
 #   migrate   — one-shot `alembic upgrade head` (D10-114). The schema comes from
 #               the image, and the API and every worker wait for it to finish.
 #   api       — FastAPI behind uvicorn
+#   frontend  — the Next.js screen (D10-128). The browser talks only to this, and
+#               this container's Next server proxies /api, /health and /health/ready
+#               to `api` over the Compose network. Until it existed the stack had no
+#               screen: `frontend/` was built and tested by CI and deployed nowhere.
 #   relay     — outbox relay worker (F2); a separate process on purpose, because
 #               the API must never publish synchronously and the relay must
 #               survive API restarts.
@@ -40,11 +44,13 @@
 #        runs — gap 17, and the reason the default is the provable backend.
 name: contract-agent
 
-# One image, eight processes: the API, six workers and one one-shot migration, each
-# being the API image with a different `command`, so worker code is never a second
-# copy of the application. `.github/workflows/ci.yml` builds this file and starts
+# Two images. `Dockerfile.backend` is nine processes: the API, the attention watcher,
+# six workers and one one-shot migration, each being the API image with a different
+# `command`, so worker code is never a second copy of the application.
+# `Dockerfile.frontend` (D10-128) is the one service a browser talks to.
+# `.github/workflows/ci.yml` builds this file and starts
 # every entry point named below (`D10-112`), so that list is not a note about
-# deployment — it is what CI executes. The eighth, `migrate`, is the one entry point
+# deployment — it is what CI executes. The ninth, `migrate`, is the one entry point
 # the import list cannot cover, because it starts a console script rather than an
 # `app.workers` module; the image job runs it instead (`D10-114`).
 #
@@ -238,6 +244,48 @@ services:
       - /tmp
     security_opt:
       - no-new-privileges:true
+
+  # D10-128. The screen. `frontend/` was built, typechecked, linted and unit-tested
+  # by CI and shipped to no container at all, so the stack had an API and no UI: the
+  # review queue, consent, the agent decisions and the user list were all routes in
+  # one directory and services in neither.
+  #
+  # The browser never reaches `api`. It loads this origin and this container's Next
+  # server forwards `/api/:path*`, `/health` and `/health/ready` — the rewrites in
+  # `frontend/next.config.ts` — which keeps the token's origin single, makes CORS
+  # irrelevant, and is why the only port published here is this one.
+  #
+  # No `depends_on: api` on purpose. The rewrite destination is a service *name* and
+  # Docker resolves that name per request, so a web tier that starts first renders
+  # pages and answers 502 for a screen until the API is up, which is a better failure
+  # than a stack that refuses to start because a worker container is still migrating.
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      # Not `environment:`. The address is read when the image is built, not when a
+      # request is served: `next build` writes the rewrite destination into
+      # `.next/routes-manifest.json` and the standalone server replays it. Measured —
+      # a container whose `environment:` named `http://api:8000` still dialled
+      # 127.0.0.1:8000 and logged ECONNREFUSED, because the build had been given no
+      # value and taken the fallback in `next.config.ts`. Changing it needs
+      # `docker compose build frontend`; setting it here at runtime changes nothing.
+      args:
+        API_PROXY_URL: http://api:8000
+    image: contract-agent-frontend:dev
+    ports:
+      # Loopback, like every other published port here but the API's.
+      - "127.0.0.1:${FRONTEND_PORT:-3000}:3000"
+    read_only: true
+    tmpfs:
+      # The standalone server's only runtime write is a cache directory, and a cache
+      # is allowed to die with the container — a writable path outside it is what
+      # lets `read_only` stay true.
+      - /tmp
+      - /app/.next/cache
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
 
   relay:
     <<: *worker

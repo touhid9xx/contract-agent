@@ -543,14 +543,21 @@ jobs:
       # `USER app` is the line that keeps a compromised request from being a
       # compromised host, and it is one word wide: deleting it changes nothing a
       # test can see. Asserted as an id, not read back from the Dockerfile.
-      - name: the container runs as the unprivileged account
+      #
+      # Both images, from one loop rather than two copies: `D10-128` gave the stack
+      # a second account to get right, and a second near-identical block is where
+      # one of the two stops being compared (`D10-116` made the same argument about
+      # the Prometheus and Alertmanager pins).
+      - name: the containers run as the unprivileged account
         run: |
-          uid=$(docker run --rm --entrypoint id contract-agent-api:ci -u)
-          if [ "$uid" != "1001" ]; then
-            echo "::error::the image runs as uid $uid, not the unprivileged 1001"
-            exit 1
-          fi
-          echo "the image runs as uid $uid"
+          for image in contract-agent-api:ci contract-agent-frontend:ci; do
+            uid=$(docker run --rm --entrypoint id "$image" -u)
+            if [ "$uid" != "1001" ]; then
+              echo "::error::$image runs as uid $uid, not the unprivileged 1001"
+              exit 1
+            fi
+            echo "$image runs as uid $uid"
+          done
 
       - name: every process the stack starts imports inside it
         run: |
@@ -610,9 +617,91 @@ jobs:
           grep -q expiry_sweep_drained "$RUNNER_TEMP/tick.log" \
             || { echo "::error::the sweep logged no drained verdict"; exit 1; }
 
-      - name: remove the container
+      # D10-128. The second image, and the first one in this repository whose
+      # failure mode is a *page*. Three defects survive `docker build` with exit 0
+      # and are invisible to every test above:
+      #
+      #   - `output: "standalone"` removed from `frontend/next.config.ts`: the build
+      #     produces no `standalone/` directory at all, so the `COPY --from=build`
+      #     fails loudly. Fine — the next item is the silent one.
+      #   - the `.next/static` copy dropped: the page still answers 200 with correct
+      #     HTML whose every `/_next/static/…` asset is a 404. It renders unstyled
+      #     and never hydrates, and nothing but a browser would notice.
+      #   - `HOSTNAME=0.0.0.0` dropped: the standalone server binds loopback inside
+      #     the container, so the published port answers nothing while the
+      #     HEALTHCHECK — which asks 127.0.0.1 from *inside* — reports healthy.
+      #
+      # So these steps fetch through the published port (loopback binds fail here),
+      # follow an asset the HTML names (a missing static copy fails here), and call the
+      # API's prefix through a stand-in container answering to the name the image baked
+      # in (a build argument that never arrived fails here, as a 500 instead of a 200).
+      - name: build the image the stack serves
+        # `--build-arg` deliberately, because Compose supplies this through `build.args`
+        # and CI should exercise the same path. An image that stopped declaring the
+        # `ARG` would silently ignore this, bake in the `next.config.ts` fallback, and
+        # the proxy step below would fail — which is the point of passing it here.
+        run: |
+          docker build --build-arg API_PROXY_URL=http://api:8000 \
+            -f Dockerfile.frontend -t contract-agent-frontend:ci .
+
+      - name: the screen serves a page and the assets that page names
+        run: |
+          # A user-defined network, so `api` is a real name on it — the shape Compose
+          # gives the stack and the name the rewrite was built with. The stand-in is the
+          # frontend image with a different entry point: nothing extra to pull, and no
+          # database, because nothing here asks the API a question. It answers every path
+          # with a marker, so a 200 carrying that marker can only mean the rewrite
+          # reached *this* container.
+          #
+          # Names distinct from `image-api` above on purpose: that container is still
+          # running and is only removed in the `always()` step at the end of the job,
+          # so reusing the name is a conflict, not a tidy-up.
+          docker network create ci-frontend
+          docker run -d --name screen-api --network ci-frontend --network-alias api \
+            --entrypoint node contract-agent-frontend:ci \
+            -e "require('http').createServer((q, s) => { s.writeHead(200, {'content-type': 'application/json'}); s.end(JSON.stringify({standin: true, path: q.url})); }).listen(8000, '0.0.0.0')"
+          docker run -d --name screen-frontend --network ci-frontend \
+            -p 127.0.0.1:13000:3000 contract-agent-frontend:ci
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:13000/en >"$RUNNER_TEMP/en.html" 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS -o /dev/null -w 'page: %{http_code}\n' http://127.0.0.1:13000/en
+
+          asset=$(grep -oE '/_next/static/[A-Za-z0-9._/-]+\.(js|css)' "$RUNNER_TEMP/en.html" | head -n1)
+          if [ -z "$asset" ]; then
+            echo "::error::the served page names no /_next/static asset; is it HTML at all?"
+            exit 1
+          fi
+          echo "asset: $asset"
+          curl -fsS -o /dev/null -w 'asset: %{http_code}\n' "http://127.0.0.1:13000$asset"
+
+      # The proxy is the reason the browser only ever talks to one origin, and `D10-128`
+      # measured that its destination is fixed when the image is built, not when a
+      # request is served: a container whose `environment:` said `http://api:8000` still
+      # dialled `127.0.0.1:8000` and logged ECONNREFUSED. So this asserts the whole
+      # chain positively — the published port, the rewrite, the name `api`, and port
+      # 8000 in the destination. Only a 200 carrying the stand-in's marker proves all
+      # four at once: a 500 means the build was handed no address, a 404 means the
+      # rewrite is gone, and a 502 means the name did not resolve.
+      - name: the proxy reaches the address baked into the image
+        run: |
+          curl -fsS -o "$RUNNER_TEMP/proxied.json" -w 'proxied: %{http_code}\n' \
+            http://127.0.0.1:13000/api/v1/health
+          cat "$RUNNER_TEMP/proxied.json"
+          echo
+          grep -q '"standin":true' "$RUNNER_TEMP/proxied.json" \
+            || { echo "::error::the rewrite did not reach the container aliased 'api'"; exit 1; }
+          grep -q '/api/v1/health' "$RUNNER_TEMP/proxied.json" \
+            || { echo "::error::the rewrite did not carry the path it was given"; exit 1; }
+
+      - name: remove the containers
         if: always()
-        run: docker rm -f image-api || true
+        run: |
+          docker rm -f image-api screen-api screen-frontend || true
+          docker network rm ci-frontend || true
 
   # --------------------------------------------------------------------- gate
   # One job to name as a required status check, instead of the eight that have to be

@@ -321,12 +321,14 @@ COMPOSE_FILE = Path(__file__).resolve().parents[2] / "docker-compose.yml"
 
 #: Entries in `.env.example` that are not settings. They belong to the stack's own
 #: interpolation, so the application never reads them and no field declares them.
-#: ``PROMETHEUS_PORT`` is the port the scrape target publishes (``D10-111``); the
-#: ``MYSQL_*`` block is the database the stack creates for itself, which the example
-#: has to carry because two of those values are written ``${VAR:?…}`` — a refusal,
-#: not a default.
+#: ``PROMETHEUS_PORT`` is the port the scrape target publishes (``D10-111``) and
+#: ``FRONTEND_PORT`` the port the screen publishes (``D10-128``); the ``MYSQL_*``
+#: block is the database the stack creates for itself, which the example has to
+#: carry because two of those values are written ``${VAR:?…}`` — a refusal, not a
+#: default.
 COMPOSE_ONLY_KEYS = frozenset(
     {
+        "FRONTEND_PORT",
         "PROMETHEUS_PORT",
         "MYSQL_DATABASE",
         "MYSQL_PASSWORD",
@@ -598,6 +600,40 @@ def _environment(block: list[str]) -> dict[str, str]:
                 continue
             key, value = entry.split(":", 1)
             values[key.strip()] = value.strip()
+    return values
+
+
+def _build_args(block: list[str]) -> dict[str, str]:
+    """``KEY: value`` entries under a service's ``build.args:``, inherited included.
+
+    Read in one pass off the indentation rather than by recursing into ``_children``
+    twice: that helper strips every line it returns, so a second call would meet the
+    nested ``args:`` at the same depth as the ``build:`` it came from and stop there,
+    returning nothing.
+    """
+    values: dict[str, str] = {}
+    for layer in _layers(block):
+        build_at = args_at = -1
+        for line in layer:
+            entry = line.strip()
+            if not entry:
+                continue
+            indent = len(line) - len(line.lstrip())
+            if indent == 0:
+                continue  # the `<<: *worker` merge line itself
+            if build_at >= 0 and indent <= build_at:
+                build_at = args_at = -1
+            if entry == "build:":
+                build_at, args_at = indent, -1
+                continue
+            if build_at < 0:
+                continue
+            if entry == "args:":
+                args_at = indent
+                continue
+            if args_at >= 0 and indent > args_at and ":" in entry:
+                key, value = entry.split(":", 1)
+                values[key.strip()] = value.strip()
     return values
 
 
@@ -968,7 +1004,12 @@ def test_the_example_env_file_does_not_move_a_mounted_default_off_its_mount() ->
 
 # --- the directory the image has to own, not just mount ---------------------
 
-DOCKERFILE = Path(__file__).resolve().parents[2] / "Dockerfile.backend"
+ROOT = Path(__file__).resolve().parents[2]
+
+#: Dockerfile -> its path, for every image this repository builds. Named rather than
+#: discovered by globbing `Dockerfile*`, which would also pick up
+#: `.agent-cache/Dockerfile.smoke` — an image no service runs.
+DOCKERFILES = {name: ROOT / name for name in ("Dockerfile.backend", "Dockerfile.frontend")}
 
 #: ``chown [-flags] owner path`` — the owner and the one path it names.
 CHOWN = re.compile(r"\bchown\s+(?:-\S+\s+)*(\S+)\s+(/\S*)")
@@ -996,8 +1037,24 @@ def _declared_volumes() -> set[str]:
     return names
 
 
-def _services_running_this_image() -> dict[str, list[str]]:
-    """Service name -> its block, for the services built from ``Dockerfile.backend``.
+def _image_dockerfile(block: list[str]) -> str | None:
+    """The Dockerfile one service is built from, or ``None`` for an image from a registry.
+
+    Read off the service's own ``build:`` block (anchor included), which is what tells
+    the two apart: MySQL is ``image: mysql:8.4`` and this repository builds nothing
+    that could prepare ``/var/lib/mysql`` for it. A service that only names an
+    ``image:`` is therefore out of scope for every test below rather than forgiven by
+    a list of names.
+    """
+    for layer in _layers(block):
+        for entry in _children(layer, "build:"):
+            if entry.startswith("dockerfile:"):
+                return entry.split(":", 1)[1].strip()
+    return None
+
+
+def _services_built_from(dockerfile: str) -> dict[str, list[str]]:
+    """Service name -> its block, for the services built from ``dockerfile``.
 
     The scope has to be the image, not the file: MySQL mounts a named volume of its
     own, and demanding the *Python* image create ``/var/lib/mysql`` would be a test
@@ -1006,22 +1063,22 @@ def _services_running_this_image() -> dict[str, list[str]]:
     return {
         name: block
         for name, block in _compose_services().items()
-        if any("Dockerfile.backend" in line for layer in _layers(block) for line in layer)
+        if _image_dockerfile(block) == dockerfile
     }
 
 
-def _named_volume_mounts() -> dict[str, list[str]]:
+def _named_volume_mounts(dockerfile: str) -> dict[str, list[str]]:
     """Container path -> the services of this image mounting a *named* volume there."""
     declared = _declared_volumes()
     found: dict[str, list[str]] = {}
-    for name, block in _services_running_this_image().items():
+    for name, block in _services_built_from(dockerfile).items():
         for source, target in _volume_entries(block):
             if source in declared:
                 found.setdefault(target, []).append(name)
     return found
 
 
-def _privileged_lines() -> tuple[str, list[str]]:
+def _privileged_lines(dockerfile: str) -> tuple[str, list[str]]:
     """``(runtime account, the lines that still run as root)``, read off the Dockerfile.
 
     The split is the ``USER`` directive, not the whole file: ``mkdir -p`` a directory
@@ -1029,7 +1086,7 @@ def _privileged_lines() -> tuple[str, list[str]]:
     the line that gives root up. A ``chown`` written below it runs as ``app`` and
     would fail at build time — worth failing here instead, named.
     """
-    lines = DOCKERFILE.read_text(encoding="utf-8").splitlines()
+    lines = DOCKERFILES[dockerfile].read_text(encoding="utf-8").splitlines()
     for index, line in enumerate(lines):
         match = re.fullmatch(r"\s*USER\s+(\S+)", line)
         if match is not None:
@@ -1052,7 +1109,10 @@ def _owns(owners: dict[str, str], path: str, account: str) -> bool:
     return False
 
 
-def test_every_named_volume_the_image_mounts_is_created_owned_by_its_user() -> None:
+@pytest.mark.parametrize("dockerfile", sorted(DOCKERFILES))
+def test_every_named_volume_the_image_mounts_is_created_owned_by_its_user(
+    dockerfile: str,
+) -> None:
     """A right path into a directory the runtime account cannot write is still a 500.
 
     ``D10-127``: with the store path corrected, ``POST /api/v1/contracts/document``
@@ -1069,43 +1129,308 @@ def test_every_named_volume_the_image_mounts_is_created_owned_by_its_user() -> N
     fix is to create the directory in the image and hand it over before ``USER``. Read
     out of the two files rather than named, so the next volume this image mounts is
     held to the rule the day it is written.
+
+    Asked of every image this repository builds, not only the Python one: the
+    frontend image mounts nothing today (its writable paths are tmpfs, which Docker
+    owns and seeds), and running the guard over it anyway is what makes the *next*
+    volume a compose file gains arrive with an owner.
     """
-    mounts = _named_volume_mounts()
-    assert mounts, (
-        "no service built from Dockerfile.backend mounts a named volume: either the "
+    services = _services_built_from(dockerfile)
+    assert services, (
+        f"no service in docker-compose.yml is built from {dockerfile}: either the "
         "compose file changed shape or this parser no longer reads it"
     )
 
-    account, as_root = _privileged_lines()
+    mounts = _named_volume_mounts(dockerfile)
+    assert any(_named_volume_mounts(name) for name in DOCKERFILES), (
+        "no service built from any image here mounts a named volume: the parse below "
+        "would be asserting over an empty set"
+    )
+
+    account, as_root = _privileged_lines(dockerfile)
     assert account, (
-        "Dockerfile.backend never drops privileges with USER: the image would run as "
-        "root, and every ownership question below is about a non-root runtime account"
+        f"{dockerfile} never drops privileges with USER: the image would run as root, "
+        "and every ownership question below is about a non-root runtime account"
     )
 
     privileged = "\n".join(as_root)
-    entire = DOCKERFILE.read_text(encoding="utf-8")
+    entire = DOCKERFILES[dockerfile].read_text(encoding="utf-8")
     owners = {path: owner for line in as_root for owner, path in CHOWN.findall(line)}
 
     missing: dict[str, str] = {}
-    for path, services in mounts.items():
+    for path, mounting in mounts.items():
         created = f"mkdir -p {path}"
         if created not in privileged:
             below_user = created in entire
             only_below = "only after `USER` gave root up" if below_user else "nowhere in the file"
             missing[path] = (
-                f"is mounted by {sorted(services)} but is created {only_below}; a "
+                f"is mounted by {sorted(mounting)} but is created {only_below}; a "
                 "`chown` needs root, so the directory is made and handed over above "
                 "`USER` or Docker seeds the volume root:root and the runtime account "
                 "cannot write in it"
             )
         elif not _owns(owners, path, account):
             missing[path] = (
-                f"is mounted by {sorted(services)} but no chown above `USER {account}` "
+                f"is mounted by {sorted(mounting)} but no chown above `USER {account}` "
                 f"gives it to {account}: {sorted(owners.items()) or 'nothing is owned'}"
             )
 
     assert not missing, (
-        f"Dockerfile.backend does not prepare {sorted(missing)}: {missing}. A named "
-        "volume is seeded from the image path it covers, so `mkdir -p` plus `chown` "
-        "before `USER` is the only place this can be fixed"
+        f"{dockerfile} does not prepare {sorted(missing)}: {missing}. A named volume is "
+        "seeded from the image path it covers, so `mkdir -p` plus `chown` before `USER` "
+        "is the only place this can be fixed"
+    )
+
+
+# --- the port the container opens, not just the port published --------------
+
+#: ``EXPOSE 3000``, or ``EXPOSE 8000/tcp`` — the number is all that matters here.
+EXPOSE = re.compile(r"^\s*EXPOSE\s+(\d+)", re.MULTILINE)
+
+
+def _exposed_ports(dockerfile: str) -> set[str]:
+    """The ports ``dockerfile`` declares the image listens on."""
+    return set(EXPOSE.findall(DOCKERFILES[dockerfile].read_text(encoding="utf-8")))
+
+
+def _published_container_ports(block: list[str]) -> list[str]:
+    """The container-side port of each ``ports:`` entry: ``HOST:CONTAINER``, last field.
+
+    ``"${API_PORT:-8000}:8000"`` and ``"127.0.0.1:${FRONTEND_PORT:-3000}:3000"`` both
+    end in the port inside the container — the only half an image can be wrong about.
+    """
+    found: list[str] = []
+    for layer in _layers(block):
+        for entry in _children(layer, "ports:"):
+            if not entry.startswith("- "):
+                continue
+            spec = entry[2:].strip().strip("'\"")
+            found.append(spec.rsplit(":", 1)[-1].split("/")[0])
+    return found
+
+
+def test_every_published_port_is_one_the_image_actually_opens() -> None:
+    """Publishing a port the process does not listen on is a green stack with no screen.
+
+    ``D10-128`` adds the first service whose whole purpose is a port, and the mismatch
+    it invites is invisible to everything else here: ``docker compose up`` reports the
+    container healthy because nothing probes that port, and the only symptom is a
+    connection refused in a browser. The image is asked which ports it opens; the
+    compose file is asked which it publishes; they have to be the same number.
+
+    A worker's ``9101`` is not ``EXPOSE``'d — all six metrics containers listen on the
+    port their ``WORKER_METRICS_PORT`` names, so a value the service itself hands the
+    process counts as the image answering too.
+    """
+    wrong: dict[str, str] = {}
+    checked: set[str] = set()
+    for name, block in _compose_services().items():
+        dockerfile = _image_dockerfile(block)
+        if dockerfile is None:
+            continue  # an image from a registry: this repository does not build it
+        exposed = _exposed_ports(dockerfile)
+        configured = set(_environment(block).values())
+        for port in _published_container_ports(block):
+            checked.add(name)
+            if port in exposed or port in configured:
+                continue
+            wrong[name] = (
+                f"publishes container port {port}, but {dockerfile} opens "
+                f"{sorted(exposed) or 'no port'} and the service configures "
+                f"{sorted(configured) or 'nothing'}"
+            )
+
+    # Without this the whole test is a loop that may never run: `_image_dockerfile`
+    # returning `None` for everything leaves `wrong` empty and the file green, which is
+    # the failure mode `D10-127` was — a check that cannot notice it stopped reading.
+    assert checked, (
+        "no published port in docker-compose.yml belongs to a service built from an "
+        "image here: either every service names a registry image or `_image_dockerfile` "
+        "has stopped reading the `build:` blocks, and the check above proved nothing"
+    )
+
+    assert not wrong, (
+        f"{sorted(wrong)}: {wrong}. A published port no process listens on is a "
+        "reachable-looking stack that answers nothing, and no probe in this repository "
+        "reads it"
+    )
+
+
+# --- the address a service is told to call, not just that it was told ---------
+
+#: ``http://host:port`` — the shape a rewrite destination resolves to.
+PROXY_URL = re.compile(r"https?://([A-Za-z0-9_.-]+):(\d+)")
+
+
+def _proxy_build_arguments() -> dict[str, str]:
+    """Service name -> the ``API_PROXY_URL`` that service's *build* is handed."""
+    supplied: dict[str, str] = {}
+    for name, block in _compose_services().items():
+        arguments = _build_args(block)
+        if "API_PROXY_URL" in arguments:
+            supplied[name] = arguments["API_PROXY_URL"]
+    return supplied
+
+
+def test_every_service_that_proxies_to_the_api_names_a_service_that_exists() -> None:
+    """``127.0.0.1`` inside a container is that container, not the one behind it.
+
+    Two ways this value can be wrong, and only one of them is an address:
+
+    * It is handed to the **build**, not to the container. ``D10-128`` measured this: a
+      frontend whose ``environment:`` said ``http://api:8000`` proxied to
+      ``127.0.0.1:8000`` and logged ``ECONNREFUSED``, because ``next build`` writes the
+      destination into ``.next/routes-manifest.json`` and the standalone server replays
+      that file. The same line in ``environment:`` therefore reads as configuration and
+      is inert, so this reads ``build.args`` and nothing else — a guard aimed at
+      ``environment:`` would pass on the stack that was broken.
+    * The host has to name a Compose service, and the port has to be one that service
+      opens. Otherwise every screen renders and every call answers 502 through a
+      container whose healthcheck passes, because the healthcheck asks the Next server
+      for a page and gets one — the same shape as ``D10-127``: correct-looking
+      configuration, no consumer that can notice.
+
+    Loopback is not special-cased into a clearer message: it is simply not a service
+    name, so it fails here by default rather than by a list of strings someone has to
+    remember to extend.
+    """
+    services = _compose_services()
+    proxied = _proxy_build_arguments()
+    assert proxied, (
+        "no service is handed API_PROXY_URL as a build argument: `next build` takes the "
+        "fallback in next.config.ts and every screen answers 502. It belongs in "
+        "`build.args` and not `environment:` — the destination is resolved when the "
+        "image is built, so a runtime copy changes nothing"
+    )
+
+    wrong: dict[str, str] = {}
+    for name, address in proxied.items():
+        match = PROXY_URL.fullmatch(address)
+        if match is None:
+            wrong[name] = f"API_PROXY_URL {address!r} is not an http(s) host and port"
+            continue
+        host, port = match.groups()
+        if host not in services:
+            loopback = (
+                " (inside this container, that is this container)"
+                if host
+                in {
+                    "127.0.0.1",
+                    "localhost",
+                    "::1",
+                }
+                else ""
+            )
+            wrong[name] = f"API_PROXY_URL names {host!r}, which is not a service here{loopback}"
+            continue
+        target = _image_dockerfile(services[host])
+        if target is not None and port not in _exposed_ports(target):
+            wrong[name] = (
+                f"API_PROXY_URL names port {port} on {host!r}, but {target} opens "
+                f"{sorted(_exposed_ports(target)) or 'no port'}"
+            )
+
+    assert not wrong, (
+        f"{sorted(wrong)}: {wrong}. Docker resolves this name per request, so a wrong "
+        "address is a 502 behind a healthy container rather than a failure to start"
+    )
+
+
+# --- the argument the image has to declare to be given ----------------------
+
+#: ``ARG API_PROXY_URL`` — the only thing that lets ``--build-arg`` reach a build.
+PROXY_ARGUMENT = re.compile(r"^ARG\s+API_PROXY_URL\b", re.MULTILINE)
+
+#: The command that fixes the rewrite destination: ``next build`` reads the config.
+NEXT_BUILD = re.compile(r"^RUN\s+npm run build\s*$", re.MULTILINE)
+
+
+def test_the_frontend_image_accepts_the_proxy_argument_before_it_builds() -> None:
+    """A ``build.args`` entry the image never declares is dropped without a word.
+
+    Docker passes a build argument to the build only for names the ``Dockerfile``
+    declares, so the two halves have to be checked together: Compose naming the API and
+    the image never accepting the value leaves ``next build`` with the fallback and the
+    Compose file reading as correct. That is the ``D10-127`` shape exactly — a value
+    written down in the right place and read by nothing.
+
+    The ``ENV`` is required as well. A declared ``ARG`` *is* visible to a later ``RUN``,
+    but that is a Docker rule to remember rather than a line in this file to read, and
+    the build reads the value as an environment variable.
+    """
+    frontend = DOCKERFILES["Dockerfile.frontend"].read_text(encoding="utf-8")
+
+    argument = PROXY_ARGUMENT.search(frontend)
+    assert argument is not None, (
+        "Dockerfile.frontend never declares `ARG API_PROXY_URL`: the value Compose hands "
+        "it in `build.args` is silently discarded and `next build` bakes in the fallback"
+    )
+    build = NEXT_BUILD.search(frontend)
+    assert build is not None, (
+        "Dockerfile.frontend no longer runs `RUN npm run build` on a line of its own: "
+        "this guard cannot tell whether the argument arrives before the build that reads "
+        "it, so it stops asserting rather than passing"
+    )
+    assert argument.start() < build.start(), (
+        "Dockerfile.frontend declares `ARG API_PROXY_URL` after `RUN npm run build`: the "
+        "destination is fixed by that command, so the argument arrives too late and the "
+        "fallback is what gets baked in"
+    )
+    assert re.search(r"^ENV\s+API_PROXY_URL=", frontend, re.MULTILINE), (
+        "Dockerfile.frontend never promotes `ARG API_PROXY_URL` to an `ENV` before the "
+        "build, so nothing in the file shows the value reaching `process.env`"
+    )
+
+
+# --- the address the image binds, and the files a page needs to hydrate ------
+
+#: ``HOSTNAME=<address>`` as `Dockerfile.frontend` spells it: one word of an `ENV`.
+HOSTNAME = re.compile(r"^\s*HOSTNAME=(\S+)\s*$", re.MULTILINE)
+
+#: The loopback spellings Node's `--host` accepts, none of which another container
+#: can reach. Compared literally: this asks "could the Compose network dial it", and
+#: the only defence against adding a fourth spelling is that it is not on this list.
+LOOPBACK = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def test_the_frontend_image_is_built_to_be_reachable_and_hydrated() -> None:
+    """Two ways this image builds cleanly and serves a broken screen.
+
+    Neither is a build failure, and the second is the one that looks fine:
+
+    * The standalone server binds ``localhost`` unless ``HOSTNAME`` says otherwise, so
+      an image that forgets it answers on its own loopback and nowhere else — 502 from
+      every other container while the process reports itself healthy and its probe
+      (which runs *inside* that container) passes.
+    * ``next build`` leaves the client bundles in ``.next/static``, which is **not**
+      inside the ``standalone`` tree it also writes. Copy only ``standalone`` and every
+      page returns HTML whose every script is a 404: it renders, it never hydrates, and
+      no server-side check notices because the HTML itself was served correctly.
+
+    Both are read off the files rather than restated here, so the guard follows the
+    Dockerfile if either line moves.
+    """
+    frontend = DOCKERFILES["Dockerfile.frontend"].read_text(encoding="utf-8")
+
+    found = HOSTNAME.findall(frontend)
+    assert found, (
+        "Dockerfile.frontend never sets HOSTNAME: the standalone server binds "
+        "localhost and no other container can reach the screen"
+    )
+    bindable = [address for address in found if address not in LOOPBACK]
+    assert bindable, (
+        f"Dockerfile.frontend binds {found}, which every other container reads as "
+        "itself: the frontend has to answer on an address the Compose network reaches"
+    )
+
+    config = (ROOT / "frontend" / "next.config.ts").read_text(encoding="utf-8")
+    assert re.search(r'^\s*output:\s*"standalone"', config, re.MULTILINE), (
+        'frontend/next.config.ts does not set `output: "standalone"`: `next build` '
+        "then writes no server.js and Dockerfile.frontend's runtime stage has nothing "
+        "to copy"
+    )
+    static_copy = re.search(r"^COPY\b.*\.next/static\b.*$", frontend, re.MULTILINE)
+    assert static_copy, (
+        "Dockerfile.frontend never copies `.next/static`: the standalone tree does not "
+        "contain it, so every page would serve HTML whose scripts all 404"
     )
