@@ -2639,8 +2639,14 @@ thing to build was therefore not the consumer but the input it would consume.
   a document write would fail at runtime rather than at boot — the worst kind of
   deployment bug. A named `documents` volume is mounted at an absolute
   `/var/lib/contract-agent/documents` on the API and all three workers, and
-  compose names that absolute path as the default while `.env.example` keeps the
-  relative `var/documents` that a checkout wants.
+  ~~compose names that absolute path as the default while `.env.example` keeps the relative
+  `var/documents` that a checkout wants.~~ **Amended by `D10-127`, `18106ae`:** that pairing is
+  wrong in the only configuration an operator runs. An explicit value in `.env.example` wins over
+  compose's `${DOCUMENT_STORE_PATH:-...}` fallback, so the relative path became the stack's path,
+  resolved under `/app`, and with `read_only: true` the store could not create it — the first upload
+  ever attempted answered `500` with `OSError: [Errno 30] Read-only file system: '/app/var'`.
+  `.env.example` now leaves the variable unset so each consumer gets its own correct default, and
+  the image creates the mount point owned by `app` before it drops privileges.
 - **This doubles the producers of events that a default stack cannot publish.**
   With `EVENT_TRANSPORT=none`, `UnavailablePublisher` (`outbox_relay.py:60`) raises
   on every publish, `record_outcome` retries to `outbox_max_attempts` and then
@@ -10028,3 +10034,110 @@ virgin datadir — which is precisely the case that hid this defect, and why the
 only check that covers it. This closing commit is documentation only, and its own run is not named,
 for the reason `D10-115` through `D10-125` all gave: a paragraph cannot contain the id of the run
 that publishes it.
+
+### D10-127 — The stack could not store a document, twice, for two reasons
+
+**Every check the repository runs agreed the stack could store a document, and it could not.**
+Everything from `D10-26` onward was proved in-process: `TestClient` against SQLite, with a
+`DocumentStore` pointed at a `tmp_path` the test itself created. That is the right way to prove a
+route, and it is structurally unable to ask the one question a deployment asks — *who owns the
+directory I have been handed*. The first request the shipped compose stack ever received with a file
+attached answered `500`.
+
+**Three files disagreed about one path, and every one of them was defensible alone.**
+`docker-compose.yml` defaults `DOCUMENT_STORE_PATH` to `/var/lib/contract-agent/documents`:
+absolute, and exactly where the `documents` volume is mounted. `.env.example` shipped
+`DOCUMENT_STORE_PATH=var/documents`, and an explicit value wins over a `${VAR:-...}` fallback, so
+the default never applied. Every service carries `read_only: true` and `/app` is not a mount, so the
+relative path resolved to `/app/var/documents` and the store answered `FileNotFoundError` then
+`OSError: [Errno 30] Read-only file system: '/app/var'`. `config.py` already refuses a relative
+document path — in production. The stack runs `APP_ENV=development`, so the rule written to catch
+exactly this was not running, and the value was accepted at boot and died at the first write
+instead.
+
+**Correcting the path reproduced the same `500` one layer down, which is the reason this slice has
+two commits' worth of finding in one.** With the absolute path in place: `PermissionError: [Errno
+13] Permission denied: '/var/lib/contract-agent/documents/f8'`. Compose mounts a named volume at a
+path the image never created; Docker creates that directory `root:root 0755`; every service runs as
+`app`, uid 1001. The store directory had never held a file. A correct path into a directory the
+runtime account cannot write is still a stack that cannot accept a document, and it reports itself
+with the same status code — so the first fix, alone, would have been accepted, filed, and wrong.
+
+**The example file now names neither answer, because there are two correct ones.** Two consumers
+read `.env.example`: `Settings()` wants a path a checkout can write without root, which is
+`var/documents`; compose wants the absolute path it mounts. One literal cannot be right for both,
+and the previous one was right for the first consumer while appearing to speak for the stack. The
+variable is now unset, with both accepted values shown commented out and the reason stated, so each
+consumer falls back to its own default and nobody has to reconcile them. `Dockerfile.backend`
+creates `/var/lib/contract-agent/documents` above `USER app` — a `chown` needs root — and hands it
+to the runtime account, so a new named volume is seeded from a path `app` owns instead of a
+root-owned one.
+
+**Three guards, all read out of the files rather than listing what they contain.** The first takes
+every `${DOCUMENT_STORE_PATH:-…}` in the compose file, requires the default to be absolute, requires
+it to be on that service's own mounts, and requires the services to agree — the `worker` anchor and
+its `<<: *worker` merge included, parsed with a line reader because the suite has no YAML dependency
+and adding one so a guard can read two files would be the tail wagging the dog. The second asserts
+`.env.example` does not move a mounted default off its mount, and objects when it finds no mounted
+default at all, because that is the parser failing rather than the stack being safe. The third
+requires every named volume this image mounts to be `mkdir -p`'d above `USER` and `chown`ed to the
+runtime account, with a parent `chown` counting so the file need not name the leaf twice. Each of
+the three carries a message that says what its failure costs, not merely which assertion failed.
+
+**Thirteen mutations, applied one at a time to the real files.** Both `.env.example` values, a
+dropped `:-` fallback, a default moved off its mount, a relative default, each `volumes:` line
+removed in turn, a drifted `api` default, the `RUN` block deleted, `app:app` rewritten to
+`root:root`, the directory created below `USER`, and the last named volume removed. All thirteen
+were caught, each by the test meant to catch it *and* the phrase it must provoke: five of them aim
+at one test, so red alone would have proved nothing. One mutation first scored as caught for the
+wrong reason, which was the harness aiming at the sibling test — the guard's message was sharpened
+to say what a missing `:-` actually costs rather than the harness being re-aimed at whatever
+happened to be red. Every mutated file was restored and compared by SHA-256.
+
+**A script drove the stack, and it is what found this.** `.agent-cache/drive_stack_journey.py` is
+gitignored and re-runnable, with `--stop-after` and `--timezone`: bootstrap a tenant through the
+CLI's stdin password path, ingest a real document over HTTP, restart `extractor` to prove a
+restarted worker picks the row up, poll `/contracts/{id}/fields`, approve, decide, schedule,
+dispatch. On the shipped stack over real MySQL it now runs end to end — ingestion, extraction on the
+`pattern` backend, review gating, consent gating, agent channel selection, quiet-hours deferral —
+and dispatch answers `409 SENDER_UNAVAILABLE` under `NOTIFICATION_TRANSPORT=none` with both rows
+still `pending`, `attempts` zero, `sent_at` null. That is the documented deferral and not a lost
+send: `SENDER_UNAVAILABLE` is deliberately absent from `SUPPRESSING_REFUSALS`, and the scheduler
+early-returns on a sender with no channels, so a `none` stack keeps its queue sendable instead of
+burning retries against a transport it does not have.
+
+**Three of the journey's failures were the journey's own, and are recorded because they are what a
+hand-written client gets wrong.** The login body key is `tenant`, not `tenant_slug`: the schema was
+right and the driver was not. `source=pdf` on a text upload is by design — `ContractSource` has
+exactly two members and names the *ingestion route*, not the bytes. And `409 NOT_YET_DUE` was quiet
+hours, which took arithmetic rather than a second guess: the clock read `00:12Z`, Europe/London sits
+inside `[20,8)`, so `quiet_hours_until` returns `08:00`, exactly the `scheduled_at` observed;
+re-running with an awake zone reached dispatch and produced a different answer. A probe that reports
+a defect has to be able to be wrong in ways that are not the stack's, or every failure becomes a bug
+report.
+
+**What this does not fix, stated rather than implied.** The guards read two files with line parsers,
+so a `docker-compose.yml` reshaped past what they understand fails loudly rather than quietly — each
+asserts it found something before asserting anything about it — but failing loudly is not the same
+as understanding. `NOTIFICATION_TRANSPORT=none` was never swapped for a live transport, so no mail
+crossed a socket from this stack; `smoke_alert_delivery.py` and the SMTP socket tests cover that
+seam separately, in a stack of their own. Extraction ran on the `pattern` backend only: no LLM
+backend, no live SMS gateway, no inbound webhook. And there is no frontend container in the compose
+file, so the browser was never part of this run — the journey is an HTTP client, and the UI's own
+contract with these routes is still only what `test_frontend_routes.py` compares statically.
+
+Gates, on the tree that commit carries: `ruff check` and `ruff format --check` over `152` files,
+bare `mypy` from the repository root over `76` files, `bandit -c pyproject.toml -r backend/app` exit
+0, `pytest -o addopts="" -m "not integration"` `1264 passed, 2 skipped, 19 deselected` — three more
+than `D10-126`'s `1261`, which is this slice's three guards and nothing else; nineteen pre-commit
+hooks; `gitleaks` over the whole history at the manual stage. The stack was run rather than
+inspected: `contracts` and `extracted_fields` were both empty before this slice, and a document was
+ingested, extracted, approved, decided and scheduled inside it.
+
+`D10-127` landed as `18106ae`, and CI run `43781046851` built it green: nine jobs of nine, read from
+the jobs API. `image (docker build, every entry point)` builds the Dockerfile this slice changed,
+which is the nearest thing CI does to this defect — but it builds the image and writes no document
+through it, so the ownership half is proven by the journey above and by nothing in CI. That gap is
+stated here rather than closed silently, because a green image job is the kind of evidence that gets
+mistaken for the other kind. This closing commit is documentation only and names no run of its own,
+for the reason `D10-115` through `D10-126` all gave.
