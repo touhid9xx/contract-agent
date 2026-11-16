@@ -540,6 +540,22 @@ jobs:
       - name: build the image the stack runs
         run: docker build -f Dockerfile.backend -t contract-agent-api:ci .
 
+      # Both images are built here, at the top, because the account assertion
+      # below checks them both and `D10-128` first put it the other way round: the
+      # loop named `contract-agent-frontend:ci` ninety lines before the step that
+      # built it, and `docker run` on an image that does not exist is a failure, not
+      # a skip. Found by this job, on the first run of the slice.
+      #
+      # `--build-arg` deliberately, because Compose supplies the proxy address
+      # through `build.args` and CI should exercise the same path. An image that
+      # stopped declaring the `ARG` would silently ignore this, bake in the
+      # `next.config.ts` fallback, and the proxy step below would fail -- which is
+      # the point of passing it here.
+      - name: build the image the stack serves
+        run: |
+          docker build --build-arg API_PROXY_URL=http://api:8000 \
+            -f Dockerfile.frontend -t contract-agent-frontend:ci .
+
       # `USER app` is the line that keeps a compromised request from being a
       # compromised host, and it is one word wide: deleting it changes nothing a
       # test can see. Asserted as an id, not read back from the Dockerfile.
@@ -635,15 +651,7 @@ jobs:
       # follow an asset the HTML names (a missing static copy fails here), and call the
       # API's prefix through a stand-in container answering to the name the image baked
       # in (a build argument that never arrived fails here, as a 500 instead of a 200).
-      - name: build the image the stack serves
-        # `--build-arg` deliberately, because Compose supplies this through `build.args`
-        # and CI should exercise the same path. An image that stopped declaring the
-        # `ARG` would silently ignore this, bake in the `next.config.ts` fallback, and
-        # the proxy step below would fail — which is the point of passing it here.
-        run: |
-          docker build --build-arg API_PROXY_URL=http://api:8000 \
-            -f Dockerfile.frontend -t contract-agent-frontend:ci .
-
+      # The image itself is built at the top of this job, next to the API's.
       - name: the screen serves a page and the assets that page names
         run: |
           # A user-defined network, so `api` is a real name on it — the shape Compose
