@@ -30,6 +30,18 @@ COPY --chown=app:app backend/app ./app
 COPY --chown=app:app backend/alembic.ini ./alembic.ini
 COPY --chown=app:app backend/migrations ./migrations
 
+# The document store (`D10-127`). `docker-compose.yml` mounts a named volume at
+# `/var/lib/contract-agent/documents` in every service, and every service runs as
+# `app`, but Docker creates a *new* named volume owned by root. The first upload
+# therefore died with `PermissionError: [Errno 13] ... documents/f8` even once the
+# path was right: a correct path into a directory this account cannot write is
+# still a stack that cannot store a document. A named volume is seeded from the
+# image path it covers, ownership included, so the directory has to exist here with
+# the runtime account's ownership before anything mounts over it.
+RUN mkdir -p /var/lib/contract-agent/documents \
+    && chown -R app:app /var/lib/contract-agent \
+    && chmod 0750 /var/lib/contract-agent /var/lib/contract-agent/documents
+
 USER app
 EXPOSE 8000
 

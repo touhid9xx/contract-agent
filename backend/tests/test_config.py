@@ -531,22 +531,107 @@ def _compose_services() -> dict[str, list[str]]:
     return services
 
 
+def _children(block: list[str], key: str) -> list[str]:
+    """The lines nested under one ``key:`` line of ``block``, stripped.
+
+    The indentation is read off the key itself rather than assumed, because the same
+    reader serves a service block (a key at four spaces) and an anchored fragment
+    (the same key at two).
+    """
+    nested: list[str] = []
+    indent = -1
+    for line in block:
+        if indent < 0:
+            if line.strip() == key:
+                indent = len(line) - len(line.lstrip())
+            continue
+        if len(line) - len(line.lstrip()) <= indent:
+            break
+        nested.append(line.strip())
+    return nested
+
+
+def _anchors() -> dict[str, list[str]]:
+    """Anchor name -> the lines of its block, for the file's top-level ``x-…`` keys."""
+    anchors: dict[str, list[str]] = {}
+    block: list[str] | None = None
+    for line in COMPOSE_FILE.read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith(" "):
+            header = re.fullmatch(r"x-[\w-]+: &(\w+)", line)
+            if header is None:
+                block = None
+            else:
+                block = []
+                anchors[header.group(1)] = block
+            continue
+        if block is not None:
+            block.append(line)
+    return anchors
+
+
+def _layers(block: list[str]) -> list[list[str]]:
+    """The blocks to read for one service, least specific first.
+
+    A service that writes ``<<: *worker`` inherits that anchor's keys, so a value it
+    does not repeat is still in force — and one comment in the anchor is a comment on
+    every worker. Merged in this order a key the service writes itself wins, which is
+    the direction YAML itself merges.
+    """
+    anchors = _anchors()
+    layers: list[list[str]] = []
+    for line in block:
+        merge = re.fullmatch(r"\s*<<: \*(\w+)", line)
+        if merge is not None and merge.group(1) in anchors:
+            layers.append(anchors[merge.group(1)])
+    layers.append(block)
+    return layers
+
+
+def _environment(block: list[str]) -> dict[str, str]:
+    """``KEY: value`` entries under a service's ``environment:``, inherited included."""
+    values: dict[str, str] = {}
+    for layer in _layers(block):
+        for entry in _children(layer, "environment:"):
+            if ":" not in entry:
+                continue
+            key, value = entry.split(":", 1)
+            values[key.strip()] = value.strip()
+    return values
+
+
+def _volume_entries(block: list[str]) -> list[tuple[str, str]]:
+    """``(source, container path)`` for every ``volumes:`` entry one service writes.
+
+    The source is kept because the two kinds of mount fail differently. A bind mount
+    of a host path is prepared by the checkout; a *named* volume is created by Docker
+    at first use, empty and owned by ``root``, so only the named ones need anything
+    from the image.
+    """
+    entries: list[tuple[str, str]] = []
+    for layer in _layers(block):
+        for entry in _children(layer, "volumes:"):
+            if not entry.startswith("- "):
+                continue
+            parts = entry[2:].split(":", 2)
+            if len(parts) >= 2:
+                entries.append((parts[0], parts[1]))
+    return entries
+
+
+def _mounts(block: list[str]) -> list[str]:
+    """The container paths one service mounts a volume or a file at."""
+    return [target for _, target in _volume_entries(block)]
+
+
 def _healthcheck(block: list[str]) -> dict[str, str]:
     """The scalar keys under one service's ``healthcheck:``, e.g. ``start_period``."""
     values: dict[str, str] = {}
-    inside = False
-    for line in block:
-        stripped = line.strip()
-        if stripped == "healthcheck:":
-            inside = True
+    for entry in _children(block, "healthcheck:"):
+        if ":" not in entry:
             continue
-        if not inside:
-            continue
-        if not line.startswith("      "):
-            break
-        if ":" not in stripped:
-            continue
-        key, value = stripped.split(":", 1)
+        key, value = entry.split(":", 1)
         values[key.strip()] = value.strip()
     return values
 
@@ -762,3 +847,265 @@ def test_production_rejects_the_examples_encryption_key() -> None:
 def test_production_rejects_the_examples_blind_index_key() -> None:
     with pytest.raises(ValidationError, match="CONTACT_BLIND_INDEX_KEY"):
         make_production(contact_blind_index_key=DEV_BLIND_INDEX_KEY_PLACEHOLDER)
+
+
+# --- the store a read-only container is handed -----------------------------
+
+#: ``${VAR:-default}``: the value Compose substitutes when `.env` is silent.
+COMPOSE_DEFAULT = re.compile(r"\$\{(\w+):-([^}]*)\}")
+
+
+def _mounted_defaults() -> dict[str, str]:
+    """Variable -> the path Compose defaults it to *and* mounts somewhere.
+
+    Derived from the Compose file in the direction the defect came from: rather than
+    naming ``DOCUMENT_STORE_PATH``, this asks which interpolated variables are backed
+    by a mount at all. A second volume-backed setting is covered the day it is
+    written, and a moved mount takes its variable with it.
+    """
+    found: dict[str, str] = {}
+    for block in _compose_services().values():
+        mounts = _mounts(block)
+        for value in _environment(block).values():
+            match = COMPOSE_DEFAULT.fullmatch(value)
+            if match is not None and match.group(2) in mounts:
+                found[match.group(1)] = match.group(2)
+    return found
+
+
+def test_every_service_that_stores_documents_is_given_a_path_it_has_mounted() -> None:
+    """A container whose root filesystem is read-only can only write to a mount.
+
+    ``read_only: true`` is set once in the ``worker`` anchor and again on ``api``, so
+    the only writable places in either are the ``tmpfs`` at ``/tmp`` and the volumes
+    listed below it. A store path that is not one of those is not a slow failure or a
+    permissions warning: ``DocumentStore.save`` calls ``mkdir`` and gets
+    ``OSError: [Errno 30] Read-only file system``.
+
+    ``D10-127`` shipped that gap in ``.env.example`` rather than here, which is why
+    the sibling test below exists as well — but the pair is only safe together. This
+    one pins that the value the stack *chooses* is absolute and mounted, so the test
+    below cannot pass by the example simply agreeing with a broken default.
+
+    Everything is read out of the file: the carriers are whichever services are handed
+    the variable, and the mounts are those services' own (including the anchor they
+    merge), so a worker that loses its ``volumes:`` line fails here.
+    """
+    services = _compose_services()
+    carriers = {
+        name: _environment(block)["DOCUMENT_STORE_PATH"]
+        for name, block in services.items()
+        if "DOCUMENT_STORE_PATH" in _environment(block)
+    }
+    assert carriers, (
+        "no service is handed DOCUMENT_STORE_PATH: has docker-compose.yml changed shape?"
+    )
+
+    wrong: dict[str, str] = {}
+    for name, raw in carriers.items():
+        match = COMPOSE_DEFAULT.fullmatch(raw)
+        if match is None:
+            wrong[name] = (
+                f"{raw!r} interpolates with no `:-` fallback, so an operator who has not "
+                "set the variable hands every service an empty path"
+            )
+            continue
+        path = match.group(2)
+        mounts = _mounts(services[name])
+        if not path.startswith("/"):
+            wrong[name] = (
+                f"falls back to {path!r}, which is not absolute: inside the container it "
+                "resolves under the working directory, and that is read-only"
+            )
+        elif path not in mounts:
+            wrong[name] = (
+                f"falls back to {path!r}, which it does not mount; it mounts "
+                f"{sorted(mounts) or 'nothing'}"
+            )
+
+    assert not wrong, (
+        f"services are given a document store they cannot write: {wrong}. Every service "
+        "reading it runs with `read_only: true`, so nothing outside a mount can be created"
+    )
+
+
+def test_the_example_env_file_does_not_move_a_mounted_default_off_its_mount() -> None:
+    """`cp .env.example .env` must not overrule a default the stack chose for a reason.
+
+    ``D10-127``: the example shipped ``DOCUMENT_STORE_PATH=var/documents``. That is
+    the right answer for a checkout and the wrong one for a container — Compose's
+    ``${DOCUMENT_STORE_PATH:-…}`` is a *fallback*, so a value in `.env` replaces it,
+    and the replacement is then handed to every process running with ``read_only:
+    true`` from ``/app``. ``var/documents`` resolved to ``/app/var/documents``, which
+    cannot be created, so ``POST /api/v1/contracts/document`` answered 500 with
+    ``Read-only file system: '/app/var'``. The stack reported twelve services up
+    throughout, because the failure lands on the first upload rather than at boot.
+
+    Nothing else could see it. ``Settings`` accepts a relative store in development by
+    design, ``test_the_example_env_file_loads`` only asks whether the copy boots, and
+    the compose gate never uploads a document. Only the pairing is wrong — the example
+    and the defaults each being defensible is exactly why it survived.
+
+    Read against the Compose file rather than against a list, so a second mounted
+    setting is held to the same rule.
+    """
+    mounted = _mounted_defaults()
+    assert mounted, (
+        "no interpolated default is a path the stack mounts: that is the parser, not "
+        "docker-compose.yml"
+    )
+
+    values = _example_env_values()
+    overriding = {key: values[key] for key in mounted if key in values}
+
+    assert not overriding, (
+        f"`.env.example` overrides {sorted(overriding)}, so every service is handed that "
+        "value instead of the path it mounts. A container with `read_only: true` cannot "
+        "create what a relative path resolves to, and the failure lands on the first "
+        "upload while `docker compose ps` still shows a healthy stack"
+    )
+
+
+# --- the directory the image has to own, not just mount ---------------------
+
+DOCKERFILE = Path(__file__).resolve().parents[2] / "Dockerfile.backend"
+
+#: ``chown [-flags] owner path`` — the owner and the one path it names.
+CHOWN = re.compile(r"\bchown\s+(?:-\S+\s+)*(\S+)\s+(/\S*)")
+
+
+def _declared_volumes() -> set[str]:
+    """The volume names the Compose file declares at the top level.
+
+    Needed to tell a named volume from a bind mount: ``documents:/x`` and ``./ops:/x``
+    are the same shape, and only the first is created empty and owned by ``root``.
+    """
+    names: set[str] = set()
+    in_volumes = False
+    for line in COMPOSE_FILE.read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith(" "):
+            in_volumes = line.strip() == "volumes:"
+            continue
+        if not in_volumes:
+            continue
+        header = re.fullmatch(r"  ([\w-]+):", line)
+        if header is not None:
+            names.add(header.group(1))
+    return names
+
+
+def _services_running_this_image() -> dict[str, list[str]]:
+    """Service name -> its block, for the services built from ``Dockerfile.backend``.
+
+    The scope has to be the image, not the file: MySQL mounts a named volume of its
+    own, and demanding the *Python* image create ``/var/lib/mysql`` would be a test
+    asserting something no one should do.
+    """
+    return {
+        name: block
+        for name, block in _compose_services().items()
+        if any("Dockerfile.backend" in line for layer in _layers(block) for line in layer)
+    }
+
+
+def _named_volume_mounts() -> dict[str, list[str]]:
+    """Container path -> the services of this image mounting a *named* volume there."""
+    declared = _declared_volumes()
+    found: dict[str, list[str]] = {}
+    for name, block in _services_running_this_image().items():
+        for source, target in _volume_entries(block):
+            if source in declared:
+                found.setdefault(target, []).append(name)
+    return found
+
+
+def _privileged_lines() -> tuple[str, list[str]]:
+    """``(runtime account, the lines that still run as root)``, read off the Dockerfile.
+
+    The split is the ``USER`` directive, not the whole file: ``mkdir -p`` a directory
+    and handing it to the runtime account needs root, so both have to happen *above*
+    the line that gives root up. A ``chown`` written below it runs as ``app`` and
+    would fail at build time — worth failing here instead, named.
+    """
+    lines = DOCKERFILE.read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(lines):
+        match = re.fullmatch(r"\s*USER\s+(\S+)", line)
+        if match is not None:
+            return match.group(1), lines[:index]
+    return "", lines
+
+
+def _owns(owners: dict[str, str], path: str, account: str) -> bool:
+    """Whether some ``chown`` gives ``path`` — or a parent of it — to ``account``.
+
+    A parent counts: ``chown -R app:app /var/lib/contract-agent`` covers everything
+    created under it, and demanding the exact leaf be named would refuse a correct
+    Dockerfile for being concise.
+    """
+    for target, owner in owners.items():
+        if owner.split(":")[0] != account:
+            continue
+        if path == target or path.startswith(target.rstrip("/") + "/"):
+            return True
+    return False
+
+
+def test_every_named_volume_the_image_mounts_is_created_owned_by_its_user() -> None:
+    """A right path into a directory the runtime account cannot write is still a 500.
+
+    ``D10-127``: with the store path corrected, ``POST /api/v1/contracts/document``
+    still answered 500, now with ``PermissionError: [Errno 13] Permission denied:
+    '/var/lib/contract-agent/documents/f8'``. Compose mounted a named volume at a path
+    the image never created, so Docker made the directory ``root:root 0755``, every
+    service runs as ``app`` (uid 1001), and the store had never held a file.
+
+    Neither earlier test could see it: the path is absolute and mounted, so the guard
+    above passes, and the mount succeeds, so ``docker compose ps`` reports healthy.
+    The defect is one layer below both — the *owner* of the mount point.
+
+    A named volume is seeded from the image path it covers, ownership included, so the
+    fix is to create the directory in the image and hand it over before ``USER``. Read
+    out of the two files rather than named, so the next volume this image mounts is
+    held to the rule the day it is written.
+    """
+    mounts = _named_volume_mounts()
+    assert mounts, (
+        "no service built from Dockerfile.backend mounts a named volume: either the "
+        "compose file changed shape or this parser no longer reads it"
+    )
+
+    account, as_root = _privileged_lines()
+    assert account, (
+        "Dockerfile.backend never drops privileges with USER: the image would run as "
+        "root, and every ownership question below is about a non-root runtime account"
+    )
+
+    privileged = "\n".join(as_root)
+    entire = DOCKERFILE.read_text(encoding="utf-8")
+    owners = {path: owner for line in as_root for owner, path in CHOWN.findall(line)}
+
+    missing: dict[str, str] = {}
+    for path, services in mounts.items():
+        created = f"mkdir -p {path}"
+        if created not in privileged:
+            below_user = created in entire
+            only_below = "only after `USER` gave root up" if below_user else "nowhere in the file"
+            missing[path] = (
+                f"is mounted by {sorted(services)} but is created {only_below}; a "
+                "`chown` needs root, so the directory is made and handed over above "
+                "`USER` or Docker seeds the volume root:root and the runtime account "
+                "cannot write in it"
+            )
+        elif not _owns(owners, path, account):
+            missing[path] = (
+                f"is mounted by {sorted(services)} but no chown above `USER {account}` "
+                f"gives it to {account}: {sorted(owners.items()) or 'nothing is owned'}"
+            )
+
+    assert not missing, (
+        f"Dockerfile.backend does not prepare {sorted(missing)}: {missing}. A named "
+        "volume is seeded from the image path it covers, so `mkdir -p` plus `chown` "
+        "before `USER` is the only place this can be fixed"
+    )
