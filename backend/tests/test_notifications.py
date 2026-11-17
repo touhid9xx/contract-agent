@@ -59,6 +59,7 @@ from app.db.enums import (
     UserRole,
 )
 from app.db.models import AgentDecision, Contract, ExtractedField, Notification, Tenant, User
+from app.db.repositories import PENDING_CHANNELS, pending_overdue_counts
 from app.db.session import session_scope
 from app.main import create_app
 from app.workers.dispatch import (
@@ -201,11 +202,17 @@ def make_notification(
     last_error: str | None = None,
     provider_message_id: str | None = None,
     sent_at: datetime | None = None,
+    created_at: datetime | None = None,
 ) -> int:
     """Insert one notification row directly and return its id.
 
     Used where the *route* is not the subject — a row parked after its budget is
     spent, or one whose milestone slot would already be taken.
+
+    ``created_at`` is settable because some rows are aged by the moment they were
+    written rather than by a due time: a row with ``scheduled_at`` NULL is due the
+    instant it exists, and the only way to make it *overdue* in a test is to move
+    its birth into the past.
     """
     slot = scheduled_date if scheduled_date is not None else utc_today() - timedelta(days=20)
     with session_scope(session_factory) as session:
@@ -217,6 +224,7 @@ def make_notification(
             status=status,
             scheduled_date=slot,
             scheduled_at=scheduled_at,
+            created_at=created_at if created_at is not None else utc_now(),
             sent_at=sent_at,
             idempotency_key=notification_idempotency_key(contract.id, template, slot),
             attempts=attempts,
@@ -1394,3 +1402,173 @@ def test_a_contract_further_out_than_every_milestone_is_refused() -> None:
         milestone_for(end_date=date(2027, 1, 1), today=date(2026, 1, 1))
 
     assert raised.value.code == "NOT_IN_WINDOW"
+
+
+# --- the pending-overdue reader (D10-129) ---------------------------------
+#
+# A ``pending`` row is the third way a notification can fail to reach anybody, and
+# the only one the database recorded nowhere: ``failed``/``suppressed`` are counted
+# by ``undelivered_counts``, but a row nothing ever claimed simply sits. These cases
+# pin the *predicate* at the repository, so the scheduler and the attention check
+# cannot drift apart without one of them failing here first.
+#
+# The reader is exercised through its real signature rather than a wrapper that
+# forgets ``now``: every case passes an explicit instant, because "overdue" is
+# only meaningful relative to a clock and a test that read the wall clock twice
+# could straddle the grace boundary.
+GRACE = timedelta(minutes=15)
+
+#: The result for a board with nothing overdue: every channel, zero-filled.
+NOTHING_OVERDUE: dict[Channel, int] = dict.fromkeys(PENDING_CHANNELS, 0)
+
+
+def overdue(
+    session_factory: sessionmaker[Session],
+    *,
+    grace: timedelta = GRACE,
+    now: datetime | None = None,
+) -> dict[Channel, int]:
+    """Run ``doctor``'s and the attention watch's reader in one short call."""
+    with session_scope(session_factory) as session:
+        return pending_overdue_counts(session, grace=grace, now=now)
+
+
+def test_an_empty_queue_reports_zero_for_every_channel(
+    session_factory: sessionmaker[Session],
+) -> None:
+    # Zero-filled rather than empty: a missing channel would read, from the
+    # publisher's side, as a channel that is never stuck rather than one nobody
+    # counted.
+    assert overdue(session_factory) == NOTHING_OVERDUE
+    assert set(overdue(session_factory)) == set(Channel)
+
+
+def test_a_row_inside_the_grace_is_not_yet_a_finding(
+    session_factory: sessionmaker[Session], tenant: Tenant
+) -> None:
+    now = utc_now()
+    make_notification(
+        session_factory,
+        make_contract(session_factory, tenant),
+        scheduled_at=now - GRACE + timedelta(seconds=30),
+    )
+
+    # Waiting for the next five-second scheduler tick is not a stuck queue.
+    assert overdue(session_factory, now=now) == NOTHING_OVERDUE
+
+
+def test_a_row_becomes_overdue_once_the_grace_has_elapsed(
+    session_factory: sessionmaker[Session], tenant: Tenant
+) -> None:
+    now = utc_now()
+    make_notification(
+        session_factory,
+        make_contract(session_factory, tenant),
+        scheduled_at=now - GRACE - timedelta(seconds=1),
+    )
+
+    assert overdue(session_factory, now=now) == {**NOTHING_OVERDUE, Channel.EMAIL: 1}
+
+
+def test_a_row_with_no_due_time_is_aged_from_its_own_creation(
+    session_factory: sessionmaker[Session], tenant: Tenant
+) -> None:
+    """The branch a ``scheduled_at``-only predicate would silently drop.
+
+    ``reminder_planner`` writes ``scheduled_at=None`` for immediate send, and
+    ``claim_next_due`` treats NULL as due now — so an age test that compared
+    ``scheduled_at`` alone would compare NULL, match nothing, and report a clean
+    board over exactly the rows the producer wrote for right now.
+    """
+    now = utc_now()
+    contract = make_contract(session_factory, tenant)
+    # Immediate send, written an hour ago: due then, still pending now.
+    make_notification(
+        session_factory,
+        contract,
+        template="T-60",
+        scheduled_at=None,
+        created_at=now - timedelta(hours=1),
+    )
+
+    assert overdue(session_factory, now=now)[Channel.EMAIL] == 1
+
+    # The other direction: an immediate-send row written a moment ago is simply
+    # the next thing to go out, and NULL must not be read as "infinitely old".
+    make_notification(
+        session_factory,
+        contract,
+        template="T-30",
+        scheduled_at=None,
+        created_at=now,
+    )
+
+    assert overdue(session_factory, now=now)[Channel.EMAIL] == 1
+
+
+def test_a_quiet_hours_deferral_is_never_counted(
+    session_factory: sessionmaker[Session], tenant: Tenant
+) -> None:
+    """Deferral is the system working, and it must not page anybody.
+
+    A deferred row carries a *future* ``scheduled_at`` and an old ``created_at``,
+    which is precisely the shape a reader keyed on creation time would mistake for
+    a stuck queue — every deployment would alert at two in the morning.
+    """
+    now = utc_now()
+    make_notification(
+        session_factory,
+        make_contract(session_factory, tenant),
+        scheduled_at=now + timedelta(hours=6),
+        created_at=now - timedelta(days=2),
+    )
+
+    assert overdue(session_factory, now=now) == NOTHING_OVERDUE
+
+
+@pytest.mark.parametrize(
+    "status",
+    [NotificationStatus.SENT, NotificationStatus.FAILED, NotificationStatus.SUPPRESSED],
+)
+def test_a_row_that_left_pending_is_not_counted_however_old(
+    session_factory: sessionmaker[Session], tenant: Tenant, status: NotificationStatus
+) -> None:
+    now = utc_now()
+    make_notification(
+        session_factory,
+        make_contract(session_factory, tenant),
+        status=status,
+        scheduled_at=now - timedelta(days=3),
+    )
+
+    # ``failed`` and ``suppressed`` are the sibling reader's population. Counting
+    # them here as well would report one broken send twice.
+    assert overdue(session_factory, now=now) == NOTHING_OVERDUE
+
+
+def test_the_counts_are_per_channel_and_not_one_total(
+    session_factory: sessionmaker[Session], tenant: Tenant
+) -> None:
+    now = utc_now()
+    contract = make_contract(session_factory, tenant)
+    # Same contract, distinct milestone slots: the unique constraint is
+    # ``(contract, template, scheduled_date)``, so the template is what keeps two
+    # email rows apart here — not the channel.
+    for template, channel in (
+        ("T-60", Channel.EMAIL),
+        ("T-30", Channel.EMAIL),
+        ("T-14", Channel.SMS),
+    ):
+        make_notification(
+            session_factory,
+            contract,
+            template=template,
+            channel=channel,
+            scheduled_at=now - timedelta(hours=1),
+        )
+
+    assert overdue(session_factory, now=now) == {
+        Channel.EMAIL: 2,
+        Channel.SMS: 1,
+        Channel.VOICE: 0,
+    }

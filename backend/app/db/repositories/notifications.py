@@ -21,10 +21,11 @@ Two shapes worth stating, both inherited from :mod:`app.db.repositories.agent`:
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.db.base import utc_now
 from app.db.enums import Channel, NotificationStatus
@@ -231,6 +232,93 @@ def undelivered_counts(session: Session) -> dict[NotificationStatus, int]:
     return counts
 
 
+#: Every channel a ``pending`` row can be stuck on, in the enum's declaration order.
+#:
+#: Named once because two things fill their zeros from it — the two counts below and
+#: the ``notifications_pending`` gauge in :mod:`app.core.metrics` — and a channel
+#: missing from one of them would read, from Prometheus' side, as a channel that is
+#: never stuck rather than one nobody counted.
+PENDING_CHANNELS: tuple[Channel, ...] = tuple(Channel)
+
+
+def _overdue_pending(grace: timedelta, now: datetime | None) -> ColumnElement[bool]:
+    """The predicate for "due, still ``pending``, and due for longer than ``grace``".
+
+    Deliberately built from the same two columns as :func:`claim_next_due` and with
+    the same reading of them, so the reader that counts stuck rows and the scheduler
+    that sends them cannot disagree about which rows are due: a row is due once
+    ``scheduled_at`` has passed, and a row with no ``scheduled_at`` is due the moment
+    it exists.
+
+    The grace is where the two differ, and it is not padding. ``claim_next_due`` asks
+    "may I send this *now*"; this asks "should somebody already have sent this", and
+    between those two questions sits every row that is merely waiting for the next
+    five-second tick. A ``scheduled_at`` in the future — the quiet-hours deferral
+    (``dispatch.quiet_hours_until``) — is not due at all and so never reaches here:
+    deferral is correct behaviour, and a check that alerted on it would page every
+    deployment at two in the morning.
+
+    For a row with no due time the age that matters is its own, so ``created_at``
+    stands in. Reading ``scheduled_at`` alone there would compare NULL, match nothing,
+    and under-report exactly the rows the producer created for immediate send.
+    """
+    cutoff = (utc_now() if now is None else now) - grace
+    return and_(
+        Notification.status == NotificationStatus.PENDING,
+        or_(
+            and_(
+                Notification.scheduled_at.is_not(None),
+                Notification.scheduled_at <= cutoff,
+            ),
+            and_(
+                Notification.scheduled_at.is_(None),
+                Notification.created_at <= cutoff,
+            ),
+        ),
+    )
+
+
+def pending_overdue_counts(
+    session: Session, *, grace: timedelta, now: datetime | None = None
+) -> dict[Channel, int]:
+    """Count rows that are due and still ``pending`` past ``grace``, **unscoped**.
+
+    The population this table had no reading for. A row leaves ``pending`` in one of
+    three ways and only two of them are visible anywhere else: it is sent, or it parks
+    as ``failed``/``suppressed`` — both counted by :func:`undelivered_counts`. The
+    third is that nothing ever claims it, and on the shipped configuration that is
+    *every* reminder: with ``NOTIFICATION_TRANSPORT=none`` the transport raises
+    ``SENDER_UNAVAILABLE`` before ``attempts`` is incremented, so the row cannot reach
+    the retry cap, never turns ``failed``, and stays ``pending`` for ever. The
+    attention check therefore reported a clean board while a queue of customer
+    reminders sat behind it, unsendable and uncounted.
+
+    Unscoped for the reason :func:`undelivered_counts` gives: this backs an operator
+    check with no principal, and scoping it would report a clean board while another
+    organisation's queue sat stuck.
+
+    Every channel is **always** present in the result, zero-filled, for the same
+    reason both statuses are in the sibling: a missing key would force every caller to
+    tell "no such row" from "no rows of that channel", and the natural slip — ``.get``
+    in one place, a loop over ``.items()`` in another — is how a channel quietly stops
+    being reported.
+
+    It returns the count **per channel and nothing else**. Whether a stuck row on that
+    channel is explained by configuration or is a fault is a question about the
+    deployment's transports, not about the table, and it is answered at the one place
+    that holds the settings: :func:`app.core.attention.attention_report`.
+    """
+    stmt = (
+        select(Notification.channel, func.count())
+        .where(_overdue_pending(grace, now))
+        .group_by(Notification.channel)
+    )
+    counts: dict[Channel, int] = dict.fromkeys(PENDING_CHANNELS, 0)
+    for channel, total in session.execute(stmt).all():
+        counts[channel] = int(total)
+    return counts
+
+
 def undelivered_counts_for_tenant(
     session: Session, tenant_id: uuid.UUID
 ) -> dict[NotificationStatus, int]:
@@ -271,3 +359,15 @@ def undelivered_counts_for_tenant(
     for status, total in session.execute(stmt).all():
         counts[status] = int(total)
     return counts
+
+
+#: Deliberately **no** tenant-scoped twin of :func:`pending_overdue_counts`.
+#:
+#: Its two siblings have one each because an operator reading a count and a tenant
+#: reading the same count answer different questions. This one does not: all three
+#: buckets it feeds are statements about what the *deployment* can send, so there is
+#: nothing a tenant could do with their own version of the number — and the population
+#: is not hidden from them anyway, because the notification queue screen lists their
+#: ``pending`` rows by name. An unread query written "for symmetry" is how a module
+#: grows a second answer that nobody checks; see ``D10-129`` and
+#: :class:`app.core.attention.TenantAttentionReport`.

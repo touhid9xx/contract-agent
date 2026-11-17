@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import ssl
+from datetime import timedelta
 from functools import lru_cache
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
@@ -17,6 +18,8 @@ from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.db.enums import Channel
 
 AppEnv = Literal["development", "test", "staging", "production"]
 #: Transport the outbox relay publishes through. ``none`` keeps the refusing
@@ -97,6 +100,21 @@ MIN_BLIND_INDEX_KEY_LENGTH = 32
 #: guess is answered by the same 202 a right one gets — so an attacker learns nothing
 #: per attempt and the only cost of guessing is the length of this value.
 MIN_INBOUND_SECRET_LENGTH = 32
+#: The channels this build has a transport *factory* for at all — the ceiling that no
+#: setting can raise.
+#:
+#: ``Channel.VOICE`` is deliberately absent and no environment variable adds it: nothing
+#: in this build places a call, so a queued voice notification is unsendable here
+#: whatever the deployment is configured to do. That is a **different fact** from "the
+#: transport is switched off", and the difference is an operator's next move — one is
+#: fixed by an environment variable, the other by changing what may be consented or by
+#: approving an address a channel can use. :func:`app.core.attention.attention_report`
+#: publishes the two as separate series for exactly that reason (``D10-129``).
+#:
+#: It is the same pair :func:`app.workers.senders.build_sender` builds factories for, and
+#: that function raises rather than accept a deliverable channel it cannot build, so a
+#: channel added here without a sender fails at start-up instead of queueing silently.
+NOTIFIABLE_CHANNELS = frozenset({Channel.EMAIL, Channel.SMS})
 _VALID_LOG_LEVELS = frozenset({"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"})
 #: Hosts considered non-public. Used to *detect* a development origin, never to bind.
 _LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "0.0.0.0", "::1")  # nosec B104
@@ -298,6 +316,19 @@ class Settings(BaseSettings):
     #: row deferred to 08:00 customer time would otherwise wait for an arbitrary
     #: sweep interval to be noticed.
     notification_poll_interval_seconds: float = Field(default=5.0, gt=0, le=300)
+    #: How long a notification may be due and still ``pending`` before the attention
+    #: check calls it stuck (``D10-129``).
+    #:
+    #: A grace is not politeness, it is what makes the count mean anything. A row is
+    #: ``pending`` from the moment ``scheduled_at`` passes until the scheduler's next
+    #: claim, which is at most :attr:`notification_poll_interval_seconds`; counting
+    #: that window would make a deployment doing its job look exactly like one whose
+    #: scheduler had died, and the gauge would stand at one for ever on a quiet
+    #: install. Fifteen minutes is three orders of magnitude more than the loop
+    #: needs — the retry path parks a row as ``failed`` after
+    #: :attr:`notification_retry_max` attempts at five-second intervals — and short
+    #: enough that an operator learns about a stuck queue in the same working session.
+    notification_overdue_grace_seconds: float = Field(default=900.0, gt=0, le=86_400)
     #: Seconds between attention checks (`python -m app.workers.attention_watch`).
     #: Five minutes, not five seconds: every tick reads three tables and the states
     #: it reports — a parked event, a suppressed notification, a plaintext field
@@ -1023,6 +1054,46 @@ class Settings(BaseSettings):
         retirement order makes "which key is this?" answerable by eye.
         """
         return [key.strip() for key in self.encryption_key_previous.split(",") if key.strip()]
+
+    @property
+    def notification_overdue_grace(self) -> timedelta:
+        """``NOTIFICATION_OVERDUE_GRACE_SECONDS`` as the interval the queries compare.
+
+        Two readers count overdue-pending rows — the operator's attention check and a
+        tenant's own board — and both hand the number to the same repository predicate.
+        Converting in one place keeps them from disagreeing about the window by a
+        rounding difference, which would show up as two boards on the same database
+        reporting different counts.
+        """
+        return timedelta(seconds=self.notification_overdue_grace_seconds)
+
+    @property
+    def deliverable_notification_channels(self) -> frozenset[Channel]:
+        """The channels this deployment has a transport for, derived from the switches.
+
+        The single answer to "can anything ever send this?", asked by two callers that
+        must not disagree: :func:`~app.workers.senders.build_sender` decides which
+        senders to wire from it, and :func:`~app.core.attention.attention_report` decides
+        from it whether a reminder stuck ``pending`` follows from configuration or from a
+        fault. Written once, here, because the two-answer version is how a background
+        send starts disagreeing with the attention check about whether a channel exists
+        at all — the same failure ``D10-129`` found in the alerting.
+
+        ``voice`` is absent by construction, not by omission: no transport in this build
+        places calls, so a queued voice notification is unsendable on *every*
+        configuration. :attr:`Channel` carries the member anyway because the agent may
+        rank among it and an inbound voice reply is representable.
+
+        A frozenset of :attr:`Channel` rather than of :class:`str` so a caller cannot
+        compare it against a raw column value without going through the enum, which is
+        where the two spellings would drift.
+        """
+        channels: set[Channel] = set()
+        if self.notification_transport != "none":
+            channels.add(Channel.EMAIL)
+        if self.sms_transport != "none":
+            channels.add(Channel.SMS)
+        return frozenset(channels)
 
 
 def _is_fernet_key(value: str) -> bool:

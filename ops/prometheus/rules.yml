@@ -1,20 +1,35 @@
 # Alert rules for the local stack (D10-111).
 #
-# Three rules, and each is recorded somewhere in this repository before it is written here. `D10-91`
+# Four rules, and each is recorded somewhere in this repository before it is written here. `D10-91`
 # names `escalation_email_failed_total` so that the first expression would need no rewrite, and
 # `D10-108`/`D10-109`/`D10-110` each found a new reason it could not fire. `D10-117` adds the
 # second: `STATUS.md`'s gap 22 has said since `D10-39` that a parked outbox row is announced by
 # nothing, and there was no series to announce it with. `D10-118` adds the third, for the other
-# half of the same gap sentence — an undelivered notification was equally unannounced. A rules file
-# is not a place to demonstrate diligence: every additional rule would be an alert nobody specified
-# and nobody has ever received, which is the shape of file that gets muted instead of fixed. The
-# third rule is the last of gap 22; what remains of that gap needs an owner's decision, not a rule.
+# half of the same gap sentence — an undelivered notification was equally unannounced.
+#
+# `D10-129` adds the fourth, and it is the reason the third was not the last of gap 22 as this
+# header used to claim. The first three all count rows that *stopped*; none could see a row that
+# never started, which on the shipped `NOTIFICATION_TRANSPORT=none` is every reminder the stack
+# ever queues. A rules file is not a place to demonstrate diligence: every additional rule would be
+# an alert nobody specified and nobody has ever received, which is the shape of file that gets
+# muted instead of fixed. So the fourth names the one population that had no reading at all, and
+# gap 22's *counting* is now closed — what remains of that gap is a consumer for `contract.ingested`,
+# which still needs an owner's decision (a broker this stack does not ship) rather than a rule.
 #
 # `for: 0m` is not laziness. The counter is incremented once per failed alert *batch*, so a single
 # increment on a 15s scrape is already a sustained condition — there is nothing to debounce, and a
 # `for` window here would only delay the one message that tells an operator nobody was told about a
 # new escalation. The rule is about a mail that did not reach a human; it should not queue behind a
-# timer to say so.
+# timer to say so. Rules two and three inherit that reasoning through `> 0` on a standing state.
+#
+# `NotificationsPendingOverdue` is the exception and carries `for: 10m`, because its reading holds
+# a window the other three have not: a reminder is overdue the instant its grace elapses, and the
+# scheduler that will claim it polls every `NOTIFICATION_POLL_INTERVAL_SECONDS` (5s, against a
+# 900s grace), so a deployment doing its job spends a few seconds per reminder looking exactly like
+# a wedged one. That transient is small but real. What sets the length is the publisher: the gauge
+# only moves when the watcher ticks (`ATTENTION_POLL_INTERVAL_SECONDS`, 300s), so a window shorter
+# than one tick would page on the boundary of a number nothing had re-read. Ten minutes means the
+# condition was recomputed from the database at least once while still true.
 groups:
   - name: escalation-alerts
     rules:
@@ -104,8 +119,13 @@ groups:
       #     shipped `NOTIFICATION_TRANSPORT=none`, `dispatch_notification` raises
       #     `SENDER_UNAVAILABLE` *before* incrementing `attempts`, so the budget is never
       #     consumed and the row stays `pending` for ever. A default install therefore
-      #     publishes `failed 0` and this rule stays quiet, without needing a second
-      #     "explained" label the way the park gauge did.
+      #     publishes `failed 0` and this rule stays quiet — which this comment stated, when
+      #     the rule was written, as a reason it needed no second "explained" label the way
+      #     the park gauge did. `D10-129` is what that sentence left out: those rows were
+      #     not explained, they were uncounted, and staying quiet here is not a claim that
+      #     the queue is fine. They have their own family below rather than a third
+      #     `status` value, because the two this family carries mean fault and policy
+      #     verdict, and a third would quietly widen the matcher above.
       #
       # `for: 0m` for the reason given above both rules: `> 0` on a gauge states a
       # standing condition, and a row parked `failed` is not retried by anything except a
@@ -131,3 +151,52 @@ groups:
             Notifications suppressed by policy — consent withdrawn, contract closed,
             field awaiting review — are published as status="suppressed" and never
             reach this alert.
+
+  - name: notification-backlog
+    rules:
+      # The gauge-versus-counter reasoning once more: the scheduler clears a row by sending it, and
+      # `POST /notifications/{id}/retry` clears a failed one, so the number must be able to fall. A
+      # counter of "late ever" would stay above zero after the first slow tick and could not be
+      # answered by the action it asks for.
+      #
+      # One of the gauge's three states is matched, and which one is the design:
+      #
+      #   * `unconfigured` — a transport exists and the setting that enables it is off. On the
+      #     shipped `NOTIFICATION_TRANSPORT=none` that is every reminder the stack queues, so an
+      #     alarm here would fire from a default install's first reminder onward and be muted long
+      #     before the deployment it described was fixed. Published, and left to the attention
+      #     verdict, which is where a person reads standing state rather than an incident.
+      #   * `unsupported` — no build of this system sends the channel (`voice`), so no setting
+      #     clears these rows either; a customer has to give an address something can send to, or
+      #     consent has to change. Same treatment: published, counted in the verdict, on `doctor`,
+      #     and not paged, because a page that repeats for ever is one an operator mutes.
+      #   * `stuck` — a deliverable channel, a due row, a grace elapsed, and nothing sent it.
+      #     Nothing about the configuration explains it and nothing clears it by itself. This is
+      #     the population a page exists for: reminders nobody is being told about while the board
+      #     reads clean.
+      #
+      # `state="stuck"` and not `state=~"unsupported|stuck"`, deliberately. The wider matcher would
+      # also remove this rule from `tests/test_alert_rules.py`'s comparison: that reader resolves
+      # `label="value"` and not `=~`, so the one check in this repository that compares a matcher
+      # against the tokens `app/core/metrics.py` actually publishes would silently stop covering
+      # this rule — and a rule nothing compares is a rule whose token can be renamed to a value no
+      # process writes, which cannot fire and cannot be told apart from a quiet deployment.
+      #
+      # `for: 10m` unlike the three above; the header paragraph argues the length rather than
+      # asserting it. Limit shared with the neighbours: the series arrives with the watcher's tick
+      # and goes stale if the watcher stops, which is why the first rule reads a counter.
+      - alert: NotificationsPendingOverdue
+        expr: notifications_pending_overdue{state="stuck"} > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Reminders overdue and unsent on {{ $labels.instance }}"
+          description: >-
+            A notification was due, its grace elapsed, its channel is one this deployment can
+            send on, and nothing sent it. The queue is intact — nothing was lost — but no
+            customer is being told anything, so the scheduler behind
+            NOTIFICATION_POLL_INTERVAL_SECONDS is not running or not draining. Check
+            `docker compose ps scheduler`, then `python -m app.cli doctor`. Rows whose channel
+            has no transport configured — every reminder, on the shipped default — are published
+            as state="unconfigured" and never reach this alert.

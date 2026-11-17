@@ -29,8 +29,10 @@ from app.db.repositories.fields import (
 from app.db.repositories.notifications import (
     DEFAULT_NOTIFICATION_LIMIT,
     MAX_NOTIFICATION_LIMIT,
+    PENDING_CHANNELS,
     UNDELIVERED_STATUSES,
     NotificationRepository,
+    pending_overdue_counts,
     undelivered_counts,
 )
 from app.db.repositories.outbox import (
@@ -52,6 +54,7 @@ __all__ = [
     "MAX_ESCALATION_QUEUE_LIMIT",
     "MAX_NOTIFICATION_LIMIT",
     "MAX_RESPONSE_HISTORY_LIMIT",
+    "PENDING_CHANNELS",
     "UNDELIVERED_STATUSES",
     "AgentDecisionRepository",
     "AuditLogRepository",
@@ -78,6 +81,7 @@ __all__ = [
     "enqueue_event",
     "fields_for_reseal",
     "normalize_email",
+    "pending_overdue_counts",
     "replay_dead_lettered",
     "undelivered_counts",
 ]

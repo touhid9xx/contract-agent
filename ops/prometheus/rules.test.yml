@@ -35,6 +35,17 @@
 # alert fires on it. Case 10 re-applies `D10-109` to the second gauge, and case 11 pins that a
 # retry, like a replay, can silence the alert.
 #
+# Cases 12-16 are the fourth rule (`D10-129`), and 13 is the one that earns its place: on the
+# shipped `NOTIFICATION_TRANSPORT=none` every reminder the stack queues is overdue and unconfigured,
+# so a rule over the whole family would page from a default install's first reminder onward and be
+# muted long before the condition it described was fixed. 12 is what stops 13 from passing because
+# the input was empty — the same instance carries a genuinely stuck row and the alert fires on it.
+# 14 is the case that justifies the `for:` window the other three rules do not have: a reminder is
+# overdue the instant its grace elapses while the scheduler that sends it polls every five seconds,
+# so a few minutes of lateness is a deployment working, not a queue wedged. 15 re-applies `D10-109`
+# to the third gauge, and 16 states the window's cost as a test: a row cleared before the window
+# elapses is never announced, which is the trade the window deliberately makes.
+#
 # `rule_files` is absolute because `promtool` resolves it against the working directory, and CI runs
 # with `-w /etc/prometheus` against the same mount `docker-compose.yml` uses — one path, so the file
 # validated is the file Prometheus reads.
@@ -256,4 +267,88 @@ tests:
       # The same run, after the operator fixed the transport and retried the rows.
       - eval_time: 11m
         alertname: NotificationsUndelivered
+        exp_alerts: []
+
+  # 12. Fires on a stuck row after the window, while the unpageable states sit on the same instance.
+  - interval: 1m
+    input_series:
+      # Every reminder the stack queues, under the shipped NOTIFICATION_TRANSPORT=none.
+      - series: 'notifications_pending_overdue{state="unconfigured",instance="attention:9101"}'
+        values: "42 42 42 42 42 42 42 42 42 42 42 42 42 42 42"
+      # A phone-only contract whose channel no build of this system can send on.
+      - series: 'notifications_pending_overdue{state="unsupported",instance="attention:9101"}'
+        values: "3 3 3 3 3 3 3 3 3 3 3 3 3 3 3"
+      # A deliverable channel, due, grace elapsed, and nothing sent it from t=2m onward.
+      - series: 'notifications_pending_overdue{state="stuck",instance="attention:9101"}'
+        values: "0 0 1 1 1 1 1 1 1 1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 13m
+        alertname: NotificationsPendingOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: "attention:9101"
+              state: stuck
+            exp_annotations:
+              summary: "Reminders overdue and unsent on attention:9101"
+              description: >-
+                A notification was due, its grace elapsed, its channel is one this deployment can
+                send on, and nothing sent it. The queue is intact — nothing was lost — but no
+                customer is being told anything, so the scheduler behind
+                NOTIFICATION_POLL_INTERVAL_SECONDS is not running or not draining. Check
+                `docker compose ps scheduler`, then `python -m app.cli doctor`. Rows whose channel
+                has no transport configured — every reminder, on the shipped default — are
+                published as state="unconfigured" and never reach this alert.
+
+  # 13. A default install has every reminder overdue and pages nobody.
+  - interval: 1m
+    input_series:
+      - series: 'notifications_pending_overdue{state="unconfigured",instance="attention:9101"}'
+        values: "118 118 118 118 118 118 118 118 118 118 118 118 118 118 118"
+      - series: 'notifications_pending_overdue{state="unsupported",instance="attention:9101"}'
+        values: "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
+      - series: 'notifications_pending_overdue{state="stuck",instance="attention:9101"}'
+        values: "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 13m
+        alertname: NotificationsPendingOverdue
+        exp_alerts: []
+
+  # 14. Lateness inside the scheduler's own poll interval never reaches the window.
+  - interval: 1m
+    input_series:
+      # Three minutes of lateness — one reminder whose grace elapsed a tick before it was claimed.
+      - series: 'notifications_pending_overdue{state="stuck",instance="attention:9101"}'
+        values: "0 1 1 1 0 0 0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: NotificationsPendingOverdue
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: NotificationsPendingOverdue
+        exp_alerts: []
+
+  # 15. No tick yet means no series, and no series cannot fire.
+  - interval: 1m
+    input_series:
+      # A family this rule does not read, so its own series is absent rather than zero.
+      - series: 'notifications_sent_total{status="sent",instance="scheduler:9101"}'
+        values: "0 1 2 3 4 5"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: NotificationsPendingOverdue
+        exp_alerts: []
+
+  # 16. The window's cost, pinned: a row cleared inside ten minutes is never announced.
+  - interval: 1m
+    input_series:
+      # Stuck from t=2m to t=7m — six minutes, cleared by a scheduler restart before the window.
+      - series: 'notifications_pending_overdue{state="stuck",instance="attention:9101"}'
+        values: "0 0 1 1 1 1 1 1 0 0 0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: NotificationsPendingOverdue
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: NotificationsPendingOverdue
         exp_alerts: []

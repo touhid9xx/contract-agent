@@ -70,6 +70,28 @@ transport that was configured and refused until the budget ran out, ``suppressed
 this codebase declining to send because a contract closed or consent was withdrawn. Only
 the first pages. The same two counts the verdict already reads, so no query was added —
 and the same stale-while-not-publishing limit applies to it, for the same reason.
+
+**And the third (``D10-129``): the queue neither of those could see.** Both families
+above count rows that *stopped*. A ``pending`` row never stopped — it was waiting for
+the scheduler, and the scheduler's existence was the whole answer. That answer is
+false on the configuration this stack ships. With ``NOTIFICATION_TRANSPORT=none``,
+``dispatch_notification`` raises ``SENDER_UNAVAILABLE`` **before** ``attempts`` is
+incremented, so the retry budget can never run out, the row can never become
+``failed``, and it stays ``pending`` for ever. A default install therefore published
+``failed 0``, an email that had genuinely never been delivered, and a board that said
+nothing needed anyone — the exact shape of every defect in this series, green
+everywhere and dead in the only configuration an operator runs.
+
+``notifications_pending_overdue{state=...}`` is that population, split by *is there a
+setting whose change would make this channel deliverable?* — ``unconfigured`` (yes,
+and it is off: published, never paged, or a default install would be muted by
+Thursday), ``unsupported`` (no: nothing in this build sends ``voice``), and ``stuck``
+(the channel is deliverable and the send path is not claiming rows). Only the last two
+are alerted on. The rule needs a ``for:`` window, unlike the other three, because a row
+one tick late is not a fault — and that window is why
+:attr:`~app.core.config.Settings.notification_overdue_grace` exists: a grace shorter
+than the scheduler's own poll interval would make a healthy deployment indistinguishable
+from a dead one.
 """
 
 from __future__ import annotations
@@ -85,8 +107,12 @@ from app.core.attention import AttentionReport, attention_report
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.core.metrics import (
+    NOTIFICATION_PENDING_STUCK,
+    NOTIFICATION_PENDING_UNCONFIGURED,
+    NOTIFICATION_PENDING_UNSUPPORTED,
     NOTIFICATION_UNDELIVERED_FAILED,
     NOTIFICATION_UNDELIVERED_SUPPRESSED,
+    NOTIFICATIONS_PENDING_OVERDUE,
     NOTIFICATIONS_UNDELIVERED,
     OUTBOX_PARK_RELAY_FAILED,
     OUTBOX_PARK_TRANSPORT_DISABLED,
@@ -202,10 +228,20 @@ class AttentionWatch:
         That population needs no person to have done anything wrong and nothing in the
         deployment clears it, which is exactly what the second rule watches.
 
-        Both counts arrive on the report this tick already built, so this method adds
-        no query: :func:`~app.core.attention.attention_report` reads them from the same
-        ``undelivered_counts`` the verdict, ``doctor`` and ``/attention`` read, and the
-        gauge cannot drift from the number those report.
+        The third family, ``notifications_pending_overdue``, is a third *kind* of
+        question again, which is why it is a separate family rather than two more values
+        of the ``status`` label. Those labels say what stopped a row; these say why a
+        row has not moved at all, and the split is deliverability — see
+        :data:`app.core.metrics.NOTIFICATIONS_PENDING_OVERDUE`. ``unconfigured`` is
+        published and not paged for the same reason ``transport_disabled`` is not: on a
+        default install it is non-zero from the first reminder onward. ``unsupported``
+        and ``stuck`` are paged, because no environment variable clears either.
+
+        All three counts arrive on the report this tick already built, so this method
+        adds no query: :func:`~app.core.attention.attention_report` reads them from the
+        same ``undelivered_counts`` and ``pending_overdue_counts`` the verdict,
+        ``doctor`` and ``/attention`` read, and a gauge cannot drift from the number
+        those report.
 
         What this does **not** buy, said here rather than discovered later: a watcher
         that stops publishing goes stale in Prometheus after five minutes and takes
@@ -219,6 +255,15 @@ class AttentionWatch:
         )
         NOTIFICATIONS_UNDELIVERED.set(
             report.notifications_suppressed, status=NOTIFICATION_UNDELIVERED_SUPPRESSED
+        )
+        NOTIFICATIONS_PENDING_OVERDUE.set(
+            report.notifications_pending_unconfigured, state=NOTIFICATION_PENDING_UNCONFIGURED
+        )
+        NOTIFICATIONS_PENDING_OVERDUE.set(
+            report.notifications_pending_unsupported, state=NOTIFICATION_PENDING_UNSUPPORTED
+        )
+        NOTIFICATIONS_PENDING_OVERDUE.set(
+            report.notifications_pending_stuck, state=NOTIFICATION_PENDING_STUCK
         )
 
     def _record(self, report: AttentionReport) -> None:

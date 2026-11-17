@@ -224,18 +224,29 @@ def test_a_clean_report_counts_nothing_at_all(
     place that notices it. ``bus_disabled`` is ``True`` here because ``test``
     settings carry the default ``EVENT_TRANSPORT=none`` — the reading now records
     the transport it was taken under, so the clean case has to say so too.
+
+    ``D10-129`` adds the three pending counts and the notification transport. They
+    are ``0`` on an empty database because there is nothing queued, not because the
+    deployment can send anything: ``notification_transport`` is ``none`` here too, and
+    that is the value the three counts are sorted by. The distinction matters for the
+    next test in this file — the same ``none`` with a row queued behind it is a
+    finding, and an empty database is not.
     """
     assert report(session_factory, settings=settings) == {
         "outbox_parked": 0,
         "outbox_parked_explained": 0,
         "notifications_failed": 0,
         "notifications_suppressed": 0,
+        "notifications_pending_stuck": 0,
+        "notifications_pending_unsupported": 0,
+        "notifications_pending_unconfigured": 0,
         "escalations_overdue": 0,
         "unsealed_field_values": 0,
         "unsealed_field_ids": [],
         "fields_scanned": 0,
         "field_scan_truncated": False,
         "event_transport": "none",
+        "notification_transport": "none",
         "bus_disabled": True,
         "needs_attention": False,
     }

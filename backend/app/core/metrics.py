@@ -464,6 +464,67 @@ NOTIFICATIONS_UNDELIVERED: Final = _declare(
 )
 
 
+#: ``state`` tokens for :data:`NOTIFICATIONS_PENDING_OVERDUE`, spelled once for the
+#: reason every other token set here is: the writer, the rule and every test that
+#: asserts a row was counted read one spelling, and a typo would look like "nothing
+#: is stuck".
+#:
+#: :data:`NOTIFICATION_UNDELIVERED_FAILED` and ``..._SUPPRESSED`` are deliberately
+#: **not** reused as a third and fourth member of that family. Those two labels mean
+#: *a fault* and *a policy verdict* — states a row stopped in — where these three mean
+#: *why a row has not moved at all*, and the rule matcher on the old family
+#: (``status="failed"``) would silently start covering a population it was not written
+#: for. A separate family keeps each matcher meaning one thing.
+NOTIFICATION_PENDING_UNCONFIGURED: Final = "unconfigured"
+NOTIFICATION_PENDING_UNSUPPORTED: Final = "unsupported"
+NOTIFICATION_PENDING_STUCK: Final = "stuck"
+
+#: The queue that had no reading at all, by why a row is still waiting (``D10-129``).
+#:
+#: :data:`NOTIFICATIONS_UNDELIVERED` counts rows that *stopped*. A ``pending`` row was
+#: accounted for by the scheduler's existence, so it needed no alarm — and with
+#: ``NOTIFICATION_TRANSPORT=none``, the shipped default, that reasoning fails:
+#: :func:`~app.workers.dispatch.dispatch_notification` raises ``SENDER_UNAVAILABLE``
+#: **before** ``attempts`` is incremented, so a reminder can never reach the retry cap,
+#: never turns ``failed``, and stays ``pending`` for ever. The default install therefore
+#: published ``failed 0`` and a clean board while a queue of customer reminders sat
+#: behind it, unsendable and uncounted.
+#:
+#: Only *overdue* rows are counted — due, still ``pending``, and due for longer than
+#: :attr:`~app.core.config.Settings.notification_overdue_grace` — which is what keeps
+#: this from firing on a deployment doing its job: a row deferred for quiet hours has a
+#: ``scheduled_at`` in the future, is not due, and appears in no series here.
+#:
+#: The three states are separated by one question, *is there a setting whose change
+#: would make this channel deliverable?*:
+#:
+#: * ``unconfigured`` — yes, and it is off. Counted and published but **not** alerted
+#:   on, for the reason ``transport_disabled`` is not: on the default install it is
+#:   non-zero from the first reminder onward, so an alarm on it would be muted by
+#:   Thursday, which is how a real one stops being read.
+#: * ``unsupported`` — no. Nothing in this build sends the channel (``voice``), so no
+#:   environment variable clears these; the human action is to change what may be
+#:   consented or supply an address a channel can use.
+#: * ``stuck`` — the channel *is* deliverable and the send path is not running. A fault
+#:   on every configuration, and the only one of the three that says "the scheduler is
+#:   down" rather than "the scheduler has nothing it can send".
+#:
+#: Published every tick including the zeros, for the ``D10-109`` reason: a family
+#: written only when something is wrong looks identical, from Prometheus' side, to a
+#: process that is not running.
+#:
+#: It reads :func:`app.db.repositories.notifications.pending_overdue_counts`, the same
+#: query the attention verdict uses, so the metric cannot drift from the number an
+#: operator is told on the command line.
+NOTIFICATIONS_PENDING_OVERDUE: Final = _declare(
+    Gauge(
+        "notifications_pending_overdue",
+        "Notifications due and still pending past the grace, by why nothing sent them.",
+        ("state",),
+    )
+)
+
+
 #: ``outcome`` tokens for :data:`CONTRACTS_EXTRACTED_TOTAL`, spelled once for the reason
 #: the park and undelivered tokens are: the writer, every test that asserts a contract
 #: was counted, and whoever reads the series all use one spelling, and a typo in one of

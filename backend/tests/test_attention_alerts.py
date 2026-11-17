@@ -424,6 +424,8 @@ _HEADLINE_PHRASES: dict[str, str] = {
     "outbox_parked": "dead-letter",
     "notifications_failed": "failed",
     "notifications_suppressed": "suppressed",
+    "notifications_pending_unsupported": "no setting can deliver",
+    "notifications_pending_stuck": "not draining",
     "escalations_overdue": "escalation",
     "unsealed_field_values": "in the clear",
 }
@@ -440,6 +442,9 @@ def _calm() -> AttentionReport:
         outbox_parked=0,
         notifications_failed=0,
         notifications_suppressed=0,
+        notifications_pending_unconfigured=0,
+        notifications_pending_unsupported=0,
+        notifications_pending_stuck=0,
         escalations_overdue=0,
         unsealed_field_values=0,
         unsealed_field_ids=(),
@@ -447,6 +452,7 @@ def _calm() -> AttentionReport:
         field_scan_truncated=False,
         event_transport="kafka",
         bus_disabled=False,
+        notification_transport="smtp",
     )
 
 
@@ -509,6 +515,22 @@ _UNPROBEABLE: dict[str, str] = {
     "event_transport": (
         "needs_attention reads bus_disabled, never this string, so no value of it "
         "changes the verdict; it is on the report so a log line can explain a reading"
+    ),
+    "notification_transport": (
+        "same shape as event_transport and the same reason: the verdict reads the "
+        "three pending counts, never this string. It rides on the report so the "
+        "operator can read a large 'unconfigured' count without having to know what "
+        "NOTIFICATION_TRANSPORT was set to that day, and so the mail names the switch "
+        "to flip instead of leaving them to infer it"
+    ),
+    "notifications_pending_unconfigured": (
+        "a count that is deliberately not a reason, so it belongs on the probe's "
+        "declined list rather than in the phrase table: it is the reminder-queue twin "
+        "of an explained park. On the shipped NOTIFICATION_TRANSPORT=none it is "
+        "non-zero from the first reminder onward, so raising on it would make the "
+        "verdict fail on every default install — the exact outcome the explained-park "
+        "judgement was written to avoid (D10-39). It is still counted, published and "
+        "mailed; only the verdict ignores it"
     ),
 }
 
@@ -999,6 +1021,9 @@ def test_the_alert_travels_the_shared_smtp_transport(
         outbox_parked=1,
         notifications_failed=0,
         notifications_suppressed=0,
+        notifications_pending_unconfigured=0,
+        notifications_pending_unsupported=0,
+        notifications_pending_stuck=0,
         escalations_overdue=0,
         unsealed_field_values=0,
         unsealed_field_ids=(),
@@ -1006,6 +1031,7 @@ def test_the_alert_travels_the_shared_smtp_transport(
         field_scan_truncated=False,
         event_transport="kafka",
         bus_disabled=False,
+        notification_transport="smtp",
     )
     alerter.raised(report)
 

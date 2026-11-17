@@ -66,6 +66,31 @@ ticket about somebody else's misconfigured transport. The counting lives here ra
 than in the route for the same reason the operator counts do — a second copy would be
 a second answer to "what needs a human", and the two readings share one ``is_sealed``
 scan so that they cannot eventually disagree about the same database.
+
+**The population nothing counted (``D10-129``).** Every count above is a row that
+*stopped*: ``failed``, ``suppressed``, parked. A ``pending`` row was accounted for by
+the scheduler's existence, so it needed no reading — and that reasoning holds only while
+something exists to claim it. With ``NOTIFICATION_TRANSPORT=none``, the shipped default,
+:func:`~app.workers.dispatch.dispatch_notification` raises ``SENDER_UNAVAILABLE``
+*before* ``attempts`` is incremented, so a reminder can never reach the retry cap, never
+turns ``failed``, and stays ``pending`` for ever. The default install therefore published
+``failed 0`` — a clean board — while a queue of customer reminders sat behind it,
+unsendable and uncounted. Three counts close that, and they are separated by a single
+question: **is there a setting whose change would make this channel deliverable?**
+
+* ``unconfigured`` — the channel has a transport and it is switched off. The same shape
+  as an explained park, and treated the same way: counted, published, and deliberately
+  **not** a reason in :attr:`AttentionReport.needs_attention`. An install that failed
+  every run after its first reminder would be muted within a week.
+* ``unsupported`` — no transport for the channel exists in this build (``voice``:
+  nothing here places a call). No environment variable fixes it; the human action is to
+  change what may be consented, or to approve an address a channel can use. A reason.
+* ``stuck`` — the channel *is* deliverable and the row is still overdue, so the send
+  path is not running. A reason, and a fault on every configuration.
+
+Deferral is in none of them. A row parked for quiet hours has a ``scheduled_at`` in the
+future, is not yet due, and counting it would page every deployment at two in the
+morning.
 """
 
 from __future__ import annotations
@@ -78,16 +103,17 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.orm import Session
 
-from app.core.config import Settings
+from app.core.config import NOTIFIABLE_CHANNELS, Settings
 from app.core.crypto import is_sealed
 from app.db.base import utc_now
-from app.db.enums import NotificationStatus
+from app.db.enums import Channel, NotificationStatus
 from app.db.repositories.escalations import (
     overdue_escalation_count,
     overdue_escalation_count_for_tenant,
 )
 from app.db.repositories.fields import fields_for_reseal, fields_for_reseal_for_tenant
 from app.db.repositories.notifications import (
+    pending_overdue_counts,
     undelivered_counts,
     undelivered_counts_for_tenant,
 )
@@ -119,6 +145,20 @@ class AttentionReport:
     outbox_parked: int
     notifications_failed: int
     notifications_suppressed: int
+    #: Due-but-``pending`` rows past the grace on a channel whose transport is switched
+    #: off. Explained by configuration, so counted and published but not a reason —
+    #: the treatment an explained park already gets, and for the same reason.
+    notifications_pending_unconfigured: int
+    #: The same population on a channel **no setting can deliver**: nothing in this build
+    #: sends it, so no environment variable clears these and a human has to act.
+    #: Deliberately separate from ``unconfigured`` because the next move differs: one is
+    #: a transport to configure, the other a consent or an address to change.
+    notifications_pending_unsupported: int
+    #: The same population on a channel that *is* deliverable — so the queue is not
+    #: draining and the send path is the fault. Counted apart from the other two because
+    #: it is the only one of the three that is never explained by the deployment's
+    #: settings.
+    notifications_pending_stuck: int
     #: Escalations past their SLA deadline that nobody has resolved, table-wide.
     #: The one count here that is not a delivery failure — nothing was lost, a
     #: promise simply came due in a queue nobody was reading (D10-99).
@@ -132,6 +172,11 @@ class AttentionReport:
     #: day. The distinction below is meaningless without it.
     event_transport: str
     bus_disabled: bool
+    #: The transport the check was run under for *reminders*, kept for the reason
+    #: ``event_transport`` is: ``unconfigured`` is only meaningful next to it, because
+    #: the count is large on a default install by design and the reader has to be able
+    #: to tell that from a broken relay without knowing the day's configuration.
+    notification_transport: str
 
     @property
     def parks_explained(self) -> int:
@@ -165,11 +210,24 @@ class AttentionReport:
         which trains the operator to ignore the one command meant to be trusted.
         The count stays in :attr:`outbox_parked` and in every log line, so nothing
         is hidden; only the verdict changes.
+
+        The stuck-queue counts follow that judgement rather than being carved out of
+        it. :attr:`notifications_pending_unconfigured` is a switch somebody has not
+        turned on — counted, published, and not a reason, exactly as an explained park
+        is, and for exactly the reason above: on the default install it is non-zero the
+        moment the first reminder is produced, so failing on it would make the verdict
+        meaningless. :attr:`notifications_pending_unsupported` and
+        :attr:`notifications_pending_stuck` are the opposite: no setting explains
+        either, the first because nothing in this build can ever send that channel and
+        the second because the channel *can* be sent and is not being, so both mean a
+        person has to decide something.
         """
         return bool(
             self.parks_unexplained
             or self.notifications_failed
             or self.notifications_suppressed
+            or self.notifications_pending_unsupported
+            or self.notifications_pending_stuck
             or self.escalations_overdue
             or self.unsealed_field_values
         )
@@ -185,6 +243,9 @@ class AttentionReport:
             "outbox_parked_explained": self.parks_explained,
             "notifications_failed": self.notifications_failed,
             "notifications_suppressed": self.notifications_suppressed,
+            "notifications_pending_unconfigured": self.notifications_pending_unconfigured,
+            "notifications_pending_unsupported": self.notifications_pending_unsupported,
+            "notifications_pending_stuck": self.notifications_pending_stuck,
             "escalations_overdue": self.escalations_overdue,
             "unsealed_field_values": self.unsealed_field_values,
             "unsealed_field_ids": list(self.unsealed_field_ids),
@@ -192,8 +253,43 @@ class AttentionReport:
             "field_scan_truncated": self.field_scan_truncated,
             "event_transport": self.event_transport,
             "bus_disabled": self.bus_disabled,
+            "notification_transport": self.notification_transport,
             "needs_attention": self.needs_attention,
         }
+
+
+def _pending_by_cause(
+    pending: dict[Channel, int],
+    *,
+    deliverable: frozenset[Channel],
+) -> tuple[int, int, int]:
+    """Split overdue-``pending`` counts into the three causes the report names.
+
+    The single question that separates them is *is there a setting whose change would
+    make this channel deliverable?* — and it is asked of the same
+    :attr:`~app.core.config.Settings.deliverable_notification_channels` that
+    :func:`~app.workers.senders.build_sender` wires its senders from, so the board and
+    the send path cannot disagree about whether a channel exists at all.
+
+    Order matters: a channel missing from :data:`~app.core.config.NOTIFIABLE_CHANNELS`
+    is ``unsupported`` **whatever** ``deliverable`` says, because the ceiling is the
+    build and no switch reaches it. Checking membership in ``deliverable`` first would
+    silently reclassify a voice row as a fault the day a settings bug let ``voice``
+    into that set.
+
+    Returns ``(unconfigured, unsupported, stuck)``.
+    """
+    unconfigured = unsupported = stuck = 0
+    for channel, count in pending.items():
+        if not count:
+            continue
+        if channel not in NOTIFIABLE_CHANNELS:
+            unsupported += count
+        elif channel in deliverable:
+            stuck += count
+        else:
+            unconfigured += count
+    return unconfigured, unsupported, stuck
 
 
 def _unsealed_ids(fields: Sequence[ExtractedField]) -> tuple[int, ...]:
@@ -247,11 +343,22 @@ def attention_report(
     undelivered = undelivered_counts(session)
     fields = fields_for_reseal(session, limit=limit)
     unsealed = _unsealed_ids(fields)
+    pending = pending_overdue_counts(
+        session,
+        grace=settings.notification_overdue_grace,
+        now=utc_now() if now is None else now,
+    )
+    unconfigured, unsupported, stuck = _pending_by_cause(
+        pending, deliverable=settings.deliverable_notification_channels
+    )
 
     return AttentionReport(
         outbox_parked=dead_letter_count(session),
         notifications_failed=undelivered[NotificationStatus.FAILED],
         notifications_suppressed=undelivered[NotificationStatus.SUPPRESSED],
+        notifications_pending_unconfigured=unconfigured,
+        notifications_pending_unsupported=unsupported,
+        notifications_pending_stuck=stuck,
         escalations_overdue=overdue_escalation_count(
             session, now=utc_now() if now is None else now
         ),
@@ -261,6 +368,7 @@ def attention_report(
         field_scan_truncated=len(fields) == limit,
         event_transport=settings.event_transport,
         bus_disabled=settings.event_transport == "none",
+        notification_transport=settings.notification_transport,
     )
 
 
@@ -286,6 +394,21 @@ class TenantAttentionReport:
     ``slots`` and ``frozen`` for the same reason every other result record here has
     them: it is a value, it is not edited after the fact, and a typo that assigns an
     attribute should raise rather than invent a field.
+
+    **None of ``D10-129``'s three pending counts is here**, and the test is the one
+    that excludes the park. Each of them is a statement about what *this deployment*
+    can send: ``unconfigured`` is a transport somebody has not switched on,
+    ``unsupported`` is a channel the build has no sender for, ``stuck`` is a send path
+    that has stopped claiming rows. None is a row an organisation can clear from its
+    own board, and telling every tenant that the scheduler is down would be one
+    deployment fault arriving as N support tickets — verbatim the argument this record
+    already makes for a parked event.
+
+    The population is not hidden from them either, which is what makes the exclusion
+    safe rather than merely tidy: unlike an operator, whose only reading of this table
+    was a count, a tenant has the notification queue screen and its ``status`` filter,
+    so every one of their ``pending`` rows is visible to them by name. A separate
+    count would tell them nothing the queue does not already show.
     """
 
     notifications_failed: int

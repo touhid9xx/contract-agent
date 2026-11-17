@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import base64
 import re
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -15,8 +16,10 @@ from app.core.config import (
     DEV_ENCRYPTION_KEY_PLACEHOLDER,
     DEV_SECRET_PLACEHOLDER,
     MAX_RETIRED_ENCRYPTION_KEYS,
+    NOTIFIABLE_CHANNELS,
     Settings,
 )
+from app.db.enums import Channel
 
 #: Which worker processes the stack starts, from `docker-compose.yml`. Reused rather
 #: than parsed again: that file already answers "which modules are processes" for
@@ -308,6 +311,110 @@ def test_a_tls_remote_ollama_endpoint_is_accepted() -> None:
     )
 
     assert settings.ollama_base_url == "https://gpu.example.com:11434"
+
+
+# --- what this deployment can actually send, and how late "late" is ---------
+# ``D10-129`` found that a notification row stuck in ``pending`` has three
+# unrelated causes — no transport exists for the channel, the transport is
+# switched off, or quiet hours are deferring it — and that only two of them are
+# faults. Separating "is there a transport?" from "is the transport on?" put the
+# transport question in exactly one place, because two callers must not answer it
+# differently: ``app.workers.senders.build_sender`` decides which senders to wire
+# from this property, and ``app.core.attention.attention_report`` decides from it
+# whether a waiting row follows from configuration or from a fault. The same
+# property feeds ``build_sender``'s start-up refusal, so a channel added here
+# without a factory fails at boot instead of queueing silently.
+
+#: The smallest SMTP block ``Settings`` accepts. Both fields are cross-checked at
+#: start-up (``SMTP_HOST`` non-empty, ``SMTP_FROM`` a plausible address), so the
+#: email-deliverable cases have to be genuinely configurable rather than a bare
+#: switch — which is also what makes them prove anything.
+SMTP = {
+    "notification_transport": "smtp",
+    "smtp_host": "relay.example.com",
+    "smtp_from": "reminders@example.com",
+}
+
+#: The same for SMS: ``TEXTBEE_API_KEY`` and ``TEXTBEE_DEVICE_ID`` are both
+#: required once the switch is on, and the pair is checked at start-up.
+TEXTBEE = {
+    "sms_transport": "textbee",
+    "textbee_api_key": "tb_test_key_do_not_log",
+    "textbee_device_id": "device-123",
+}
+
+
+def deliverable(**overrides: object) -> frozenset[Channel]:
+    values: dict[str, object] = {"app_env": "test", "log_json": False}
+    values.update(overrides)
+    return Settings(**values).deliverable_notification_channels  # type: ignore[arg-type]
+
+
+def test_the_shipped_configuration_can_send_nothing() -> None:
+    """``NOTIFICATION_TRANSPORT=none`` is the default, and the case that matters.
+
+    A default install starts with no transport for any channel. Every reminder it
+    queues is therefore undeliverable by construction, which is exactly why the
+    attention board counts that state rather than calling it a fault.
+    """
+    settings = Settings(app_env="test", log_json=False)
+
+    assert settings.notification_transport == "none"
+    assert settings.sms_transport == "none"
+    assert settings.deliverable_notification_channels == frozenset()
+
+
+def test_smtp_makes_email_deliverable_and_nothing_else() -> None:
+    assert deliverable(**SMTP) == frozenset({Channel.EMAIL})
+
+
+def test_textbee_makes_sms_deliverable_and_nothing_else() -> None:
+    assert deliverable(**TEXTBEE) == frozenset({Channel.SMS})
+
+
+def test_both_transports_make_both_deliverable() -> None:
+    assert deliverable(**SMTP, **TEXTBEE) == frozenset({Channel.EMAIL, Channel.SMS})
+
+
+def test_voice_is_undeliverable_on_every_configuration() -> None:
+    """No setting puts a voice call on the wire, so ``voice`` is never deliverable.
+
+    Asserted as a set *relationship* rather than by checking one channel is absent:
+    a fourth channel added to :class:`Channel` would otherwise inherit "deliverable"
+    silently, and the attention board would then report it as a fault the operator
+    has no move for. Making this assertion fail is the intended way to notice.
+    """
+    everything_on = deliverable(**SMTP, **TEXTBEE)
+
+    assert Channel.VOICE not in everything_on
+    assert everything_on == NOTIFIABLE_CHANNELS
+    assert set(Channel) - NOTIFIABLE_CHANNELS == {Channel.VOICE}
+
+
+def test_the_overdue_grace_is_the_interval_the_queries_compare() -> None:
+    """Seconds in the environment, an interval at the call site, converted once.
+
+    Both readers of the pending queue hand this to the same repository predicate;
+    a conversion written out in each would let the operator's board and a tenant's
+    disagree about which rows are late on the same database.
+    """
+    assert Settings(app_env="test", log_json=False).notification_overdue_grace == timedelta(
+        minutes=15
+    )
+    assert Settings(
+        app_env="test", log_json=False, notification_overdue_grace_seconds=60
+    ).notification_overdue_grace == timedelta(seconds=60)
+
+
+def test_a_nonsense_grace_is_refused_at_startup() -> None:
+    # A zero grace would make every row overdue the instant it is written, which
+    # turns the alert into a report on the queue's normal operation rather than on
+    # a fault. A day is the ceiling: past that the window has stopped being a
+    # "brief pause" and the alert no longer says anything about a stuck worker.
+    with pytest.raises(ValidationError, match="greater than 0"):
+        Settings(app_env="test", notification_overdue_grace_seconds=0)
+    with pytest.raises(ValidationError, match="less than or equal to 86400"):
+        Settings(app_env="test", notification_overdue_grace_seconds=86_401)
 
 
 # --- the env file nobody should be reading by accident ----------------------

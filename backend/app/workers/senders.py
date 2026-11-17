@@ -537,12 +537,38 @@ def build_sender(settings: Settings) -> MessageSender:
     When neither switch names a transport the stand-in is returned with a reason
     naming *both* settings, so an operator reading a 409 or a row's ``last_error``
     learns every value to change, not just the first.
+
+    **Which** channels are wired is not decided here: it is
+    :attr:`~app.core.config.Settings.deliverable_notification_channels`, which the
+    attention check reads too. This function only knows how to build a sender for a
+    channel it is told to wire, so the channel a background send attempts and the
+    channel ``doctor`` believes the deployment cannot reach are one answer instead of
+    two (``D10-129``). A channel the settings call deliverable with no factory here
+    is a ``KeyError`` at start-up rather than a queue that quietly never drains.
     """
-    by_channel: dict[Channel, MessageSender] = {}
-    if settings.notification_transport == "smtp":
-        by_channel[Channel.EMAIL] = create_smtp_sender(settings)
-    if settings.sms_transport == "textbee":
-        by_channel[Channel.SMS] = create_textbee_sender(settings)
+    # Annotated rather than inferred: the two factories return different sender
+    # classes, so a dict literal types their common value as ``object`` and the
+    # comprehension's result no longer satisfies ``dict[Channel, MessageSender]``.
+    factories: dict[Channel, Callable[[Settings], MessageSender]] = {
+        Channel.EMAIL: create_smtp_sender,
+        Channel.SMS: create_textbee_sender,
+    }
+    deliverable = settings.deliverable_notification_channels
+    by_channel = {
+        channel: factory(settings)
+        for channel, factory in factories.items()
+        if channel in deliverable
+    }
+    # The other direction of the same agreement, and the one that fails safe: a
+    # channel the settings call deliverable with no factory here would leave the
+    # queue for it permanently undrained while ``doctor`` reported the deployment
+    # able to send it. A start-up error is the only honest answer.
+    unwireable = deliverable.difference(by_channel)
+    if unwireable:
+        raise KeyError(
+            "no transport factory for deliverable channel(s) "
+            f"{sorted(channel.value for channel in unwireable)}; add one to build_sender"
+        )
     if not by_channel:
         return UnavailableSender(
             reason=(

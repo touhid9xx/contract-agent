@@ -5,7 +5,7 @@ code (``D10-36``). ``D10-39`` added a second caller with a different job —
 :class:`~app.workers.attention_watch.AttentionWatch` — because a check nobody runs
 finds nothing, and this stack ships a Compose file rather than a crontab.
 
-The properties worth pinning are not "the worker starts". They are the five
+The properties worth pinning are not "the worker starts". They are the seven
 decisions in that module, each of which could be made wrongly without failing a
 test:
 
@@ -36,6 +36,19 @@ test:
   send, which is usually the system working. Both are published, and the shipped
   rule reads only the first — so the split has to be pinned, because a writer that
   put the same number on both series would still render plausible-looking numbers.
+* **The queue that had no reading at all is now counted, and only one of its three
+  causes may page** (``D10-129``). ``D10-118`` counted rows that *stopped*. A row
+  still ``pending`` was accounted for by the scheduler's existence — an argument
+  that fails on the shipped ``NOTIFICATION_TRANSPORT=none``, where the transport
+  raises before ``attempts`` is incremented, so no reminder can ever reach the retry
+  cap and every one of them stays ``pending`` for ever while the board reads clean.
+  The population is split by *is there a setting whose change would deliver this?*:
+  ``unconfigured`` (yes, and it is off — published, deliberately not a reason, or
+  every default install would page from its first reminder), ``unsupported`` (no
+  transport exists in this build, so no setting clears it) and ``stuck`` (the
+  channel works and the send path is not draining). Only the last two raise the
+  verdict, and the grace window is what stops a deployment doing its job from
+  looking like one that is stuck.
 
 What this file deliberately does **not** test is delivery: nothing here reads the
 log. ``D10-117`` did not change that, and it did not reopen the question ``D10-39``
@@ -51,7 +64,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Sequence
-from datetime import date
+from datetime import date, datetime, timedelta
 
 import pytest
 import structlog
@@ -64,6 +77,9 @@ from app.core import metrics
 from app.core.config import Settings
 from app.core.crypto import FieldCipher
 from app.core.metrics import (
+    NOTIFICATION_PENDING_STUCK,
+    NOTIFICATION_PENDING_UNCONFIGURED,
+    NOTIFICATION_PENDING_UNSUPPORTED,
     NOTIFICATION_UNDELIVERED_FAILED,
     NOTIFICATION_UNDELIVERED_SUPPRESSED,
     OUTBOX_PARK_RELAY_FAILED,
@@ -85,6 +101,10 @@ from app.workers.dispatch import notification_idempotency_key
 
 #: The value that must never appear on a log line, and the key that seals it.
 PLAINTEXT_EMAIL = "a.rahman@example.test"
+#: The ``SMTP_FROM`` value. Not a contact: it is the deployment's own address, and
+#: nothing in this file sends anything — it exists because a valid smtp transport
+#: is refused at start-up without one.
+NOTIFICATION_SENDER_ADDRESS = "reminders@example.com"
 KEY = Fernet.generate_key().decode("ascii")
 CIPHER = FieldCipher(KEY)
 
@@ -97,6 +117,19 @@ CONFIGURED = Settings(
     log_json=False,
     event_transport="kafka",
     kafka_bootstrap_servers="kafka:9092",
+)
+
+#: A deployment that can actually send an email, so a queued reminder on that
+#: channel means the send path has stopped rather than that nothing was wired.
+#: Built as a real ``Settings`` for the same reason as ``CONFIGURED``: the
+#: smtp-without-a-host combination is refused at start-up, and the value this
+#: constant stands for is precisely a *valid* one.
+DELIVERABLE = Settings(
+    app_env="test",
+    log_json=False,
+    notification_transport="smtp",
+    smtp_host="relay.example.com",
+    smtp_from=NOTIFICATION_SENDER_ADDRESS,
 )
 
 
@@ -200,6 +233,9 @@ def add_notification(
     *,
     template: str = "T-60",
     slot: date = date(2025, 1, 2),
+    channel: Channel = Channel.EMAIL,
+    scheduled_at: datetime | None = None,
+    created_at: datetime | None = None,
 ) -> int:
     """One notification row in a chosen state, written directly.
 
@@ -209,19 +245,31 @@ def add_notification(
     the attempt counter is not incremented on that path, so the row stays ``pending``
     for ever. The state is the subject here, not the worker that would produce it, so
     the row is written the way ``test_doctor`` and ``test_attention_route`` write it.
+
+    ``scheduled_at`` and ``created_at`` are the two clocks the overdue predicate reads,
+    and they are supplied as values rather than derived from "now" so a case can sit
+    on either side of the grace window without sleeping. ``None`` for both is the
+    scheduler's own shape for "send as soon as you can" — see
+    :func:`app.db.repositories.notifications._overdue_pending`, which ages such a row
+    from ``created_at`` rather than ignoring it.
     """
     with session_scope(session_factory) as session:
         row = Notification(
             tenant_id=contract.tenant_id,
             contract_id=contract.id,
-            channel=Channel.EMAIL,
+            channel=channel,
             template=template,
             status=status,
             scheduled_date=slot,
+            scheduled_at=scheduled_at,
             idempotency_key=notification_idempotency_key(contract.id, template, slot),
             attempts=5 if status is NotificationStatus.FAILED else 0,
             last_error="relay refused" if status is NotificationStatus.FAILED else None,
         )
+        if created_at is not None:
+            # Assigned rather than passed: the column has an application-side
+            # ``default``, and passing ``None`` explicitly would try to store NULL.
+            row.created_at = created_at
         session.add(row)
         session.flush()
         return int(row.id)
@@ -264,6 +312,11 @@ def parked() -> dict[str, float]:
 def undelivered() -> dict[str, float]:
     """The undelivered-notification gauge, by ``status``."""
     return _series(metrics.NOTIFICATIONS_UNDELIVERED.name, "status")
+
+
+def pending() -> dict[str, float]:
+    """The overdue-pending gauge, by ``state``."""
+    return _series(metrics.NOTIFICATIONS_PENDING_OVERDUE.name, "state")
 
 
 # --- one line per tick, and it names the verdict --------------------------
@@ -658,4 +711,238 @@ def test_a_retried_row_lowers_the_gauge(
     assert undelivered() == {
         NOTIFICATION_UNDELIVERED_FAILED: 0.0,
         NOTIFICATION_UNDELIVERED_SUPPRESSED: 0.0,
+    }
+
+
+# --- the queue that had no reading (D10-129) -----------------------------
+#: How far in the past a row has to be to be unambiguously past the shipped
+#: fifteen-minute grace. Well clear of it, so the case cannot flip on a slow runner
+#: that takes a few seconds between writing the row and reading the report.
+OVERDUE = timedelta(minutes=30)
+
+
+def test_a_clean_board_publishes_all_three_pending_causes_at_zero(
+    session_factory: sessionmaker[Session], settings: Settings
+) -> None:
+    """``D10-109``'s defect class, on the third gauge.
+
+    A series that is only written when something is wrong cannot be told apart, from
+    the scrape's side, from a worker that stopped. The three zeros are what makes
+    "nothing queued" a published fact rather than an absence.
+    """
+    AttentionWatch(session_factory, settings=settings).run_once()
+
+    assert pending() == {
+        NOTIFICATION_PENDING_UNCONFIGURED: 0.0,
+        NOTIFICATION_PENDING_UNSUPPORTED: 0.0,
+        NOTIFICATION_PENDING_STUCK: 0.0,
+    }
+
+
+def test_a_reminder_the_default_install_cannot_send_is_counted_and_excused(
+    session_factory: sessionmaker[Session], settings: Settings, contract: Contract
+) -> None:
+    """The population that made the board read clean while a queue sat behind it.
+
+    This is the shipped configuration — ``NOTIFICATION_TRANSPORT=none`` — where the
+    dispatcher raises before ``attempts`` moves, so the row can never reach the retry
+    cap and sits ``pending`` for ever. It is counted, published, and deliberately
+    **not** a finding: on a default install it is non-zero from the first reminder
+    onward, and a verdict that fails every run of a correct deployment is a verdict
+    that gets ignored.
+    """
+    assert settings.notification_transport == "none"
+    add_notification(
+        session_factory,
+        contract,
+        NotificationStatus.PENDING,
+        scheduled_at=utc_now() - OVERDUE,
+    )
+
+    with capture_logs() as captured:
+        report = AttentionWatch(session_factory, settings=settings).run_once()
+
+    assert pending() == {
+        NOTIFICATION_PENDING_UNCONFIGURED: 1.0,
+        NOTIFICATION_PENDING_UNSUPPORTED: 0.0,
+        NOTIFICATION_PENDING_STUCK: 0.0,
+    }
+    assert report.needs_attention is False
+    assert events(captured) == ["attention_watch_clean"]
+
+
+def test_a_voice_reminder_is_no_setting_s_fault_so_it_raises(
+    session_factory: sessionmaker[Session], settings: Settings, contract: Contract
+) -> None:
+    """``unsupported`` is a reason on every configuration, including the default one.
+
+    Nothing in this build places a call, so no environment variable clears these and
+    a person has to change what may be consented or approve an address a channel can
+    use. It is separated from ``unconfigured`` for exactly that reason — the two share
+    a symptom and differ in the only thing an operator needs: the next move.
+    """
+    add_notification(
+        session_factory,
+        contract,
+        NotificationStatus.PENDING,
+        channel=Channel.VOICE,
+        scheduled_at=utc_now() - OVERDUE,
+    )
+
+    with capture_logs() as captured:
+        report = AttentionWatch(session_factory, settings=settings).run_once()
+
+    assert pending() == {
+        NOTIFICATION_PENDING_UNCONFIGURED: 0.0,
+        NOTIFICATION_PENDING_UNSUPPORTED: 1.0,
+        NOTIFICATION_PENDING_STUCK: 0.0,
+    }
+    assert report.needs_attention is True
+    assert events(captured) == ["attention_watch_needs_attention"]
+
+
+def test_a_queued_reminder_on_a_working_channel_is_stuck_and_raises(
+    session_factory: sessionmaker[Session], contract: Contract
+) -> None:
+    """The same row, the same count, the other cause — the transport decides.
+
+    Under :data:`DELIVERABLE` this channel can be sent, so a row past the grace means
+    the send path is not claiming it. This is the one cause of the three that no
+    setting explains, and the only one that is a fault on every deployment.
+    """
+    add_notification(
+        session_factory,
+        contract,
+        NotificationStatus.PENDING,
+        scheduled_at=utc_now() - OVERDUE,
+    )
+
+    report = AttentionWatch(session_factory, settings=DELIVERABLE).run_once()
+
+    assert pending() == {
+        NOTIFICATION_PENDING_UNCONFIGURED: 0.0,
+        NOTIFICATION_PENDING_UNSUPPORTED: 0.0,
+        NOTIFICATION_PENDING_STUCK: 1.0,
+    }
+    assert report.needs_attention is True
+
+
+def test_a_reminder_deferred_to_quiet_hours_is_counted_nowhere(
+    session_factory: sessionmaker[Session], settings: Settings, contract: Contract
+) -> None:
+    """Deferral is correct behaviour, and paging for it would page everyone nightly.
+
+    A row parked for quiet hours carries a ``scheduled_at`` in the future, so it is not
+    yet due and the repository predicate does not return it. This case exists because
+    the cheap implementation — count ``pending`` and subtract the ones with an error —
+    would include it, and the resulting alert would fire at two in the morning on every
+    deployment that had configured quiet hours properly.
+    """
+    add_notification(
+        session_factory,
+        contract,
+        NotificationStatus.PENDING,
+        scheduled_at=utc_now() + timedelta(hours=3),
+    )
+
+    with capture_logs() as captured:
+        report = AttentionWatch(session_factory, settings=settings).run_once()
+
+    assert pending() == {
+        NOTIFICATION_PENDING_UNCONFIGURED: 0.0,
+        NOTIFICATION_PENDING_UNSUPPORTED: 0.0,
+        NOTIFICATION_PENDING_STUCK: 0.0,
+    }
+    assert report.needs_attention is False
+    assert events(captured) == ["attention_watch_clean"]
+
+
+def test_a_reminder_inside_the_grace_window_is_not_yet_overdue(
+    session_factory: sessionmaker[Session], settings: Settings, contract: Contract
+) -> None:
+    """The grace window is what stops a working deployment looking like a stuck one.
+
+    Without it, the seconds between a row becoming due and the scheduler's next tick
+    would read as "the queue is not draining" on every single reminder — an alarm that
+    fires when the system works is one that gets muted before the day it matters.
+    """
+    add_notification(
+        session_factory,
+        contract,
+        NotificationStatus.PENDING,
+        scheduled_at=utc_now() - timedelta(seconds=60),
+    )
+
+    AttentionWatch(session_factory, settings=DELIVERABLE).run_once()
+
+    assert pending()[NOTIFICATION_PENDING_STUCK] == 0.0
+
+
+def test_a_row_with_no_scheduled_time_is_aged_from_created_at(
+    session_factory: sessionmaker[Session], settings: Settings, contract: Contract
+) -> None:
+    """``scheduled_at`` is nullable, and the scheduler treats NULL as due-now.
+
+    So the age predicate has to fall back to ``created_at`` for exactly those rows.
+    Reading ``scheduled_at`` alone would silently under-report the one shape the
+    reminder planner writes for "send immediately" — the commonest row on a real
+    install, and therefore the one whose invisibility matters most.
+    """
+    add_notification(
+        session_factory,
+        contract,
+        NotificationStatus.PENDING,
+        scheduled_at=None,
+        created_at=utc_now() - OVERDUE,
+    )
+
+    AttentionWatch(session_factory, settings=settings).run_once()
+
+    assert pending() == {
+        NOTIFICATION_PENDING_UNCONFIGURED: 1.0,
+        NOTIFICATION_PENDING_UNSUPPORTED: 0.0,
+        NOTIFICATION_PENDING_STUCK: 0.0,
+    }
+
+
+def test_the_three_causes_are_counted_separately(
+    session_factory: sessionmaker[Session], contract: Contract
+) -> None:
+    """Unequal counts, because equal ones pass on a writer that copies one number.
+
+    Under :data:`DELIVERABLE` an email row is ``stuck``, a voice row is
+    ``unsupported`` and an sms row is ``unconfigured``: three causes, three different
+    numbers. The cheap mistake — publishing one total on all three series — renders a
+    perfectly plausible gauge and destroys the distinction the split exists for.
+    """
+    now = utc_now() - OVERDUE
+    add_notification(
+        session_factory, contract, NotificationStatus.PENDING, template="T-60", scheduled_at=now
+    )
+    add_notification(
+        session_factory, contract, NotificationStatus.PENDING, template="T-30", scheduled_at=now
+    )
+    add_notification(
+        session_factory,
+        contract,
+        NotificationStatus.PENDING,
+        template="T-14",
+        channel=Channel.VOICE,
+        scheduled_at=now,
+    )
+    add_notification(
+        session_factory,
+        contract,
+        NotificationStatus.PENDING,
+        template="T-7",
+        channel=Channel.SMS,
+        scheduled_at=now,
+    )
+
+    AttentionWatch(session_factory, settings=DELIVERABLE).run_once()
+
+    assert pending() == {
+        NOTIFICATION_PENDING_UNCONFIGURED: 1.0,
+        NOTIFICATION_PENDING_UNSUPPORTED: 1.0,
+        NOTIFICATION_PENDING_STUCK: 2.0,
     }
