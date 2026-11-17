@@ -3846,8 +3846,16 @@ above read "passed" because a hook finally ran and passed.
     `transport_disabled` parks, which are published and deliberately not paged. **Amended by
     `D10-118`, not deleted:** the half that kept this entry open now pages, so the entry stays
     open on its residue rather than on the hole — a row stuck `pending` for ever under
-    `NOTIFICATION_TRANSPORT=none` is invisible to both status series, and `D10-118` argues
-    there why a gauge watching the two terminal states does not count that population.
+    `NOTIFICATION_TRANSPORT=none` ~~is invisible to both status series, and `D10-118` argues
+    there why a gauge watching the two terminal states does not count that population.~~
+    **Amended by `D10-129`, not deleted:** that residue has a reading of its own now. The
+    `notifications_pending_overdue{state}` series counts the rows that are due, still `pending`,
+    and due for longer than a grace, publishing the zeros so a quiet worker and a dead one are
+    distinguishable; `doctor`, the watcher's log line and the rule all read the same query. It
+    does not close the entry: on the default install every such row is `unconfigured`, which
+    `D10-129` counts, publishes and logs and deliberately keeps out of the verdict, so
+    `NotificationsPendingOverdue` pages only where a transport was configured and stopped
+    draining — the case the two terminal series cannot see by construction.
 23. ~~**The double-send serialisation is proven by reasoning, not by a concurrent
     test.**~~ — **closed against MySQL (D10-08).** The gap was real and correctly
     stated: `0003` (`0f5da36`) makes the second dispatch block on
@@ -8454,6 +8462,62 @@ in this record instead of in a deployment.
 `D10-128` landed as `975de17`, the workflow fix as `3278a61`, and CI run `43851632625` is nine jobs
 of nine, read from the jobs API. This closing commit is documentation only and names no run of its
 own, for the reason `D10-115` through `D10-127` all gave.
+
+### D10-129 — the reminder queue nothing could send was counted by nothing
+
+**A `pending` row was counted by nothing, and on the shipped default every reminder is one.**
+`undelivered_counts` — what `doctor`, the attention watcher and `/attention` read — counts rows
+that *stopped*. With `NOTIFICATION_TRANSPORT=none`, the default,
+`dispatch_notification` raises `SENDER_UNAVAILABLE` **before** `attempts` is incremented, so a
+reminder can never reach the retry cap, never turns `failed`, and stays `pending` for ever.
+The board published `failed 0` while a queue of customer reminders sat behind it, unsendable
+and uncounted. `pending_overdue_counts` reads that population now: due, still `pending`, and
+due for longer than `NOTIFICATION_OVERDUE_GRACE_SECONDS` (900 by default, `gt=0, le=86400`),
+ageing a row with no `scheduled_at` from `created_at` because `reminder_planner` writes `None`
+for immediate send. A quiet-hours deferral has a future `scheduled_at`, is not due, and is
+counted nowhere.
+
+**The count is split three ways, and only two of them are a reason.**
+`unconfigured` — a setting exists and is off: counted, published, logged, **not** a reason,
+because on the default install it is non-zero from the first reminder onward and an alarm on
+it would be muted by Thursday. `unsupported` — nothing in this build sends the channel, which
+is `voice`: counted and a reason. `stuck` — the channel is deliverable and the send path is
+not draining: counted and a reason, the only one that says "the scheduler is down".
+`NOTIFIABLE_CHANNELS` is checked **first**, so no configuration accident can reclassify
+`voice` as a fault. Three series are published every tick including the zeros, and
+`NotificationsPendingOverdue` alerts on `state="stuck"` with `for: 10m`, proved by
+`promtool test rules` against the pinned `prom/prometheus:v2.55.0`.
+
+**The visible behaviour change: `doctor` now exits non-zero where it read clean.** A
+deployment with a transport configured and a scheduler that has stopped draining now reports
+`stuck`, so `python -m app.cli doctor` returns `EXIT_ATTENTION` over the same database it
+previously called `EXIT_OK`. The `unconfigured` exclusion is what keeps the default install
+quiet; it is stated separately because the two facts are easy to conflate. The tenant route
+gained nothing — a count belongs on a tenant's board when a tenant can clear it from a screen
+they already have, and none of the three causes is clearable by an organisation that owns no
+setting, no enum and no scheduler. `AttentionView` is unchanged, verified.
+
+**One reading, one place.** The metric, the verdict and the log line all call the same query,
+so the scrape cannot disagree with the number an operator is told on the command line; the
+reader is unscoped with no tenant twin, and `build_sender` classifies from the same
+`deliverable_notification_channels` the verdict does and raises on a deliverable channel with
+no factory. Thirteen mutations were applied to the real files and all thirteen were caught,
+including the two — renaming the rule's state token, and renaming the expectation in
+`rules.test.yml` to match — that leave `promtool test rules` green and are visible only to
+`test_alert_rules.py`'s drift guard. Bare `mypy` caught one defect of mine that 1293 passing
+tests did not: `build_sender`'s dict literal inferred `dict[Channel, object]`, fixed by
+annotating the factories as `dict[Channel, Callable[[Settings], MessageSender]]`.
+
+**It also corrects one living sentence.** Gap 22's index entry said a row stuck `pending` under
+`NOTIFICATION_TRANSPORT=none` was invisible to both status series, which this slice makes false. The
+sentence is struck and amended rather than deleted, and the entry stays open for the reason the
+amendment gives: visible is not the same as a fault.
+
+Gates: `ruff check` and `ruff format --check` over `152` files, `mypy` over `76`, `bandit`
+exit 0, `pytest -o addopts="" -m "not integration"` **`1293 passed, 2 skipped, 19
+deselected`** (twenty-four more than `D10-128`'s `1269`), `promtool check config` four rules,
+`promtool test rules` `SUCCESS`, nineteen pre-commit hooks, `gitleaks` at the manual stage.
+Landed as `3a8a700`; CI run `44159848561` is nine jobs of nine.
 
 ## Non-negotiable reminders
 

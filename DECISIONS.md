@@ -10252,3 +10252,151 @@ in this record instead of in a deployment.
 `D10-128` landed as `975de17`, the workflow fix as `3278a61`, and CI run `43851632625` is nine jobs
 of nine, read from the jobs API. This closing commit is documentation only and names no run of its
 own, for the reason `D10-115` through `D10-127` all gave.
+
+### D10-129 — The reminder queue nothing could send was counted by nothing
+
+**A reminder that no transport could send was counted as a reminder that had been handled.**
+`doctor`, the attention watcher and `/attention` all read `undelivered_counts`, which counts
+rows that *stopped* — `failed` or `suppressed` — and a `pending` row was counted by nothing,
+on the reasoning that a scheduler exists to move it. With `NOTIFICATION_TRANSPORT=none`, the
+shipped default, that reasoning is false in the one way that matters:
+:func:`~app.workers.dispatch.dispatch_notification` raises `SENDER_UNAVAILABLE` **before**
+`attempts` is incremented, so the row never reaches the retry cap, never turns `failed`, and
+stays `pending` for ever. The board published `failed 0`, `doctor` exited `EXIT_OK`, and
+behind both sat a queue of customer reminders that nothing in this build could send.
+
+**The new reading counts rows that are due, still `pending`, and due for longer than a grace.**
+`pending_overdue_counts` asks exactly that, and both halves of the predicate are load-bearing.
+`scheduled_at` where it is set and `created_at` where it is not, because `reminder_planner`
+writes `scheduled_at=None` for immediate send: a reader comparing `scheduled_at` alone would
+match NULL, match nothing, and report a clean board over precisely the rows the producer
+created for right now. The grace is `NOTIFICATION_OVERDUE_GRACE_SECONDS`, 900 by default and
+bounded `gt=0, le=86400`, because the question here is *should somebody already have sent
+this* and not *may I send it now* — between the two sits every row merely waiting for the next
+tick, and a non-positive grace would count the row a scheduler is about to claim as a fault. A
+quiet-hours deferral has a `scheduled_at` in the future, is not due at all, and appears in no
+series here; deferral is correct behaviour and a check that alarmed on it would page every
+deployment at two in the morning.
+
+**A `pending` row is not a fault until the reason it has not moved is named, so the count is
+split by why.** Three causes, separated by one question — *is there a setting whose change
+would make this channel deliverable?* `unconfigured`: yes, and it is off. `unsupported`: no,
+and nothing in this build can send it, which is `voice` today — consentable, with no transport
+in existence. `stuck`: the channel *is* deliverable and the send path is not draining it,
+which is the only one of the three that says something about the scheduler rather than about
+the configuration. Membership in `NOTIFIABLE_CHANNELS` is checked **first**, so a channel
+outside the build's ceiling is `unsupported` whatever the settings say; checking `deliverable`
+first would reclassify a `voice` row as a stuck queue the day a configuration bug let `voice`
+into that set, and send an operator looking for a scheduler fault that does not exist.
+
+**`unconfigured` is counted, published and logged, and it is deliberately not a reason.**
+`needs_attention` gains `unsupported` and `stuck` only. On the shipped default every reminder
+that comes due is `unconfigured`, so making it a reason would turn the first reminder of a
+fresh install into a non-zero exit and a firing alert, which is how the one command meant to
+be trusted stops being read — the same judgement `D10-39` made about a park under a
+switched-off bus, applied to a second population. This is the sentence in the slice most
+likely to be misread as an omission: the number is on the log line, the series is on the
+scrape, and only the verdict excludes it. A reader who wants a default install to stay quiet
+gets that; a reader who wants to know the queue exists gets the count.
+
+**This changes what `doctor` does, and the change is the point.** On a deployment that is set
+up to deliver — transport configured, scheduler dead — the overdue rows are `stuck`, and
+`doctor` now exits `EXIT_ATTENTION` over the same database where it previously exited
+`EXIT_OK`. That is user-visible in a command cron entries run on, so it is recorded here
+rather than left to be found: those rows are the ones the retry cap cannot reach, and the old
+reading was silent about them because it only counted rows that had stopped. The
+`unconfigured` exclusion two paragraphs up is what keeps the same change from firing on the
+default install, and it is stated separately because the two facts are easy to conflate and
+only one of them is about a fault.
+
+**Three series, published every tick including the zeros.**
+`notifications_pending_overdue{state}` carries `unconfigured`, `unsupported` and `stuck`,
+spelled once in `metrics.py` for the reason every other token set there is, so the writer, the
+rule and every test that asserts a row was counted read one spelling. They are deliberately
+**not** a third and fourth member of `notifications_undelivered`'s `failed`/`suppressed`
+family: those two mean *a row stopped*, these three mean *why a row has not moved at all*, and
+the rule matching the old family would silently widen to a population it was not written for.
+Zeros are published for the `D10-109` reason — a family written only when something is wrong
+is indistinguishable, from Prometheus' side, from a worker that is not running.
+
+**`NotificationsPendingOverdue` alerts on `state="stuck"` and carries `for: 10m`.** Both are
+the rule being narrower than its neighbours and saying why. `stuck` is the only cause a person
+can act on from the alert alone: `unconfigured` is the default install and `unsupported` is a
+product decision, so neither belongs in a page. The window is there because this reading —
+unlike the counters beside it — holds across a tick, and ten minutes is the length at which
+restarting the scheduler stops looking like an incident while a dead one still arrives.
+`rules.test.yml` holds five cases across both directions and the `for:` window, and `promtool
+test rules` is `SUCCESS` against the pinned `prom/prometheus:v2.55.0`, as every rule in this
+repository is proved.
+
+**The tenant board gained nothing.** `GET /api/v1/attention` answers *what on my own board can
+I act on*, and the rule written into that router is that a count belongs on a tenant's board
+when a tenant can clear it from a screen they already have. Nobody clearing `unconfigured`
+owns a setting; `unsupported` is cleared by changing what may be consented, which is a product
+decision; `stuck` is cleared by restarting a service a tenant has no handle on. The row-level
+queue at `/notifications` already shows a tenant their own pending rows one at a time, which
+is the granularity they can act at, so the three counts stay operator facts and `AttentionView`
+is unchanged. It is a verified no-op rather than an oversight, and it is recorded because a
+reader watching the operator's board grow will expect this one to grow with it.
+
+**The reader is unscoped and has no tenant twin, which is a decision and not an omission.**
+`undelivered_counts` has one — `undelivered_counts_for_tenant` — because a tenant can retry
+their own failed row. None of the three causes here is clearable by the organisation it
+belongs to, so a second reader would be a second answer to *is anything stuck* with nothing a
+tenant could do with the difference. The reader also returns the count **per channel and
+nothing else**: whether a channel is explained by configuration or is a fault is a question
+about the deployment's transports, and it is answered at the one place that holds the
+settings, so the table's reader cannot drift into holding a policy. `build_sender` reads the
+same `deliverable_notification_channels` that the classification does and now raises on a
+deliverable channel with no factory, so the board and the send path cannot disagree about
+whether a channel exists at all.
+
+**One gate failure was mine, and only a type checker could see it.** `build_sender`'s factory
+dict mixed `SmtpSender` and `TextbeeSender`, so mypy inferred `dict[Channel, object]` from the
+literal and the comprehension no longer produced `dict[Channel, MessageSender]`; the fix
+annotates the dict as `dict[Channel, Callable[[Settings], MessageSender]]`, which makes the
+annotation load-bearing rather than incidental. Every test passed on the same tree, which is
+the whole reason bare `mypy` is in the gate list below and not just `pytest`.
+
+**Thirteen mutations, applied one at a time to the real files.** The predicate loses its
+`created_at` branch; a missing `scheduled_at` reads as infinitely old; the zero-fill drops a
+channel; the grace default drops from 900 to 60; the SMS switch is inverted; `voice` is added
+to `NOTIFIABLE_CHANNELS`; the classification is inverted; `unconfigured` is made a reason;
+`unsupported` is dropped from the verdict; one total is published onto all three series; the
+zeros are suppressed; the rule matches `state="wedged"`; the rule-test case expects `wedged`.
+Eleven green control runs preceded them so that no red could be the harness's own fault, each
+mutation names the phrasing it must provoke so a wrong-reason red scores as MISSED rather than
+caught, and every mutated file was restored and compared by SHA-256. Two are worth naming
+because only one test in the repository can see them: renaming the rule's state token, and
+renaming the expectation in `rules.test.yml` to match, both leave `promtool test rules` green
+— the file agrees with itself — so `test_alert_rules.py`'s drift guard, which parses the
+rule's matcher and compares it against the tokens `app/` publishes, is the only thing between
+the rename and a rule that can never fire.
+
+**One living sentence went stale and was amended, not deleted.** Gap 22's index entry in
+`STATUS.md` said a row stuck `pending` for ever under `NOTIFICATION_TRANSPORT=none` was
+invisible to both status series, and that is the population this slice reads. It is struck and
+amended in the house form; the entry stays open, because on the default install such a row is
+`unconfigured` and the verdict still excludes it — the residue became visible without becoming a
+fault.
+
+**What this does not prove.** It counts rows, not causes: a `stuck` queue says the scheduler
+is not draining, never why. The grace is a judgement rather than a measurement, so a
+deployment whose `NOTIFICATION_POLL_INTERVAL_SECONDS` exceeds it will report `stuck` on rows
+it is about to claim — loud, and wrong in the direction that gets somebody to look, which is
+the direction a first version should fail in. A row deferred for quiet hours is excluded by
+the predicate, but a deferral that has since elapsed without a claim is counted under whatever
+cause its channel implies, so `stuck` can mean *the scheduler slept through the resumption* as
+well as *the scheduler is dead*; both need the same person. And nothing here watches the
+scheduler process: a dead scheduler on a deployment with no due rows is still a clean board,
+which is what the `up` series and `docker compose ps` are for.
+
+Gates, on the tree this commit carries: `ruff check` and `ruff format --check` over `152`
+files, bare `mypy` from the repository root over `76` files, `bandit -c pyproject.toml -r
+backend/app` exit 0, `pytest -o addopts="" -m "not integration"` `1293 passed, 2 skipped, 19
+deselected` — twenty-four more than `D10-128`'s `1269`, being this slice's repository, config,
+verdict, gauge and rule cases; `promtool check config` at four rules and `promtool test rules`
+`SUCCESS`; nineteen pre-commit hooks; `gitleaks` over the whole history at the manual stage.
+
+`D10-129` landed as `3a8a700`, and CI run `44159848561` is nine jobs of nine, read from the
+jobs API. This closing commit is documentation only and adds no code to what that run built.
