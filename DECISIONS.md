@@ -10553,3 +10553,100 @@ table is large".
 anchored amendment to gap 25's entry. No code, test, rule or migration is exercised by this commit,
 so it names no CI run — not as an omission but because there is no build of this commit to point at,
 and inventing one would be the exact failure the close rule exists to catch.
+
+### D10-132 — The model backend gets a way to be checked, not a service to check it with
+
+Gap 17 ends with a sentence that has been true since the backend was written: `ollama` has no
+compose service and has never been run against a live model. `D10-106` closed the part of the gap
+that could be measured — address and dob gained patterns, so the default path reads all seven field
+types — and left this half standing, correctly, because the sentence was still true. `D10-88` had
+already declined to define the service and said why: a compose service that no test starts and no
+readiness probe covers would be the unverifiable milestone `D7-03` rejected, and defining it is
+deployment configuration rather than a repository change. Both of those readings stand. What neither
+of them noticed is smaller and worse than a missing service: there was no *command anyone could
+type* to check the claim, so it was not a measurement waiting for a model, it was a sentence with
+nothing behind it at all.
+
+**What is exactly true today.** `OllamaExtractor` exists and `build_extractor` selects it whenever
+`EXTRACTION_BACKEND=ollama`; it posts the document to `/api/generate`, strips a markdown fence,
+parses JSON, and raises `ExtractionUnavailableError` when the model does not answer. Every test of
+it in `test_extraction.py` answers with `urllib.request.urlopen` patched. `docker-compose.yml`
+defines no Ollama service. The opt-in `live` marker has been declared in `pyproject.toml` since
+before this slice and had exactly one user — `KAFKA_LIVE` in `test_publishers.py` — which is the
+pattern this slice follows rather than invents.
+
+**Decision.** The gap's service half stays a deployment choice and is recorded as one; the gap's
+*checkability* half is closed by adding `backend/tests/test_extraction_live.py`, which makes the
+claim runnable. Two tests, deliberately of different kinds. The first needs no model: it aims the
+extractor at a loopback port it has just bound and released, so the number is one the kernel
+confirmed free, and asserts the real, unmocked failure path raises rather than guessing. It is
+offline and deterministic, so it runs in CI like anything else. The second needs a model, is
+`live`-marked, and skips unless `OLLAMA_LIVE=1` is set.
+
+**Why the unmocked half is worth a test of its own.** A patched `urlopen` proves the parsing of an
+answer, and proves nothing about the transport that would carry one: the exception the handler sees
+is one the test constructed. Pointing the real extractor at a closed socket exercises the exception
+`urllib` actually raises, and asserts the two properties that matter on that path — that a silent
+model is a failure rather than an empty result, and that the refusal is safe to log, carrying
+neither the endpoint nor the customer's value. Those are `D7-03`'s promises about a model that says
+nothing, and until now they were only tested against a mock.
+
+**Why not the compose service, again.** Because the argument that refused it has not aged. A service
+definition in this repository is not inert: `test_worker_wiring.py` and `test_config.py` both parse
+`docker-compose.yml` and assert things about its service blocks, and CI validates the file, so
+adding a block buys new obligations to satisfy. What it does not buy is evidence, because CI cannot
+pull a multi-gigabyte model on every push and will not, which is why the `live` marker exists as a
+category at all. Adding a service would make the ledger's sentence *longer* — `ollama` now has a
+compose service and has still never been run against a live model — which is worse than what is
+there now, not better.
+
+**A skip is not a pass, and the block says so.** Running the suite collects two tests and reports
+one passing and one skipping, and the skipping one is the half that would close the gap. Nobody has
+yet pointed this tree at a model. What this slice buys is that somebody can, without writing code:
+`ollama serve`, pull the model the settings already name, then
+`OLLAMA_LIVE=1 python -m pytest backend/tests/test_extraction_live.py -v`. The test docstring
+carries those three steps so the knowledge does not live only in a ledger entry.
+
+**Why the live test asserts a specific value rather than that something happened.** An assertion
+that the model returned any candidate at all would pass on a model that emits plausible noise; the
+thing gap 17 says was never observed is a model reading a document it was given. So the fixture
+names one labelled email and the test requires that value back, along with two shape properties that
+hold whatever the model says: no candidate may carry a field name outside `FieldName`, because a
+name with no column could not be stored, and every confidence must be a float in `0.0-1.0`, because
+the column quantises to `NUMERIC(4,3)` and a backend handing over `95` would be silently rounded
+into `100.0`.
+
+**What this does not fix, said here so the close does not read as a clean bill.** The label shape is
+untouched: an address written as prose, with no label at the start of a line, still yields nothing,
+and the opt-in model was never the reader for that case either. The live test's endpoint comes from
+`Settings`, so it inherits the shipped loopback default and the refusal `Settings` already applies
+to a cloud backend rather than relaxing either. And no CI job will ever prove the Ollama path:
+`live`-marked means skipped, deliberately, so green CI says the refusal path works and says nothing
+about a model.
+
+**The historical closes that named this stay as written.** `D10-88` said defining the service is the
+owner's call, and `D10-106` said the field count was narrowed rather than closed; both were true of
+the slices that wrote them. Neither is amended. The standing gap entry is, because that is where a
+reader looks for the current state of the question.
+
+**Limits.** This adds a way to measure, not a measurement. A deployment that wants the model held to
+the same regression net as the pattern backend — scored against the golden corpus by
+`evaluate-extraction` rather than read once by hand — needs the corpus run against a model, which
+this slice does not do and cannot do from CI. The live test also binds a model only loosely: it
+establishes that a served model reads a labelled value, not that its answers are good enough to
+promote, and the review gate is what stands between the backend and a stored value precisely because
+that is not established.
+
+**It reopens on a condition.** A deployment that requires the Ollama backend and wants the
+repository to ship it — the operator who has a model and no inclination to hand it a `base_url` — is
+the shape of that. Adding the service then is a scoped change with three obligations attached: a
+compose `profiles` entry so a default `up` does not pull it, a readiness probe that fails closed
+when no model is loaded, and a test that starts it, since a service nobody starts is exactly what
+this entry refuses to add.
+
+**What gated it.** `pytest backend/tests/test_extraction_live.py` collects two tests and reports
+`1 passed, 1 skipped`: the refusal path runs against a real closed socket, and the live half skips
+with its stated reason. The file adds one passing and one skipping case to a suite it does not
+otherwise touch, satisfies the `live` marker already registered under `--strict-markers`, and leaves
+every existing test's expectations alone. The CI run for the commit that carries this is recorded
+where that run is known, not guessed here.

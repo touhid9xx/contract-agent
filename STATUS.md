@@ -3721,10 +3721,16 @@ above read "passed" because a hook finally ran and passed.
     address 3/3, dob 1/1, pooled F1 0.919 → 0.974. What stands is the *shape* of the
     evidence rather than the count: an address and a date of birth are read only when a
     label named them at the start of a line, so an address written as prose, with no
-    label, or with its value on the line below it still yields nothing — and `ollama`
-    still has no compose service and has never been run against a live model (D7-03).
-    A postal address is now read and reviewable; it is still not a delivery channel,
-    which is a channel decision (`test_agent_decisions.py`), not an extraction one.
+    label, or with its value on the line below it still yields nothing. ~~and `ollama` still has no
+    compose service and has never been run against a live model (D7-03)~~ **Amended by `D10-132`:**
+    the service is still not defined, because defining one is deployment configuration and a service
+    no test starts would be the unverifiable milestone `D7-03` refused (`D10-88`). What changed is
+    that the claim became checkable: `backend/tests/test_extraction_live.py` drives the real backend
+    against a model an operator has running, opt-in behind `OLLAMA_LIVE=1`, and pins the unmocked
+    refusal path. "Never run against a live model" is now a measurement waiting for an operator
+    rather than a sentence with nothing behind it. A postal address is now read and reviewable; it
+    is still not a delivery channel, which is a channel decision (`test_agent_decisions.py`), not an
+    extraction one.
 18. **Consent has no UI. ~~and no import path~~** F9's flags default to `false`, so
     **every contract that existed before `0002` became un-contactable** —
     fail-closed and correct, but resolvable only through
@@ -8576,6 +8582,33 @@ question is not mistaken for a clean stack.
 passes over every block from `D10-111` onward, every added line fits in `100` columns, and nineteen
 pre-commit hooks plus `gitleaks` at the manual stage refuse the commit otherwise. It names no CI run
 because a documentation-only commit has none to name.
+
+### D10-132 — Gap 17's service half is a deployment choice; its claim is now checkable
+
+**Decided, `D10-132`.** Gap 17's last sentence said `ollama` has no compose service and has never
+been run against a live model. Both remain true. What changed is that the second half stopped being
+uncheckable: `backend/tests/test_extraction_live.py` now drives the real backend against a model an
+operator has running, behind `OLLAMA_LIVE=1`, using the `live` marker this repository has declared
+since before the slice and previously used only for `KAFKA_LIVE`.
+
+**A skip is not a pass.** The suite reports `1 passed, 1 skipped`. The passing test aims the
+extractor at a loopback port it has just confirmed free and asserts the unmocked failure path raises
+rather than guessing, carrying neither the endpoint nor the customer's value into a message that is
+safe to log. The skipping test is the one that would close the gap, and nobody has run it against a
+model yet. Green CI therefore says the refusal path works and says nothing at all about a model,
+which is the distinction this entry exists to keep.
+
+**The service is still not added, and the reason has not aged.** A compose block is not inert —
+`test_worker_wiring.py` and `test_config.py` parse `docker-compose.yml`, and CI validates it — so
+adding one buys new obligations and no evidence, because CI cannot pull a model per push and never
+will. It would make the ledger's sentence longer (`ollama` now has a service and has still never
+run) rather than shorter. It reopens when a deployment needs the backend shipped, and then it
+arrives with a `profiles` entry, a readiness probe, and a test that starts it.
+
+**Gates.** One test file, two Markdown files: `pytest backend/tests/test_extraction_live.py` reports
+`1 passed, 1 skipped`, the ledger close check passes over every block from `D10-111` onward, every
+added line fits in `100` columns, and nineteen pre-commit hooks plus `gitleaks` at the manual stage
+refuse the commit otherwise. The label-shape limit that `D10-106` named is untouched by any of it.
 
 ## Non-negotiable reminders
 
