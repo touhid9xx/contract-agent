@@ -3911,15 +3911,18 @@ above read "passed" because a hook finally ran and passed.
     that counts the parks (`D10-12`) — and the combination reads as a fault on first
     run. **Not introduced by `D10-26`:** the metadata route has had this property since
     F6, and this entry exists because the document slice added a second producer to it.
-    What is missing is a decision rather than a patch: whether `none` should mean
-    "enqueue nothing" (there is no consumer to enqueue for) or stay "enqueue and park"
-    (a visible backlog that never drains), and the second wants a doctor that can tell
-    "the bus is switched off" apart from "the bus is broken". **Amended by `D10-39`, not
-    deleted:** that doctor now exists — `bus_disabled` and `event_transport` travel on the
-    report and the worker names a switched-off bus once at startup (`2572f53`) — so the
-    second reading is served and the decision above is the whole of what is left. The
-    heading's "nothing says so" is likewise narrower than it reads: something says so now,
-    quietly and on a timer, to a log nobody reads.
+    ~~What is missing is a decision rather than a patch: whether `none` should mean "enqueue
+    nothing" (there is no consumer to enqueue for) or stay "enqueue and park" (a visible backlog
+    that never drains), and the second wants a doctor that can tell "the bus is switched off" apart
+    from "the bus is broken". **Amended by `D10-39`, not deleted:** that doctor now exists —
+    `bus_disabled` and `event_transport` travel on the report and the worker names a switched-off
+    bus once at startup (`2572f53`) — so the second reading is served and the decision above is the
+    whole of what is left.~~ **Answered and closed by `D10-131`:** `none` keeps meaning enqueue and
+    park, because after `D10-130` established that no consumer is coming under any transport,
+    discarding at write time preserves nothing and costs the one record that an event was meant.
+    What stays open here is retention rather than semantics — nothing prunes the outbox, so the
+    explained parks grow without bound. The heading's "nothing says so" is likewise narrower than it
+    reads: something says so now, quietly and on a timer, to a log nobody reads.
 
 ## The workers have a daemon ✅ (`D10-25`)
 
@@ -8545,6 +8548,29 @@ replace-or-beside is the live question again.
 false since `D10-117` added `OutboxEventsParked` — the gap 22 entry was amended then and item 5 was
 not. Struck and amended in the house form; the manual-requeue half survives, and that is the part
 that never had a fix.
+
+**Gates.** No code, no test, no rule: `DECISIONS.md` and `STATUS.md` only. The ledger close check
+passes over every block from `D10-111` onward, every added line fits in `100` columns, and nineteen
+pre-commit hooks plus `gitleaks` at the manual stage refuse the commit otherwise. It names no CI run
+because a documentation-only commit has none to name.
+
+### D10-131 — Gap 25 decided: `none` parks rather than discards
+
+**Decided, `D10-131`.** Gap 25 was whether `EVENT_TRANSPORT=none` should enqueue nothing at all or
+keep enqueueing and parking. The answer is park: `none` is a configured bus that still records what
+it was asked to deliver, and the alternative lost its premise when `D10-130` established that no
+reader is coming under any transport.
+
+**What stays true.** Every event on a default stack spends its retry budget and parks `failed`;
+`doctor` exits `0` because `bus_disabled` explains those rows rather than counting them as faults;
+`outbox_parked_events{outcome="transport_disabled"}` counts them and `OutboxEventsParked` matches
+only `relay_failed`, so a bus its owner switched off never pages; and no tenant sees the count, on
+the rule that a tenant's board holds only what a tenant can clear.
+
+**What is still wrong, and is not this gap.** Nothing prunes the outbox — `prune` covers
+`login_attempts` only — so the parked rows grow without bound and only someone scraping the gauge
+sees it. That is a retention slice; it is written down here so a clean answer to the semantics
+question is not mistaken for a clean stack.
 
 **Gates.** No code, no test, no rule: `DECISIONS.md` and `STATUS.md` only. The ledger close check
 passes over every block from `D10-111` onward, every added line fits in `100` columns, and nineteen

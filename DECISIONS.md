@@ -10473,3 +10473,83 @@ amendments to gap 5's entry. No code changed, so no test, rule, migration or ima
 this commit. Unlike every block in this series since `D10-111` it names no CI run, and that is not
 an omission: there is no build of this commit to point at, and inventing one would be the exact
 failure the close rule exists to catch.
+
+### D10-131 — A switched-off bus parks rather than discards, and that is now the answer
+
+Gap 25 recorded one sentence with two readings and no owner. `EVENT_TRANSPORT=none` is the default,
+and under it every event a relay claims spends its retry budget and parks; the question was whether
+`none` should instead mean *enqueue nothing*, since nothing was reading the topic. The entry called
+that "a decision rather than a patch" and then waited, which is an honest thing to write and a
+useless thing to leave standing. `D10-130` answered the neighbouring question — there is no
+`contract.ingested` consumer under *any* transport, Kafka included — and that is the fact this one
+was missing, so it is now decidable rather than owed.
+
+**What is exactly true today.** `EventTransport` is a closed `Literal` of `none` and `kafka`
+defaulting to `none`, and `none` selects `UnavailablePublisher`, whose `publish` raises on every
+call with no code path that reports success. `record_outcome` retries to `outbox_max_attempts`
+(`10`) and then parks the row `failed`. The producer consults none of that: `enqueue_event` writes
+the row inside the caller's transaction whatever the transport says, which is precisely why the
+ingest route can promise that the contract row and its event are written or discarded together.
+
+**The two readings, and what each was for.** *Enqueue nothing* was premised on the outbox being a
+backlog for a consumer that would eventually arrive: if nothing will ever read the topic, writing
+and parking a row is bookkeeping for a reader who does not exist. *Enqueue and park* was premised on
+the row being worth more than the storage it costs — a durable, counted, replayable record that
+something was meant to happen.
+
+**The first reading lost its premise, and not on taste.** With no consumer under either transport,
+discarding on `none` preserves nothing for a reader who is coming; it discards the only record that
+an event was meant. Priced as code rather than as policy, it is worse than that: `enqueue_event`
+cannot ask a transport question without the ingest route reading settings inside the business
+transaction, which makes the same request write a different number of rows on two deployments and
+forces the atomicity test to run once per configuration. That is the producer-side twin of the
+coupling `D10-130` refused on the consumer side, and it does not get cheaper by being one
+transaction earlier.
+
+**Decision.** `none` keeps meaning **enqueue and park**. A switched-off bus is a deliberate
+configuration that still records what it was asked to deliver: the row is parked, counted, explained
+as configuration rather than as fault, and replayable with `python -m app.cli outbox-replay`. The
+alternative is refused rather than deferred.
+
+**Parks are counted, explained, and addressed to the reader who can act.** `attention_report`
+carries `event_transport` and sets `bus_disabled` from it, and `parks_explained` returns
+`outbox_parked` when the bus is off and zero otherwise, so a default install does not read as a
+fault — `doctor` exits `0` on exactly the rows its own configuration told it to produce. The gauge
+splits the two populations, `outbox_parked_events{outcome="transport_disabled"}` and
+`outbox_parked_events{outcome="relay_failed"}`, and `OutboxEventsParked` matches only the second:
+the alert is for a deployment that had a transport and could not deliver, never for one that turned
+its transport off. No tenant sees any of it, and that is the route's stated rule rather than an
+oversight — a count belongs on a tenant's board when a tenant can clear it from a screen they
+already have, and a tenant cannot clear a relay fault.
+
+**What this does not fix, said here so the close does not read as a clean bill.** Nothing prunes the
+outbox. `prune` exists in this codebase for `login_attempts` and nowhere else, so under `none` with
+the relay running, every ingest adds a row that parks and stays, indefinitely. Those rows are
+explained, which is why `doctor` exits `0`, and they are the `transport_disabled` population, which
+is why no alert fires: on a default stack the backlog grows and is visible only to someone who
+scrapes the gauge. That is a retention question and a different slice's — but a reader who takes
+"explained" for "harmless" will be wrong, and this is where that is written down.
+
+**The historical close that named this stays as written.** `D10-117` ended its "what it does not
+close" paragraph by saying gap 25's semantics were an owner's decision, and that was true of the
+slice that wrote it and of every day until this one. It is not amended; the standing index entry is,
+because that is where a reader looks for the current answer.
+
+**Limits.** This decides a meaning, not a behaviour: no code moved, so a deployment that wanted
+"enqueue nothing" still cannot have it without the producer-side coupling priced above, and one that
+wants the parked rows gone must replay them or delete them by hand. The decision also binds later
+transports rather than only today's two: a transport added afterwards inherits the meaning of `none`
+rather than inheriting an argument, and adding a consumer does not by itself reopen it — with a
+reader on the topic, parking stops being a dead end, which makes the same meaning easier to defend
+rather than wrong.
+
+**It reopens on a condition.** A deployment where the row count is itself the problem — a table
+growing faster than it can be retained, measured rather than feared — or a transport whose success
+signal is not an acknowledgement the relay can record. In either case the question to ask first is
+the retention one, because discarding at write time is the most expensive possible answer to "the
+table is large".
+
+**What gated it.** Documentation only: this entry, a matching status block in `STATUS.md`, and one
+anchored amendment to gap 25's entry. No code, test, rule or migration is exercised by this commit,
+so it names no CI run — not as an omission but because there is no build of this commit to point at,
+and inventing one would be the exact failure the close rule exists to catch.
