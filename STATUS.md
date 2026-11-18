@@ -3520,10 +3520,12 @@ above read "passed" because a hook finally ran and passed.
    *publisher* and F5 adds `python -m app.cli outbox-replay` for parked rows, but
    `docker-compose.yml` still has no Kafka service, so nothing has been proven
    against a real broker and the `live` test is opt-in (`KAFKA_LIVE=1`). The
-   consumer side of at-least-once does not exist. Replay is operator-initiated:
-   **no alert fires when rows park and nothing requeues them automatically**
-   (D5-03). The default `EVENT_TRANSPORT=none` keeps the refusing stand-in, so a
-   fresh deployment retries and parks events rather than losing them (D4-03).
+   consumer side of at-least-once does not exist. Replay is operator-initiated: ~~**no alert fires
+   when rows park and nothing requeues them automatically** (D5-03)~~ **amended by `D10-117`** — an
+   alert does fire, `OutboxEventsParked`, on `outbox_parked_events{outcome="relay_failed"} > 0`, so
+   what survives of `D5-03` is the manual half alone: nothing requeues a parked row by itself. The
+   default `EVENT_TRANSPORT=none` keeps the refusing stand-in, so a fresh deployment retries and
+   parks events rather than losing them (D4-03).
    ~~**Prerequisites now exist that did not when this was written, and the gap is
    still open.**~~ **Amended by `D10-120`:** the extraction half is closed and the
    event half is not. `D10-26` gave the contract a stored document, so a consumer
@@ -3539,10 +3541,13 @@ above read "passed" because a hook finally ran and passed.
    clock rather than on an event**. It is recorded as answered, not as a decision
    that is still owed. What survives is narrower and still true: there is **no
    `contract.ingested` consumer**, so the topic still has no reader and the
-   publisher still publishes to nothing. That half stays **blocked on an owner
-   decision** for a reason that is a deployment's and not a slice's — wiring it
-   means running a broker this stack does not ship, and deciding whether an event
-   should *replace* the poll or run beside it.
+   publisher still publishes to nothing. ~~That half stays **blocked on an owner decision** for a
+   reason that is a deployment's and not a slice's — wiring it means running a broker this stack
+   does not ship, and deciding whether an event should *replace* the poll or run beside it.~~
+   **Answered and closed by `D10-130`:** the question was put to the owner and answered — the poll
+   is the stand-in, not a stopgap — so what remains here is a recorded non-goal carrying a stated
+   reopen condition, not a decision still owed. There is still no `contract.ingested` consumer, and
+   that is now deliberate rather than pending.
 6. ~~**No refresh token.**~~ — **closed by `D10-17`.** `POST /auth/login` now also
    returns a single-use refresh token, and `POST /auth/refresh` spends it for a
    successor in the same family, so a 15-minute access token no longer means
@@ -8518,6 +8523,33 @@ exit 0, `pytest -o addopts="" -m "not integration"` **`1293 passed, 2 skipped, 1
 deselected`** (twenty-four more than `D10-128`'s `1269`), `promtool check config` four rules,
 `promtool test rules` `SUCCESS`, nineteen pre-commit hooks, `gitleaks` at the manual stage.
 Landed as `3a8a700`; CI run `44159848561` is nine jobs of nine.
+
+### D10-130 — Gap 5's event half is closed as a non-goal
+
+**Asked and answered, `D10-130`.** Gap 5's remaining half was `contract.ingested` having no
+consumer, recorded as waiting on an owner decision. The owner took the cheap side and closed it: the
+poll is the stand-in, the topic keeps its publisher and no reader, and the gap stops being owed.
+
+**What is still true, and now deliberately so.** No broker in `docker-compose.yml`, no consumer for
+the topic, parked rows requeued by hand with `python -m app.cli outbox-replay`, and the live broker
+test opt-in behind `KAFKA_LIVE=1`, so CI never proves the Kafka path. `ExtractionWorker` reads the
+table on `extraction_scan_poll_interval_seconds` (`900` by default) and never names the topic, which
+is why it cannot drift from a consumer's behaviour — and a consumer would not widen coverage, since
+extraction needs a stored document and the poll already covers every contract that has one.
+
+**It reopens on a condition.** A deployment running its own broker, with a requirement the poll
+cannot meet: a reaction in seconds, or a per-event reaction that is not extraction. Then
+replace-or-beside is the live question again.
+
+**One stale clause corrected with it.** Gap 5's entry still said no alert fires when rows park,
+false since `D10-117` added `OutboxEventsParked` — the gap 22 entry was amended then and item 5 was
+not. Struck and amended in the house form; the manual-requeue half survives, and that is the part
+that never had a fix.
+
+**Gates.** No code, no test, no rule: `DECISIONS.md` and `STATUS.md` only. The ledger close check
+passes over every block from `D10-111` onward, every added line fits in `100` columns, and nineteen
+pre-commit hooks plus `gitleaks` at the manual stage refuse the commit otherwise. It names no CI run
+because a documentation-only commit has none to name.
 
 ## Non-negotiable reminders
 

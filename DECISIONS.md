@@ -10400,3 +10400,76 @@ verdict, gauge and rule cases; `promtool check config` at four rules and `promto
 
 `D10-129` landed as `3a8a700`, and CI run `44159848561` is nine jobs of nine, read from the
 jobs API. This closing commit is documentation only and adds no code to what that run built.
+
+### D10-130 — The topic nothing reads is a decision, and it now says so
+
+Gap 5 was two halves wearing one number, and only one of them was a slice. The extraction half
+closed when `D10-120` put a reader behind a poll interval; the event half stayed listed as blocked
+on an owner decision, which was an honest description and a useless plan — a gap nobody owns defers
+for ever. Twenty-three earlier blocks in `STATUS.md` mention it, twenty of them inside a *what this
+does not do* paragraph, so the standing answer has been scattered across slice records rather than
+written down once. This records the answer instead of the absence.
+
+**What is actually missing, named exactly.** `contract.ingested` has two producers, the JSON ingest
+route and the document upload route, and both enqueue inside the same transaction as the contract
+row, so the topic cannot drift from the data it describes. `OutboxRelay` publishes a row and marks
+it; it has never had a notion of a subscriber. Beyond that: `docker-compose.yml` ships no broker,
+`EVENT_TRANSPORT` is a closed `Literal` of `none` and `kafka` defaulting to `none`, the round-trip
+test is opt-in behind `KAFKA_LIVE=1` and so never runs in CI, and nothing requeues a parked row
+without an operator asking for it.
+
+**What stands in for the consumer, and why it is not a stopgap.** `claim_extraction_candidates`
+selects `storage_path IS NOT NULL AND extraction_attempted_at IS NULL` under
+`FOR UPDATE SKIP LOCKED` and stamps the column in the same transaction, and `ExtractionWorker` calls
+it on `extraction_scan_poll_interval_seconds`, `900` by default. That worker never names the topic —
+not the constant, not the string, not the word — so it cannot silently diverge from a consumer's
+behaviour, because it does not have one. It is the same work on a clock, and it is idempotent for
+the reason a consumer would have to be: one row per `(contract, field_name)`.
+
+**Decision.** Gap 5's event half is closed as a **recorded non-goal**. The stack ships no broker,
+there is no `contract.ingested` consumer, parked rows are requeued by hand, and the live broker test
+stays opt-in. It reopens on a condition rather than on a mood: a deployment that runs its own broker
+**and** has a requirement the poll cannot meet — a reaction within seconds instead of within the
+interval, or a per-event reaction that is not extraction. If that arrives, the question is the one
+this slice refuses to answer on the future's behalf: does the event *replace* the poll, or run
+beside it?
+
+**A consumer today would buy latency, not capability.** Extraction needs `storage_path`, and a
+JSON-ingested contract with no document has no bytes to read, so a consumer firing on that event
+would find nothing the poll does not already find — its coverage is a subset of the poll's, not a
+superset. The only thing it could add is speed, `900` seconds against a few. Paying for a broker, a
+consumer process, and a second extraction trigger that must stay behaviourally identical to the
+first, to save minutes nobody has asked for, is the wrong trade here — and a deployment that wants
+the latency can lower `EXTRACTION_SCAN_POLL_INTERVAL_SECONDS` without adding a process at all.
+
+**What closing it does not mean.** It is not a claim that the outbox works. At-least-once is proven
+against `FakeProducer` and not against a broker, because `KAFKA_LIVE` is skipped everywhere: the
+envelope, the headers and the ack path are exercised, the broker is not. And a deployment that sets
+`EVENT_TRANSPORT=kafka` publishes to a topic nobody reads — harmless, deliberate, and the reason the
+shipped rule watches for *parks* rather than for a missing consumer. A topic with a publisher and no
+consumer looks, from the topic's own side, exactly like a healthy one.
+
+**One stale clause in the same entry, corrected with it.** Gap 5's index entry still said no alert
+fires when rows park. That stopped being true at `D10-117`, which added the `outbox_parked_events`
+gauge and the `OutboxEventsParked` rule, and the gap 22 entry was amended then while item 5 was not
+— one claim in two places with only one of them fixed. It is struck and amended in the house form,
+and the part that survives is the part that never got a fix: nothing requeues a parked row by
+itself.
+
+**Historical closes that name gap 5 stay as written.** Several slice records call the
+`contract.ingested` consumer unwritten and a decision still owed. Each was true when it was written,
+and rewriting them would assert about those slices something that was not true of them. What changes
+is the standing index entry, which is where a reader looks for the current answer.
+
+**Limits.** Nothing here runs a broker, so the Kafka path stays unproven end to end. A non-goal is
+cheap to reverse now and expensive later: the poll costs a scan every interval however little
+arrived, and a deployment at a scale where that scan matters will want the event path, at which
+point replace-or-beside is live again. And this record holds only while the poll is the *only*
+extraction trigger — a second one added without amending this would make the sentence false, which
+is why the trigger count is the thing to check before trusting it.
+
+**What gated it.** Documentation only: this entry, a matching status block in `STATUS.md`, and two
+amendments to gap 5's entry. No code changed, so no test, rule, migration or image is exercised by
+this commit. Unlike every block in this series since `D10-111` it names no CI run, and that is not
+an omission: there is no build of this commit to point at, and inventing one would be the exact
+failure the close rule exists to catch.
