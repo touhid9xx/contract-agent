@@ -8610,6 +8610,39 @@ arrives with a `profiles` entry, a readiness probe, and a test that starts it.
 added line fits in `100` columns, and nineteen pre-commit hooks plus `gitleaks` at the manual stage
 refuse the commit otherwise. The label-shape limit that `D10-106` named is untouched by any of it.
 
+### D10-133 — A real browser renders every screen now, and the signed-in journey is asserted
+
+**Decided, `D10-133`.** `D10-128` recorded the one thing its `image` job could not prove: "no
+browser executes the scripts, so a page that renders and never hydrates passes".
+`frontend/e2e/browser-smoke.mjs` closes that. It boots uvicorn on a loopback port against a migrated
+SQLite file, creates an admin with `create-admin`, seeds one contract through the ingestion route,
+starts the production `next start` server, and drives Chromium: every screen under
+`src/app/[locale]` — ten of them, read off the filesystem rather than listed — loaded signed out,
+then the sign-in form, then the same links a person clicks, failing unless the seeded contract
+appears in the list.
+
+**What that buys over what was there.** `screens.test.ts` renders under `jsdom` against a doubled
+API and router; `test_frontend_routes.py` compares route strings to the FastAPI table; the `image`
+job fetches one page and follows its assets. All three are worth having and none of them hydrates.
+The seeded row reaches the page only after client JavaScript runs, calls React Query and goes out
+through the Next rewrite, so green means the bundle executes and the proxy points somewhere that
+answers — the two claims `D10-128` named as unmade.
+
+**The run found four defects, all in the harness.** Sign-in answered `401` on the first attempt
+because `next.config.ts` bakes `API_PROXY_URL` into `.next/routes-manifest.json` at build time and
+this machine's Docker stack already held port 8000, so the browser reached a foreign API — the
+hazard `D10-128` recorded for the container, reproduced on a developer machine. Then: a bind-based
+port probe that `SO_REUSEADDR` defeats on Windows, `spawn("npm", …)` failing with `ENOENT` because
+`npm` is a `.cmd` shim, and a relative `page.goto` with a `networkidle` wait that returns
+immediately after an SPA navigation. Each was invisible to every gate, because nothing had ever
+loaded a page.
+
+**Gates and cost.** `npm run smoke:browser` exits `0` with eighteen `ok` lines; `npm run lint` is
+clean; `npx vitest run --maxWorkers=2` reports `20` files and `371` tests passing. A tenth CI job
+`browser` runs it on `ubuntu-latest` with `npx playwright install --with-deps chromium`, and the
+`gate` job now needs nine jobs. What it does not do: assert appearance, use a screen reader, visit
+`bn`, or click through a mutation — the journey is one path, and `jsdom` still covers the rest.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

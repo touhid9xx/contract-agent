@@ -10650,3 +10650,97 @@ with its stated reason. The file adds one passing and one skipping case to a sui
 otherwise touch, satisfies the `live` marker already registered under `--strict-markers`, and leaves
 every existing test's expectations alone. The CI run for the commit that carries this is recorded
 where that run is known, not guessed here.
+
+### D10-133 — Ten screens, ten component tests, and no browser had ever loaded one
+
+`D10-128` closed by naming, in its own words, the one thing the `image` job could not prove: "It
+does not run the bundle: no browser executes the scripts, so a page that renders and never hydrates
+passes, and the stand-in answers every path, so a dropped `/api/v1` prefix would pass too." That
+sentence was accurate, and it is the last limit in this repository that no amount of care in the
+existing gates could retire: `screens.test.ts` renders each of the ten screens under `jsdom` against
+a doubled API and a doubled router, `test_frontend_routes.py` checks the route strings against the
+FastAPI app's own table, and the `image` job fetches a page and follows the assets its HTML names.
+None of the three executes the application the way a person does.
+
+**Decision.** Add `frontend/e2e/browser-smoke.mjs` — a standalone smoke script in the shape of
+`smoke_journey.py`, not a sixth `jsdom` suite — and a `browser` job in `ci.yml` that runs it on
+`ubuntu-latest`. The script boots the real stack: uvicorn on a loopback port against a temporary
+SQLite file migrated with `alembic`, an admin created through the `create-admin` CLI, one contract
+seeded through `POST /api/v1/contracts`, the production `next start` server, and Chromium. It walks
+the route list out of `src/app/[locale]` rather than restating it — ten screens today — loads every
+one of them signed out, then signs in through the real form on `/en/login`, follows the same links a
+person follows, and fails unless the contract it seeded appears in the list. That row can only
+appear once client JavaScript has hydrated, called React Query and fetched through the Next rewrite,
+which is precisely the claim `D10-128` recorded as unmade.
+
+**Why a script and a browser rather than a test in the existing suite.** The suite's doubles are the
+point of the suite: a `jsdom` environment that renders React under Node has no rewrite to proxy
+through, no real `fetch` and no server-rendered HTML to hydrate. Running the same assertions there
+would prove the components still compose, which is already proven. This is the same judgment
+`smoke_journey.py` records about the API — that the seams worth a real socket are the ones a mock
+cannot have — applied one tier up. It is also why the script is not pytest-collected: it needs a
+build, a browser and about a minute, which is the company the other `smoke_*.py` scripts keep rather
+than the company of a unit test.
+
+**What the first real run found, before it found anything about the application.** The first attempt
+failed sign-in with `401` — `Invalid tenant, email or password` — against a tenant the script had
+created seconds earlier in its own database. The cause: `next.config.ts` resolves `API_PROXY_URL`
+with `||` at *build* time, so `.next/routes-manifest.json` permanently records one API address, and
+this machine already had a Docker stack holding port 8000. The browser was not talking to the
+smoke's API at all; it was talking to someone else's. `D10-128` had recorded the build-time
+resolution for the container — that is why `Dockerfile.frontend` promotes the argument to `ENV`
+above the build — so what this run established is narrower and still worth having: the same hazard
+exists on a developer machine, where a stale backend answering `/health` is indistinguishable from a
+working one, and it is invisible to every gate because nothing before this had ever loaded a page.
+
+**Three more defects, each hidden behind the one before it.** Port 8000 was probed by *binding* it,
+and on Windows `SO_REUSEADDR` behaves like `SO_REUSEPORT`, so a second listener binds a port Docker
+already holds and the probe answers "free" while the traffic goes elsewhere; it probes by connecting
+now, and the boot step refuses to continue if its own child has already exited, so a foreign
+`/health` cannot masquerade as the smoke's. `spawn("npm", …)` fails with `ENOENT` on Windows because
+`npm` is a `.cmd` shim Node will not execute without a shell, which meant `npm run start` had never
+started the frontend at all. And `page.goto("/en")` is a relative URL Chromium refuses, while
+`waitForLoadState("networkidle")` returns immediately after an SPA navigation because the document
+never reloads — so the seeded-row assertion was racing the fetch rather than proving it. None of the
+four was in the application. All four were in the first draft of the harness, and each one was found
+only by running it.
+
+**What it reuses, rather than reinvents.** The boot sequence is `smoke_journey.py`'s: a port
+confirmed free, a file-backed SQLite database with foreign keys on, `Settings` built for a temporary
+directory, uvicorn started as a subprocess and stopped in a `finally`. The admin comes from
+`create-admin`, the contract from the ingestion route, the credentials from the same
+`DEFAULT_PASSWORD` shape the API tests use. Nothing in it restates a route: the screens come from
+the filesystem, the links from the rendered pages. `playwright` is the repository's only new
+dependency and it is a devDependency of `frontend`, pinned at `^1.65.1`, with the browser binary
+fetched by `npx playwright install chromium` rather than vendored.
+
+**What the job costs, and why it is a tenth job rather than steps on an existing one.** It needs the
+Python toolchain, the Node toolchain, a production build and a Chromium download — the `frontend`
+job has none of the first three and `backend-tests` has neither of the last two, so folding it in
+would make both slower for a check neither is about. It is added to the `gate` job's `needs` list,
+which is therefore nine names now, and the existing `if: always()` means a failed browser job still
+produces a verdict rather than a skip.
+
+**Limits.** Chromium renders, it does not judge: nothing here asserts what a screen looks like,
+reads it with a screen reader, or visits the second locale `frontend/src/i18n/config.ts` declares —
+`bn` is built and unrendered. The journey is one path through eight screens, not a regression net
+over every control; clicking through the consent mutations and the review decisions is still
+`jsdom`'s job. The run leaves a frontend built against port 8010 behind whenever 8000 is occupied,
+so a later deploy needs `npm run build` without `API_PROXY_URL` first. The script's two Windows-only
+paths — `npm.cmd` through a shell and `taskkill /T` to stop a child tree — are never reached on
+`ubuntu-latest`, so CI proves the Linux half and a developer proves the other; the
+`spawn(..., shell: true)` call also emits Node's `DEP0190` warning, which is not suppressed because
+suppressing it would hide the arguments that warning is about.
+
+**What gated it.** `npm run smoke:browser` exits `0`: ten screens found under `src/app/[locale]`,
+eight migrations applied to an empty database, one contract seeded, ten screens rendered signed out,
+the seeded row asserted in `/en/contracts`, and eight screens reached again after signing in —
+eighteen `ok` lines and a pass line. `npm run lint` is clean, and `npx vitest run --maxWorkers=2`
+reports `20` files and `371` tests passing, which is the whole frontend suite and unchanged by this
+slice. On this machine the default worker count failed to start eleven of twenty forks while a
+Chromium from the smoke run was still resident; the same command at `--maxWorkers=2` is green in
+fifty-four seconds, so that is a local resource measurement rather than a regression, and
+`vitest.config.ts` is deliberately not changed on the strength of one box. The workflow edit is
+linted by the `hygiene` job's `check-yaml` and executes only on CI: no local command runs a
+workflow, so the `browser` job first runs on the push that carries this block, and its run is named
+where that run is known rather than guessed here.

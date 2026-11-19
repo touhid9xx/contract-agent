@@ -286,6 +286,91 @@ jobs:
         env:
           NEXT_TELEMETRY_DISABLED: "1"
 
+  # ------------------------------------------------------------------ browser
+  # The fifth frontend check, and the first one that executes the app. `D10-128`
+  # recorded the limit of everything above in its own words: "It does not run the
+  # bundle: no browser executes the scripts, so a page that renders and never
+  # hydrates passes, and the stand-in answers every path, so a dropped `/api/v1`
+  # prefix would pass too." `screens.test.ts` says the same about its ten specs —
+  # jsdom, a doubled API, a doubled router.
+  #
+  # This job boots the real stack the way `smoke_journey.py` boots the API: uvicorn
+  # on a loopback port, a migrated SQLite file, an admin created through the CLI,
+  # the production `next start` server, and Chromium. It walks the route list out of
+  # `src/app/[locale]` instead of restating it, loads every screen, then signs in
+  # through the real form, clicks the links a person clicks, and fails unless the
+  # contract it seeded through `POST /contracts` appears in the list. That row can
+  # only appear once client JavaScript has hydrated, called React Query and fetched
+  # through the Next rewrite — which is the one claim no step above can make.
+  #
+  # The API port is pinned to 8000 and the build is given the same address, because
+  # `next build` writes the rewrite target into `.next/routes-manifest.json` and the
+  # script reads it back out; pinning it is what keeps this to one build. The script
+  # also refuses a port something already holds, by connecting rather than binding,
+  # so a stray listener on the runner fails this job by name instead of answering its
+  # login and looking like a wrong password.
+  #
+  # What stays unproven here: the script carries two Windows-only paths — `npm.cmd`
+  # through a shell, and `taskkill /T` to stop a child tree — which no Linux runner
+  # reaches, and its port probe exists because `SO_REUSEADDR` on Windows behaves like
+  # `SO_REUSEPORT`. Those are developer-machine concerns, guarded here only by the
+  # fact that the same file runs to completion on both.
+  browser:
+    name: browser (chromium renders every screen)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      # Read out of the same place the script reads it: one address, so the build
+      # recorded in the manifest is the one this run serves, and no rebuild happens.
+      SMOKE_API_PORT: "8000"
+      # No virtualenv on a runner; `python()` would otherwise look for the
+      # repository's `venv/` and then fall back to the same thing.
+      SMOKE_PYTHON: python
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # The smoke boots the backend itself, so this job needs the interpreter the
+      # `backend-tests` job uses, from the same requirements file.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r ../backend/requirements-dev.txt
+
+      # `--with-deps` is the only reason this job needs no separate apt step: it
+      # installs the shared libraries a headless Chromium links against, which a
+      # bare `playwright install` leaves out and which fail at launch, not at boot.
+      - name: Install chromium
+        run: npx playwright install --with-deps chromium
+
+      # Built here rather than inside the smoke so the address is asserted before
+      # anything boots: a manifest that records a different port makes the script
+      # rebuild, and a rebuild in CI means this step disagrees with `env:` above.
+      - name: production build, proxying to the API this job serves
+        run: npm run build
+        env:
+          API_PROXY_URL: http://127.0.0.1:8000
+
+      - name: every screen renders, and the signed-in journey reaches the seeded row
+        run: npm run smoke:browser
+
   # ------------------------------------------------------------- demo frontend
   # A separate app with its own lockfile. The `demo-frontend-typecheck` hook was
   # added because nothing checked this tree at all until its fixtures had already
@@ -712,7 +797,7 @@ jobs:
           docker network rm ci-frontend || true
 
   # --------------------------------------------------------------------- gate
-  # One job to name as a required status check, instead of the eight that have to be
+  # One job to name as a required status check, instead of the nine that have to be
   # re-listed whenever a job is added. `if: always()` is what makes it run when
   # an upstream job failed — otherwise the gate would be skipped, and a skipped
   # required check is a green light.
@@ -733,6 +818,7 @@ jobs:
       - backend-tests
       - mysql-integration
       - frontend
+      - browser
       - demo-frontend
       - hygiene
       - observability
