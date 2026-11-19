@@ -18,9 +18,12 @@ import type {
   ContractSource,
   ContractStatus,
   EscalationQueue,
+  EscalationStatus,
   FieldName,
   FieldStatus,
   NotificationList,
+  NotificationRow,
+  NotificationStatus,
   RiskLevel,
 } from "@/lib/api";
 import { withContractScope } from "@/lib/contract-scope";
@@ -90,6 +93,37 @@ const FIELD_STATUS_KEYS = {
   rejected: "statuses.rejected",
   unreadable: "statuses.unreadable",
 } as const satisfies Record<FieldStatus, string>;
+
+/**
+ * A reminder's dispatch state, labelled from the **notifications** namespace for
+ * the same reason the field keys come from `review.*`: "failed" means one thing in
+ * this system, and a second vocabulary for it here is how a timeline ends up
+ * calling a row "unsent" while the queue calls it "suppressed".
+ */
+const REMINDER_STATUS_KEYS = {
+  pending: "statuses.pending",
+  sent: "statuses.sent",
+  delivered: "statuses.delivered",
+  answered: "statuses.answered",
+  machine: "statuses.machine",
+  failed: "statuses.failed",
+  suppressed: "statuses.suppressed",
+} as const satisfies Record<NotificationStatus, string>;
+
+/**
+ * An escalation's state, labelled from the **escalations** namespace.
+ *
+ * Same rule as the two maps above: `resolved` here and `resolved` on the queue
+ * screen are one state, so it is one message key. `sla_breached` is derived from
+ * the deadline rather than set by hand, and the timeline prints what the server
+ * answered instead of recomputing it from `sla_deadline`.
+ */
+const ESCALATION_STATUS_KEYS = {
+  open: "statuses.open",
+  in_progress: "statuses.in_progress",
+  resolved: "statuses.resolved",
+  sla_breached: "statuses.sla_breached",
+} as const satisfies Record<EscalationStatus, string>;
 
 /**
  * Tone per status, matching the listing's cards: only `expired` and `escalated`
@@ -249,6 +283,21 @@ export default function ContractDetailPage() {
     dateStyle: "medium",
     timeStyle: "short",
   });
+  /**
+   * Just the clock. The timeline names the day in a heading of its own, so an
+   * entry that repeated the date would print it twice on every line.
+   */
+  const clockFormat = new Intl.DateTimeFormat(locale, { timeStyle: "short" });
+  /**
+   * The **reader's** calendar day, for grouping instants under a heading.
+   *
+   * `dateFormat` above is deliberately UTC, because a calendar date has no clock
+   * to place in a zone. An instant does, and both `instantFormat` and
+   * `clockFormat` print it in the reader's zone — so the heading over a group of
+   * instants has to be built in that same zone. Reusing `dateFormat` here would
+   * let a heading name the day before the clocks printed underneath it.
+   */
+  const instantDayFormat = new Intl.DateTimeFormat(locale, { dateStyle: "medium" });
 
   function formatDate(value: string): string {
     return dateFormat.format(new Date(value));
@@ -342,6 +391,15 @@ export default function ContractDetailPage() {
                 reminders={reminders}
                 escalationsHere={escalationsHere}
                 describeFailure={describeFailure}
+              />
+
+              <TimelineCard
+                row={row}
+                decisions={decisions}
+                reminders={reminders}
+                escalationsHere={escalationsHere}
+                instantDayFormat={instantDayFormat}
+                clockFormat={clockFormat}
               />
             </>
           )}
@@ -583,10 +641,17 @@ interface RelatedReadsProps {
 /**
  * What the rest of the system has recorded about this contract.
  *
- * The card states a count, not a list: the queue screens are where a row is
- * worked on, and a second read-only rendering of their rows here would be a
- * second place for the wording of a status to drift. The counts come from the
- * responses' own `count`, so nothing is summed up on the client.
+ * The card states a count, not a list, and the counts come from the responses'
+ * own `count`, so nothing is summed up on the client.
+ *
+ * **This used to say a second read-only rendering of those rows would be a second
+ * place for the wording of a status to drift, and the timeline below reverses
+ * that judgement (`D10-135`).** What changed is what the risk was made of: the
+ * timeline does not restate a row's status in words of its own — every label it
+ * prints comes from the same catalogues these screens use — and what it adds is
+ * the *when*, which no queue screen shows because a queue is ordered by what
+ * needs work, not by when things happened. The counts stay, because they are the
+ * server's totals; the timeline is only the rows that came back, and it says so.
  */
 function RelatedReads({
   contractId,
@@ -745,5 +810,211 @@ function RelatedRead({
       {!state.isPending && !state.isError && stat !== null && <p>{stat}</p>}
       {detail !== null && <p className="text-muted-foreground">{detail}</p>}
     </div>
+  );
+}
+
+interface TimelineCardProps {
+  row: ContractListItem;
+  decisions: RelatedQuery<AgentDecisionList>;
+  reminders: RelatedQuery<NotificationList>;
+  escalationsHere: RelatedQuery<EscalationQueue>;
+  /** The reader's day, for the heading over a group of instants. */
+  instantDayFormat: Intl.DateTimeFormat;
+  /** The reader's clock, for the time printed beside an instant. */
+  clockFormat: Intl.DateTimeFormat;
+}
+
+/**
+ * One dated entry in the contract's history.
+ *
+ * `at` is only ever used to order the list. The heading and the clock are
+ * *already formatted* at construction, because the two kinds of timestamp on
+ * this page are read differently and the difference has to be decided where the
+ * kind is known: an instant is placed in the reader's zone, a calendar date is
+ * not placed in any zone at all.
+ */
+interface TimelineEntry {
+  /** Stable across re-renders: one React key per row of history. */
+  key: string;
+  at: number;
+  day: string;
+  /** The time of day, or `null` for an entry that is a date and has none. */
+  clock: string | null;
+  label: string;
+  detail: string | null;
+}
+
+/**
+ * What happened to this contract, when.
+ *
+ * The one thing no other screen shows: a queue is ordered by what needs work,
+ * and the facts card states a term, but neither answers "and then what". The
+ * entries are built from the four reads the page already fetched — no new route,
+ * no aggregation, nothing summed here — so this card cannot cost a request.
+ *
+ * Two honesty notes it states rather than implies:
+ *
+ * * **It is the rows that came back, not the whole history.** Every related read
+ *   is bounded, and the counts on the card above are the server's totals. A long
+ *   history is therefore cut off here, and the hint line says so instead of
+ *   letting an absence read as "nothing happened".
+ * * **Instants are on the reader's clock, a slot is printed as the server sent
+ *   it.** An instant carries a moment, so its heading and clock are both built in
+ *   the reader's zone. A reminder slot is a day on the contract's clock and has no
+ *   moment at all, so it is never reformatted — the same rule the summary line
+ *   above follows, and the reason a slot heading can look unlike the others.
+ *
+ * It prints no status wording of its own: every state word comes from the same
+ * catalogue the screen that owns that state uses, so a reminder is "failed" here
+ * exactly when the notification queue calls it failed (`D10-135`).
+ */
+function TimelineCard({
+  row,
+  decisions,
+  reminders,
+  escalationsHere,
+  instantDayFormat,
+  clockFormat,
+}: TimelineCardProps) {
+  const t = useTranslations();
+
+  /** An instant: the reader's day and the reader's clock, from the bound formats. */
+  function instant(value: string): Pick<TimelineEntry, "at" | "day" | "clock"> {
+    const when = new Date(value);
+    return {
+      at: when.getTime(),
+      day: instantDayFormat.format(when),
+      clock: clockFormat.format(when),
+    };
+  }
+
+  /**
+   * A slot: the server's own calendar date, printed unformatted.
+   *
+   * Deliberately **not** `formatDate`. A slot is a day on the contract's clock, and
+   * the related card above already prints it verbatim for that reason — running it
+   * through a formatter here would place a day that was never in a zone, and would
+   * put a second, differently-rendered copy of the same date on the screen. The
+   * heading is therefore the string the server sent, and there is no clock to print.
+   */
+  function slot(value: string): Pick<TimelineEntry, "at" | "day" | "clock"> {
+    return { at: new Date(value).getTime(), day: value, clock: null };
+  }
+
+  /**
+   * When a reminder belongs on the timeline.
+   *
+   * Sent is an event that happened, so it is placed at `sent_at`. Still pending but
+   * deferred is placed at the instant it is due. A row with neither has only the
+   * slot it was booked into, which is a day rather than a moment — `slot` keeps it
+   * as the server wrote it.
+   */
+  function reminderWhen(
+    reminder: NotificationRow,
+  ): Pick<TimelineEntry, "at" | "day" | "clock"> {
+    if (reminder.sent_at !== null) return instant(reminder.sent_at);
+    if (reminder.scheduled_at !== null) return instant(reminder.scheduled_at);
+    return slot(reminder.scheduled_date);
+  }
+
+  const entries: TimelineEntry[] = [
+    {
+      key: "ingested",
+      ...instant(row.created_at),
+      label: t("contracts.detailTimelineIngested"),
+      detail: null,
+    },
+  ];
+
+  /* The term's two dates are deliberately **not** entries. They are calendar dates
+     the facts card above already prints, no event happened on them, and printing
+     them here would put the same string on the screen twice with nothing to say
+     which line a reader should quote. This card is activity, not a restatement. */
+
+  for (const decision of decisions.data?.items ?? []) {
+    entries.push({
+      key: `decision-${decision.id}`,
+      ...instant(decision.created_at),
+      label: t("contracts.detailTimelineDecision", {
+        channel: t(`contracts.${CHANNEL_KEYS[decision.channel]}`),
+      }),
+      /* Only printed once a person has replaced the policy's answer, which is the
+         one thing about a decision the newest-row summary above cannot say. */
+      detail:
+        decision.original_channel === null
+          ? null
+          : t("contracts.detailTimelineOverridden", {
+              channel: t(`contracts.${CHANNEL_KEYS[decision.original_channel]}`),
+            }),
+    });
+  }
+
+  for (const reminder of reminders.data?.items ?? []) {
+    const channel = t(`contracts.${CHANNEL_KEYS[reminder.channel]}`);
+    entries.push({
+      key: `reminder-${reminder.id}`,
+      ...reminderWhen(reminder),
+      label: t("contracts.detailTimelineReminder", {
+        template: reminder.template,
+        channel,
+      }),
+      detail: t(`notifications.${REMINDER_STATUS_KEYS[reminder.status]}`),
+    });
+  }
+
+  for (const escalation of escalationsHere.data?.items ?? []) {
+    entries.push({
+      key: `escalation-${escalation.id}`,
+      ...instant(escalation.sla_deadline),
+      label: t("contracts.detailTimelineEscalation", {
+        status: t(`escalations.${ESCALATION_STATUS_KEYS[escalation.status]}`),
+      }),
+      /* `overdue` is the server's answer; recomputing it from `sla_deadline`
+         would drift from the queue the moment the two clocks differ. */
+      detail: escalation.overdue ? t("contracts.detailTimelineOverdue") : null,
+    });
+  }
+
+  entries.sort((left, right) => left.at - right.at);
+
+  /* Grouped after sorting, and only ever by consecutive heading, so a day cannot
+     appear twice because two entries reached it from different formatters. */
+  const days: { day: string; entries: TimelineEntry[] }[] = [];
+  for (const entry of entries) {
+    const last = days[days.length - 1];
+    if (last !== undefined && last.day === entry.day) last.entries.push(entry);
+    else days.push({ day: entry.day, entries: [entry] });
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{t("contracts.detailTimelineHeading")}</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <p className="text-xs text-muted-foreground">{t("contracts.detailTimelineHint")}</p>
+
+        <ol className="space-y-3">
+          {days.map((group) => (
+            <li key={group.entries[0]?.key ?? group.day} className="space-y-1">
+              <p className="text-xs font-medium text-muted-foreground">{group.day}</p>
+              <ol className="space-y-1 border-l border-border pl-3">
+                {group.entries.map((entry) => (
+                  <li key={entry.key} className="flex flex-wrap items-baseline gap-2 text-xs">
+                    {entry.clock !== null && (
+                      <span className="tabular-nums text-muted-foreground">{entry.clock}</span>
+                    )}
+                    <span>{entry.label}</span>
+                    {entry.detail !== null && (
+                      <span className="text-muted-foreground">· {entry.detail}</span>
+                    )}
+                  </li>
+                ))}
+              </ol>
+            </li>
+          ))}
+        </ol>
+      </CardContent>
+    </Card>
   );
 }

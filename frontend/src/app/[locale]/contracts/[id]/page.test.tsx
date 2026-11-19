@@ -20,6 +20,11 @@
  *     booleans, which would be a second contact policy free to disagree.
  *   * **counts come from the responses' own `count`.** Nothing on this page sums
  *     `items.length` and calls it the total.
+ *   * **the timeline is the rows that came back, never a total, and a slot is
+ *     printed as the server sent it.** It is built from the four related reads
+ *     rather than a fifth, so it cannot cost a request; a day heading comes from
+ *     the reader's zone for an instant and from the server's own string for a
+ *     slot, which carries no moment and is therefore never reformatted.
  *   * **nothing shows a value.** The fields route withholds every extracted value
  *     and this card says so rather than looking broken.
  *   * **the three related links carry the contract.** `withContractScope` spells
@@ -96,6 +101,7 @@ import type {
   ContractField,
   ContractFields,
   ContractListItem,
+  Escalation,
   EscalationQueue,
   NotificationList,
   NotificationRow,
@@ -115,9 +121,20 @@ function say(template: string, values: Record<string, string | number>): string 
 /** The same formatters the screen builds, so a formatting change is not a failure. */
 const DATE_FMT = new Intl.DateTimeFormat("en", { dateStyle: "medium", timeZone: "UTC" });
 const INSTANT_FMT = new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" });
+/** The timeline splits an instant in two: a day heading and a clock, no date repeated. */
+const INSTANT_DAY_FMT = new Intl.DateTimeFormat("en", { dateStyle: "medium" });
+const CLOCK_FMT = new Intl.DateTimeFormat("en", { timeStyle: "short" });
 
 function dateText(value: string): string {
   return DATE_FMT.format(new Date(value));
+}
+
+function dayText(value: string): string {
+  return INSTANT_DAY_FMT.format(new Date(value));
+}
+
+function clockText(value: string): string {
+  return CLOCK_FMT.format(new Date(value));
 }
 
 /**
@@ -222,9 +239,30 @@ function reminderPage(items: NotificationRow[] = [], count = items.length): Noti
   return { items, count, contract_id: 7 };
 }
 
+const BASE_ESCALATION: Escalation = {
+  id: 21,
+  contract_id: 7,
+  status: "open",
+  assigned_to: null,
+  sla_deadline: "2026-11-06T09:00:00Z",
+  resolved_at: null,
+  resolution_note: null,
+  overdue: false,
+  version: 2,
+};
+
+function escalation(overrides: Partial<Escalation> = {}): Escalation {
+  return { ...BASE_ESCALATION, ...overrides };
+}
+
 /** `overdue` and `sla_hours` are the server's numbers, echoed rather than computed. */
-function escalationPage(count = 0, overdue = 0, slaHours = 48): EscalationQueue {
-  return { items: [], count, overdue, sla_hours: slaHours, contract_id: 7 };
+function escalationPage(
+  count = 0,
+  overdue = 0,
+  slaHours = 48,
+  items: Escalation[] = [],
+): EscalationQueue {
+  return { items, count, overdue, sla_hours: slaHours, contract_id: 7 };
 }
 
 function sessionFor(role: UserRole): Session {
@@ -290,6 +328,10 @@ function fieldsCard(): HTMLElement {
 
 function relatedCard(): HTMLElement {
   return cardTitled(EN.contracts.detailRelatedHeading);
+}
+
+function timelineCard(): HTMLElement {
+  return cardTitled(EN.contracts.detailTimelineHeading);
 }
 
 function alertTexts(): (string | null)[] {
@@ -925,5 +967,94 @@ describe("refusals", () => {
     expect(
       screen.getByText(say(EN.contracts.detailDecisionsCount, { count: 0 })),
     ).toBeDefined();
+  });
+});
+
+describe("the timeline", () => {
+  it("orders the page's own reads oldest first, and groups them by the reader's day", async () => {
+    // Ingested in October; a decision and a sent reminder both in November. Two
+    // days, three entries, and one heading for the day that holds two of them.
+    vi.mocked(agent.decisions).mockResolvedValue(
+      decisionPage([decision({ created_at: "2026-11-04T12:00:00Z" })], 1),
+    );
+    vi.mocked(notifications.list).mockResolvedValue(
+      reminderPage([reminder({ status: "sent", sent_at: "2026-11-04T15:30:00Z" })], 1),
+    );
+    signedIn();
+    renderScreen();
+
+    await screen.findByText(say(EN.contracts.contractLabel, { id: 7 }));
+    const element = timelineCard();
+    const card = within(element);
+    // The reminder's clock is what proves the November entries arrived.
+    expect(await card.findByText(clockText("2026-11-04T15:30:00Z"))).toBeDefined();
+
+    // The day is stated once in the heading, so the entry line carries only it.
+    expect(card.getAllByText(dayText("2026-11-04T12:00:00Z")).length).toBe(1);
+    expect(card.getByText(dayText("2026-10-01T09:15:00Z"))).toBeDefined();
+
+    // Oldest first is the card's reason for existing: ingestion, decision, reminder.
+    const text = element.textContent ?? "";
+    const ingested = text.indexOf(EN.contracts.detailTimelineIngested);
+    const recommended = text.indexOf(
+      say(EN.contracts.detailTimelineDecision, { channel: EN.contracts.channels.email }),
+    );
+    const reminded = text.indexOf(
+      say(EN.contracts.detailTimelineReminder, {
+        template: "T-30",
+        channel: EN.contracts.channels.email,
+      }),
+    );
+    expect(ingested).toBeGreaterThanOrEqual(0);
+    expect(ingested).toBeLessThan(recommended);
+    expect(recommended).toBeLessThan(reminded);
+  });
+
+  it("prints a reminder's slot as the server sent it, because a slot is not an instant", async () => {
+    // A booking with neither a send time nor a due instant has only its slot, and a
+    // slot is a day on the contract's clock: formatting it would move the day.
+    vi.mocked(notifications.list).mockResolvedValue(
+      reminderPage([reminder({ scheduled_date: "2027-01-15" })], 1),
+    );
+    signedIn();
+    renderScreen();
+
+    await screen.findByText(say(EN.contracts.contractLabel, { id: 7 }));
+    const card = within(timelineCard());
+    expect(await card.findByText("2027-01-15")).toBeDefined();
+    expect(screen.queryByText(dateText("2027-01-15"))).toBeNull();
+  });
+
+  it("says it is the rows that came back, so a cut-off history is not read as a total", async () => {
+    // One row carried, ninety-seven recorded: the timeline must not report the total,
+    // and must say so rather than letting a short list mean "nothing happened".
+    vi.mocked(agent.decisions).mockResolvedValue(decisionPage([decision()], 97));
+    signedIn();
+    renderScreen();
+
+    await screen.findByText(say(EN.contracts.contractLabel, { id: 7 }));
+    const card = within(timelineCard());
+    expect(await card.findByText(EN.contracts.detailTimelineHint)).toBeDefined();
+    expect(card.queryByText(/97/)).toBeNull();
+  });
+
+  it("takes an escalation's lateness from the server rather than recomputing it", async () => {
+    // `overdue` is the server's answer; deriving it from `sla_deadline` here would
+    // let the timeline call a row late that the queue calls open.
+    vi.mocked(escalations.queue).mockResolvedValue(
+      escalationPage(1, 1, 48, [
+        escalation({ status: "sla_breached", overdue: true, sla_deadline: "2026-11-06T09:00:00Z" }),
+      ]),
+    );
+    signedIn();
+    renderScreen();
+
+    await screen.findByText(say(EN.contracts.contractLabel, { id: 7 }));
+    const card = within(timelineCard());
+    const label = say(EN.contracts.detailTimelineEscalation, {
+      status: EN.escalations.statuses.sla_breached,
+    });
+    expect(await card.findByText(label)).toBeDefined();
+    expect(card.getByText(new RegExp(EN.contracts.detailTimelineOverdue))).toBeDefined();
   });
 });

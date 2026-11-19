@@ -10816,3 +10816,64 @@ tell a stopped relay from a running relay whose broker refuses every publish; bo
 unclaimed past a lease, and `outbox_published_total` is what separates them. And striking the
 sentence in `docker-compose.yml` removes an admission, not a limitation: the relay still writes no
 family of its own, and a scrape of its port still answers "is this listener alive".
+
+### D10-135 — The contract page gets a timeline, and the sentence refusing one is rewritten
+
+`RelatedReads` opened with a reason rather than a measurement: the card states a count, not a list,
+because a second read-only rendering of the same rows would be a second place for the wording of a
+status to drift. That sentence was true about the risk and wrong about the remedy. The question this
+drill-down exists to answer — *and then what* — had no screen at all: a queue is ordered by what
+needs work and the facts card states a term, and neither says what happened to this contract, in
+what order. The demo frontend had answered it with `groupedTimeline` and `groupByDay`, two local
+helpers over data its page already held, so the shape of a fix was known and cost no route.
+
+**Decision.** `/[locale]/contracts/[id]` renders a `TimelineCard` built from the four related reads
+the page already fetches: the contract row, its decisions, its reminders and its escalations. No new
+endpoint, no aggregation, no fifth request — a screen that costs a request to answer a presentation
+question is how a detail page becomes four. What changed about the drift risk is what the risk was
+made of. The timeline prints no status wording of its own: `REMINDER_STATUS_KEYS` and
+`ESCALATION_STATUS_KEYS` are exhaustive `Record<Status, string>` maps into the `notifications` and
+`escalations` catalogues, so a reminder reads `failed` here exactly when the notification queue
+calls it failed, and adding a member to either enum is a type error rather than a stale word on one
+screen. The remedy for a second place to drift is to make the drift unrepresentable, not to refuse
+the feature.
+
+**Two kinds of timestamp, and only one is an instant.** An instant — ingested, decided, dispatched,
+escalated — gets a heading in the reader's zone and a clock beside it (`timeStyle: short`, no date),
+because the day belongs in the heading and a line that repeated the date would print it twice under
+its own heading. A reminder slot carries no moment: it is a calendar day on the contract's clock, so
+it is printed exactly as the server sent it. That is not a shortcut — `page.test.tsx` already
+asserts that the formatted form of a slot appears nowhere on the page, so reformatting it in the
+timeline would have turned a pinned test red, and the right answer was the server's string. Term
+dates were considered as entries and dropped: they are calendar dates the facts card already prints,
+so on the timeline they would be the identical string twice, with no event on either day.
+
+**It says it is the rows that came back.** Every related read is bounded — decision history,
+notification list, escalation queue — so a long history is truncated here, and an absence must not
+read as *nothing happened*. The hint line states that in words, the counts on the card above stay
+because they are the server's totals, and nothing on the timeline sums `items.length` and calls it a
+total. A card that showed both a total and a window without saying which was which would be the
+actual drift risk.
+
+**The catalogue test caught a real mistake in the translation.** The Bengali for the reminder entry
+put `{channel}` before `{template}` where the English had `{template}` first. `messages.test.ts`
+compares placeholder names *and their order* between the two catalogues, so the frontend suite
+failed with one contract key. The fix was the Bengali sentence's word order —
+`{template} ... ({channel} ...)` — and not the test, because swapping two placeholders in a
+translated sentence is a silent semantic change and the test is what makes it loud.
+
+**What gated it.** Four tests in `page.test.tsx`, 49 in that file, 375 across the frontend suite:
+entries ordered oldest first and grouped under one heading per reader-day even when two entries
+share it; a slot rendered as the server's own string with its formatted form still absent; the hint
+present and nothing in the card summing to the server's total; and an escalation's lateness taken
+from the server's `overdue` rather than recomputed from its deadline. Lint and typecheck are clean,
+and both catalogues were read to confirm every status either map looks up exists in Bengali as well
+as English.
+
+**Limits.** It is a window, not a history: each of the three reads is bounded on its own and the
+card paginates nothing, so an old contract's timeline is the most recent rows of each kind,
+interleaved. It shows no state change that none of these reads returns — an expiry sweep's status
+change and a consent edit land in the audit log, which this page does not read, so the timeline is
+silent about them and a reader could mistake that silence for inactivity. And it groups by the
+reader's zone, so two operators in different zones see the same rows under different day boundaries;
+that is the correct behaviour for an instant and the reason a slot is not treated the same way.

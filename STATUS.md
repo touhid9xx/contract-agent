@@ -8677,6 +8677,34 @@ refuses every publish; `outbox_published_total` is what tells those apart. Twelv
 rest, seven in `test_outbox.py` and five in `test_attention_watch.py`, including that a stalled
 relay never moves `needs_attention` — a slow relay is not a wrong contract.
 
+### D10-135 — The contract drill-down answers *and then what*
+
+**Decided, `D10-135`.** The contract detail page renders a `TimelineCard` built from the four
+related reads it already fetched — no new endpoint, no fifth request. It reverses a sentence in
+`RelatedReads` that refused a timeline because a second rendering of the same rows would be a second
+place for a status word to drift; that note now records the reversal and why.
+
+**Why the risk did not survive.** The timeline prints no status wording of its own.
+`REMINDER_STATUS_KEYS` and `ESCALATION_STATUS_KEYS` are exhaustive maps into the catalogues the
+notification and escalation screens already use, so a state word cannot differ between the queue and
+the timeline, and adding a status to either enum breaks the typecheck. A second place to drift is
+fixed by making the drift unrepresentable, not by withholding the screen.
+
+**Two kinds of time.** An instant is placed in the reader's zone — day in the heading, clock on the
+line — while a reminder slot is a calendar day with no moment and is printed as the server sent it,
+the rule the summary line already followed. Term dates are not entries: they are dates the facts
+card already prints, so the timeline would have repeated them verbatim with no event attached.
+
+**Honest about its bounds.** Every related read is bounded, so the card is a window and the hint
+says so; the counts above stay because they are the server's totals, and nothing here sums what the
+card holds. It shows no expiry-sweep status change or consent edit, because those land in the audit
+log and this page does not read it.
+
+**What gated it.** Four new tests in `page.test.tsx` (49 in the file, 375 across the frontend suite)
+cover ordering and day grouping, the slot printed verbatim, the not-a-total hint, and an
+escalation's lateness read from the server. The catalogue test earned its keep here: it failed on
+the Bengali entry because its two placeholders were in the other order.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.
