@@ -8640,8 +8640,9 @@ loaded a page.
 **Gates and cost.** `npm run smoke:browser` exits `0` with eighteen `ok` lines; `npm run lint` is
 clean; `npx vitest run --maxWorkers=2` reports `20` files and `371` tests passing. A tenth CI job
 `browser` runs it on `ubuntu-latest` with `npx playwright install --with-deps chromium`, and the
-`gate` job now needs nine jobs. What it does not do: assert appearance, use a screen reader, visit
-`bn`, or click through a mutation — the journey is one path, and `jsdom` still covers the rest.
+`gate` job now needs nine jobs; on CI it has run: `44496351399` completed green with all ten
+jobs succeeding. What it does not do: assert appearance, use a screen reader, visit `bn`, or click
+through a mutation — the journey is one path, and `jsdom` still covers the rest.
 
 ## Non-negotiable reminders
 

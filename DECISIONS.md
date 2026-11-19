@@ -10742,5 +10742,6 @@ Chromium from the smoke run was still resident; the same command at `--maxWorker
 fifty-four seconds, so that is a local resource measurement rather than a regression, and
 `vitest.config.ts` is deliberately not changed on the strength of one box. The workflow edit is
 linted by the `hygiene` job's `check-yaml` and executes only on CI: no local command runs a
-workflow, so the `browser` job first runs on the push that carries this block, and its run is named
-where that run is known rather than guessed here.
+workflow, so the `browser` job first ran on the push that carried this block: run `44496351399`
+completed green, all ten jobs succeeding, `browser (chromium renders every screen)` among them, so
+the Linux half is measured rather than hoped for.
