@@ -42,6 +42,7 @@ from app.db.repositories.outbox import (
     dead_letter_count,
     dead_lettered,
     enqueue_event,
+    outbox_pending_overdue_count,
     replay_dead_lettered,
 )
 from app.db.repositories.security import LoginAttemptRepository, RefreshTokenRepository
@@ -81,6 +82,7 @@ __all__ = [
     "enqueue_event",
     "fields_for_reseal",
     "normalize_email",
+    "outbox_pending_overdue_count",
     "pending_overdue_counts",
     "replay_dead_lettered",
     "undelivered_counts",

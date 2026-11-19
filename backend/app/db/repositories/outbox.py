@@ -229,7 +229,13 @@ class OutboxRepository:
 
     # --- reporting -------------------------------------------------------
     def pending_count(self) -> int:
-        """Unpublished rows, for the outbox backlog gauge and alert."""
+        """Unpublished rows, whether or not they are due yet.
+
+        Not the backlog gauge's query — see :func:`outbox_pending_overdue_count`, which
+        excludes rows still serving out a retry backoff. This one answers "how many
+        rows are unpublished", which a test wants and a threshold does not: a row
+        waiting four minutes of backoff is unpublished and healthy.
+        """
         stmt = (
             select(func.count())
             .select_from(OutboxEvent)
@@ -293,6 +299,53 @@ def dead_letter_count(session: Session) -> int:
         .select_from(OutboxEvent)
         .where(OutboxEvent.status == OutboxStatus.FAILED)
     )
+    return int(session.execute(stmt).scalar_one())
+
+
+def outbox_pending_overdue_count(
+    session: Session, *, grace: timedelta, now: datetime | None = None
+) -> int:
+    """Rows that have been claimable for longer than ``grace`` and are still here.
+
+    This is the one number that says "the relay is not draining the outbox", and
+    nothing in the deployment currently says it: the relay's own listener answers
+    "did this process start?" (``D10-117``), and a relay that is not running writes
+    no family at all — which is indistinguishable, from Prometheus' side, from a
+    target that was never scraped. An outside observer reading the table is the
+    only reading that survives the observer's failure, so the attention watcher
+    publishes this rather than the relay.
+
+    **Why a grace, and why the lease.** ``claim_due`` takes a row within one poll
+    interval (0.5 s by default), so a row that has sat claimable for minutes is
+    evidence rather than jitter. Backoff is the reason a plain count is wrong:
+    ``_mark_failed`` pushes ``next_attempt_at`` into the future, so a row mid-retry
+    is unpublished *and healthy*, and counting it would make the gauge non-zero
+    during any broker hiccup — the alarm-nobody-reads shape ``D10-39`` warns about.
+    Filtering on the timestamp excludes that population without a second setting,
+    and reusing ``OUTBOX_LEASE_SECONDS`` as the grace means the deployment has one
+    statement of "how long the relay may take" instead of two that could be
+    configured into the wrong order. A ``publishing`` row is counted once its
+    **lease** has run out and no grace on top, because the lease is already that
+    statement: ``claim_due`` would have reclaimed the row by then. Charging both
+    would hold a stalled claim quiet for two leases (four minutes at the shipped
+    defaults) while saying "one lease" in one place and "two" in another.
+
+    Unscoped like :func:`dead_letter_count`: a stalled relay is not a tenant's.
+    """
+    moment = utc_now() if now is None else now
+    claimable = moment - grace
+    overdue = or_(
+        and_(
+            OutboxEvent.status == OutboxStatus.PENDING,
+            OutboxEvent.next_attempt_at <= claimable,
+        ),
+        and_(
+            OutboxEvent.status == OutboxStatus.PUBLISHING,
+            OutboxEvent.locked_until.is_not(None),
+            OutboxEvent.locked_until <= moment,
+        ),
+    )
+    stmt = select(func.count()).select_from(OutboxEvent).where(overdue)
     return int(session.execute(stmt).scalar_one())
 
 

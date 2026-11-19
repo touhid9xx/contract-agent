@@ -98,6 +98,7 @@ from __future__ import annotations
 
 import signal
 import threading
+from datetime import timedelta
 from types import FrameType
 
 import structlog
@@ -117,7 +118,9 @@ from app.core.metrics import (
     OUTBOX_PARK_RELAY_FAILED,
     OUTBOX_PARK_TRANSPORT_DISABLED,
     OUTBOX_PARKED_EVENTS,
+    OUTBOX_PENDING_COUNT,
 )
+from app.db.repositories.outbox import outbox_pending_overdue_count
 from app.db.session import build_engine, build_session_factory, session_scope
 from app.workers.attention_alerts import AttentionAlerter, build_attention_alerter
 from app.workers.metrics_server import publish_metrics
@@ -153,7 +156,7 @@ class AttentionWatch:
         self._notified_needs_attention = False
 
     def run_once(self) -> AttentionReport:
-        """One tick: read the three tables once and log one verdict.
+        """One tick: read the tables once and log one verdict.
 
         Returns the report rather than only logging it, so a test can assert the
         verdict instead of scraping a log line — the same reason
@@ -161,7 +164,23 @@ class AttentionWatch:
         """
         with session_scope(self._session_factory) as session:
             report = attention_report(session, limit=self._limit, settings=self._settings)
-        self._publish_gauges(report)
+            # Read here, on the session the report was just built from, rather than
+            # onto :class:`AttentionReport`. An unclaimed row is the outbox's backlog,
+            # not a finding: nothing a person does clears it, the relay claiming it
+            # does, so putting it on the report would mean either letting it move
+            # ``needs_attention`` — a slow relay is not a wrong contract — or adding a
+            # field no verdict reads. Same session, so the gauge and the report still
+            # cannot disagree about which rows they saw.
+            #
+            # The grace is the outbox lease rather than an interval of its own: the
+            # lease is already the deployment's statement of how long the relay may
+            # hold a row before another replica may take it, so anything overdue by a
+            # lease is a row every relay had had its full chance at. A second number
+            # would be a second ordering to keep, for one reader.
+            pending_overdue = outbox_pending_overdue_count(
+                session, grace=timedelta(seconds=self._settings.outbox_lease_seconds)
+            )
+        self._publish_gauges(report, pending_overdue=pending_overdue)
         self._record(report)
         self._alert(report)
         return report
@@ -199,8 +218,8 @@ class AttentionWatch:
 
         log.info("attention_watch_stopped")
 
-    def _publish_gauges(self, report: AttentionReport) -> None:
-        """Publish both backlogs on this process's scrape, each split by what stopped it.
+    def _publish_gauges(self, report: AttentionReport, *, pending_overdue: int) -> None:
+        """Publish every backlog on this process's scrape, each split by what stopped it.
 
         Every series is set on **every** tick, the zeros included, because the shipped
         alert rules read these gauges directly (``ops/prometheus/rules.yml``). A family
@@ -243,6 +262,15 @@ class AttentionWatch:
         ``doctor`` and ``/attention`` read, and a gauge cannot drift from the number
         those report.
 
+        ``outbox_pending_count`` is the one reading that is *not* on the report, and is
+        passed in instead. It answers a different question from the other three: they
+        count rows that are stuck, this counts rows that have not been picked up, and a
+        relay that is merely slow should never move a board that tells an operator their
+        contracts need a person. So it is a gauge with no verdict attached — see
+        :data:`app.core.metrics.OUTBOX_PENDING_COUNT`, which also says why it is
+        unlabelled and why no rule ships on it yet. :meth:`run_once` reads it on the
+        session that built the report, so the two still cannot disagree.
+
         What this does **not** buy, said here rather than discovered later: a watcher
         that stops publishing goes stale in Prometheus after five minutes and takes
         its alerts with it. Closing that needs a liveness series nothing has asked for
@@ -265,6 +293,7 @@ class AttentionWatch:
         NOTIFICATIONS_PENDING_OVERDUE.set(
             report.notifications_pending_stuck, state=NOTIFICATION_PENDING_STUCK
         )
+        OUTBOX_PENDING_COUNT.set(pending_overdue)
 
     def _record(self, report: AttentionReport) -> None:
         """Log exactly one verdict for one reading, plus a truncation warning.

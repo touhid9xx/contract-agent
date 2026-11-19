@@ -298,7 +298,7 @@ services:
     # their own network namespace and one machine publishes all of them. The relay
     # writes no family of its own — its registry holds the API's zeros — so a
     # scrape here answers "is this listener alive", not "is the relay working".
-    # `outbox_pending_count` is still absent (`D10-90`).
+    # `outbox_pending_count` is served by the attention watcher (`D10-134`).
     ports:
       - "127.0.0.1:${RELAY_METRICS_PORT:-9101}:9101"
 

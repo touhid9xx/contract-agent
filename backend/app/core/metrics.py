@@ -422,6 +422,34 @@ OUTBOX_PARKED_EVENTS: Final = _declare(
 )
 
 
+#: The outbox's *other* backlog: events nothing has claimed for longer than a lease,
+#: which is what a relay that is not running looks like from the outside.
+#:
+#: `D10-90` listed ``outbox_pending_count`` among the families that were absent rather
+#: than hollow, because no code path read the table and a family declared to read zero
+#: is the placeholder the spec forbids in production paths. Something reads it now, and
+#: this is the reading ``docker-compose.yml`` used to apologise for on the relay's port.
+#:
+#: Unlabelled, and that is a decision rather than an omission. The park gauge needed an
+#: ``outcome`` split because ``transport_disabled`` is *every* event on the shipped
+#: default, so a bare ``> 0`` would have fired on the first ``docker compose up``. Here
+#: there is no second population: a row serving out a retry backoff is excluded by the
+#: query rather than by a label, so a non-zero reading has exactly one explanation — the
+#: relay stopped claiming — and no configured-and-expected version of that exists.
+#:
+#: No alert rule ships on it yet, following ``extraction_backlog``: the number is a day
+#: old and nobody has stated a threshold, and a rule invented to look finished is the
+#: "alert nobody specified" that ``ops/prometheus/rules.yml`` opens by refusing. It is
+#: published on every tick including the zero, so adding the rule later is a rule and
+#: nothing else (`D10-134`).
+OUTBOX_PENDING_COUNT: Final = _declare(
+    Gauge(
+        "outbox_pending_count",
+        "Outbox events nothing has claimed for longer than a lease.",
+    )
+)
+
+
 #: ``status`` tokens for :data:`NOTIFICATIONS_UNDELIVERED`, spelled once for the same
 #: reason the park tokens are: the writer, the rule and every test that asserts a row
 #: was counted read one spelling, and a typo would look like "nothing is stuck".

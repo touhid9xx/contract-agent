@@ -21,12 +21,17 @@ from app.db.repositories.outbox import (
     BACKOFF_CAP_SECONDS,
     backoff_seconds,
     backoff_with_jitter,
+    outbox_pending_overdue_count,
 )
 from app.db.session import session_scope
 
 LEASE_SECONDS = 30
 MAX_ATTEMPTS = 3
 WORKER = "relay-a"
+
+#: The grace the attention watch passes: the outbox lease, ``D10-134``'s one statement
+#: of how long the relay may hold a claim before the row counts as nobody's.
+GRACE = timedelta(seconds=LEASE_SECONDS)
 
 
 def repository(session: Session, worker_id: str = WORKER) -> OutboxRepository:
@@ -257,6 +262,151 @@ def test_pending_count_sees_unpublished_rows(
     # One published, one still leased and unpublished.
     with session_scope(session_factory) as session:
         assert repository(session).pending_count() == 1
+
+
+# --- the backlog nothing has claimed (D10-134) -----------------------------
+# ``pending_count`` above answers "how much work is in the table"; these answer the
+# different question the published gauge asks: "is anything not moving?". A row
+# inside its retry backoff is unpublished and healthy, so the two numbers are
+# deliberately not the same number.
+
+
+def test_an_empty_outbox_has_nothing_overdue(
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_scope(session_factory) as session:
+        assert outbox_pending_overdue_count(session, grace=GRACE) == 0
+
+
+def test_a_row_inside_the_grace_is_not_yet_overdue(
+    session_factory: sessionmaker[Session], enqueue_event: Callable[..., int]
+) -> None:
+    """A row written this instant is overdue by nobody's definition.
+
+    The grace is what stops the gauge reading non-zero on the half second between a
+    route committing an event and the relay's next poll — a number that is briefly
+    true about every deployment and therefore says nothing about any of them.
+    """
+    enqueue_event()
+
+    with session_scope(session_factory) as session:
+        assert outbox_pending_overdue_count(session, grace=GRACE, now=utc_now()) == 0
+
+
+def test_a_row_that_has_waited_longer_than_the_grace_is_counted(
+    session_factory: sessionmaker[Session], enqueue_event: Callable[..., int]
+) -> None:
+    """The same row, the same grace, one lease later: now it is evidence.
+
+    Only the clock moved. That is the property that makes the reading a statement
+    about the relay rather than about the writer.
+    """
+    enqueue_event()
+    later = utc_now() + GRACE + timedelta(seconds=60)
+
+    with session_scope(session_factory) as session:
+        assert outbox_pending_overdue_count(session, grace=GRACE, now=later) == 1
+
+
+def test_a_row_serving_out_a_retry_backoff_is_not_overdue(
+    session_factory: sessionmaker[Session], enqueue_event: Callable[..., int]
+) -> None:
+    """The reason it is a timestamp query and not ``pending_count``.
+
+    A broker hiccup leaves rows unpublished *and* correctly scheduled, so counting
+    them would make the gauge non-zero during exactly the event a relay is handling
+    — the alarm-nobody-reads shape ``D10-39`` warns about. The exclusion expires
+    when the retry does, which is asserted here rather than assumed.
+    """
+    event_id = enqueue_event()
+
+    with session_scope(session_factory) as session:
+        repository(session).claim_due(10)
+    with session_scope(session_factory) as session:
+        repository(session).record_outcome(event_id, error="RuntimeError: broker down")
+
+    with session_scope(session_factory) as session:
+        row = session.get(OutboxEvent, event_id)
+        assert row is not None
+        retry_at = row.next_attempt_at
+        # One second of grace, and a clock on either side of the retry timer: before
+        # it the row is backing off, at it the row is due again and nothing claimed it.
+        backing_off = outbox_pending_overdue_count(
+            session, grace=timedelta(seconds=1), now=retry_at - timedelta(seconds=1)
+        )
+        now_overdue = outbox_pending_overdue_count(
+            session, grace=timedelta(seconds=1), now=retry_at + timedelta(seconds=1)
+        )
+
+    assert backing_off == 0
+    assert now_overdue == 1
+
+
+def test_a_published_row_is_never_overdue(
+    session_factory: sessionmaker[Session], enqueue_event: Callable[..., int]
+) -> None:
+    """Delivered is not pending, however old the row — and the row is not deleted."""
+    event_id = enqueue_event()
+
+    with session_scope(session_factory) as session:
+        repository(session).claim_due(10)
+    with session_scope(session_factory) as session:
+        repository(session).record_outcome(event_id, error=None)
+
+    with session_scope(session_factory) as session:
+        assert (
+            outbox_pending_overdue_count(session, grace=GRACE, now=utc_now() + timedelta(days=30))
+            == 0
+        )
+
+
+def test_a_parked_row_belongs_to_the_park_gauge_and_not_this_one(
+    session_factory: sessionmaker[Session], enqueue_event: Callable[..., int]
+) -> None:
+    """Two families, two populations, no row counted twice.
+
+    A parked row is ``failed`` and flagged by ``outbox_parked_events``; counting it
+    here as well would double the report an operator reads and make a dead-letter
+    backlog look like a stalled relay — two different jobs.
+    """
+    event_id = enqueue_event()
+
+    for _ in range(MAX_ATTEMPTS):
+        with session_scope(session_factory) as session:
+            repository(session).claim_due(10)
+        with session_scope(session_factory) as session:
+            repository(session).record_outcome(event_id, error="RuntimeError: broker down")
+            force_due(session, event_id)
+
+    with session_scope(session_factory) as session:
+        assert (
+            outbox_pending_overdue_count(session, grace=GRACE, now=utc_now() + timedelta(days=1))
+            == 0
+        )
+
+
+def test_a_lease_that_still_holds_the_row_is_not_overdue(
+    session_factory: sessionmaker[Session], enqueue_event: Callable[..., int]
+) -> None:
+    """A ``publishing`` row is a relay doing its job until its lease runs out.
+
+    Only after the lease may another replica take the row, so only after the lease
+    can the row be called unclaimed — which is why the query reads ``locked_until``
+    rather than the status alone.
+    """
+    enqueue_event()
+
+    with session_scope(session_factory) as session:
+        repository(session).claim_due(10)
+
+    with session_scope(session_factory) as session:
+        inside = outbox_pending_overdue_count(session, grace=GRACE, now=utc_now())
+        after = outbox_pending_overdue_count(
+            session, grace=GRACE, now=utc_now() + GRACE + timedelta(seconds=1)
+        )
+
+    assert inside == 0
+    assert after == 1
 
 
 def test_backoff_grows_exponentially_then_caps() -> None:

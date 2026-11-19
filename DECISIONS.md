@@ -7075,8 +7075,11 @@ in `dispatch_notification`.
 ten so they read `0` forever would be the placeholder logic the spec forbids in production paths, so
 `escalations_total`, `agent_decisions_total`, `voice_calls_total`, `ollama_requests_total`,
 `ollama_latency_seconds`, `agent_schema_repair_total`, `ollama_circuit_breaker_state`,
-`kafka_consumer_lag`, `worker_replicas`, `outbox_pending_count` and `redis_connections_active` are
-absent rather than hollow. ~~Consequently no alert rule can be written yet, and~~ **amended by
+`kafka_consumer_lag`, `worker_replicas` and `redis_connections_active` are absent rather
+than hollow. **`D10-134` struck `outbox_pending_count` from that list, not the rule behind
+it** — the name has a reader now, so it is no longer absent, and the remaining names are
+the ten the sentence already said it held.
+~~Consequently no alert rule can be written yet, and~~ **amended by
 `D10-107`, not deleted:** `D10-91` did write `EscalationEmailFailed:
 increase(escalation_email_failed_total[1h]) > 0`, and that rule could not fire at all until a
 target exposed the series. ~~What was missing was a listener rather than a rule, and the scanner
@@ -10745,3 +10748,71 @@ linted by the `hygiene` job's `check-yaml` and executes only on CI: no local com
 workflow, so the `browser` job first ran on the push that carried this block: run `44496351399`
 completed green, all ten jobs succeeding, `browser (chromium renders every screen)` among them, so
 the Linux half is measured rather than hoped for.
+
+### D10-134 — The outbox backlog is read by an observer, and its grace is the lease
+
+`D10-90` listed `outbox_pending_count` among the families the spec names and the code did not serve,
+and wrote it down as *absent rather than hollow* instead of declaring a gauge that would read zero
+forever. `docker-compose.yml` carried the same admission on the relay's port:
+"`outbox_pending_count` is still absent (`D10-90`)." Both sentences were true. Neither was a
+decision — and the number they described is the one reading in the deployment that says the relay is
+not draining the outbox, which no other series says.
+
+**Decision.** The attention watcher publishes it, from a query over the table, rather than the relay
+publishing it from its own counters. A relay that is running can report its own health; a relay that
+has stopped reports nothing at all, and a family that stops being written is indistinguishable, from
+Prometheus' side, from a target that was never scraped. `OutboxRepository.pending_count()` already
+existed with no caller, so the shape was there. What it could not answer is the question a threshold
+asks: a row serving out four minutes of retry backoff is unpublished *and healthy*, so a plain count
+is non-zero during any broker hiccup — the alarm-nobody-reads shape `D10-39` warns about.
+
+**The query, and why its grace is the lease.**
+`outbox_pending_overdue_count(session, *, grace, now=None)` counts a `pending` row whose
+`next_attempt_at` is older than `moment - grace`, and a `publishing` row whose `locked_until` has
+already passed. The deployment already states how long the relay may take — `OUTBOX_LEASE_SECONDS`,
+which `config.py` validates below `KAFKA_PUBLISH_TIMEOUT_SECONDS` — so the grace *is* that number
+rather than a second setting free to be configured into the wrong order against it. `claim_due`
+takes a row within one poll interval, 0.5 s by default, so a row claimable for a whole lease is
+evidence rather than jitter.
+
+**One branch disagreed with its own docstring, and the test was what found it.** The `publishing`
+arm compared `locked_until <= claimable`, charging the grace on top of the lease — two leases, four
+minutes at the shipped defaults — while the sentence beside it said the row is counted "once its
+**lease** has run out and no grace on top". The lease is already the statement: `claim_due` would
+have reclaimed the row by the moment the lease expired, so the grace was a second charge for a wait
+that had already been paid. The comparison is `locked_until <= moment` and the docstring now says
+why, because the code and the sentence disagreed and only one of them could be the decision.
+
+**Unlabelled, and no alert rule ships.** The park gauge needed an `outcome` split because
+`transport_disabled` is *every* event on the shipped default, so a bare `> 0` would have fired on
+the first `docker compose up`; here there is no second population to split on, because backoff rows
+are excluded by the query rather than by a label, so a non-zero reading has exactly one explanation.
+The rule is withheld the way `extraction_backlog` withholds one: the number is new, nobody has
+stated a threshold, and `rules.yml` opens by refusing "an alert nobody specified". Every series is
+set on every tick, the zero included, so the rule later is a rule and nothing else.
+
+**Read on the report's own session, and deliberately not a field on the report.** `run_once` reads
+the count inside the `session_scope` that built the `AttentionReport`, so the gauge and the report
+cannot disagree about which rows they saw, and passes it to `_publish_gauges` as a keyword-only
+argument, which keeps the parameter the single place the reading enters. It is not on the report
+because nothing a person does clears an unclaimed row — the relay claiming it does — so a field
+there would mean either letting it move `needs_attention`, which would say a slow relay is a wrong
+contract, or adding a field no verdict reads. Unscoped like `dead_letter_count`: a stalled relay is
+not a tenant's.
+
+**What gated it.** Twelve tests. Seven in `test_outbox.py`: an empty outbox reads `0`; a row inside
+the grace is not overdue; the same row past it is `1` with only the clock moved; a row in retry
+backoff is excluded *and becomes counted once its retry is due*, which is the case that justifies a
+timestamp query over `pending_count()`; a published row is never overdue; a parked row is counted by
+the park gauge and not here; and a `publishing` row is not overdue inside its lease and is past it.
+Five in `test_attention_watch.py`: a clean board publishes `0`, an unclaimed row past the lease
+publishes `1`, a row inside the lease publishes `0`, a parked row moves `outbox_parked_events` and
+not this gauge, and a stalled relay never moves the verdict. The full backend suite exits `0`.
+
+**Limits.** It counts rows, not age: it says a backlog exists, not how stale its oldest row is, and
+a `max(age)` histogram would say that — nobody has asked for one. It is computed on the watcher's
+tick, so it lags the table by that interval, the same lag the other three gauges have. It cannot
+tell a stopped relay from a running relay whose broker refuses every publish; both leave rows
+unclaimed past a lease, and `outbox_published_total` is what separates them. And striking the
+sentence in `docker-compose.yml` removes an admission, not a limitation: the relay still writes no
+family of its own, and a scrape of its port still answers "is this listener alive".

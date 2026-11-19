@@ -8644,6 +8644,39 @@ clean; `npx vitest run --maxWorkers=2` reports `20` files and `371` tests passin
 jobs succeeding. What it does not do: assert appearance, use a screen reader, visit `bn`, or click
 through a mutation — the journey is one path, and `jsdom` still covers the rest.
 
+### D10-134 — The relay's backlog is on a gauge now, and nothing alerts on it yet
+
+**Decided, `D10-134`.** `D10-90` wrote `outbox_pending_count` down among the families that were
+*absent rather than hollow*, and `docker-compose.yml` repeated the admission on the relay's port. It
+is published now: `outbox_pending_overdue_count(session, *, grace, now=None)` counts outbox rows
+claimable for longer than a lease, and `AttentionWatch.run_once` sets it on every tick, the zero
+included.
+
+**Why a query rather than the relay.** The relay's own listener answers whether its process started.
+A relay that has stopped writes no family at all, which from Prometheus' side is the same as a
+target nobody scraped, so the reading has to come from outside the thing it is about. The grace is
+`OUTBOX_LEASE_SECONDS` rather than a second setting, because the lease is already the deployment's
+statement of how long a row may be held, and a second number would be a second ordering to keep
+against `KAFKA_PUBLISH_TIMEOUT_SECONDS`.
+
+**The test found the branch that disagreed with its own docstring.** The `publishing` arm charged
+the grace on top of the lease — four minutes at the shipped defaults where the sentence beside it
+said two — so the comparison is `locked_until <= moment` now and the docstring carries the reason. A
+row serving out a retry backoff is excluded rather than counted, because it is unpublished and
+healthy, and counting it would have made the gauge non-zero during any broker hiccup.
+
+**Unlabelled, and no rule.** There is no second population to split on here, unlike the park gauge:
+backoff rows are excluded by the query, so a non-zero reading has one explanation. The alert is
+withheld the way `extraction_backlog` withholds one — nobody has stated a threshold, and `rules.yml`
+opens by refusing an alert nobody specified — so every series is set on every tick and adding the
+rule later is a rule and nothing else.
+
+**What it does not do.** It counts rows, not age: it cannot say how stale the oldest one is. It lags
+by the watcher's tick. And it cannot separate a stopped relay from a running one whose broker
+refuses every publish; `outbox_published_total` is what tells those apart. Twelve tests pin the
+rest, seven in `test_outbox.py` and five in `test_attention_watch.py`, including that a stalled
+relay never moves `needs_attention` — a slow relay is not a wrong contract.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

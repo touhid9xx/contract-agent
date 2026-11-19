@@ -49,6 +49,17 @@ test:
   channel works and the send path is not draining). Only the last two raise the
   verdict, and the grace window is what stops a deployment doing its job from
   looking like one that is stuck.
+* **The population none of those three can see is the outbox's backlog**
+  (``D10-134``). Every family above counts rows that *stopped*. A ``pending``
+  outbox event never stopped either — it is waiting for the relay — and the relay's
+  own listener answers "did this process start?", not "is it draining": a relay that
+  is not running writes no family at all, which a scrape cannot tell from a target
+  nobody configured. So the reading has to come from outside the relay, which is
+  this worker. It is a gauge with **no verdict attached**, because a slow relay is
+  not a wrong contract and must not page on a board that says the tenant's work needs
+  the tenant; and it is **unlabelled**, unlike the park gauge, because the query
+  excludes rows still serving a retry backoff rather than labelling them, so a
+  non-zero reading has exactly one explanation.
 
 What this file deliberately does **not** test is delivery: nothing here reads the
 log. ``D10-117`` did not change that, and it did not reopen the question ``D10-39``
@@ -226,6 +237,31 @@ def add_parked_event(session_factory: sessionmaker[Session], tenant: Tenant) -> 
         return int(row.id)
 
 
+def add_unclaimed_event(
+    session_factory: sessionmaker[Session], tenant: Tenant, *, waited: timedelta
+) -> int:
+    """A pending outbox row nothing has claimed, written ``waited`` ago.
+
+    ``next_attempt_at`` is the timestamp the gauge reads, so ageing the row is a matter
+    of writing it — no sleeping, and no clock to monkeypatch.
+    """
+    with session_scope(session_factory) as session:
+        row = OutboxEvent(
+            correlation_id="corr-watch",
+            tenant_id=tenant.id,
+            event_type="contract.ingested",
+            topic="contract.events",
+            partition_key="1",
+            payload={"contract_id": 1},
+            status=OutboxStatus.PENDING,
+            attempts=0,
+            next_attempt_at=utc_now() - waited,
+        )
+        session.add(row)
+        session.flush()
+        return int(row.id)
+
+
 def add_notification(
     session_factory: sessionmaker[Session],
     contract: Contract,
@@ -317,6 +353,28 @@ def undelivered() -> dict[str, float]:
 def pending() -> dict[str, float]:
     """The overdue-pending gauge, by ``state``."""
     return _series(metrics.NOTIFICATIONS_PENDING_OVERDUE.name, "state")
+
+
+def _unlabelled(family: str) -> float | None:
+    """One unlabelled gauge as a scrape reads it, or ``None`` if it has no series.
+
+    The helpers above cannot see this family at all: they build ``family{label="`` as
+    their prefix, and a gauge declared without labels renders ``family 0``. Absence is
+    reported as ``None`` rather than as zero for the reason those helpers parse
+    ``render()`` instead of calling ``value()`` — "no series" and "a zero" are the two
+    states an alert treats differently (``D10-109``), so a helper that conflated them
+    could not catch the defect it exists for.
+    """
+    prefix = f"{family} "
+    for line in metrics.render().splitlines():
+        if line.startswith(prefix):
+            return float(line[len(prefix) :])
+    return None
+
+
+def unclaimed_outbox() -> float | None:
+    """The unclaimed-outbox gauge (``D10-134``)."""
+    return _unlabelled(metrics.OUTBOX_PENDING_COUNT.name)
 
 
 # --- one line per tick, and it names the verdict --------------------------
@@ -946,3 +1004,107 @@ def test_the_three_causes_are_counted_separately(
         NOTIFICATION_PENDING_UNSUPPORTED: 1.0,
         NOTIFICATION_PENDING_STUCK: 2.0,
     }
+
+
+# --- the outbox's other backlog, published (D10-134) ----------------------
+#: Past the outbox lease, and well clear of it: the grace is a real setting on a real
+#: ``Settings`` here, so a case has to be unambiguously beyond it rather than one
+#: second past a number a slow runner might straddle.
+def unclaimed_waited(settings: Settings) -> timedelta:
+    """An age that is overdue by every reading of the shipped lease."""
+    return timedelta(seconds=settings.outbox_lease_seconds + 60)
+
+
+def test_a_clean_board_publishes_the_unclaimed_outbox_at_zero(
+    session_factory: sessionmaker[Session], settings: Settings
+) -> None:
+    """Published on a board with nothing to report, which is the whole point.
+
+    ``D10-109``'s defect class one family over: a gauge written only when something
+    is wrong renders no series when everything is fine, and a scrape cannot tell that
+    apart from a watcher that stopped. That matters more here than anywhere else in
+    this file, because this is the reading that survives the *observed* process
+    dying — the relay writes nothing at all when it is not running, which is the
+    reason an outside observer publishes this number instead (``D10-134``).
+    """
+    AttentionWatch(session_factory, settings=settings).run_once()
+
+    assert unclaimed_outbox() == 0.0
+
+
+def test_an_event_nothing_has_claimed_is_published_as_one(
+    session_factory: sessionmaker[Session], settings: Settings, tenant: Tenant
+) -> None:
+    """The positive case, because a writer that always publishes zero passes the zero.
+
+    One row the relay has not taken, aged past the lease. Nothing else is written, so
+    the ``1.0`` can only have come from the row — and the row is ``pending``, which
+    is a state no other family in this worker counts.
+    """
+    add_unclaimed_event(session_factory, tenant, waited=unclaimed_waited(settings))
+
+    AttentionWatch(session_factory, settings=settings).run_once()
+
+    assert unclaimed_outbox() == 1.0
+
+
+def test_an_event_inside_the_lease_is_not_published(
+    session_factory: sessionmaker[Session], settings: Settings, tenant: Tenant
+) -> None:
+    """A row the relay may still be about to claim is not evidence of anything.
+
+    The grace is the same statement the relay's lease makes — how long a claim may
+    stand — so a row newer than one lease is a row every relay has not yet had its
+    full chance at. Without that exclusion the gauge would read non-zero in the
+    seconds between a route committing an event and the relay's next poll, which is
+    a number briefly true about every deployment and therefore about none.
+    """
+    add_unclaimed_event(session_factory, tenant, waited=timedelta(seconds=0))
+
+    AttentionWatch(session_factory, settings=settings).run_once()
+
+    assert unclaimed_outbox() == 0.0
+
+
+def test_a_parked_row_moves_the_park_gauge_and_not_this_one(
+    session_factory: sessionmaker[Session], settings: Settings, tenant: Tenant
+) -> None:
+    """Two families, two populations, and no row counted twice.
+
+    A parked event is ``failed``: the relay spent its retry budget and stopped
+    claiming it, which is a flag on ``outbox_parked_events``. Counting it here as
+    well would make a dead-letter backlog look like a stalled relay, and those are
+    two different jobs with two different answers — replay for the first, start the
+    relay for the second. Asserted together in one tick, because the cheap mistake is
+    a single count published on both families, which passes any test that reads one.
+    """
+    add_parked_event(session_factory, tenant)
+
+    AttentionWatch(session_factory, settings=settings).run_once()
+
+    assert unclaimed_outbox() == 0.0
+    assert parked() == {
+        OUTBOX_PARK_TRANSPORT_DISABLED: 1.0,
+        OUTBOX_PARK_RELAY_FAILED: 0.0,
+    }
+
+
+def test_the_unclaimed_gauge_never_moves_the_verdict(
+    session_factory: sessionmaker[Session], settings: Settings, tenant: Tenant
+) -> None:
+    """A relay that has stopped is not a tenant's contract needing a person.
+
+    This is why the count is read beside the report rather than onto it
+    (``AttentionReport``): a field there would either have to move
+    ``needs_attention`` — sending an operator to look at contracts when the fault is
+    a worker — or be a field no verdict reads. The board stays clean and the gauge
+    still says one, so the fact is published without being misrouted.
+    """
+    add_unclaimed_event(session_factory, tenant, waited=unclaimed_waited(settings))
+
+    with capture_logs() as captured:
+        report = AttentionWatch(session_factory, settings=settings).run_once()
+
+    assert unclaimed_outbox() == 1.0
+    assert report.needs_attention is False
+    assert events(captured) == ["attention_watch_clean"]
