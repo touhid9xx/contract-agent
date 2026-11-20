@@ -42,6 +42,18 @@ const STATUS_FILTERS: (ContractStatus | null)[] = [
 ];
 
 /**
+ * The board's columns, taken from the filter list rather than written out again.
+ *
+ * The order a reader expects is already decided above, and a second hand-written
+ * list is the one that would silently miss a member the day the enum grows. All
+ * this does is drop `null`, which is "all" — a filter, not a place a contract can
+ * be.
+ */
+const BOARD_COLUMNS = STATUS_FILTERS.filter(
+  (candidate): candidate is ContractStatus => candidate !== null,
+);
+
+/**
  * Wire value → message key (relative to the `contracts` namespace), as records
  * rather than string surgery.
  *
@@ -185,6 +197,17 @@ export default function ContractsPage() {
 
   /** `null` means every status — the same meaning as an omitted `?status=`. */
   const [statusFilter, setStatusFilter] = useState<ContractStatus | null>(null);
+
+  /**
+   * How the same rows are arranged, and nothing more.
+   *
+   * Deliberately *not* in the address bar: every other screen here keeps its
+   * filter in the URL because a filtered queue is a link someone shares. A layout
+   * is a reading preference, so it stays on the tab (the sixth screen's state is
+   * entirely its own, which is why it carries no navigation mock) and a reload
+   * returns to the list rather than pretending a preference is a query.
+   */
+  const [view, setView] = useState<"list" | "board">("list");
 
   /**
    * Both ingestion routes are `require_roles(ADMIN, OPERATOR)`, so a viewer is
@@ -401,7 +424,13 @@ export default function ContractsPage() {
   }
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 px-6 py-12">
+    <main
+      className={`mx-auto flex min-h-screen flex-col gap-6 px-6 py-12 ${
+        // Six columns need the room; a list of full cards does not, and reading a
+        // wide single column is worse than a narrow one.
+        view === "board" ? "max-w-6xl" : "max-w-3xl"
+      }`}
+    >
       <header className="space-y-2">
         <h1 className="text-2xl font-semibold">{t("contracts.title")}</h1>
         <p className="text-sm text-muted-foreground">{t("contracts.subtitle")}</p>
@@ -548,6 +577,35 @@ export default function ContractsPage() {
                   : t(`contracts.${STATUS_KEYS[candidate]}`)}
               </Button>
             ))}
+
+            {/*
+              `aria-pressed`, not `aria-current`: a layout toggle is a switch with
+              one side on, and `aria-current` already means "this is the filter you
+              are looking at" on the chips beside it. The two must not collide, or a
+              reader (and the screen's own test) cannot tell which control is which.
+            */}
+            <span className="ml-auto flex items-center gap-1">
+              <Button
+                size="sm"
+                variant={view === "list" ? "primary" : "outline"}
+                aria-pressed={view === "list"}
+                onClick={() => {
+                  setView("list");
+                }}
+              >
+                {t("contracts.viewList")}
+              </Button>
+              <Button
+                size="sm"
+                variant={view === "board" ? "primary" : "outline"}
+                aria-pressed={view === "board"}
+                onClick={() => {
+                  setView("board");
+                }}
+              >
+                {t("contracts.viewBoard")}
+              </Button>
+            </span>
           </div>
 
           {items.length > 0 && (
@@ -593,18 +651,32 @@ export default function ContractsPage() {
             </Card>
           )}
 
-          {items.map((row) => (
-            <ContractCard
-              key={row.id}
-              row={row}
+          {view === "board" && items.length > 0 ? (
+            <Board
+              items={items}
+              /*
+                `hasNextPage === false` is the server's own claim that the last
+                page was complete — the cursor came back `null`. That is the only
+                moment a column may print a number, because only then is the
+                loaded set the whole matching set.
+              */
+              complete={!list.hasNextPage}
               dateFormat={formatDate}
-              instantFormat={instantFormat}
-              consent={consentStateFor(row)}
-              onConsentSave={(contractId, payload) => {
-                consent.mutate({ contractId, payload });
-              }}
             />
-          ))}
+          ) : (
+            items.map((row) => (
+              <ContractCard
+                key={row.id}
+                row={row}
+                dateFormat={formatDate}
+                instantFormat={instantFormat}
+                consent={consentStateFor(row)}
+                onConsentSave={(contractId, payload) => {
+                  consent.mutate({ contractId, payload });
+                }}
+              />
+            ))
+          )}
 
           {list.hasNextPage && (
             <Button
@@ -627,6 +699,109 @@ export default function ContractsPage() {
         </Link>
       </p>
     </main>
+  );
+}
+
+interface BoardProps {
+  items: ContractListItem[];
+  /** Whether the loaded rows are every row the current filter matches. */
+  complete: boolean;
+  /** Pre-bound so a column formats a calendar date the same way the cards do. */
+  dateFormat: (value: string) => string;
+}
+
+/**
+ * The contracts already loaded, grouped by where each one is in its life.
+ *
+ * This is a second *arrangement* of the same rows, never a second read: the chips
+ * above remain the server's question, and the board only sorts whatever answer
+ * came back. A row is placed by its own `status`, the value the API sent — nothing
+ * here re-derives one, so the board cannot disagree with the card it hides.
+ *
+ * **A column prints a count only when that count is a total.** The listing pages
+ * with an opaque keyset cursor, so "the rows loaded so far" and "everything that
+ * matches" are different facts; a number that quietly slides between the two is
+ * worse than no number, because it is read as a total either way. `complete` is
+ * the server's own claim that the last page ended the match (its cursor came back
+ * `null`), and only then does a column show a figure. Until then the sentence
+ * above the board says what it is holding.
+ *
+ * The tickets are deliberately thin — title, reference, term. The consent editor
+ * and the fingerprint stay in the list view and on the contract's own page: a
+ * column a sixth of the screen wide cannot carry a four-flag editor without
+ * becoming unreadable, and the editor is one click away in either view.
+ */
+function Board({ items, complete, dateFormat }: BoardProps) {
+  const t = useTranslations();
+  const locale = useLocale();
+
+  return (
+    <section className="space-y-2">
+      <p className="text-xs text-muted-foreground">
+        {complete
+          ? t("contracts.boardComplete", { count: items.length })
+          : t("contracts.boardLoaded", { count: items.length })}
+      </p>
+      <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+        {BOARD_COLUMNS.map((column) => {
+          const rows = items.filter((item) => item.status === column);
+          return (
+            <div
+              key={column}
+              className="flex min-h-24 flex-col rounded-lg border border-border bg-muted/40"
+            >
+              <div className="flex items-baseline justify-between gap-2 border-b border-border px-2 py-1.5">
+                <h2 className="text-xs font-medium">{t(`contracts.${STATUS_KEYS[column]}`)}</h2>
+                {complete && (
+                  <span className="text-xs text-muted-foreground">{rows.length}</span>
+                )}
+              </div>
+              <div className="flex-1 space-y-2 p-2">
+                {rows.length === 0 ? (
+                  <p className="py-2 text-center text-xs text-muted-foreground">
+                    {t("contracts.boardColumnEmpty")}
+                  </p>
+                ) : (
+                  rows.map((item) => (
+                    <BoardTicket
+                      key={item.id}
+                      row={item}
+                      locale={locale}
+                      dateFormat={dateFormat}
+                    />
+                  ))
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+interface BoardTicketProps {
+  row: ContractListItem;
+  /** The reader's locale, so the link stays inside it. */
+  locale: string;
+  dateFormat: (value: string) => string;
+}
+
+/** One contract as a board ticket. A link, because that is all a column can hold. */
+function BoardTicket({ row, locale, dateFormat }: BoardTicketProps) {
+  const t = useTranslations();
+
+  return (
+    <Link
+      href={`/${locale}/contracts/${row.id}`}
+      className="block rounded-lg border border-border bg-card px-2 py-1.5 text-xs"
+    >
+      <span className="block font-medium">{t("contracts.contractLabel", { id: row.id })}</span>
+      <span className="block truncate text-muted-foreground">{row.customer_ref}</span>
+      <span className="block text-muted-foreground">
+        {termText(row, dateFormat, t("contracts.noDates"))}
+      </span>
+    </Link>
   );
 }
 
@@ -653,14 +828,7 @@ function ContractCard({ row, dateFormat, instantFormat, consent, onConsentSave }
   const t = useTranslations();
   const locale = useLocale();
 
-  const term =
-    row.start_date === null && row.end_date === null
-      ? t("contracts.noDates")
-      : row.start_date === null
-        ? formatDateOrNull(row.end_date, dateFormat)
-        : row.end_date === null
-          ? formatDateOrNull(row.start_date, dateFormat)
-          : `${formatDateOrNull(row.start_date, dateFormat)} – ${formatDateOrNull(row.end_date, dateFormat)}`;
+  const term = termText(row, dateFormat, t("contracts.noDates"));
 
   const channels = row.consent_channels.map((channel) => t(`contracts.${CHANNEL_KEYS[channel]}`));
 
@@ -890,4 +1058,27 @@ function ConsentEditor({ row, state, onSave }: ConsentEditorProps) {
 /** Format a date that the caller has already established is not `null`. */
 function formatDateOrNull(value: string | null, format: (value: string) => string): string {
   return value === null ? "" : format(value);
+}
+
+/**
+ * A contract's term as one line.
+ *
+ * One helper rather than an expression in each view: the board ticket and the list
+ * card describe the same two dates, and two copies of "what do we print when only
+ * one end is known" is exactly how those two would come to disagree on screen.
+ */
+function termText(
+  row: ContractListItem,
+  dateFormat: (value: string) => string,
+  noDates: string,
+): string {
+  if (row.start_date === null && row.end_date === null) {
+    return noDates;
+  }
+
+  if (row.start_date === null || row.end_date === null) {
+    return formatDateOrNull(row.start_date ?? row.end_date, dateFormat);
+  }
+
+  return `${formatDateOrNull(row.start_date, dateFormat)} – ${formatDateOrNull(row.end_date, dateFormat)}`;
 }

@@ -10,11 +10,12 @@ and escalation to a human operator.
 > side effect through a transactional outbox, authenticates real users with Argon2id
 > and rotating refresh tokens, seals PII with Fernet, extracts contract fields, gates
 > them behind human review, and dispatches a reminder over a real authenticated SMTP
-> socket. ~~**Phase 2 (P2-A … P2-L) has not started.**~~ **It has: seven of the twelve
-> milestones have landed slices** — P2-A, P2-B, P2-C, P2-D, P2-E, P2-G and P2-J — recorded
-> part by part in `STATUS.md`. What has no code at all is P2-F (voice and answering-machine
-> detection), P2-H (the pull-mode contracts API) and P2-I's dashboard, timeline and kanban
-> views; P2-K and P2-L are specified nowhere but the range in this file, so nothing can be
+> socket. ~~**Phase 2 (P2-A … P2-L) has not started.**~~ **It has: eight of the twelve
+> milestones have landed slices** — P2-A, P2-B, P2-C, P2-D, P2-E, P2-G, P2-I and
+> P2-J — recorded part by part in `STATUS.md`. What has no code at all is P2-F (voice and
+> answering-machine detection), P2-H (the pull-mode contracts API) and P2-I's dashboard;
+> P2-I's timeline and board views landed as `D10-135` and `D10-136`. P2-K and P2-L are
+> specified nowhere but the range in this file, so nothing can be
 > built against them yet. The struck clause was true when written and became false the
 > commit the first `P2` slice landed, which is why it is struck rather than deleted.
 >

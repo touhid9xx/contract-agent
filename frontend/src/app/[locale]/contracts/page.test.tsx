@@ -25,6 +25,11 @@
  *     because the flags already matched — a reassuring answer, not a failure.
  *   * **the page appends.** Paging passes the opaque `next_cursor` straight back,
  *     so a scroll touches each contract once even while new rows arrive underneath.
+ *   * **the same rows, arranged — and a count only when it is a total.** The board
+ *     groups the rows already in hand by the status the API sent, so switching
+ *     arrangement asks the server nothing. A column prints a figure only once the
+ *     cursor came back `null`, because until then "loaded so far" and "everything
+ *     that matches" are different facts and a bare number reads as the second.
  *
  * The harness is the one `frontend/src/app/[locale]/notifications/page.test.tsx`
  * established, minus one double: **there is no `next/navigation` mock here**, because
@@ -277,6 +282,33 @@ function currentChips(): string[] {
     .map((node) => node.textContent ?? "");
 }
 
+/**
+ * One board column, found by the heading it carries.
+ *
+ * The column is the nearest `div.rounded-lg` above that heading — the board's own
+ * structural guarantee. Nothing in the list view wraps a row title in one, so this
+ * throws there rather than quietly matching half the page.
+ */
+function column(label: string): HTMLElement {
+  const heading = screen.getByRole("heading", { name: label });
+  const root = heading.closest("div.rounded-lg");
+  if (root === null) {
+    throw new Error(`No board column found for "${label}".`);
+  }
+  return root as HTMLElement;
+}
+
+/**
+ * The `aria-pressed` state of one named button.
+ *
+ * Asked of a *name* rather than collected from every button: the consent editor
+ * uses `aria-pressed` for its flags too, so "which buttons are pressed" is not a
+ * question with one answer on this screen.
+ */
+function pressed(buttonName: string): string | null {
+  return screen.getByRole("button", { name: buttonName }).getAttribute("aria-pressed");
+}
+
 function typeInto(label: string, value: string) {
   fireEvent.change(screen.getByLabelText(label), { target: { value } });
 }
@@ -425,6 +457,123 @@ describe("the read", () => {
     // `null` is a completeness claim about the database, not an inference from a
     // short page, so there is no second page to offer.
     expect(screen.queryByRole("button", { name: EN.contracts.loadMore })).toBeNull();
+  });
+});
+
+describe("the board", () => {
+  /**
+   * Every column label, read off the catalogue rather than written out here.
+   *
+   * The board builds its columns from the status list, so the vocabulary a reader
+   * sees is exactly the catalogue's — a seventh status would arrive in both places
+   * at once, and this list would not need touching to prove it.
+   */
+  const COLUMN_LABELS: string[] = Object.values(EN.contracts.statuses);
+
+  it("places a contract in the column its own status names, and only there", async () => {
+    const live = row({ id: 7, customer_ref: "ACME-1", status: "active" });
+    const late = row({ id: 9, customer_ref: "ACME-2", status: "escalated" });
+    setSession(sessionFor("operator"));
+    readAnswers(page([live, late]));
+    renderScreen();
+
+    await screen.findByText(titleOf(live));
+    fireEvent.click(screen.getByRole("button", { name: EN.contracts.viewBoard }));
+
+    // Exactly the six labels, in the order the filter list decides — so a column can
+    // never be missing a status the enum has, and a chip can never be repurposed as one.
+    const headings = screen.getAllByRole("heading").map((node) => node.textContent ?? "");
+    expect(headings.filter((text) => COLUMN_LABELS.includes(text))).toStrictEqual(COLUMN_LABELS);
+
+    // Placed by the status the API sent: nothing here re-derives one, so the board
+    // cannot file a row somewhere the card behind it would disagree with.
+    expect(within(column(EN.contracts.statuses.active)).getByText(titleOf(live))).toBeDefined();
+    expect(within(column(EN.contracts.statuses.active)).queryByText(titleOf(late))).toBeNull();
+    expect(within(column(EN.contracts.statuses.escalated)).getByText(titleOf(late))).toBeDefined();
+
+    // A column nothing falls into says so. A blank column would read as "the filter
+    // hid these rows", which is a different and wrong statement.
+    expect(
+      within(column(EN.contracts.statuses.renewed)).getByText(EN.contracts.boardColumnEmpty),
+    ).toBeDefined();
+  });
+
+  it("prints a count only when the server says the loaded rows are all of them", async () => {
+    const live = row({ id: 7, customer_ref: "ACME-1", status: "active" });
+    const alsoLive = row({ id: 9, customer_ref: "ACME-2", status: "active" });
+    const late = row({ id: 11, customer_ref: "ACME-3", status: "escalated" });
+    const rows = [live, alsoLive, late];
+
+    // A cursor came back, so the server has more: the loaded set is a window.
+    setSession(sessionFor("operator"));
+    readAnswers(page(rows, { next_cursor: 11 }));
+    renderScreen();
+
+    await screen.findByText(titleOf(live));
+    fireEvent.click(screen.getByRole("button", { name: EN.contracts.viewBoard }));
+
+    expect(screen.getByText(say(EN.contracts.boardLoaded, { count: 3 }))).toBeDefined();
+    // No column prints a figure: "2 active" would be read as a fact about the
+    // database when it is a fact about this scroll.
+    for (const label of COLUMN_LABELS) {
+      const header = within(column(label)).getByRole("heading", { name: label });
+      expect(header.parentElement?.textContent).toBe(label);
+    }
+
+    cleanup();
+
+    // The cursor came back `null`: the loaded rows now *are* the matching rows.
+    setSession(sessionFor("operator"));
+    readAnswers(page(rows, { next_cursor: null }));
+    renderScreen();
+
+    await screen.findByText(titleOf(live));
+    fireEvent.click(screen.getByRole("button", { name: EN.contracts.viewBoard }));
+
+    expect(screen.getByText(say(EN.contracts.boardComplete, { count: 3 }))).toBeDefined();
+    const activeHeader = within(column(EN.contracts.statuses.active)).getByRole("heading", {
+      name: EN.contracts.statuses.active,
+    }).parentElement;
+    expect(within(activeHeader as HTMLElement).getByText("2")).toBeDefined();
+    // The empty column stays empty-worded rather than becoming "0" — there is nothing
+    // to count, and a zero invites the reader to look for the missing row.
+    expect(
+      within(column(EN.contracts.statuses.renewed)).getByText(EN.contracts.boardColumnEmpty),
+    ).toBeDefined();
+  });
+
+  it("switches arrangement without asking the server again", async () => {
+    const live = row({ id: 7, customer_ref: "ACME-1", status: "active" });
+    setSession(sessionFor("operator"));
+    const readMock = readAnswers(page([live]));
+    renderScreen();
+
+    await screen.findByText(titleOf(live));
+    // The list stays the default: an operator's first sight of the screen is unchanged.
+    expect(pressed(EN.contracts.viewList)).toBe("true");
+    expect(
+      within(card(live)).getByRole("button", { name: EN.contracts.consentAction }),
+    ).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: EN.contracts.viewBoard }));
+
+    // The same row, arranged: a ticket in a column instead of a card with an editor.
+    expect(within(column(EN.contracts.statuses.active)).getByText(titleOf(live))).toBeDefined();
+    expect(screen.queryByRole("button", { name: EN.contracts.consentAction })).toBeNull();
+    expect(pressed(EN.contracts.viewBoard)).toBe("true");
+    expect(pressed(EN.contracts.viewList)).toBe("false");
+    // A layout is a reading preference over rows already in hand, so it asks nothing.
+    expect(readMock).toHaveBeenCalledTimes(1);
+    // And the chips keep `aria-current`: the toggle owns `aria-pressed` alone, so the
+    // two controls cannot be confused for each other by a reader or by a test.
+    expect(currentChips()).toStrictEqual([EN.contracts.filterAll]);
+
+    fireEvent.click(screen.getByRole("button", { name: EN.contracts.viewList }));
+
+    expect(
+      within(card(live)).getByRole("button", { name: EN.contracts.consentAction }),
+    ).toBeDefined();
+    expect(readMock).toHaveBeenCalledTimes(1);
   });
 });
 

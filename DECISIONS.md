@@ -10877,3 +10877,58 @@ change and a consent edit land in the audit log, which this page does not read, 
 silent about them and a reader could mistake that silence for inactivity. And it groups by the
 reader's zone, so two operators in different zones see the same rows under different day boundaries;
 that is the correct behaviour for an instant and the reason a slot is not treated the same way.
+
+### D10-136 — The contracts list reads as a board, and a column counts only when it is a total
+
+The demo frontend let `/contracts` be read as a list or as a kanban board, and the real screen only
+ever listed. The reason it had not been ported is not the layout — six columns of cards is an
+afternoon — but the number in each column header. This screen paginates with an opaque keyset
+cursor, so at any moment the browser holds an unknown fraction of the matching contracts, and a
+column reading *2* over a loaded window is a statement about the scroll, not about the portfolio. A
+queue that quietly under-reports how much work exists is worse than no queue, and that risk — not
+the markup — is what kept the board unbuilt.
+
+**Decision.** `view` is local component state, and the board is a second arrangement of rows the
+page already holds. Both halves of that sentence were argued. The board issues no read: the same
+`items` are grouped by the `status` the API sent, so switching arrangement cannot change which
+contracts are shown, only where. And `view` is deliberately *not* in the address bar, unlike every
+filter on this screen. A filtered queue is a shareable link — that is why the chips live in the URL
+— while a layout is a reading preference belonging to whoever is reading; the screen's own test file
+already calls it the first screen whose state is entirely its own, and it mounts no
+`next/navigation` double for exactly that reason. Putting the layout in the URL would have been a
+state change no test could see and no other screen imitates.
+
+**The columns cannot go stale.** `BOARD_COLUMNS` is derived from `STATUS_FILTERS` by filtering out
+the `null` entry, so it is the same list of statuses the chips offer, and a status added to the enum
+appears in both places or in neither. A second hand-written list of six columns would have been a
+silent place for a status to disappear from the board while the filter beside it still offered it.
+
+**The count rule, enforced rather than documented.** A column header prints a figure only when
+`hasNextPage` is `false` — the server's own claim, through the cursor, that the loaded set *is* the
+matching set. Until then the sentence above the board says how many are loaded so far and that more
+exist. One flag drives both, so a future change cannot make the header print a partial figure while
+the sentence still admits the window: the two are the same condition read twice, not two claims that
+must be kept in agreement.
+
+**A thin ticket, and the write stays where it was.** A board ticket carries the title, the reference
+and the term, and links to the drill-down. The consent editor stays in the list. A column a sixth of
+the screen wide cannot honestly carry four toggles that write to the server, and a mis-tap there
+revokes or grants contactability for a real customer; the layout that shows more rows is not the
+layout that should accept more risk. `termText()` was extracted so the ticket and the list card
+describe a half-known term identically — two copies of *what do we print when only one end is known*
+is precisely how the two would drift apart on screen.
+
+**What gated it.** Three tests in `page.test.tsx`, 35 in that file, 378 across the frontend suite: a
+contract appears in the column its own `status` names and in no other, with a status nothing is in
+stating `boardColumnEmpty` rather than rendering blank; a column header is its label and nothing
+else while the cursor is non-null, and carries its figure once the cursor is `null`; and toggling
+arrangement leaves the read count at one, with `aria-pressed` on the toggle and `aria-current` still
+on the chips. Lint and typecheck are clean.
+
+**Limits.** The board is a view, not a queue: no drag, no reordering, no assignment, and no column
+is a work list in the sense the escalation queue is. A column's figure appears only at the end of
+the scroll, so on a tenant large enough to page more than once the honest number an operator sees
+most often is the loaded-so-far sentence. Load more appends into columns rather than re-fetching, so
+the board reshapes while it is being read. And at phone width six columns stack into six short
+lists, which is the list view again with more headings — the layout earns its place on a wide screen
+only.

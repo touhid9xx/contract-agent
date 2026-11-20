@@ -8705,6 +8705,34 @@ cover ordering and day grouping, the slot printed verbatim, the not-a-total hint
 escalation's lateness read from the server. The catalogue test earned its keep here: it failed on
 the Bengali entry because its two placeholders were in the other order.
 
+### D10-136 — The contracts list can be read as a board
+
+**Decided, `D10-136`.** `/[locale]/contracts` renders the loaded rows as a list or as six status
+columns, switched locally. The board issues no read — it groups the same `items` by the `status` the
+API sent — and `view` stays out of the URL, because a filtered queue is a shareable link while a
+layout is a reading preference and no other screen here shares one.
+
+**A column counts only when it is a total.** The screen pages with a keyset cursor, so the browser
+usually holds an unknown fraction of the matches. A header prints a figure only when `hasNextPage`
+is `false`; otherwise the sentence above the board says how many are loaded so far. Both come from
+the one flag, so a partial figure and an admission of the window cannot disagree. `BOARD_COLUMNS`
+derives from `STATUS_FILTERS`, so a status cannot appear in the chips and vanish from the board.
+
+**The board shows, the list writes.** A ticket carries the title, reference and term and links to
+the drill-down; the four-flag consent editor stays in the list, because a sixth-of-screen column is
+the wrong place to accept a write that changes whether a customer is contacted. `termText()` is
+shared by ticket and card so a half-known term reads the same in both.
+
+**The README said this did not exist.** Its phase paragraph listed P2-I's timeline and kanban views
+as having no code; the timeline landed in `D10-135` and the board lands here, so the sentence is
+amended in this slice rather than left to contradict the running app. It is amended, not struck, for
+the same reason the `Phase 2 has not started` clause above it was.
+
+**What gated it.** Three new tests in `contracts/page.test.tsx` (35 in the file, 378 across the
+frontend suite): a row lands in the column its own status names and nowhere else with an empty
+column saying so; a header is bare while the cursor is non-null and carries a figure when it is
+`null`; and switching arrangement does not ask the server again.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.
