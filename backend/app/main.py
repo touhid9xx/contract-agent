@@ -24,6 +24,7 @@ from app.api.v1.agent import router as agent_router
 from app.api.v1.attention import router as attention_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.contracts import router as contracts_router
+from app.api.v1.dashboard import router as dashboard_router
 from app.api.v1.escalations import router as escalations_router
 from app.api.v1.health import router as health_router
 from app.api.v1.inbound import router as inbound_router
@@ -195,6 +196,7 @@ def create_app(
     app.include_router(notifications_router, prefix=app_settings.api_v1_prefix)
     app.include_router(escalations_router, prefix=app_settings.api_v1_prefix)
     app.include_router(attention_router, prefix=app_settings.api_v1_prefix)
+    app.include_router(dashboard_router, prefix=app_settings.api_v1_prefix)
     # The only route with no principal: a customer answering a text has no account to
     # authenticate with, so it authenticates the *relay* instead. Mounted inside the
     # versioned prefix anyway, because it is our API surface even though its caller is

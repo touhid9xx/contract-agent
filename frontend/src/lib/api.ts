@@ -1232,6 +1232,68 @@ export const attention = {
 };
 
 /**
+ * One organisation's portfolio totals, `GET /api/v1/dashboard`.
+ *
+ * Every number here is a server-side `COUNT` over the tenant's own rows, and that
+ * is the whole point of the route. The listing endpoint's `count` is the length of
+ * the page it just returned, so a headline built from it would shrink as the cursor
+ * walked and would read `0` for a tenant holding a thousand contracts. `D10-136`
+ * drew the line: a figure may print as a total only when the server counted rows,
+ * not when the client counted what it happened to have loaded.
+ *
+ * `contracts_by_status` is zero-filled from the server's enum, so a lifecycle state
+ * nothing is in reads `0` rather than vanishing — a breakdown that hid empty states
+ * could not answer "has anything reached renewal?".
+ *
+ * `today` and `window_end` come back on the wire because the window is a server
+ * decision: the contracts table carries a per-contract timezone a `COUNT` cannot
+ * resolve, so the route counts calendar days in UTC and says which days those were.
+ * A client that computed its own window would label the count with a different one.
+ */
+export interface DashboardView {
+  /** The UTC calendar day the counts were taken on, `YYYY-MM-DD`. */
+  today: string;
+  /** Last day of the expiring window, inclusive, `YYYY-MM-DD`. */
+  window_end: string;
+  /** Every contract the tenant holds, whatever its state. */
+  contracts_total: number;
+  /** Zero-filled: every member of `ContractStatus` appears, absent ones as `0`. */
+  contracts_by_status: Record<ContractStatus, number>;
+  /** Contracts ending inside `[today, window_end]` whose lapse is still nobody's outcome. */
+  contracts_expiring: number;
+  /** Extracted fields awaiting a human decision — the review queue's own total. */
+  fields_awaiting_review: number;
+  /**
+   * Escalations opened and not yet resolved. **`escalations_overdue` is a subset of
+   * this number, never a peer of it** — the two are not added anywhere, because a
+   * late escalation is still an open one and summing them would count it twice.
+   */
+  escalations_open: number;
+  /** The subset of `escalations_open` past its SLA deadline. */
+  escalations_overdue: number;
+  /**
+   * A bounded, newest-first slice of the tenant's contracts — the rows *returned*,
+   * not a total. Printing `recent_contracts.length` as an activity figure would be
+   * the page-length mistake this route exists to end.
+   */
+  recent_contracts: ContractListItem[];
+}
+
+/**
+ * The tenant's portfolio dashboard — one read, readable by every role.
+ *
+ * No role gate, unlike the attention board: the payload is counts and rows the
+ * caller can already list from screens they can already open, so restricting it
+ * would hide the portfolio from the operators who work it.
+ *
+ * Read-only and idempotent: no body, no query parameter, and no tenant anywhere in
+ * the request. An empty portfolio is a `200` with every count zero.
+ */
+export const dashboard = {
+  read: (accessToken: string) => request<DashboardView>("/dashboard", { accessToken }),
+};
+
+/**
  * Liveness probe.
  *
  * Built on `fetch` directly rather than on {@link request} because `/health`

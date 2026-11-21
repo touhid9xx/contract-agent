@@ -10932,3 +10932,71 @@ most often is the loaded-so-far sentence. Load more appends into columns rather 
 the board reshapes while it is being read. And at phone width six columns stack into six short
 lists, which is the list view again with more headings — the layout earns its place on a wide screen
 only.
+
+### D10-137 — The dashboard is a counted route, because a page length is not a total
+
+The demo frontend's home screen was a dashboard: four headline cells and three panels over the
+portfolio. Only the headline was ever specified as a total — *active contracts*, *expiring within 30
+days*, *awaiting review*, *escalated* — and those four numbers are the whole reason the screen
+exists. The screen itself was cheap. Building it was not, and the reason is a fact about the API
+rather than about markup.
+
+**What the routes could actually say.** Only one of the four headline cells had a tenant total
+behind it. `attention.py` returns four counts that really are totals, and `escalations.py` documents
+its own `count` as *the count a dashboard headline needs*. Every other `count` on the wire is a page
+length and says so: `contracts.py` returns `len(items)`, and `review.py` states it is *how many
+items this page carries, not how many the queue holds*. Composing the dashboard from those routes
+would have printed a scroll position in the position reserved for a portfolio total — the same trap
+`D10-136` refused for a board column, in a louder place, since a headline is read as a fact about
+the business rather than as a fact about the viewport. So this is a backend slice that happens to
+have a screen, not a screen that needed three reads.
+
+**Decision.** One route: `GET /api/v1/dashboard`, tenant-scoped from the principal, read-only, in
+`dashboard.py` beside `attention.py`. That neighbour is the pattern rather than an accident — a
+read-only composition of repository counts, tenant taken only from the verified token, no query
+parameter that could name another organisation. Three repository counters do the arithmetic in SQL
+against existing indexes: `count_by_status` (zero-filled from the enum, so a lifecycle state nobody
+is in reads `0` rather than vanishing from the screen), `count_expiring(start, end)` (restricted to
+the statuses where a lapse is still nobody's recorded outcome), and a review-queue count narrowed to
+the same predicate the queue itself filters on — deliberately **not** narrowed to live contracts,
+because a pending field on an expired contract is still work somebody was asked to decide, and
+hiding it would leave the review queue holding items the dashboard denied.
+
+**Overdue is a subset, and the screen cannot print it as a peer.** `escalations_overdue` is
+escalations that are open *and* past their SLA deadline, so `overdue ⊆ open`. Two figures side by
+side invite addition, and adding them counts a late escalation twice — once as open, once as late.
+The route returns both, and the screen prints one sentence: *“{overdue} of these {open} are past
+their SLA deadline. A subset, not an addition.”* The number is never rendered alone, so there is no
+figure on the page a reader could sum with its neighbour.
+
+**The window travels with the count.** `today` and `window_end` are in the payload as UTC calendar
+dates, and the expiring panel prints them beside the figure. The contracts table carries a
+per-contract timezone, which a `COUNT` cannot resolve — SQL has the row, not the zone rules — so the
+route answers the weaker question (*this many end inside these UTC days*) and says which days. A
+count that hides which window it used is the same defect as a count that hides that it is partial.
+
+**Two demo panels were left out rather than approximated.** The reminder-windows bucket and the
+channel mix need an aggregate no reader in this codebase produces in any form:
+`pending_overdue_counts` is deliberately unscoped with a standing note explaining why there is no
+tenant twin, and the extraction-queue count exists *to be put on a gauge, not shown to a tenant*. A
+panel built by summing a page would have been the invented total this slice exists to avoid, so the
+panels are absent. Adding one is a reader in the planner's vocabulary, not a second query.
+
+**What gated it.** Twelve backend tests in `test_dashboard.py` — the load-bearing ones pin that the
+total is every contract while the recent panel is one page (a route returning `len(recent)` would
+pass a naive test), that each excluded expiring contract is excluded for its own reason and both
+window boundaries are inclusive, that three open with one late reads `3` open and `1` late and never
+`4`, that a tenant with nothing reads zero everywhere beside a busy neighbour, and that
+`?tenant_id=` is ignored. Twelve frontend tests in `dashboard/page.test.tsx`, 390 across the
+frontend suite: the subset sentence never prints the two numbers as peers, the recent panel labels
+its own length as rows returned while the headline is the server's total, an unreached lifecycle
+state reads `0`, and an unreachable API says *offline* rather than *failed*. Lint and typecheck are
+clean.
+
+**Limits.** The expiring window is UTC, not the customer's local calendar, so a contract ending on
+the boundary day in a far-east zone is counted a day early or late — the route says which window it
+used rather than pretending to a per-contract answer. The recent list is a bounded window, and the
+screen says so in words. There is no caching: each visit runs four `COUNT`s, which is cheap at demo
+scale and would need a materialised view before it were free on a tenant with a million rows. And
+the dashboard is a read, not a live view — it is as stale as the moment it was fetched until the
+screen is reloaded.

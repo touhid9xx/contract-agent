@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 /**
- * The home screen — the ninth screen under test, and the last one that had none.
+ * The home screen — the ninth screen under test, and at the time the last of the
+ * original eight to have none (the portfolio screen under `[locale]/dashboard`
+ * later became the tenth).
  *
  * The eight before it each pinned the seam a screen is judged by: `login` that a
  * session can be obtained, `review` that a queue can be worked, `escalations`
@@ -28,7 +30,10 @@
  *     links from a visitor would leave them no way to learn the screens exist,
  *     and each screen asks for a session itself. The `users` link is not
  *     role-gated for the same reason: the screen says for itself that only an
- *     admin may use it.
+ *     admin may use it. The `dashboard` link leads the row even though the screen
+ *     reads tenant data: it is the only one that answers a portfolio question
+ *     without the reader knowing which queue to open, and it is not role-gated
+ *     server-side either, so a visitor who follows it is refused by nothing.
  *   * **the locale switcher is a page load, not a route push** — the locale
  *     segment has to be re-resolved by the server — and it rewrites only the
  *     first segment, so a link to a screen survives the switch.
@@ -267,10 +272,13 @@ describe("the account card when signed out", () => {
     await screen.findByText(EN.home.signedOut);
 
     // Shown to a visitor on purpose: each screen asks for a session itself, and
-    // hiding the links would leave no way to learn they exist. `contracts` leads
+    // hiding the links would leave no way to learn they exist. `dashboard` leads
+    // because it is the only screen that answers "how much is about to lapse?"
+    // without the reader already knowing which queue to open; `contracts` follows
     // because every per-contract route takes an id only it can produce.
     expect(hrefs()).toEqual([
       "/en/login",
+      "/en/dashboard",
       "/en/contracts",
       "/en/review",
       "/en/agent",

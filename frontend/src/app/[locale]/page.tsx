@@ -130,16 +130,27 @@ export default function HomePage() {
           <p className="text-sm text-muted-foreground">{t("home.body")}</p>
 
           {/*
-            The screens that do work rather than report it are linked from here
-            instead of being reachable only by URL. Shown whether or not there is
-            a session: each asks for one itself, and hiding the links would leave
-            a signed-out visitor no way to learn they exist.
+            The screens this organisation works in are linked from here instead of
+            being reachable only by URL. Shown whether or not there is a session:
+            each asks for one itself, and hiding the links would leave a signed-out
+            visitor no way to learn they exist.
 
-            `contracts` leads because it is the one screen every other per-contract
-            route depends on: they all take a contract id, and until this listing
-            existed the only place to get one was an ingest response.
+            `dashboard` leads because it is the only screen that answers "how much
+            does this organisation hold, and how much of it is about to lapse?"
+            without asking the reader to already know which queue to open. It is
+            read-only, and every figure it prints links out to the screen that owns
+            the work behind it.
+
+            `contracts` follows because it is the one screen every other
+            per-contract route depends on: they all take a contract id, and until
+            this listing existed the only place to get one was an ingest response.
           */}
           <div className="flex flex-wrap items-center gap-2">
+            <Link href={`/${locale}/dashboard`}>
+              <Button size="sm" variant="secondary">
+                {t("nav.dashboard")}
+              </Button>
+            </Link>
             <Link href={`/${locale}/contracts`}>
               <Button size="sm" variant="secondary">
                 {t("nav.contracts")}

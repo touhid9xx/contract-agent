@@ -1,0 +1,197 @@
+"""The portfolio dashboard: one organisation's own totals, counted by the server.
+
+Until this route, no screen in the product could answer "how much of my portfolio
+is about to lapse". Every read that looked like it might was a **page**: the
+contracts listing returned ``count = len(items)``, the review queue said so in as
+many words, and the notifications count is the size of the response. A screen
+built from those would have printed "12 contracts" and meant "12 rows", and the
+first person to notice would be the one whose portfolio is nine thousand.
+
+So the numbers here are ``COUNT``\\ s over the same predicates the queue routes
+filter on, not the lengths of pages — and where a page is shown anyway
+(``recent_contracts``) it is labelled as recent activity rather than offered as a
+total. That distinction is the whole reason this module exists; the frontend could
+not have fixed it with better wording, because a page length is not a wrong label,
+it is a different quantity.
+
+**What is deliberately absent.** The demo dashboard also drew a reminder-windows
+panel (contracts bucketed by days-to-expiry) and a channel mix. Both need an
+aggregate no reader produces — bucketing by milestone day would be a new query in
+the reminder planner's vocabulary, and the channel mix needs notification rows
+grouped by channel over a window. Neither is here. A panel is better missing than
+approximated from a page, and :data:`DEFAULT_EXPIRING_WINDOW_DAYS` below gives the
+one number a reader actually acts on (how many terms end this month).
+
+**Admin, operator and viewer.** Unlike :mod:`app.api.v1.attention`, nothing here
+is a list of primary keys or a statement about encryption hygiene — every field is
+a count of rows the caller can already open from a screen they have. The narrowest
+role that can act on the answer is therefore not the only role that may see it, and
+a viewer who cannot act is still a viewer who should know the portfolio is not on
+fire.
+
+**Which day it is.** ``today`` and ``window_end`` are **UTC calendar dates**, and
+they are returned in the response rather than left implicit. The contracts table
+carries a per-contract ``timezone`` column, and the expiry sweep resolves the
+customer's own day per contract before deciding anything (D2-01) — a ``COUNT``
+cannot do that, so this route answers the weaker question and says so. Stating the
+window it used is what makes the number checkable: a caller near midnight in Dhaka
+sees a window that starts on the previous UTC day rather than a number that
+disagrees with nothing they can see.
+
+**What this route cannot leak.** It takes no tenant from the request: not a query
+parameter, not a body field, not a header. ``principal.tenant_id`` comes from the
+bearer token and a database read in :func:`~app.api.deps.get_current_principal`,
+and every repository below is constructed with it, so the only organisation a
+caller can ask about is the one they authenticated as.
+"""
+
+from __future__ import annotations
+
+from datetime import date, timedelta
+
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from app.api.deps import get_request_session, require_roles
+from app.api.v1.contracts import ContractListItem, list_item
+from app.core.principal import Principal
+from app.db.base import utc_now
+from app.db.enums import ContractStatus, UserRole
+from app.db.repositories.contracts import ContractRepository
+from app.db.repositories.escalations import (
+    EscalationRepository,
+    overdue_escalation_count_for_tenant,
+)
+from app.db.repositories.fields import ExtractedFieldRepository
+
+router = APIRouter(prefix="/dashboard", tags=["dashboard"])
+
+#: How far ahead "expiring" looks. Thirty days is the horizon the spec's reminder
+#: ladder is built around, and the demo dashboard's headline used the same figure;
+#: it is a module constant rather than a setting because a deployment that changed
+#: it would change what a number on a screen means without changing its label.
+DEFAULT_EXPIRING_WINDOW_DAYS = 30
+
+#: How many recently ingested contracts the activity panel gets. Bounded here for
+#: the reason every other listing is bounded at its query: a dashboard is a glance,
+#: and a caller cannot ask this route for a tenant's whole contract table.
+RECENT_CONTRACT_LIMIT = 5
+
+
+class DashboardView(BaseModel):
+    """One organisation's portfolio, as it goes on the wire.
+
+    No ``tenant_id`` echo: the caller already knows which organisation they are,
+    and echoing it back invites a client to start trusting a field the server
+    never reads from the client.
+    """
+
+    today: date = Field(
+        description=(
+            "The UTC calendar day this reading was taken. Stated so a caller can "
+            "tell when a stale answer was fetched, and because the expiring window "
+            "below is a range of dates rather than a countdown."
+        ),
+    )
+    window_end: date = Field(
+        description=(
+            "Last day of the expiring window, inclusive: `today` plus the window "
+            "length. A contract whose `end_date` falls on this day counts."
+        ),
+    )
+    contracts_total: int = Field(
+        description=(
+            "Every contract this organisation has, in any state — the sum of "
+            "`contracts_by_status`. A tenant-scoped `COUNT`, not a page length."
+        ),
+    )
+    contracts_by_status: dict[ContractStatus, int] = Field(
+        description=(
+            "One entry per lifecycle state, zero-filled from the enum so a state "
+            "nothing is in is present as `0` rather than missing. Adding up every "
+            "value gives `contracts_total`."
+        ),
+    )
+    contracts_expiring: int = Field(
+        description=(
+            "Contracts whose term ends between `today` and `window_end`, restricted "
+            "to states where a lapse is still nobody's recorded outcome. A "
+            "`responded`, `renewed` or `escalated` contract is not counted, because "
+            "somebody already acted on it."
+        ),
+    )
+    fields_awaiting_review: int = Field(
+        description=(
+            "Extracted fields still in `pending_review` — the backlog the review "
+            "queue works through. Counted with a `COUNT`, because the queue itself "
+            "is paginated and its length is the page size."
+        ),
+    )
+    escalations_open: int = Field(
+        description=(
+            "Escalations nobody has resolved yet, in any of the three open states. "
+            "Includes the overdue ones counted below."
+        ),
+    )
+    escalations_overdue: int = Field(
+        description=(
+            "Open escalations whose SLA deadline has passed. A subset of "
+            "`escalations_open`, never a peer of it — adding the two would count a "
+            "late escalation twice."
+        ),
+    )
+    recent_contracts: list[ContractListItem] = Field(
+        description=(
+            "The most recently ingested contracts, newest first. Recent activity, "
+            "**not** a total: it is one bounded page, and `contracts_total` is the "
+            "number to use for that question."
+        ),
+    )
+
+
+@router.get(
+    "",
+    response_model=DashboardView,
+    summary="Read this tenant's portfolio totals",
+)
+def read_dashboard(
+    principal: Principal = Depends(
+        require_roles(UserRole.ADMIN, UserRole.OPERATOR, UserRole.VIEWER)
+    ),
+    session: Session = Depends(get_request_session),
+) -> DashboardView:
+    """This organisation's counts, plus a handful of recent contracts.
+
+    Read-only and strictly idempotent in the sense that matters: it opens no
+    transaction of its own, writes nothing, takes no lock, and every statement is a
+    ``COUNT`` against an index or a bounded ordered page. Two operators refreshing
+    the screen see the same answer twice rather than perturbing each other.
+
+    An empty portfolio is ``200`` with zeros, not an error — "nothing here yet" is
+    an answer, and the frontend renders it as an empty state rather than as a
+    failure.
+    """
+    now = utc_now()
+    today = now.date()
+    window_end = today + timedelta(days=DEFAULT_EXPIRING_WINDOW_DAYS)
+
+    contracts = ContractRepository(session, tenant_id=principal.tenant_id)
+    fields = ExtractedFieldRepository(session, tenant_id=principal.tenant_id)
+    escalations = EscalationRepository(session, tenant_id=principal.tenant_id)
+
+    by_status = contracts.count_by_status()
+
+    return DashboardView(
+        today=today,
+        window_end=window_end,
+        contracts_total=sum(by_status.values()),
+        contracts_by_status=by_status,
+        contracts_expiring=contracts.count_expiring(start=today, end=window_end),
+        fields_awaiting_review=fields.count_awaiting_review(),
+        escalations_open=escalations.count_open(),
+        escalations_overdue=overdue_escalation_count_for_tenant(
+            session, principal.tenant_id, now=now
+        ),
+        recent_contracts=[list_item(row) for row in contracts.recent(limit=RECENT_CONTRACT_LIMIT)],
+    )

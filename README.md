@@ -13,9 +13,9 @@ and escalation to a human operator.
 > socket. ~~**Phase 2 (P2-A … P2-L) has not started.**~~ **It has: eight of the twelve
 > milestones have landed slices** — P2-A, P2-B, P2-C, P2-D, P2-E, P2-G, P2-I and
 > P2-J — recorded part by part in `STATUS.md`. What has no code at all is P2-F (voice and
-> answering-machine detection), P2-H (the pull-mode contracts API) and P2-I's dashboard;
-> P2-I's timeline and board views landed as `D10-135` and `D10-136`. P2-K and P2-L are
-> specified nowhere but the range in this file, so nothing can be
+> answering-machine detection) and P2-H (the pull-mode contracts API). P2-I is complete:
+> its timeline, board and dashboard landed as `D10-135`, `D10-136` and `D10-137`. P2-K
+> and P2-L are specified nowhere but the range in this file, so nothing can be
 > built against them yet. The struck clause was true when written and became false the
 > commit the first `P2` slice landed, which is why it is struck rather than deleted.
 >

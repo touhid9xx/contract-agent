@@ -140,6 +140,66 @@ class ContractRepository(TenantScopedRepository[Contract]):
         stmt = stmt.order_by(Contract.id.desc()).limit(limit)
         return list(self.session.execute(stmt).scalars())
 
+    def count_by_status(self) -> dict[ContractStatus, int]:
+        """How many of this tenant's contracts sit in each lifecycle state.
+
+        One ``GROUP BY`` rather than six ``COUNT``\\ s, and the result is
+        **zero-filled** from the enum: a status nothing is in comes back as ``0``
+        rather than missing. That matters because the consumer is a board that
+        draws a row per state — an absent key would render as a gap and invite the
+        client to guess, and the guess would be whatever the last screen showed.
+
+        ``ix_contracts_tenant_status`` leads on ``(tenant_id, status)``, so this
+        is an index scan of the tenant's own slice and grouping costs nothing
+        extra. The states are the whole :class:`~app.db.enums.ContractStatus`
+        enum, not a hand-picked subset: a dashboard that omitted ``renewed``
+        would make a tenant's contracts silently stop adding up to their total.
+        """
+        stmt = (
+            select(Contract.status, func.count())
+            .where(Contract.tenant_id == self.tenant_id)
+            .group_by(Contract.status)
+        )
+        counts = dict.fromkeys(ContractStatus, 0)
+        for status, count in self.session.execute(stmt).all():
+            counts[ContractStatus(status)] = int(count)
+        return counts
+
+    def count_expiring(self, *, start: date, end: date) -> int:
+        """How many contracts have a term ending between ``start`` and ``end``.
+
+        Restricted to :data:`EXPIRABLE_CONTRACT_STATUSES`, so ``responded``,
+        ``renewed`` and ``escalated`` rows are excluded: a contract the customer
+        has already answered is not about to lapse in the sense that makes a
+        headline worth reading. ``escalated`` is excluded for the ``D10-20`` reason
+        the tuple already documents.
+
+        ``end_date`` may be ``NULL`` — a contract whose term never arrived — and
+        those rows must not be counted as expiring. ``>= start`` alone would drop
+        them anyway (SQL comparisons against ``NULL`` are unknown, not true), but
+        the ``IS NOT NULL`` is stated so a later rewrite to a ``BETWEEN`` or an
+        ``OR`` cannot quietly pull them in.
+
+        The bounds are **calendar dates, not instants**, and they are resolved by
+        the caller rather than in here. Which day it is depends on the contract's
+        own ``timezone`` column, and a ``COUNT`` cannot evaluate that per row; the
+        expiry sweep does that per contract and is the authority on whether one
+        has *expired*. This answers the weaker question a heading asks — how many
+        terms end in the next month — and the caller passes the window it means.
+        """
+        stmt = (
+            select(func.count())
+            .select_from(Contract)
+            .where(
+                Contract.tenant_id == self.tenant_id,
+                Contract.status.in_(list(EXPIRABLE_CONTRACT_STATUSES)),
+                Contract.end_date.is_not(None),
+                Contract.end_date >= start,
+                Contract.end_date <= end,
+            )
+        )
+        return int(self.session.execute(stmt).scalar_one())
+
     def create(
         self,
         *,

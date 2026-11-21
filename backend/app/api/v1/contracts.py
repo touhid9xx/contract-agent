@@ -301,12 +301,17 @@ class ContractListResponse(BaseModel):
     next_cursor: int | None
 
 
-def _list_item(contract: Contract) -> ContractListItem:
+def list_item(contract: Contract) -> ContractListItem:
     """Serialize one contract for the listing.
 
     ``created_at`` is re-attached to UTC here for the same reason the decision view
     does it: MySQL's ``DATETIME`` discards the offset, so ``as_utc`` is the single
     place the timezone is put back (D2-01).
+
+    Public rather than module-private since ``D10-137``: the dashboard's recent
+    activity panel shows the same row shape, and a second serializer would have
+    been free to disagree with this one about, say, whether ``consent_channels`` is
+    sorted — on a screen where the two appear side by side.
     """
     return ContractListItem(
         id=contract.id,
@@ -365,7 +370,7 @@ def list_contracts(
     repository = ContractRepository(session, principal.tenant_id)
     rows = repository.recent(limit=limit + 1, status=contract_status, after=cursor)
 
-    items = [_list_item(row) for row in rows[:limit]]
+    items = [list_item(row) for row in rows[:limit]]
     return ContractListResponse(
         items=items,
         count=len(items),
@@ -407,7 +412,7 @@ def read_contract(
     contract = ContractRepository(session, principal.tenant_id).get(Contract, contract_id)
     if contract is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Contract not found")
-    return _list_item(contract)
+    return list_item(contract)
 
 
 @router.post(

@@ -156,6 +156,31 @@ class EscalationRepository(TenantScopedRepository[Escalation]):
         stmt = stmt.order_by(Escalation.sla_deadline.asc(), Escalation.id.asc()).limit(limit)
         return list(self.session.execute(stmt).scalars())
 
+    def count_open(self) -> int:
+        """How many escalations on this tenant's queue nobody has resolved yet.
+
+        :meth:`queue` is capped, so ``len(queue(...))`` is the page size and not
+        the backlog — the same distinction :func:`overdue_escalation_count_for_tenant`
+        draws for lateness. A dashboard needs the backlog, because "nine
+        escalations" that silently meant "nine on this page" is a number an
+        operator would act on and be wrong about.
+
+        Same three statuses as :data:`OPEN_ESCALATION_STATUSES`, so this is
+        "unresolved" in exactly the sense :func:`~app.workers.escalation.is_overdue`
+        and the queue route use. ``resolved`` is the only exclusion, and it is the
+        one that matters: a resolved row whose SLA deadline has since passed is
+        history, not work.
+        """
+        stmt = (
+            select(func.count())
+            .select_from(Escalation)
+            .where(
+                Escalation.tenant_id == self.tenant_id,
+                Escalation.status.in_(list(OPEN_ESCALATION_STATUSES)),
+            )
+        )
+        return int(self.session.execute(stmt).scalar_one())
+
     def create(
         self,
         *,

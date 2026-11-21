@@ -3116,7 +3116,7 @@ family-revocation path, and the symptom would look like a backend bug.
 | Three failures, three sentences | Wrong credentials, throttled (`429`) and API-unreachable are different problems with the same visual outcome on a login form. Each gets its own string in both locales instead of one "sign-in failed". |
 | The tenant field is explained | `/auth/login` takes a tenant **slug**, not a display name. The label says so (`auth.tenantHint`), because that is the field a first-time user gets wrong. |
 | Health probe gets its own rewrite | `/health` is unversioned and outside `/api/v1` on purpose, so `/api/:path*` never matched it; `next.config.ts` gained two explicit rules. Worth two lines because "the API is down" and "your password is wrong" are otherwise indistinguishable. |
-| A dangling link removed | `/[locale]` linked to `/dashboard`, a route that does not exist. It is replaced by the sign-in link rather than pointed at a 404. |
+| A dangling link removed, and later restored | `/[locale]` linked to `/dashboard`, a route that did not exist, so it was replaced by the sign-in link rather than pointed at a 404. The route exists as of `D10-137`, so `/[locale]` links to it again, leading the nav row. |
 | Both locales, together | `auth.*`, `home.account*` and `common.email/role/organisation` were added to `en.json` and `bn.json` in the same edit. **Note the guard does not exist:** `i18n/messages.ts` casts `bn` to `typeof en`, and a cast across a narrower object compiles, so a key missing from `bn` falls back at run time rather than failing the build. Keeping the two in step is a convention here, not a check. |
 
 ### Verification actually run (auth UI)
@@ -8732,6 +8732,46 @@ the same reason the `Phase 2 has not started` clause above it was.
 frontend suite): a row lands in the column its own status names and nowhere else with an empty
 column saying so; a header is bare while the cursor is non-null and carries a figure when it is
 `null`; and switching arrangement does not ask the server again.
+
+### D10-137 — The dashboard reads the portfolio from one counted route
+
+**Decided, `D10-137`.** `GET /api/v1/dashboard` returns tenant-scoped `COUNT` aggregates: total
+contracts, a zero-filled per-status breakdown, contracts expiring inside a UTC window, fields
+awaiting review, escalations open and overdue, plus a bounded recent list. It sits beside
+`attention.py` because that route is the same shape — a read-only composition of repository counts,
+tenant taken only from the principal, no parameter that could name another organisation. The screen
+is `/[locale]/dashboard`, readable by every role.
+
+**It is a route because a page length is not a total.** Every other `count` on the wire is the
+length of the page that carried it — `review.py` and `contracts.py` both say so in their own
+docstrings — so a dashboard composed from the existing reads would have printed a scroll position
+where the product promises a portfolio total. That is `D10-136`'s board column in a louder place: a
+headline is read as a fact about the business.
+
+**Overdue is printed as a subset, never as a peer.** `escalations_overdue` is open *and* past
+deadline, so the screen prints one sentence — *{overdue} of these {open} are past their SLA
+deadline* — and never renders the overdue figure alone. Two adjacent figures invite addition, and
+adding them counts a late escalation twice. For the same reason the expiring count carries the UTC
+window it used: a `COUNT` cannot apply a per-contract timezone, so the route says which days it
+counted instead of implying a local calendar.
+
+**Two demo panels are absent, not approximated.** Reminder windows and channel mix need an aggregate
+no reader in this codebase produces; `pending_overdue_counts` is deliberately unscoped with a
+standing note saying why there is no tenant twin. A panel summed from a page would have been the
+invented total the route exists to avoid.
+
+**The README and the old link are corrected.** The phase paragraph listed P2-I's dashboard as having
+no code; it has code now, so the clause is amended and the milestone count stays at eight — P2-I was
+already counted when its timeline and board landed. The auth-UI table row that recorded
+`/[locale]`'s `/dashboard` link being removed as a 404 is amended too: the route exists, so the link
+is back, leading the nav row.
+
+**What gated it.** Twelve tests in `backend/tests/test_dashboard.py` and twelve in
+`frontend/src/app/[locale]/dashboard/page.test.tsx` (390 across the frontend suite, up from 378):
+total-is-every-contract-while-the-panel-is-one-page, inclusive window boundaries, `3` open with `1`
+late and never `4`, a clean tenant beside a busy one, `?tenant_id=` ignored, an unreached lifecycle
+state reading `0`, and an unreachable API saying *offline*. Lint, typecheck and the ledger check are
+clean.
 
 ## Non-negotiable reminders
 

@@ -28,7 +28,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from sqlalchemy import ColumnElement, and_, or_, select
+from sqlalchemy import ColumnElement, and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.blind_index import CONTACT_FIELD_NAMES
@@ -188,6 +188,35 @@ class ExtractedFieldRepository(TenantScopedRepository[ExtractedField]):
             ExtractedField.id.asc(),
         ).limit(limit)
         return [(field, contract) for field, contract in self.session.execute(stmt).all()]
+
+    def count_awaiting_review(self) -> int:
+        """How many of this tenant's fields are still waiting for a person.
+
+        The queue is paginated, so the number of rows it returns is the page
+        length and says nothing about the backlog. A dashboard headline that
+        reused it would report "how many I happened to fetch" as "how many are
+        waiting" — the same class of mistake the contracts board guards against
+        on the frontend (``D10-136``). This is the count that headline needs, and
+        it is a ``COUNT`` over the same predicate the queue filters on, so the two
+        cannot disagree about which rows are waiting.
+
+        ``ix_extracted_fields_tenant_status`` covers ``(tenant_id, status)``, so
+        it is answered from the index without reading a field row.
+
+        Not narrowed to fields whose contract is still live: a pending field on a
+        contract that has since expired is still work somebody has been asked to
+        decide, and hiding it here would leave the queue with items the board
+        denied.
+        """
+        stmt = (
+            select(func.count())
+            .select_from(ExtractedField)
+            .where(
+                ExtractedField.tenant_id == self.tenant_id,
+                ExtractedField.status == FieldStatus.PENDING_REVIEW,
+            )
+        )
+        return int(self.session.execute(stmt).scalar_one())
 
     def for_contract(self, contract_id: int) -> list[ExtractedField]:
         """Every field row of one contract, in no particular order.
