@@ -8773,6 +8773,38 @@ late and never `4`, a clean tenant beside a busy one, `?tenant_id=` ignored, an 
 state reading `0`, and an unreachable API saying *offline*. Lint, typecheck and the ledger check are
 clean.
 
+### D10-138 — The README's two milestone statements now have to agree
+
+**Fixed, `D10-138`.** `README.md`'s `GATE 3` row said *P2-F, P2-H and P2-I's new views none* and
+listed seven landed milestones, while the status paragraph at the top of the same file said eight
+had landed and P2-I was complete. `D10-137` amended the paragraph and not the row. The row now reads
+P2-A, -B, -C, -D, -E, -G, -I, -J landed; P2-F and P2-H have no code at all; P2-K/-L unspecified —
+the same accounting as the paragraph.
+
+**How it got through.** `test_readme.py` (`D10-121`) exists to catch the front door going false, and
+it reads two claims: the job count and the migration head. Both are statements with no second copy
+in the tree. The milestone position is the one claim the README makes twice, and the file reads the
+README only as the claim under test, so the single duplicated sentence was outside the single guard
+built for duplication.
+
+**The guard.** Two tests in `backend/tests/test_readme.py`, derived from `README.md` alone: the
+prose count matches the list beside it and the total matches the declared range; and the two
+statements name the same landed and unbuilt milestones, with the landed, unbuilt and unspecified
+sets disjoint and covering `P2-A … P2-L` between them. The partition is what makes it hold across
+slices — a milestone cannot move state in one statement and not the other, and a new one cannot
+appear unaccounted for.
+
+**It proves agreement, not truth, and says so.** Deciding which milestones genuinely have code would
+put the Phase-2 specification in a test, which is the duplication the file exists to avoid. So the
+test cannot tell that `P2-F` has no code; it can tell that the README does not contradict itself
+about it. The distinction is in the test's docstring, because a guard that reads wider than it is
+invites trust it has not earned.
+
+**What gated it.** `.agent-cache/teeth_d138.py`: the pre-fix row is put back and the agreement test
+fails; the prose count moves from eight to nine and the count test fails; a green control follows,
+and the restored `README.md` hashes to the SHA-256 the run started from.
+`pytest backend/tests/test_readme.py` — four passed. The ledger check is clean.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

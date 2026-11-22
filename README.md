@@ -111,7 +111,7 @@ that matters.
 | --- | --- | --- |
 | 0 | Interactive mocked demo — every screen, all states, one command | **GATE 1** — ✅ approved |
 | 1 | Real foundation F1–F10 (infra, DB/outbox, auth, bus, observability, review, decisions, dispatch, PII encryption) | **GATE 2** — ✅ signed (`5c3e077`) |
-| 2 | P2-A … P2-L features, one milestone per commit, human picks the order | **GATE 3** — in progress: P2-A, -B, -C, -D, -E, -G, -J have landed slices; P2-F, P2-H and P2-I's new views none; P2-K/-L unspecified (see `STATUS.md`) |
+| 2 | P2-A … P2-L features, one milestone per commit, human picks the order | **GATE 3** — in progress: P2-A, -B, -C, -D, -E, -G, -I, -J have landed slices; P2-F and P2-H have no code at all; P2-K/-L unspecified (see `STATUS.md`) |
 
 Rules that are not negotiable anywhere in this repo:
 

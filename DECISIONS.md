@@ -11000,3 +11000,52 @@ screen says so in words. There is no caching: each visit runs four `COUNT`s, whi
 scale and would need a materialised view before it were free on a tenant with a million rows. And
 the dashboard is a read, not a live view — it is as stale as the moment it was fetched until the
 screen is reloaded.
+
+### D10-138 — A claim stated twice is a claim that can contradict itself
+
+`D10-137` amended `README.md`'s phase paragraph: P2-I's dashboard had no code when the paragraph was
+written and has code now. The edit landed. The README's other statement of the same fact did not:
+the `GATE 3` row of the delivery table still read *P2-F, P2-H and P2-I's new views none*, and still
+listed seven landed milestones beside a paragraph claiming eight. For one commit the front door said
+P2-I had shipped and that it had not. No check failed, because no check looked.
+
+**Why nothing failed.** `D10-121` added `test_readme.py` for exactly this class of rot — a
+present-tense claim in the front door that had quietly gone false — and it checks two of them: the
+job count against `ci.yml`'s own `jobs:` block, and the migration head against Alembic's script
+directory. Both are single statements checked against the tree. The milestone position is the one
+claim the README makes *twice*, and the file's whole design is anti-duplication: it reads the README
+only as the claim under test. So the one sentence with a copy in the tree sat outside the one guard
+built for copies in the tree.
+
+**Decision.** Two tests, both derived from `README.md` alone. The first checks the prose counts what
+it lists — *eight* against the eight ids beside it, and *twelve* against the range the table
+declares. The second checks the two statements agree: the same landed set, the same unbuilt set, no
+id in both, and — the strongest part — that the three states the row sorts milestones into (landed,
+no code, unspecified) are disjoint and together cover every id in the declared range. That last
+invariant is what makes the test survive contact with the next slice: a milestone cannot be added to
+one list without being subtracted from another, and a new one cannot arrive unaccounted for.
+
+**Why the range and not the tree.** Deciding which milestones genuinely have code would mean
+encoding the Phase-2 specification into a test, which is the duplication this file exists to avoid,
+and a spec that might itself be wrong. Partitioning the range is the strongest invariant available
+without that second truth source. It cannot tell a reader that `P2-F` has no code; it can tell them
+the README does not contradict itself about `P2-F`, which is the failure that actually occurred and
+the only one this file is entitled to catch. The distinction is written into the test's docstring
+rather than left for the next reader to rediscover, because a guard that looks wider than it is rots
+in a different way: people trust it.
+
+**What gated it.** `.agent-cache/teeth_d138.py` puts the pre-`D10-138` row back verbatim and
+requires `test_the_readmes_two_milestone_statements_agree` to fail; changes the prose count from
+*eight* to *nine* and requires `test_the_readme_counts_the_milestones_it_lists` to fail; requires a
+green control run with the README restored, and asserts the restored bytes hash to the same SHA-256
+the mutation started from, so a refused mutation cannot leave a corrupted README behind. All four
+conditions held. `test_readme.py` is four tests, all passing.
+
+**Limits.** The tests prove agreement, not truth: a README that says the same wrong thing in both
+places passes, and both copies could be amended together and wrongly — which is still a smaller
+failure than one copy contradicting the other, but it is not coverage of the claim. The parse is
+anchored on the phrases the README actually uses — *have landed slices*, *have no code at all*,
+*unspecified*, *What has no code at all is*, *— recorded* — so rewording any of them fails loudly
+rather than silently checking nothing. That is the deliberate trade for reading prose: the guard
+breaks when the prose is rewritten, and somebody has to re-read it. And it reads one row and one
+paragraph: a milestone claim added anywhere else in the README is outside it.

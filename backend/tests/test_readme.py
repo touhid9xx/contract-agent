@@ -1,4 +1,4 @@
-"""The two facts `README.md` states about the tree, checked against the tree.
+"""The facts `README.md` states about the tree, and the two copies of one of them.
 
 `README.md` is the front door, and until this file it was the one document in the
 repository that nothing read. Two of its present-tense claims had gone false: it said
@@ -17,14 +17,29 @@ So nothing is re-counted here and nothing is written down twice. The job count c
 from `ci.yml`'s own `jobs:` block and the revision comes from Alembic's script directory;
 the README is only the claim under test.
 
-**What this does not cover, stated rather than implied.** It checks the *count* of jobs
-and the *head revision*, not the words around them. A job could be renamed, or split in
-two and another merged into it, and the count stay nine with the README describing the
-old shape. Catching that would mean writing all nine job ids into the README — the
-duplication this file exists to avoid — so it is left uncaught rather than paid for. The
-same holds for every other claim in the README: that one command brings the stack up, that
-`P2-F` has no code, that every screen has a spec. `screens.test.ts` checks the last of
-those independently, and nothing checks the rest.
+**The milestone statement is the exception, and it is a different kind of check.** The
+README says which Phase-2 milestones have code *twice* — as prose in the status block at
+the top, and as the `GATE 3` row of the delivery table — and the two copies had already
+disagreed when the third test here was written. `D10-137` amended the prose to say P2-I's
+dashboard had landed and left the table reading *P2-I's new views none*, so one file said
+both things on one page. Nothing compared them, which is the failure this whole file
+exists for, one copy further in. The test does not decide which copy is right; it proves
+they name the same milestones, and that together with the pair the table calls
+unspecified they partition the range the table itself declares — so a milestone cannot
+land in one statement and not the other, and a new one cannot arrive unaccounted for.
+
+**What this does not cover, stated rather than implied.** Of the two claims checked
+against the tree it reads the *count* of jobs and the *head revision*, not the words
+around them. A job could be renamed, or split in two and another merged into it, and the
+count stay nine with the README describing the old shape. Catching that would mean writing
+all nine job ids into the README — the duplication this file exists to avoid — so it is
+left uncaught rather than paid for. The same holds for every other claim in the README:
+that one command brings the stack up, that `P2-F` has no code, that every screen has a
+spec. `screens.test.ts` checks the last of those independently, and nothing checks the
+rest. The milestone test is the narrowest of the three and must not be read as wider: it
+proves the paragraph and the table *agree about* `P2-F`, not that `P2-F` has no code — the
+tree is never consulted for that, and only a test that could tell would make the claim
+safe to leave unguarded.
 """
 
 from __future__ import annotations
@@ -61,6 +76,29 @@ NUMBER_WORDS = {
 #: keep, and a missing anchor fails loudly rather than silently checking nothing.
 JOBS_CLAIM = re.compile(r"runs \*\*(?P<count>[A-Za-z]+|\d+)\s+jobs\*\*")
 HEAD_CLAIM = re.compile(r"currently at head `(?P<head>\d+)`")
+
+#: The milestone claim, read from both places the README states it. Each anchor is the
+#: smallest phrase a rewording is likely to keep; a missing one fails loudly below rather
+#: than silently checking nothing.
+RANGE_CLAIM = re.compile(r"P2-(?P<first>[A-Z]) … P2-(?P<last>[A-Z])")
+PROSE_LANDED = re.compile(
+    r"(?P<count>[A-Za-z]+|\d+) of the (?P<total>[A-Za-z]+|\d+) milestones have landed "
+    r"slices\*\* — (?P<list>[^—]+?) — recorded"
+)
+PROSE_ABSENT = re.compile(r"What has no code at all is (?P<list>.+?)\.(?:\s|$)")
+
+#: The three states the delivery table's `GATE 3` row sorts milestones into, with the
+#: phrase that introduces each. A milestone is landed, has no code, or is unspecified.
+ROW_STATES = (
+    ("have landed slices", "landed"),
+    ("have no code at all", "no code"),
+    ("unspecified", "unspecified"),
+)
+
+#: A full id (`P2-F`) or the shorthand the table uses after the first one (`-F`), each
+#: optionally carrying a possessive gloss (`P2-I's new views`). The gloss is dropped.
+FULL_ID = re.compile(r"P2-(?P<letter>[A-Z])(?:'s\b.*)?\Z")
+SHORT_ID = re.compile(r"-(?P<letter>[A-Z])(?:'s\b.*)?\Z")
 
 
 def _count_of(word: str) -> int:
@@ -102,6 +140,159 @@ def _migration_head() -> str:
     head = ScriptDirectory.from_config(config).get_current_head()
     assert head is not None, "the migration scripts declare no head at all"
     return head
+
+
+def _unwrapped() -> str:
+    """`README.md` with its blockquote markers folded away, so a claim split across two
+    `>` lines still reads as one sentence."""
+
+    return re.sub(r"\n>\s?", " ", README.read_text(encoding="utf-8"))
+
+
+def _claim(pattern: re.Pattern[str], text: str, shape: str) -> re.Match[str]:
+    """The claim, or a failure naming the shape the README stopped having."""
+
+    claim = pattern.search(text)
+    assert claim is not None, (
+        f"README.md no longer states the milestone position as {shape}. Either keep it "
+        "checkable or delete the test that reads it, because a claim this file cannot "
+        "find is a claim it silently stops checking"
+    )
+    return claim
+
+
+def _milestone_id(token: str) -> str:
+    """`P2-F`, or the table's shorthand `-F`, normalised to a full id."""
+
+    token = token.strip()
+    for pattern in (FULL_ID, SHORT_ID):
+        match = pattern.match(token)
+        if match:
+            return f"P2-{match.group('letter')}"
+    raise AssertionError(
+        f"cannot read {token!r} as a milestone. Write it as `P2-F`, or as the table's short "
+        "`-F`, or extend FULL_ID/SHORT_ID if the naming changes"
+    )
+
+
+def _milestones(listed: str) -> set[str]:
+    """The ids in a comma / `and` / `/` separated list, parenthetical glosses dropped.
+
+    The glosses matter: the prose writes `P2-F (voice and answering-machine detection) and
+    P2-H (...)`, and splitting that on `and` without removing the brackets reads three
+    tokens, one of which is not a milestone.
+    """
+
+    listed = re.sub(r"\([^)]*\)", "", listed).replace(" and ", ", ")
+    tokens = [token.strip() for chunk in listed.split(",") for token in chunk.split("/")]
+    return {_milestone_id(token) for token in tokens if token}
+
+
+def _table_milestones(text: str) -> dict[str, set[str]]:
+    """The three states the delivery table's `GATE 3` row sorts milestones into."""
+
+    row = next(
+        (line for line in text.splitlines() if "GATE 3" in line and "in progress" in line),
+        None,
+    )
+    assert row is not None, (
+        "README.md no longer has a `GATE 3` row saying it is in progress. Either keep the "
+        "row checkable — `**GATE 3** — in progress: ...` — or delete this test with it"
+    )
+
+    found: dict[str, set[str]] = {}
+    for segment in row.split(";"):
+        # Everything before `in progress:` is the phase cell, and it carries the range
+        # (`P2-A … P2-L`) — an id list that is not a statement about any milestone.
+        segment = segment.split("in progress:", 1)[-1]
+        for phrase, state in ROW_STATES:
+            if phrase in segment:
+                found[state] = _milestones(segment.split(phrase, 1)[0])
+
+    assert set(found) == {state for _, state in ROW_STATES}, (
+        f"parsed {sorted(found)} out of the `GATE 3` row. It must name all three states — "
+        "landed, no code, unspecified — or the comparison below is vacuous"
+    )
+    return found
+
+
+def _declared_range(text: str) -> set[str]:
+    """Every milestone the table's own `P2-A … P2-L` range covers."""
+
+    claim = _claim(RANGE_CLAIM, text, "`P2-A … P2-L`")
+    first, last = ord(claim.group("first")), ord(claim.group("last"))
+    assert first <= last, f"the declared range runs backwards: {claim.group(0)!r}"
+    return {f"P2-{chr(code)}" for code in range(first, last + 1)}
+
+
+def test_the_readme_counts_the_milestones_it_lists() -> None:
+    """`eight of the twelve` must be a count of the list beside it, not a memory of one."""
+
+    text = _unwrapped()
+    claim = _claim(
+        PROSE_LANDED, text, "`N of the M milestones have landed slices** — … — recorded`"
+    )
+    landed = _milestones(claim.group("list"))
+    declared = _declared_range(text)
+
+    assert _count_of(claim.group("count")) == len(landed), (
+        f"README.md says {claim.group('count')} milestones have landed and then lists "
+        f"{len(landed)} — {', '.join(sorted(landed))}. Update the word to match the list "
+        "beside it, or the number is what the next reader trusts and the next slice outdates"
+    )
+    assert _count_of(claim.group("total")) == len(declared), (
+        f"README.md says there are {claim.group('total')} milestones; the range it declares "
+        f"covers {len(declared)} — {', '.join(sorted(declared))}. Widen the range, or fix "
+        "the word"
+    )
+
+
+def test_the_readmes_two_milestone_statements_agree() -> None:
+    """`D10-137` amended the prose and left the table saying P2-I's views had no code.
+
+    The two statements are eight hundred lines apart and nothing compared them, which is
+    how one README came to say that P2-I had shipped and that it had not. This test is
+    about agreement, not about truth: it cannot tell whether `P2-F` has code, only that
+    both statements believe the same thing about it.
+    """
+
+    text = _unwrapped()
+    claim = _claim(
+        PROSE_LANDED, text, "`N of the M milestones have landed slices** — … — recorded`"
+    )
+    absent = _claim(PROSE_ABSENT, text, "`What has no code at all is …`")
+    table = _table_milestones(text)
+    declared = _declared_range(text)
+
+    landed = _milestones(claim.group("list"))
+    unbuilt = _milestones(absent.group("list"))
+
+    assert landed == table["landed"], (
+        f"the status paragraph says {', '.join(sorted(landed))} have landed; the `GATE 3` "
+        f"row says {', '.join(sorted(table['landed']))}. Both are in this file, so one of "
+        "them is a claim the reader will trust and the other is a contradiction"
+    )
+    assert unbuilt == table["no code"], (
+        f"the status paragraph says {', '.join(sorted(unbuilt))} have no code; the `GATE 3` "
+        f"row says {', '.join(sorted(table['no code']))}"
+    )
+
+    overlap = table["landed"] & table["no code"]
+    assert not overlap, (
+        f"{', '.join(sorted(overlap))} is called both landed and unbuilt by the same row"
+    )
+
+    accounted = table["landed"] | table["no code"] | table["unspecified"]
+    missing, extra = declared - accounted, accounted - declared
+    assert not missing, (
+        f"the range says {', '.join(sorted(declared))}; the `GATE 3` row accounts for "
+        f"{', '.join(sorted(accounted))} and never mentions {', '.join(sorted(missing))}. "
+        "Every milestone in the range is landed, unbuilt, or unspecified — pick one"
+    )
+    assert not extra, (
+        f"the `GATE 3` row names {', '.join(sorted(extra))}, which is outside the range the "
+        "table itself declares. Widen the range, or drop the milestone from the row"
+    )
 
 
 def test_the_readme_counts_the_jobs_the_workflow_defines() -> None:
