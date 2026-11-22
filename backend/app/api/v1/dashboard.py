@@ -14,13 +14,23 @@ total. That distinction is the whole reason this module exists; the frontend cou
 not have fixed it with better wording, because a page length is not a wrong label,
 it is a different quantity.
 
-**What is deliberately absent.** The demo dashboard also drew a reminder-windows
-panel (contracts bucketed by days-to-expiry) and a channel mix. Both need an
-aggregate no reader produces — bucketing by milestone day would be a new query in
-the reminder planner's vocabulary, and the channel mix needs notification rows
-grouped by channel over a window. Neither is here. A panel is better missing than
-approximated from a page, and :data:`DEFAULT_EXPIRING_WINDOW_DAYS` below gives the
-one number a reader actually acts on (how many terms end this month).
+**The reminder windows are the planner's own ladder, not a second one.** The demo
+dashboard drew a panel of contracts bucketed by days-to-expiry, and the first
+version of this route left it out: bucketing by milestone day was a query nothing
+in the codebase made, and a band drawn from numbers invented here could have
+disagreed with the cadence the planner actually schedules on. The panel is served
+now because the bands are **derived from**
+:data:`~app.workers.dispatch.DEFAULT_MILESTONE_DAYS` rather than restated — the
+same tuple :func:`~app.workers.dispatch.milestone_for` picks a reminder from — so a
+change to the cadence moves the panel with it. Each band counts the contracts whose
+:func:`milestone_for` answer *today* is that milestone; the bands abut, so a
+contract appears in exactly one, and together they cover ``today`` through the
+loosest milestone.
+
+**What is still absent.** The channel mix needs notification rows grouped by
+channel over a window, which is an aggregate no reader produces and no tuple in
+this codebase defines. It is left out rather than approximated: a panel built by
+summing a page would be the invented total this module exists to avoid.
 
 **Admin, operator and viewer.** Unlike :mod:`app.api.v1.attention`, nothing here
 is a list of primary keys or a statement about encryption hygiene — every field is
@@ -64,6 +74,7 @@ from app.db.repositories.escalations import (
     overdue_escalation_count_for_tenant,
 )
 from app.db.repositories.fields import ExtractedFieldRepository
+from app.workers.dispatch import DEFAULT_MILESTONE_DAYS
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -77,6 +88,74 @@ DEFAULT_EXPIRING_WINDOW_DAYS = 30
 #: the reason every other listing is bounded at its query: a dashboard is a glance,
 #: and a caller cannot ask this route for a tenant's whole contract table.
 RECENT_CONTRACT_LIMIT = 5
+
+
+def reminder_window_bands(*, today: date) -> list[tuple[str, int, date, date]]:
+    """The planner's milestone ladder as calendar bands, loosest first.
+
+    One tuple per milestone: ``(name, days, start, end)``. The bands **abut and do
+    not overlap** — the next-tighter milestone's day count plus one is this band's
+    first day — so a contract whose term ends inside the ladder belongs to exactly
+    one band. That is the property that makes the panel's numbers safe to read
+    together and the reason the boundaries are computed here rather than written
+    down as three literal ranges: a fourth rung added to
+    :data:`~app.workers.dispatch.DEFAULT_MILESTONE_DAYS` shifts its neighbours
+    instead of silently creating a gap or a double count.
+
+    The tightest band starts at ``today``, so a term that has already passed its
+    end date is in no band. Those rows are the expiry sweep's business, and
+    counting them as "due a T-14 reminder" would offer a reminder nobody can send.
+    """
+    bands: list[tuple[str, int, date, date]] = []
+    for index, (milestone, days) in enumerate(DEFAULT_MILESTONE_DAYS):
+        tighter = (
+            DEFAULT_MILESTONE_DAYS[index + 1][1] if index + 1 < len(DEFAULT_MILESTONE_DAYS) else -1
+        )
+        start = today + timedelta(days=tighter + 1)
+        bands.append((milestone, days, start, today + timedelta(days=days)))
+    return bands
+
+
+class ReminderWindow(BaseModel):
+    """One rung of the reminder ladder, and how many contracts fall in it.
+
+    The days travel with the count for the same reason the expiring window does: a
+    name like ``T-60`` is the planner's vocabulary, and a reader who does not know
+    what it means would otherwise be looking at a label with no date behind it.
+    """
+
+    milestone: str = Field(
+        description=(
+            "The milestone's name, exactly as the dispatch policy writes it "
+            "(`T-60`, `T-30`, `T-14`). Not a display string."
+        ),
+    )
+    days: int = Field(
+        description=(
+            "Days before the term ends that this milestone falls due — the figure "
+            "in the name, kept apart from it so a client never parses a label."
+        ),
+    )
+    start: date = Field(
+        description=(
+            "First day counted, inclusive, as a UTC calendar date. The day after "
+            "the next-tighter milestone's window closes."
+        ),
+    )
+    end: date = Field(
+        description=(
+            "Last day counted, inclusive: `today` plus `days`, which is the day "
+            "this milestone comes due for the term that ends there."
+        ),
+    )
+    contracts: int = Field(
+        description=(
+            "Contracts whose term ends inside `[start, end]`, restricted to the "
+            "states the planner would still remind — the same predicate as "
+            "`contracts_expiring`. A contract in this band is one whose reminder "
+            "for `milestone` is due today."
+        ),
+    )
 
 
 class DashboardView(BaseModel):
@@ -141,6 +220,14 @@ class DashboardView(BaseModel):
             "late escalation twice."
         ),
     )
+    reminder_windows: list[ReminderWindow] = Field(
+        description=(
+            "The reminder ladder, one entry per milestone, loosest first. Together "
+            "the bands are a partition of the terms ending between `today` and the "
+            "loosest milestone, so adding up `contracts` counts no contract twice — "
+            "unlike `escalations_overdue`, whose subset relationship forbids summing."
+        ),
+    )
     recent_contracts: list[ContractListItem] = Field(
         description=(
             "The most recently ingested contracts, newest first. Recent activity, "
@@ -193,5 +280,20 @@ def read_dashboard(
         escalations_overdue=overdue_escalation_count_for_tenant(
             session, principal.tenant_id, now=now
         ),
+        # One COUNT per band rather than one statement with CASE arithmetic. Each is a
+        # range over the tenant's own status slice — `ix_contracts_tenant_status` leads
+        # on `(tenant_id, status)` — and the three ranges partition the ladder, so the
+        # arithmetic stays in `reminder_window_bands` where a test can check it, rather
+        # than being written twice, once in SQL and once in the code that labels it.
+        reminder_windows=[
+            ReminderWindow(
+                milestone=milestone,
+                days=days,
+                start=start,
+                end=end,
+                contracts=contracts.count_expiring(start=start, end=end),
+            )
+            for milestone, days, start, end in reminder_window_bands(today=today)
+        ],
         recent_contracts=[list_item(row) for row in contracts.recent(limit=RECENT_CONTRACT_LIMIT)],
     )

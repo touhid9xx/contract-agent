@@ -20,6 +20,12 @@ response. This file pins the properties that make the new numbers different:
   ``responded`` row is excluded, and so is a row whose term never arrived.
 * **Overdue is a subset of open, never a peer.** Adding them would count a late
   escalation twice, which is exactly the arithmetic a careless headline performs.
+* **The reminder bands partition, so they *may* be summed.** They are drawn from
+  ``DEFAULT_MILESTONE_DAYS`` — the tuple the planner itself picks a reminder from —
+  and a contract lands in exactly one band, which is the opposite of the
+  subset relationship above and is asserted both ways: every boundary row counted
+  in exactly one band, and the bands tiling the window from ``today`` to the
+  loosest milestone with no gap between them.
 * **One organisation's totals reach nobody else.** Two tenants, one busy and one
   clean: the busy one's numbers are unchanged and the clean one's board is zeros
   rather than the neighbour's. The clean side is the assertion that matters — an
@@ -44,11 +50,16 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.api.v1.dashboard import DEFAULT_EXPIRING_WINDOW_DAYS, RECENT_CONTRACT_LIMIT
+from app.api.v1.dashboard import (
+    DEFAULT_EXPIRING_WINDOW_DAYS,
+    RECENT_CONTRACT_LIMIT,
+    reminder_window_bands,
+)
 from app.db.base import utc_now
 from app.db.enums import ContractStatus, EscalationStatus, FieldName, FieldStatus, UserRole
 from app.db.models import AuditLog, Contract, Escalation, ExtractedField, Tenant, User
 from app.db.session import session_scope
+from app.workers.dispatch import DEFAULT_MILESTONE_DAYS
 
 DASHBOARD_PATH = "/api/v1/dashboard"
 LOGIN_PATH = "/api/v1/auth/login"
@@ -157,7 +168,8 @@ def auth(
 def read(client: TestClient, headers: dict[str, str], **params: str) -> dict[str, Any]:
     response = client.get(DASHBOARD_PATH, headers=headers, params=params)
     assert response.status_code == 200, response.text
-    return response.json()
+    body: dict[str, Any] = response.json()
+    return body
 
 
 def audit_rows(session_factory: sessionmaker[Session]) -> int:
@@ -334,6 +346,133 @@ def test_an_empty_portfolio_reads_as_zeros_rather_than_an_error(
     assert body["escalations_open"] == 0
     assert body["escalations_overdue"] == 0
     assert body["recent_contracts"] == []
+    # The ladder is present and empty rather than absent: a client that had to guess
+    # the milestones would draw a panel from whatever it last saw.
+    assert [window["milestone"] for window in body["reminder_windows"]] == [
+        milestone for milestone, _days in DEFAULT_MILESTONE_DAYS
+    ]
+    assert {window["contracts"] for window in body["reminder_windows"]} == {0}
+
+
+# --- reminder windows -----------------------------------------------------
+def test_the_bands_are_the_planners_ladder_and_they_abut() -> None:
+    """Pure arithmetic, no database: the bands must tile the window exactly.
+
+    Written against the function rather than the route because this is the part a
+    route test cannot see — a gap between two bands and an overlap between two
+    bands produce the *same* total when the sum is asserted alone. Each boundary is
+    therefore checked by name: the bands are listed loosest first, so each entry
+    ends the day before the entry above it begins, and the tightest band starts on
+    ``today`` itself.
+    """
+    today = date(2026, 3, 1)
+
+    bands = reminder_window_bands(today=today)
+
+    assert [(milestone, days) for milestone, days, _start, _end in bands] == list(
+        DEFAULT_MILESTONE_DAYS
+    )
+    for index, (_milestone, days, _start, end) in enumerate(bands):
+        assert end == today + timedelta(days=days)
+        if index == 0:
+            continue
+        # Reading down the list walks backwards through the window: the looser band
+        # above begins the day after this one ends.
+        looser_start = bands[index - 1][2]
+        assert looser_start == end + timedelta(days=1)
+    assert bands[-1][2] == today
+    assert bands[0][3] == today + timedelta(
+        days=max(days for _milestone, days in DEFAULT_MILESTONE_DAYS)
+    )
+
+
+def test_each_term_lands_in_exactly_one_band(
+    client: TestClient,
+    tenant: Tenant,
+    make_user: Callable[..., User],
+    make_contract: Callable[..., Contract],
+) -> None:
+    """One contract per boundary, and the sum is the whole ladder's count.
+
+    The interesting rows are the ones *on* a boundary: a term ending exactly thirty
+    days out is due a ``T-30`` reminder today, not a ``T-60`` one, because
+    ``milestone_for`` takes the tightest milestone already due. A naive band of
+    ``<= 60`` for T-60 and ``<= 30`` for T-30 would count that row twice and still
+    look plausible on screen.
+    """
+    today = utc_now().date()
+    for days in (61, 60, 31, 30, 15, 14, 1, 0, -1):
+        make_contract(tenant, end_date=today + timedelta(days=days))
+    make_contract(tenant, end_date=None)
+    headers = auth(client, tenant, make_user)
+
+    body = read(client, headers)
+
+    counts = {window["milestone"]: window["contracts"] for window in body["reminder_windows"]}
+    # 60 and 31 in T-60 (61 is beyond the ladder), 30 and 15 in T-30, 0/1/14 in T-14.
+    assert counts == {"T-60": 2, "T-30": 2, "T-14": 3}
+    # Seven terms sit inside the ladder. ``contracts_expiring`` is a *tighter* window
+    # (30 days, not 60), so it holds five of them: the rows at day 31 and day 60 are in
+    # T-60 and no band the expiring headline reads. The two figures are stated rather
+    # than derived from each other, because they answer different questions and an
+    # offset between them is arithmetic nobody would notice going wrong.
+    assert sum(counts.values()) == 7
+    assert body["contracts_expiring"] == 5
+    ladder_end = today + timedelta(days=max(days for _milestone, days in DEFAULT_MILESTONE_DAYS))
+    assert body["reminder_windows"][0]["start"] == (today + timedelta(days=31)).isoformat()
+    assert body["reminder_windows"][0]["end"] == ladder_end.isoformat()
+
+
+def test_the_bands_hold_the_states_the_planner_would_still_remind(
+    client: TestClient,
+    tenant: Tenant,
+    make_user: Callable[..., User],
+    make_contract: Callable[..., Contract],
+) -> None:
+    """Same predicate as ``contracts_expiring``, asserted on a band rather than a total.
+
+    Three rows end inside the final fortnight and only one is still owed a reminder:
+    a customer who responded, a contract somebody renewed, and one already escalated.
+    A band counting statuses the planner would refuse to send for would put work on
+    the screen that the dispatch worker will decline.
+    """
+    today = utc_now().date()
+    make_contract(tenant, end_date=today + timedelta(days=7))
+    make_contract(tenant, status=ContractStatus.RESPONDED, end_date=today + timedelta(days=7))
+    make_contract(tenant, status=ContractStatus.RENEWED, end_date=today + timedelta(days=7))
+    make_contract(tenant, status=ContractStatus.ESCALATED, end_date=today + timedelta(days=7))
+    headers = auth(client, tenant, make_user)
+
+    body = read(client, headers)
+
+    counts = {window["milestone"]: window["contracts"] for window in body["reminder_windows"]}
+    # All four terms end inside the final fortnight, but a band is the *planner's*
+    # view: it counts only the states ``count_expiring`` counts, so the answered,
+    # renewed and escalated rows are in no band at all rather than in T-14 with the
+    # one contract still owed a reminder.
+    assert counts == {"T-60": 0, "T-30": 0, "T-14": 1}
+
+
+def test_a_neighbours_terms_are_in_nobodys_window(
+    client: TestClient,
+    tenant: Tenant,
+    other_tenant: Tenant,
+    make_user: Callable[..., User],
+    make_contract: Callable[..., Contract],
+) -> None:
+    """The bands are tenant-scoped like every other count on the route.
+
+    Written with the busy neighbour first and the quiet tenant second: a band read
+    that forgot the tenant predicate would show three windows here and look like a
+    working panel.
+    """
+    today = utc_now().date()
+    make_contract(other_tenant, end_date=today + timedelta(days=5))
+    busy = auth(client, other_tenant, make_user, email="ops@globex.test")
+    quiet = auth(client, tenant, make_user, email=EMAIL)
+
+    assert sum(w["contracts"] for w in read(client, busy)["reminder_windows"]) == 1
+    assert sum(w["contracts"] for w in read(client, quiet)["reminder_windows"]) == 0
 
 
 # --- isolation ------------------------------------------------------------

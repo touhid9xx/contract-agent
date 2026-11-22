@@ -44,7 +44,7 @@ const STATUS_KEYS = {
  * is the first one whose *whole point* is a total, so it is the first that could not
  * be built without a counted route.
  *
- * Six choices are deliberate:
+ * Seven choices are deliberate:
  *
  * * **No role gate.** Unlike the attention board, every number here is derived from
  *   rows the caller can already list from screens they can already open, so hiding
@@ -56,6 +56,15 @@ const STATUS_KEYS = {
  *   says which ones, because a contract's own timezone is a per-row value a `COUNT`
  *   cannot resolve. The screen prints `{start}–{end}` beside the count instead of
  *   implying the reader's local month.
+ * * **The reminder ladder is a partition, and says so.** Its bands abut without
+ *   overlapping, so a contract is in exactly one of them and the counts may be read
+ *   together — which is *not* true of the two escalation figures above, and is why
+ *   each card states its own rule. The bands are drawn from the planner's own ladder
+ *   rather than a list written here, so a deployment that added a rung would move its
+ *   neighbours on the server instead of leaving this screen printing a range nothing
+ *   counts. Each band carries the dates it counted, by the same reasoning as the
+ *   expiring window; the panel prints no total of its own, because a sum of the
+ *   ladder is a number about the ladder and not about the portfolio.
  * * **The recent list is labelled as rows returned.** It is the one panel here that
  *   is not a total, so it says so in the sentence above it rather than letting its
  *   length read as an activity figure.
@@ -202,6 +211,47 @@ export default function DashboardPage() {
                   end: formatDay(board.window_end),
                 })}
               </p>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>{t("dashboard.reminderHeading")}</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <p className="text-sm text-muted-foreground">{t("dashboard.reminderBody")}</p>
+              {/*
+                One row per band, in the order the server sent them — loosest first —
+                because that is the planner's own ladder and re-sorting it here would
+                be a second opinion about the order the reminders fire in. Each label
+                carries the days it counted as well as the milestone's name: `T-60` is
+                the policy's vocabulary, and a reader who does not know it would
+                otherwise be looking at a count with no dates behind it.
+              */}
+              <dl className="grid grid-cols-[auto_auto] justify-start gap-x-6 gap-y-1 text-sm">
+                {board.reminder_windows.map((band) => (
+                  <div key={band.milestone} className="contents">
+                    <dt className="text-muted-foreground">
+                      {t("dashboard.reminderBand", {
+                        milestone: band.milestone,
+                        days: band.days,
+                        start: formatDay(band.start),
+                        end: formatDay(band.end),
+                      })}
+                    </dt>
+                    <dd className="tabular-nums">{band.contracts}</dd>
+                  </div>
+                ))}
+              </dl>
+              {/*
+                No total is printed. A band reading `0` still prints, because the
+                ladder is the planner's and a missing rung would read as a rung that
+                does not exist; a sum across the bands would be a fresh figure nobody
+                counted, and it would sit beside `contracts_expiring` as though the two
+                were comparable. They are not: the ladder reaches 60 days and that
+                window ends at 30.
+              */}
+              <p className="text-xs text-muted-foreground">{t("dashboard.reminderNote")}</p>
             </CardContent>
           </Card>
 

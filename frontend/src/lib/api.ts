@@ -1232,6 +1232,30 @@ export const attention = {
 };
 
 /**
+ * One rung of the planner's reminder ladder, and how many contracts fall in it.
+ *
+ * The bands are the planner's own `DEFAULT_MILESTONE_DAYS`, not a list written down
+ * here: a deployment that added a fourth rung would shift its neighbours on the
+ * server rather than leaving the screen printing a range nothing counts.
+ *
+ * `days` travels beside `milestone` so nothing has to parse `T-60` to learn what it
+ * means, and `start`/`end` travel so the count is labelled with the days it actually
+ * counted — the same reason the expiring window brings its own end date.
+ */
+export interface ReminderWindow {
+  /** The milestone's name as the dispatch policy writes it — `T-60`, not a label. */
+  milestone: string;
+  /** Days before the term ends this milestone falls due. The figure in the name. */
+  days: number;
+  /** First day counted, inclusive, `YYYY-MM-DD`. */
+  start: string;
+  /** Last day counted, inclusive, `YYYY-MM-DD`. */
+  end: string;
+  /** Contracts whose term ends inside `[start, end]` and is still remindable. */
+  contracts: number;
+}
+
+/**
  * One organisation's portfolio totals, `GET /api/v1/dashboard`.
  *
  * Every number here is a server-side `COUNT` over the tenant's own rows, and that
@@ -1271,6 +1295,22 @@ export interface DashboardView {
   escalations_open: number;
   /** The subset of `escalations_open` past its SLA deadline. */
   escalations_overdue: number;
+  /**
+   * The planner's reminder ladder as calendar bands, **loosest first**.
+   *
+   * Unlike `escalations_overdue` above, these are a **partition**: the bands abut and
+   * do not overlap, one entry per milestone, and a contract lands in exactly one of
+   * them — so unlike the overdue subset, adding these up counts no contract twice.
+   * That is why summing them is safe and summing the escalations is not, and the
+   * screen says which is which rather than leaving a reader to guess.
+   *
+   * The bands cover `[today, today + the loosest milestone]`, which is **wider than
+   * `contracts_expiring`'s 30-day window**: the two numbers answer different questions
+   * and are not comparable. A term whose end date has already passed is in no band at
+   * all — the expiry sweep owns that row, and a T-14 reminder against a lapsed term is
+   * an offer nobody can accept.
+   */
+  reminder_windows: ReminderWindow[];
   /**
    * A bounded, newest-first slice of the tenant's contracts — the rows *returned*,
    * not a total. Printing `recent_contracts.length` as an activity figure would be

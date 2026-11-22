@@ -10975,31 +10975,33 @@ per-contract timezone, which a `COUNT` cannot resolve — SQL has the row, not t
 route answers the weaker question (*this many end inside these UTC days*) and says which days. A
 count that hides which window it used is the same defect as a count that hides that it is partial.
 
-**Two demo panels were left out rather than approximated.** The reminder-windows bucket and the
-channel mix need an aggregate no reader in this codebase produces in any form:
+**One demo panel was left out, and the other was served later.** The channel mix needs notification
+rows grouped by channel over a window, an aggregate no reader in this codebase produces in any form:
 `pending_overdue_counts` is deliberately unscoped with a standing note explaining why there is no
 tenant twin, and the extraction-queue count exists *to be put on a gauge, not shown to a tenant*. A
-panel built by summing a page would have been the invented total this slice exists to avoid, so the
-panels are absent. Adding one is a reader in the planner's vocabulary, not a second query.
+panel built by summing a page would have been the invented total this slice exists to avoid, so that
+panel is absent. The reminder-windows bucket was left out on the same reasoning and did not deserve
+it; `D10-139` records why, and serves it.
 
-**What gated it.** Twelve backend tests in `test_dashboard.py` — the load-bearing ones pin that the
-total is every contract while the recent panel is one page (a route returning `len(recent)` would
-pass a naive test), that each excluded expiring contract is excluded for its own reason and both
-window boundaries are inclusive, that three open with one late reads `3` open and `1` late and never
-`4`, that a tenant with nothing reads zero everywhere beside a busy neighbour, and that
-`?tenant_id=` is ignored. Twelve frontend tests in `dashboard/page.test.tsx`, 390 across the
-frontend suite: the subset sentence never prints the two numbers as peers, the recent panel labels
-its own length as rows returned while the headline is the server's total, an unreached lifecycle
-state reads `0`, and an unreachable API says *offline* rather than *failed*. Lint and typecheck are
+**What gated it.** Twelve backend tests in `test_dashboard.py` and twelve in
+`dashboard/page.test.tsx`, 390 across the frontend suite — the figures as the slice landed, since
+`D10-139` added four and two. The load-bearing ones pin that the total is every contract while the
+recent panel is one page (a route returning `len(recent)` would pass a naive test), that each
+excluded expiring contract is excluded for its own reason and both window boundaries are inclusive,
+that three open with one late reads `3` open and `1` late and never `4`, that a tenant with nothing
+reads zero everywhere beside a busy neighbour, and that `?tenant_id=` is ignored; on the screen,
+that the subset sentence never prints the two numbers as peers, that the recent panel labels its own
+length as rows returned while the headline is the server's total, that an unreached lifecycle state
+reads `0`, and that an unreachable API says *offline* rather than *failed*. Lint and typecheck are
 clean.
 
 **Limits.** The expiring window is UTC, not the customer's local calendar, so a contract ending on
 the boundary day in a far-east zone is counted a day early or late — the route says which window it
 used rather than pretending to a per-contract answer. The recent list is a bounded window, and the
-screen says so in words. There is no caching: each visit runs four `COUNT`s, which is cheap at demo
-scale and would need a materialised view before it were free on a tenant with a million rows. And
-the dashboard is a read, not a live view — it is as stale as the moment it was fetched until the
-screen is reloaded.
+screen says so in words. There is no caching: each visit ran four `COUNT`s, seven since `D10-139`
+added the bands, which is cheap at demo scale and would need a materialised view before it were free
+on a tenant with a million rows. And the dashboard is a read, not a live view — it is as stale as
+the moment it was fetched until the screen is reloaded.
 
 ### D10-138 — A claim stated twice is a claim that can contradict itself
 
@@ -11049,3 +11051,58 @@ anchored on the phrases the README actually uses — *have landed slices*, *have
 rather than silently checking nothing. That is the deliberate trade for reading prose: the guard
 breaks when the prose is rewritten, and somebody has to re-read it. And it reads one row and one
 paragraph: a milestone claim added anywhere else in the README is outside it.
+
+### D10-139 — The ladder's query already took a range
+
+`D10-137` left two panels out of the dashboard and said why: reminder windows and the channel mix
+both needed *an aggregate no reader in this codebase produces in any form*, and a panel summed from
+a page would have been the invented total the slice existed to avoid. Half of that held. The
+reminder ladder was not missing a reader. It was missing the observation that
+`ContractRepository.count_expiring(start, end)` has taken a start and an end since it was written —
+the panel needed a range nobody had asked of it, not a query nobody had written.
+
+**The bands are the planner's ladder, not a second one.** `reminder_window_bands(today=...)` in
+`app/api/v1/dashboard.py` derives one band per rung of `DEFAULT_MILESTONE_DAYS` — the tuple in
+`app/workers/dispatch.py` that `milestone_for` picks a reminder from — and returns
+`(milestone, days, start, end)` for each, loosest first. Every band's first day is the day after the
+next-tighter milestone's last, so the bands abut: a term inside the ladder belongs to exactly one,
+and the boundaries are computed rather than written down as three literal ranges. A fourth rung
+therefore shifts its neighbours instead of silently opening a gap or double counting, which is the
+whole reason the screen may print the bands as a set.
+
+**The tightest band starts at `today`, and the statuses are the planner's.** A contract whose end
+date has passed is in no band: those rows are the expiry sweep's business, and offering a reminder
+nobody can send would be the dashboard inventing work. Each band is counted with the same
+`EXPIRABLE_CONTRACT_STATUSES` predicate as `contracts_expiring`, so a `responded`, `renewed` or
+`escalated` contract is in none of them even when its end date is inside one — a lapse somebody
+already recorded an outcome for is not a reminder.
+
+**It is a partition, and the wire says so.** `DashboardView.reminder_windows` is a list of
+`ReminderWindow`, each carrying `milestone`, `days`, `start`, `end` and `contracts`. The days and
+the dates travel with the count for the same reason the expiring window does: `T-60` is the
+planner's vocabulary, and a reader who does not know it would otherwise see a label with no date
+behind it. The field description states that summing the bands counts no contract twice —
+deliberately the opposite of `escalations_overdue`, which is a subset of `escalations_open` — and
+warns that the ladder reaches sixty days while `contracts_expiring` stops at thirty, so the two
+figures are not comparable and the screen prints no sum of them.
+
+**What is still absent.** The channel mix needs notification rows grouped by channel over a window,
+and no reader produces that aggregate in any form. It stays out rather than being approximated,
+exactly as `D10-137` argued.
+
+**What gated it.** Four new tests in `backend/tests/test_dashboard.py`, sixteen in the file (up from
+twelve): the bands tile the ladder with no gap and no overlap — pure arithmetic over the tuple, no
+database — each term lands in exactly one band, the bands carry only statuses the planner would
+still remind, and a neighbour's terms are in nobody's window. The empty-portfolio test now also
+asserts the ladder is three entries of `0`, because the ladder exists whether or not anything is
+due. Two new tests in `frontend/src/app/[locale]/dashboard/page.test.tsx`, fourteen in the file and
+392 across the frontend suite: the bands print in wire order with the days and dates the server
+counted, a band reading `0` still prints, and no figure on the page is the sum of the ladder.
+`ruff`, `mypy --strict`, lint and typecheck are clean.
+
+**Limits.** The bands are UTC calendar days, for the reason the expiring window is: a `COUNT` cannot
+resolve a per-contract timezone, so a term ending on a boundary day in a far-east zone can sit a
+band early or late. The tail is a cliff — a contract whose end date is beyond the loosest milestone
+appears in no band and the panel does not say how many those are, so `contracts_total` remains the
+only figure covering them. The route ran four statements a visit and now runs seven, one per band
+plus the four it had, which is still indexed range scans and still uncached.

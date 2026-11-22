@@ -20,6 +20,11 @@
  *     has reached still prints `0` instead of vanishing.
  *   * the expiring count carries the window the **server** counted in, formatted from
  *     the payload's own date strings.
+ *   * the reminder ladder prints in the order the server sent it — loosest first,
+ *     because that is the planner's own ladder — and a band nothing falls in still
+ *     prints its `0`. No figure is derived by summing the bands: the ladder reaches
+ *     further than the expiring window, so a sum of it sits beside that count as
+ *     though the two answered the same question.
  *   * an empty portfolio is a heading and a sentence, not an error.
  *
  * The harness is the one `attention/page.test.tsx` established: a real `QueryClient`
@@ -118,6 +123,15 @@ function board(overrides: Partial<DashboardView> = {}): DashboardView {
       escalated: 0,
     },
     contracts_expiring: 7,
+    // The planner's own ladder, tightest boundaries from a 2026-03-01 today. The
+    // counts are 11 and 6 and a genuine `0` — the last one on purpose, because a band
+    // nobody is in is the case a "skip the empty ones" shortcut would hide. None of
+    // them is `1`, `2`, `3` or `7`, which the assertions above reserve.
+    reminder_windows: [
+      { milestone: "T-60", days: 60, start: "2026-04-01", end: "2026-04-30", contracts: 11 },
+      { milestone: "T-30", days: 30, start: "2026-03-16", end: "2026-03-31", contracts: 6 },
+      { milestone: "T-14", days: 14, start: "2026-03-01", end: "2026-03-15", contracts: 0 },
+    ],
     fields_awaiting_review: 5,
     escalations_open: 3,
     escalations_overdue: 1,
@@ -142,6 +156,11 @@ function emptyBoard(): DashboardView {
       escalated: 0,
     },
     contracts_expiring: 0,
+    // The ladder itself survives an empty portfolio — the planner still runs those
+    // milestones — so the bands are re-counted rather than emptied. A screen that hid
+    // them at zero would make "the ladder exists and nothing is due" read as "this
+    // deployment has no ladder".
+    reminder_windows: board().reminder_windows.map((band) => ({ ...band, contracts: 0 })),
     fields_awaiting_review: 0,
     escalations_open: 0,
     escalations_overdue: 0,
@@ -194,18 +213,42 @@ function hrefOf(name: string): string | null {
 }
 
 /**
- * The figure printed beside one lifecycle state's label.
+ * The `<dl>` a caption introduces, rather than "the first `<dl>` on the page".
  *
- * Scoped to the breakdown list rather than the whole document, because the same
- * label also appears on each recent row's status span — a document-wide lookup would
- * be ambiguous there and could pass by reading the wrong element.
+ * There are two definition lists here now — the lifecycle breakdown and the reminder
+ * ladder — so a positional lookup would have quietly started reading the wrong card
+ * the day one was inserted above the other. Anchoring on the caption's own text keeps
+ * each helper on the card it names, and fails loudly (returns `null`) if the markup
+ * stops putting the list beside its caption.
  */
+function listUnder(caption: string): HTMLElement | null {
+  const next = screen.getByText(caption).nextElementSibling;
+  return next instanceof HTMLElement && next.tagName === "DL" ? next : null;
+}
+
+/** The figure printed beside one lifecycle state's label. */
 function countFor(label: string): string | null {
-  const list = document.querySelector("dl");
+  const list = listUnder(EN.dashboard.breakdownLabel);
   if (list === null) return null;
-  const term = within(list as HTMLElement).getByText(label);
+  const term = within(list).getByText(label);
   const row = term.closest("div");
   return row === null ? null : (row.querySelector("dd")?.textContent ?? null);
+}
+
+/**
+ * The reminder ladder as the page printed it, in document order.
+ *
+ * Order is the assertion, not an incidental of the lookup: the bands arrive loosest
+ * first because that is the order the planner checks them in, and re-sorting them on
+ * the screen would be a second opinion about which reminder fires first.
+ */
+function ladderRows(): { label: string; count: string }[] {
+  const list = listUnder(EN.dashboard.reminderBody);
+  if (list === null) return [];
+  return [...list.querySelectorAll("div")].map((band) => ({
+    label: band.querySelector("dt")?.textContent ?? "",
+    count: band.querySelector("dd")?.textContent ?? "",
+  }));
 }
 
 beforeEach(() => {
@@ -322,6 +365,52 @@ describe("the breakdown reads the wire", () => {
     expect(countFor(EN.contracts.statuses.renewed)).toBe("4");
     expect(countFor(EN.contracts.statuses.expired)).toBe("0");
     expect(countFor(EN.contracts.statuses.escalated)).toBe("0");
+  });
+});
+
+describe("the reminder ladder is a partition, printed as one", () => {
+  it("prints every band in the planner's order, with the days the server counted", async () => {
+    // The bands are the policy's own ladder (`DEFAULT_MILESTONE_DAYS`), not a list the
+    // screen keeps, so the assertion is that each band arrives with the name, the days
+    // and the *dates it counted* — a reader has to be able to see what `T-60` means
+    // without knowing the policy. Order is asserted because the bands do not overlap:
+    // loosest first is the planner's order and re-sorting is a different claim.
+    const view = board();
+    setSession(sessionFor("operator"));
+    vi.mocked(dashboard.read).mockResolvedValue(view);
+    renderScreen();
+
+    expect(await screen.findByText(EN.dashboard.reminderBody)).toBeDefined();
+    expect(ladderRows()).toStrictEqual(
+      view.reminder_windows.map((band) => ({
+        label: say(EN.dashboard.reminderBand, {
+          milestone: band.milestone,
+          days: band.days,
+          start: day("en", band.start),
+          end: day("en", band.end),
+        }),
+        count: String(band.contracts),
+      })),
+    );
+    // The tightest band holds nobody in this fixture, and its `0` still printed —
+    // which is what the assertion above it just proved by expecting `"0"` in the list.
+    expect(ladderRows().map((band) => band.count)).toContain("0");
+  });
+
+  it("derives no total from the bands, and says why they are not comparable", async () => {
+    // 11 + 6 + 0 is 17, and `17` must appear nowhere: a sum of the ladder is a figure
+    // about the ladder, and it would sit beside the expiring count (which stops at 30
+    // days) as though the two answered the same question. The warning that they do not
+    // travels with the panel instead.
+    const view = board();
+    setSession(sessionFor("operator"));
+    vi.mocked(dashboard.read).mockResolvedValue(view);
+    renderScreen();
+
+    expect(await screen.findByText(EN.dashboard.reminderNote)).toBeDefined();
+    const summed = view.reminder_windows.reduce((total, band) => total + band.contracts, 0);
+    expect(summed).toBeGreaterThan(0);
+    expect(screen.queryByText(String(summed))).toBeNull();
   });
 });
 
