@@ -33,11 +33,15 @@ from typing import Any
 from sqlalchemy import ColumnElement, Exists, and_, exists, func, select
 from sqlalchemy.orm import Session
 
-from app.db.enums import Channel, ContractStatus, EscalationStatus, NotificationStatus, ResponseType
+from app.db.enums import Channel, ContractStatus, EscalationStatus, ResponseType
 from app.db.models import Contract, CustomerResponse, Escalation, Notification
 from app.db.repositories.base import TenantScopedRepository
+from app.db.repositories.notifications import CONTACTED_STATUSES
 
 __all__ = [
+    # Declared in :mod:`app.db.repositories.notifications` and re-exported here: the
+    # escalation rule reads it, and a caller holding an escalation question should not
+    # have to know which module owns a notification status.
     "CONTACTED_STATUSES",
     "DEFAULT_ESCALATION_QUEUE_LIMIT",
     "DEFAULT_RESPONSE_HISTORY_LIMIT",
@@ -69,20 +73,6 @@ OPEN_ESCALATION_STATUSES: tuple[EscalationStatus, ...] = (
     EscalationStatus.OPEN,
     EscalationStatus.IN_PROGRESS,
     EscalationStatus.SLA_BREACHED,
-)
-
-#: ``Notification.status`` values that mean the transport accepted the row.
-#:
-#: Expressed by exclusion — everything past ``pending`` that is not one of the two
-#: failure states — because those are the only two ways a row stops without
-#: reaching anybody. ``machine`` counts as contact on purpose: a voicemail reached
-#: a mailbox even though the spec is explicit that it is *not* a response, which is
-#: precisely the situation an escalation exists for.
-CONTACTED_STATUSES: tuple[NotificationStatus, ...] = (
-    NotificationStatus.SENT,
-    NotificationStatus.DELIVERED,
-    NotificationStatus.ANSWERED,
-    NotificationStatus.MACHINE,
 )
 
 #: Contract states the scanner may escalate *from*.

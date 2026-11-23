@@ -10975,33 +10975,34 @@ per-contract timezone, which a `COUNT` cannot resolve — SQL has the row, not t
 route answers the weaker question (*this many end inside these UTC days*) and says which days. A
 count that hides which window it used is the same defect as a count that hides that it is partial.
 
-**One demo panel was left out, and the other was served later.** The channel mix needs notification
-rows grouped by channel over a window, an aggregate no reader in this codebase produces in any form:
+**One demo panel was left out, and both were served later.** The channel mix needs notification
+rows grouped by channel over a window, an aggregate no reader in this codebase produced in any form:
 `pending_overdue_counts` is deliberately unscoped with a standing note explaining why there is no
 tenant twin, and the extraction-queue count exists *to be put on a gauge, not shown to a tenant*. A
 panel built by summing a page would have been the invented total this slice exists to avoid, so that
 panel is absent. The reminder-windows bucket was left out on the same reasoning and did not deserve
-it; `D10-139` records why, and serves it.
+it; `D10-139` records why, and serves it. The channel mix did deserve it and had to wait for a
+reader: `D10-141` adds one.
 
 **What gated it.** Twelve backend tests in `test_dashboard.py` and twelve in
 `dashboard/page.test.tsx`, 390 across the frontend suite — the figures as the slice landed, since
-`D10-139` added four and two. The load-bearing ones pin that the total is every contract while the
-recent panel is one page (a route returning `len(recent)` would pass a naive test), that each
-excluded expiring contract is excluded for its own reason and both window boundaries are inclusive,
-that three open with one late reads `3` open and `1` late and never `4`, that a tenant with nothing
-reads zero everywhere beside a busy neighbour, and that `?tenant_id=` is ignored; on the screen,
-that the subset sentence never prints the two numbers as peers, that the recent panel labels its own
-length as rows returned while the headline is the server's total, that an unreached lifecycle state
-reads `0`, and that an unreachable API says *offline* rather than *failed*. Lint and typecheck are
-clean.
+`D10-139` added four and two and `D10-141` five and three. The load-bearing ones pin that the total
+is every contract while the recent panel is one page (a route returning `len(recent)` would pass a
+naive test), that each excluded expiring contract is excluded for its own reason and both window
+boundaries are inclusive, that three open with one late reads `3` open and `1` late and never `4`,
+that a tenant with nothing reads zero everywhere beside a busy neighbour, and that `?tenant_id=` is
+ignored; on the screen, that the subset sentence never prints the two numbers as peers, that the
+recent panel labels its own length as rows returned while the headline is the server's total, that an
+unreached lifecycle state reads `0`, and that an unreachable API says *offline* rather than *failed*.
+Lint and typecheck are clean.
 
 **Limits.** The expiring window is UTC, not the customer's local calendar, so a contract ending on
 the boundary day in a far-east zone is counted a day early or late — the route says which window it
 used rather than pretending to a per-contract answer. The recent list is a bounded window, and the
 screen says so in words. There is no caching: each visit issued five `COUNT`s, eight since `D10-139`
-added the bands, which is cheap at demo scale and would need a materialised view before it were free
-on a tenant with a million rows. And the dashboard is a read, not a live view — it is as stale as
-the moment it was fetched until the screen is reloaded.
+added the bands and nine since `D10-141` added the mix, which is cheap at demo scale and would need a
+materialised view before it were free on a tenant with a million rows. And the dashboard is a read,
+not a live view — it is as stale as the moment it was fetched until the screen is reloaded.
 
 ### D10-138 — A claim stated twice is a claim that can contradict itself
 
@@ -11086,28 +11087,34 @@ deliberately the opposite of `escalations_overdue`, which is a subset of `escala
 warns that the ladder reaches sixty days while `contracts_expiring` stops at thirty, so the two
 figures are not comparable and the screen prints no sum of them.
 
-**What is still absent.** The channel mix needs notification rows grouped by channel over a window,
-and no reader produces that aggregate in any form. It stays out rather than being approximated,
-exactly as `D10-137` argued.
+**What is still absent — nothing, since `D10-141`.** The channel mix needs notification rows grouped
+by channel over a window, and when this block was written no reader produced that aggregate in any
+form; it stayed out rather than being approximated, exactly as `D10-137` argued. That reader turned
+out to be a group-by over rows the table already holds, which is why the absent-panel sentence is now
+struck rather than repeated: the demo's board is served in full.
 
-**What gated it.** Four new tests in `backend/tests/test_dashboard.py`, sixteen in the file (up from
-twelve): the bands tile the ladder with no gap and no overlap — pure arithmetic over the tuple, no
-database — each term lands in exactly one band, the bands carry only statuses the planner would
-still remind, and a neighbour's terms are in nobody's window. The empty-portfolio test now also
-asserts the ladder is three entries of `0`, because the ladder exists whether or not anything is
-due. Two new tests in `frontend/src/app/[locale]/dashboard/page.test.tsx`, fourteen in the file and
-392 across the frontend suite: the bands print in wire order with the days and dates the server
-counted, a band reading `0` still prints, and no figure on the page is the sum of the ladder.
-`ruff`, `mypy --strict`, lint and typecheck are clean.
+**What gated it.** Four new tests in `backend/tests/test_dashboard.py`, sixteen in the file when this
+slice landed — twelve before it, twenty-one since `D10-141` added five: the bands tile the ladder
+with no gap and no overlap — pure arithmetic over the tuple, no database — each term lands in
+exactly one band, the bands carry only statuses the planner would still remind, and a neighbour's
+terms are in nobody's window. The empty-portfolio test now also asserts the ladder is three entries
+of `0`, because the ladder exists whether or not anything is due. Two new tests in
+`frontend/src/app/[locale]/dashboard/page.test.tsx`, fourteen in the file and 392 across the
+frontend suite when this slice landed — seventeen and 395 since `D10-141`: the bands print in wire
+order with the days and dates the server counted, a band reading `0` still prints, and no figure on
+the page is the sum of the ladder. `ruff`, `mypy`, lint and typecheck are clean.
 
 **Limits.** The bands are UTC calendar days, for the reason the expiring window is: a `COUNT` cannot
 resolve a per-contract timezone, so a term ending on a boundary day in a far-east zone can sit a
 band early or late. The tail is a cliff — a contract whose end date is beyond the loosest milestone
 appears in no band and the panel does not say how many those are, so `contracts_total` remains the
-only figure covering them. The route issues ten statements a visit: the principal lookup, five
-`COUNT`s, the three band `COUNT`s and one page of recent rows. It issued seven before this slice —
-the same route without the bands, five of those seven being `COUNT`s. `D10-140` records why the
-figure first written here was wrong. All ten are indexed range scans, and none of them is cached.
+only figure covering them. The route issues eleven statements a visit, nine of them `COUNT`s: the
+principal lookup, five `COUNT`s, the three band `COUNT`s, the channel-mix group-by `D10-141` added
+and one page of recent rows. It issued seven before this slice — the same route without the bands,
+five of those seven being `COUNT`s. `D10-140` records why the figure first written here was wrong,
+and `D10-141` re-measured it rather than adding one to it. Ten of the eleven are indexed range
+scans, and none of them is cached. The eleventh is the exception: bounded on tenant and status by an
+index and then filtering the window row by row. `D10-141` says which index is missing.
 
 ### D10-140 — A statement count is not arithmetic on a route's shape
 
@@ -11115,22 +11122,23 @@ figure first written here was wrong. All ten are indexed range scans, and none o
 since `D10-139`* and then wrote that the route *ran four statements a visit and now runs seven, one
 per band plus the four it had*. The second sentence was the tell: it named the bands as the only
 addition and derived both totals by counting the calls in the source. Nobody had counted an
-execution. The route issues ten.
+execution. The route issues ten — eleven since `D10-141` added a ninth `COUNT`.
 
 **The measurement.** One authenticated `GET /api/v1/dashboard` through the in-memory harness, with a
 listener on SQLAlchemy's `before_cursor_execute`, records: the principal lookup that authenticates
 the bearer token, `count_by_status`, `count_expiring`, `count_awaiting_review`, `count_open`, the
-overdue-escalation count, the three band counts and the page of recent rows — ten statements, eight
-of them `COUNT`s. Before the bands it was seven statements, of which five were `COUNT`s. Both
-earlier figures were wrong, and wrong in opposite directions: the pre-slice count was understated by
-one `COUNT`, and the post-slice figure happened to read as the pre-slice one.
+overdue-escalation count, the three band counts, the channel-mix group-by `D10-141` later added and
+the page of recent rows — eleven statements, nine of them `COUNT`s, re-measured rather than
+recounted when that block landed. Before the bands it was seven statements, of which five were
+`COUNT`s. Both earlier figures were wrong, and wrong in opposite directions: the pre-slice count was
+understated by one `COUNT`, and the post-slice figure happened to read as the pre-slice one.
 
 **What the correction changes, and what it does not.** The two sentences are amended in place — five
-and eight in `D10-137`, ten in `D10-139` — because a figure in a Limits paragraph is what the next
-reader budgets against, and *seven* left in place while the route issued ten would have been a claim
-shrinking the bill. Nothing else in either block moves: the argument that the panel needed a
-parameterised query rather than a new one is unaffected by how many statements the route runs, and
-the `D10-139` band arithmetic was never in question.
+and eight in `D10-137`, ten in `D10-139`, then nine and eleven in `D10-141` — because a figure in a
+Limits paragraph is what the next reader budgets against, and *seven* left in place while the route
+issued ten would have been a claim shrinking the bill. Nothing else in either block moves: the
+argument that the panel needed a parameterised query rather than a new one is unaffected by how
+many statements the route runs, and the `D10-139` band arithmetic was never in question.
 
 **Limits.** The figure is per visit, measured on SQLite through the test harness — it is a count of
 statements issued, not of MySQL's plans, and it says nothing about what any single statement costs
@@ -11138,3 +11146,68 @@ on a large tenant. It also includes the principal lookup, which earlier drafts h
 at all, so the number is larger than a reader comparing it with the old text might expect. Nothing
 here is cached, so the count is what a scraper adds up to the database for every visit the screen
 makes.
+
+### D10-141 — The channel mix counts contact, and says which window it counted
+
+`D10-137` returned four of the demo's five dashboard panels and left the fifth out on a rule it
+stated plainly: no panel built by summing a page. `D10-139` served the reminder ladder and named the
+channel mix as the one still owed, because it needed a reader that did not exist. This block adds
+that reader, and it turned out to cost one `group_by` over rows the `notifications` table already
+held — which is why `D10-137`'s absent-panel sentence is struck rather than left standing.
+
+**Counts, and the window said out loud.** The panel prints, one row per channel, how many times this
+organisation reached somebody on that channel inside a stated window. It prints no percentage. The
+demo's version drew a share, and a share needs a denominator; the only one available is everything
+that was ever due, which includes reminders that failed, were suppressed at send time and are still
+pending. A percentage over that total would tell a reader nothing about reach while looking exactly
+like a figure that does, and `email 62%` beside no visible remainder is precisely the misreading the
+reminder ladder was written to refuse. Where a channel reads `0` it prints `0`, so "we never text
+anyone" stays distinguishable from "this panel forgot to count texts".
+
+**Which rows count, and from when.** Only `CONTACTED_STATUSES` — statuses that mean a message
+reached the customer. A `failed` or `suppressed` row is outside the total because counting it would
+claim a conversation that never happened, and those rows already answer for themselves on the
+undelivered board (`D10-138`). The window ranges over `sent_at`, not `scheduled_date`: a reminder
+whose slot was three weeks ago but which was retried into a send last night reached the customer
+last night. `scheduled_date` is indexed and `sent_at` is not, so this is the slower of the two
+choices and it is the correct one; the closing Limits says what that costs.
+
+**Days, not instants, because the route promises the same payload twice.** The first draft windowed
+on instants taken from `now`, and `test_reading_it_writes_nothing` failed on it: two reads a second
+apart returned two different windows, so the module's "reading it changes nothing" was false for a
+reason no fixture had been asked about. The fix is the shape the expiring window already uses — two
+UTC calendar dates, both inclusive, converted internally to `[since 00:00, until+1d 00:00)` so a
+send at 23:59:59.999 on the last counted day is in and one at midnight after it is out.
+`channel_mix_since` and `channel_mix_until` travel in the payload for the reason `today` and
+`window_end` do, and the panel prints them from the payload rather than from the reader's clock.
+
+**A separate constant.** `DEFAULT_CHANNEL_MIX_WINDOW_DAYS` is its own constant rather than an alias
+of `DEFAULT_EXPIRING_WINDOW_DAYS`. The two agree today and answer different questions — one looks
+back at sends that happened, the other forward at terms that will lapse — so one moving should not
+silently move the other. Its window trails: `since` is thirty days before `today` and `until` is
+`today`, the mirror image of `window_end`.
+
+**What gated it.** Five tests in `backend/tests/test_dashboard.py`, twenty-one in the file: each of
+the seven notification statuses is counted or excluded for its own stated reason, a silent portfolio
+gets every channel in enum order at `0`, the window covers both boundary days and leaves the day
+after `until` out, and a neighbour's contacts are in nobody's mix. Three in
+`frontend/src/app/[locale]/dashboard/page.test.tsx`, seventeen in the file and 395 across the
+frontend suite: rows print in the server's order with a genuine `0` among them, the panel labels its
+own window and does not repeat the expiring window's sentence, and a channel count larger than
+`contracts_total` prints unchanged, because the panel is not a breakdown of that figure. One in
+`backend/tests/test_notifications.py` closes a claim that module's docstring had been making with no
+test behind it: `CONTACTED_STATUSES` and `UNDELIVERED_STATUSES` are disjoint and together with
+`PENDING` are the whole `NotificationStatus` enum. `pytest`, `ruff`, `mypy`, `npm run lint` and `npm
+run test` are clean.
+
+**Limits.** The window is UTC calendar days, for the reason the expiring window is: a `COUNT` cannot
+resolve a per-contract timezone, so a send near a day boundary in a far-east zone can land on the
+day before. The statement is the one place on this route that is not an indexed range scan: no index
+on this table leads on `sent_at`, so it narrows on tenant and status through
+`ix_notifications_tenant_status` and then filters the window row by row. That is the same cost as
+its siblings at demo scale and a walk over every message a large tenant ever sent at real scale; the
+honest fix is a composite index leading on `(tenant_id, status, sent_at)` or a daily rollup, not a
+query rewritten onto `scheduled_date`. `D10-139`'s "all ten are indexed range scans" is amended to
+name the exception, and the route now issues eleven statements a visit, nine of them `COUNT`s.
+Finally these are contacts, not confirmed delivery: a message that reached a mailbox nobody opened
+still counts, and the undelivered board is where a send that never left is visible.

@@ -8,7 +8,7 @@ import { useAuth } from "@/components/auth-provider";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { TraceId } from "@/components/ui/trace-id";
-import { ApiError, dashboard, type ContractStatus } from "@/lib/api";
+import { ApiError, dashboard, type ContactChannel, type ContractStatus } from "@/lib/api";
 import { authorized } from "@/lib/session";
 
 /**
@@ -33,6 +33,19 @@ const STATUS_KEYS = {
 } as const satisfies Record<ContractStatus, string>;
 
 /**
+ * The label for each channel the mix can carry, from the same catalogue and for the
+ * same reason as `STATUS_KEYS`: the contracts and notification screens already name
+ * these three, and a second set of labels here would let one channel be called two
+ * things in one product. Exhaustive over `ContactChannel`, so a fourth channel
+ * becomes a type error rather than a row that silently disappears from the panel.
+ */
+const CHANNEL_KEYS = {
+  email: "channels.email",
+  sms: "channels.sms",
+  voice: "channels.voice",
+} as const satisfies Record<ContactChannel, string>;
+
+/**
  * The portfolio dashboard — the client for `GET /api/v1/dashboard`.
  *
  * The screen the demo had and this app did not, and the reason it took a route
@@ -44,7 +57,7 @@ const STATUS_KEYS = {
  * is the first one whose *whole point* is a total, so it is the first that could not
  * be built without a counted route.
  *
- * Seven choices are deliberate:
+ * Eight choices are deliberate:
  *
  * * **No role gate.** Unlike the attention board, every number here is derived from
  *   rows the caller can already list from screens they can already open, so hiding
@@ -65,6 +78,14 @@ const STATUS_KEYS = {
  *   counts. Each band carries the dates it counted, by the same reasoning as the
  *   expiring window; the panel prints no total of its own, because a sum of the
  *   ladder is a number about the ladder and not about the portfolio.
+ * * **The channel mix is counts, and carries its own window.** The demo printed three
+ *   percentages of an unstated whole. A share has to be a share *of* something, and the
+ *   only honest denominator would include the reminders that failed to arrive — so
+ *   `email 62%` would leave a reader guessing what the other thirty-eight were. Counts
+ *   cannot be misread that way, and the panel prints the days it counted in because
+ *   this window runs *backwards* over contact that already happened, unlike the
+ *   expiring window above. Its figures are not a breakdown of `contracts_total`: one
+ *   contract can be contacted several times, so the counts may exceed it.
  * * **The recent list is labelled as rows returned.** It is the one panel here that
  *   is not a total, so it says so in the sentence above it rather than letting its
  *   length read as an activity figure.
@@ -252,6 +273,57 @@ export default function DashboardPage() {
                 window ends at 30.
               */}
               <p className="text-xs text-muted-foreground">{t("dashboard.reminderNote")}</p>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>{t("dashboard.channelMixHeading")}</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {/*
+                The sentence introducing the list, and the list itself, are adjacent on
+                purpose: it is the same shape the ladder above uses, and it is what lets
+                a test find *this* `<dl>` by the words that introduce it rather than by
+                its position among three definition lists.
+              */}
+              <p className="text-sm text-muted-foreground">{t("dashboard.channelMixBody")}</p>
+              {/*
+                One row per channel, in the order the server sent them, printed even when
+                the count is zero. A channel nothing was sent on is an answer — "we used
+                email only" — and a row that vanished would look like a channel this
+                deployment cannot send on at all.
+              */}
+              <dl className="grid grid-cols-[auto_auto] justify-start gap-x-6 gap-y-1 text-sm">
+                {board.channel_mix.map((entry) => (
+                  <div key={entry.channel} className="contents">
+                    <dt className="text-muted-foreground">
+                      {t(`contracts.${CHANNEL_KEYS[entry.channel]}`)}
+                    </dt>
+                    <dd className="tabular-nums">{entry.contacts}</dd>
+                  </div>
+                ))}
+              </dl>
+              {/*
+                The window runs backwards over contact that already happened, so it is
+                printed rather than assumed — the card above looks forward at terms
+                about to lapse, and a reader who carried that reading down here would be
+                reading the wrong month. Formatted from the payload's own days, as the
+                expiring card does.
+              */}
+              <p className="text-xs text-muted-foreground">
+                {t("dashboard.channelMixWindow", {
+                  start: formatDay(board.channel_mix_since),
+                  end: formatDay(board.channel_mix_until),
+                })}
+              </p>
+              {/*
+                Said in words because the panel sits below a card of contract counts and
+                invites the same reading. These are contacts: one contract can be
+                reminded more than once, so they do not add up to `contracts_total` and
+                are not meant to.
+              */}
+              <p className="text-xs text-muted-foreground">{t("dashboard.channelMixNote")}</p>
             </CardContent>
           </Card>
 

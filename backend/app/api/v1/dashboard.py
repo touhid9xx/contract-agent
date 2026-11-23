@@ -27,10 +27,17 @@ change to the cadence moves the panel with it. Each band counts the contracts wh
 contract appears in exactly one, and together they cover ``today`` through the
 loosest milestone.
 
-**What is still absent.** The channel mix needs notification rows grouped by
-channel over a window, which is an aggregate no reader produces and no tuple in
-this codebase defines. It is left out rather than approximated: a panel built by
-summing a page would be the invented total this module exists to avoid.
+**The channel mix is a count of contacts, over a stated window.** The demo drew
+this panel as a share of the whole, and that is the shape this route declines to
+reproduce: a percentage of a subset invites the reader to treat the remaining share
+as "nobody", when it is really "not yet" and "failed". So the panel carries
+**counts** — one per channel, zero-filled — plus the two days it counted between, on
+the same principle as ``reminder_windows`` and the expiring window. What is counted
+is contact that happened: rows in
+``CONTACTED_STATUSES``, windowed on ``sent_at``. A ``failed`` or ``suppressed``
+row is deliberately outside the total, because counting it would claim a
+conversation that never took place; the notification queue and the attention board
+are where those rows answer for themselves.
 
 **Admin, operator and viewer.** Unlike :mod:`app.api.v1.attention`, nothing here
 is a list of primary keys or a statement about encryption hygiene — every field is
@@ -57,6 +64,7 @@ caller can ask about is the one they authenticated as.
 
 from __future__ import annotations
 
+import uuid
 from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends
@@ -67,13 +75,14 @@ from app.api.deps import get_request_session, require_roles
 from app.api.v1.contracts import ContractListItem, list_item
 from app.core.principal import Principal
 from app.db.base import utc_now
-from app.db.enums import ContractStatus, UserRole
+from app.db.enums import Channel, ContractStatus, UserRole
 from app.db.repositories.contracts import ContractRepository
 from app.db.repositories.escalations import (
     EscalationRepository,
     overdue_escalation_count_for_tenant,
 )
 from app.db.repositories.fields import ExtractedFieldRepository
+from app.db.repositories.notifications import ALL_CHANNELS, channel_mix_counts_for_tenant
 from app.workers.dispatch import DEFAULT_MILESTONE_DAYS
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -88,6 +97,14 @@ DEFAULT_EXPIRING_WINDOW_DAYS = 30
 #: the reason every other listing is bounded at its query: a dashboard is a glance,
 #: and a caller cannot ask this route for a tenant's whole contract table.
 RECENT_CONTRACT_LIMIT = 5
+
+#: How far back the channel mix looks. **Not** ``DEFAULT_EXPIRING_WINDOW_DAYS``,
+#: even though both are thirty: those two numbers answer opposite questions — one
+#: a forward horizon for terms about to lapse, this one a trailing window over
+#: sends that already happened — and tying them would mean a future change to the
+#: reminder horizon silently rewrote what "the last month of contact" means. They
+#: are equal today because a month is a month, not because they are one figure.
+DEFAULT_CHANNEL_MIX_WINDOW_DAYS = 30
 
 
 def reminder_window_bands(*, today: date) -> list[tuple[str, int, date, date]]:
@@ -154,6 +171,34 @@ class ReminderWindow(BaseModel):
             "states the planner would still remind — the same predicate as "
             "`contracts_expiring`. A contract in this band is one whose reminder "
             "for `milestone` is due today."
+        ),
+    )
+
+
+class ChannelMix(BaseModel):
+    """One channel, and how many times it actually reached somebody.
+
+    A count rather than a share, and the difference is not cosmetic. A percentage
+    has to be a percentage *of* something, and the only honest denominator here is
+    all the contact that could have happened — which includes the rows that failed.
+    Presenting ``email: 60%`` would leave a reader to guess what filled the other
+    forty, and the demo's answer, "channels we did not use", is the least likely of
+    the three. A raw count cannot be misread that way: it says how many, and the
+    window beside it says when.
+    """
+
+    channel: Channel = Field(
+        description=(
+            "The channel contacted on — a stored enum value, usable as a lookup "
+            "key. Present even when `contacts` is zero."
+        ),
+    )
+    contacts: int = Field(
+        description=(
+            "Notifications in a `sent`-or-later state on this channel whose "
+            "`sent_at` falls in the window, when they were dispatched. Failed and "
+            "suppressed rows are excluded: they reached nobody, and claiming "
+            "otherwise would make this board disagree with the notification queue."
         ),
     )
 
@@ -228,6 +273,32 @@ class DashboardView(BaseModel):
             "unlike `escalations_overdue`, whose subset relationship forbids summing."
         ),
     )
+    channel_mix_since: date = Field(
+        description=(
+            "First day of the channel-mix window, inclusive, as a UTC calendar "
+            "date — the day `DEFAULT_CHANNEL_MIX_WINDOW_DAYS` before `today`. A "
+            "trailing window, unlike `today`/`window_end`: this one looks back at "
+            "sends that happened. Stated in days rather than instants so two reads "
+            "inside one UTC day describe the same window."
+        ),
+    )
+    channel_mix_until: date = Field(
+        description=(
+            "Last day of the channel-mix window, inclusive: the UTC calendar day "
+            "this reading was taken, which is `today`. Both ends are inclusive, so "
+            "the window is `DEFAULT_CHANNEL_MIX_WINDOW_DAYS` apart — the mirror "
+            "image of `window_end`, which sits the same distance ahead."
+        ),
+    )
+    channel_mix: list[ChannelMix] = Field(
+        description=(
+            "Contact per channel over `[channel_mix_since, channel_mix_until]`, one "
+            "entry per channel in the enum's order, zero-filled. These are counts of "
+            "contact that happened, so they sum to the messages delivered in the "
+            "window — **not** a share of `contracts_total`, and not comparable to "
+            "`contracts_expiring`, whose window points the other way."
+        ),
+    )
     recent_contracts: list[ContractListItem] = Field(
         description=(
             "The most recently ingested contracts, newest first. Recent activity, "
@@ -235,6 +306,31 @@ class DashboardView(BaseModel):
             "number to use for that question."
         ),
     )
+
+
+def _channel_mix(
+    session: Session,
+    tenant_id: uuid.UUID,
+    *,
+    since: date,
+    until: date,
+) -> list[ChannelMix]:
+    """The mix as a list, in ``ALL_CHANNELS`` order.
+
+    One grouped `COUNT` over the tenant's own rows rather than one per channel:
+    unlike the reminder bands — whose ranges are derived arithmetic over a ladder
+    that might gain a rung — the channels are a fixed enum, so ``group_by`` answers
+    all of them in a single statement.
+
+    The order comes from ``ALL_CHANNELS`` and not from the mapping the reader
+    returns. Those agree today, because that reader fills its keys with
+    ``dict.fromkeys(ALL_CHANNELS, 0)``; they would stop agreeing the moment somebody
+    rebuilt it differently, and a panel that reordered itself is the kind of change
+    nobody notices until a screenshot is compared. Iterating the enum is the version
+    that cannot drift.
+    """
+    counts = channel_mix_counts_for_tenant(session, tenant_id, since=since, until=until)
+    return [ChannelMix(channel=channel, contacts=counts[channel]) for channel in ALL_CHANNELS]
 
 
 @router.get(
@@ -262,6 +358,11 @@ def read_dashboard(
     now = utc_now()
     today = now.date()
     window_end = today + timedelta(days=DEFAULT_EXPIRING_WINDOW_DAYS)
+    # A trailing window, and in calendar days rather than instants: `now` moves
+    # between two reads, and a payload whose window moves with it is not the same
+    # payload twice. Days keep the route's idempotency intact for as long as the UTC
+    # day lasts, which is what `today`, `window_end` and the bands already rely on.
+    channel_mix_since = today - timedelta(days=DEFAULT_CHANNEL_MIX_WINDOW_DAYS)
 
     contracts = ContractRepository(session, tenant_id=principal.tenant_id)
     fields = ExtractedFieldRepository(session, tenant_id=principal.tenant_id)
@@ -295,5 +396,10 @@ def read_dashboard(
             )
             for milestone, days, start, end in reminder_window_bands(today=today)
         ],
+        channel_mix_since=channel_mix_since,
+        channel_mix_until=today,
+        channel_mix=_channel_mix(
+            session, principal.tenant_id, since=channel_mix_since, until=today
+        ),
         recent_contracts=[list_item(row) for row in contracts.recent(limit=RECENT_CONTRACT_LIMIT)],
     )

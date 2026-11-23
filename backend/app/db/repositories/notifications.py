@@ -21,7 +21,7 @@ Two shapes worth stating, both inherited from :mod:`app.db.repositories.agent`:
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
@@ -203,6 +203,26 @@ UNDELIVERED_STATUSES: tuple[NotificationStatus, ...] = (
     NotificationStatus.SUPPRESSED,
 )
 
+#: ``Notification.status`` values that mean the transport accepted the row.
+#:
+#: Expressed by inclusion — everything past ``pending`` that is not one of the two
+#: failure states — because those are the only two ways a row stops without reaching
+#: anybody. ``machine`` counts as contact on purpose: a voicemail reached a mailbox
+#: even though the spec is explicit that it is *not* a response, which is precisely
+#: the situation an escalation exists for.
+#:
+#: Lives here rather than beside its first caller (:mod:`app.db.repositories.
+#: escalations`) because it is a statement about ``Notification.status``, and this
+#: module is where those are declared. With :data:`UNDELIVERED_STATUSES` beside it the
+#: three-way split is visible in one place: every status is *pending*, *contacted*, or
+#: *undelivered*, and ``test_notifications.py`` asserts the three partitions.
+CONTACTED_STATUSES: tuple[NotificationStatus, ...] = (
+    NotificationStatus.SENT,
+    NotificationStatus.DELIVERED,
+    NotificationStatus.ANSWERED,
+    NotificationStatus.MACHINE,
+)
+
 
 def undelivered_counts(session: Session) -> dict[NotificationStatus, int]:
     """Count rows that stopped without being delivered, **unscoped**.
@@ -232,13 +252,15 @@ def undelivered_counts(session: Session) -> dict[NotificationStatus, int]:
     return counts
 
 
-#: Every channel a ``pending`` row can be stuck on, in the enum's declaration order.
+#: Every channel, in the enum's declaration order.
 #:
-#: Named once because two things fill their zeros from it — the two counts below and
-#: the ``notifications_pending`` gauge in :mod:`app.core.metrics` — and a channel
-#: missing from one of them would read, from Prometheus' side, as a channel that is
-#: never stuck rather than one nobody counted.
-PENDING_CHANNELS: tuple[Channel, ...] = tuple(Channel)
+#: Named once because three readings fill their zeros from it — the stuck-row count
+#: below and the ``notifications_pending`` gauge in :mod:`app.core.metrics` that
+#: reads it, plus the dashboard's channel mix — and a channel missing from one of
+#: them would read, from the caller's side, as a channel nobody counted rather than
+#: one with nothing in it. It was called ``PENDING_CHANNELS`` while the pending
+#: gauge was its only reader; the name was about that reader, not about the set.
+ALL_CHANNELS: tuple[Channel, ...] = tuple(Channel)
 
 
 def _overdue_pending(grace: timedelta, now: datetime | None) -> ColumnElement[bool]:
@@ -313,7 +335,7 @@ def pending_overdue_counts(
         .where(_overdue_pending(grace, now))
         .group_by(Notification.channel)
     )
-    counts: dict[Channel, int] = dict.fromkeys(PENDING_CHANNELS, 0)
+    counts: dict[Channel, int] = dict.fromkeys(ALL_CHANNELS, 0)
     for channel, total in session.execute(stmt).all():
         counts[channel] = int(total)
     return counts
@@ -358,6 +380,79 @@ def undelivered_counts_for_tenant(
     counts: dict[NotificationStatus, int] = dict.fromkeys(UNDELIVERED_STATUSES, 0)
     for status, total in session.execute(stmt).all():
         counts[status] = int(total)
+    return counts
+
+
+def channel_mix_counts_for_tenant(
+    session: Session,
+    tenant_id: uuid.UUID,
+    *,
+    since: date,
+    until: date,
+) -> dict[Channel, int]:
+    """Count **one organisation's** contacts per channel between two *days*.
+
+    What a "channel mix" is here, stated because the words are ambiguous: the number
+    of times this organisation actually reached somebody on each channel, not the
+    number of reminders it intended to send. So the rows counted are the ones in
+    :data:`CONTACTED_STATUSES` — a ``failed`` or ``suppressed`` row is left out
+    deliberately, because reporting it would claim contact that never happened, and
+    the undelivered board (:func:`undelivered_counts_for_tenant`) is the place that
+    answers for it.
+
+    The window is on ``sent_at``, not ``scheduled_date``: the question is when the
+    message reached the customer, and a reminder whose slot was three weeks ago but
+    which was retried into a send last night belongs to the night it went out. A row
+    with no ``sent_at`` cannot fall inside a window — SQL comparisons against NULL are
+    never true — so an unsent row is excluded by the predicate rather than by a
+    separate clause.
+
+    The bounds are **calendar days, both inclusive**, and they are days rather than
+    instants for a reason the dashboard route depends on: an instant window would be
+    taken from "now", so two reads a second apart would return two different windows
+    and the route's "reading it changes nothing" guarantee — the same payload twice —
+    would be false. Whole UTC days are stable for as long as the day is, exactly like
+    ``today`` and ``window_end`` in the sibling expiring window. Internally the two
+    days become the half-open instant range ``[since 00:00, until + 1 day 00:00)``: a
+    send at 23:59:59.999 on the last counted day is inside, and one at midnight the
+    following morning is not.
+
+    Every channel is always present and zero-filled from :data:`ALL_CHANNELS`: a
+    channel nobody used has to read ``0``, or a reader cannot tell "we never text
+    anyone" from "this board forgot to count texts".
+
+    Tenant-scoped for the reason :func:`undelivered_counts_for_tenant` gives, and
+    ``ix_notifications_tenant_status`` leads on ``tenant_id``, so this is an index
+    scan over one organisation's rows. No row content is read, so no count can leak a
+    recipient.
+
+    **The ``sent_at`` range is a filter, not a scan bound, and that is worth saying.**
+    No index on this table leads on ``sent_at`` — the two that exist are
+    ``(status, scheduled_at)`` and ``(tenant_id, status)`` — so the planner narrows to
+    one organisation's status slice and then tests the window row by row. At demo
+    scale that is the same cost as the sibling counts. On a tenant that has sent a
+    million notifications it is a walk over every row they ever contacted, which is
+    why the honest fix later is an index leading on ``(tenant_id, status, sent_at)``
+    or a daily rollup — not a rewrite of this query. The alternative considered and
+    rejected was windowing on ``scheduled_date``, which *is* indexed but answers the
+    wrong question: a reminder whose slot was three weeks ago and which was retried
+    into a send last night did not reach the customer three weeks ago.
+    """
+    start = datetime.combine(since, time.min)
+    end = datetime.combine(until + timedelta(days=1), time.min)
+    stmt = (
+        select(Notification.channel, func.count())
+        .where(
+            Notification.tenant_id == tenant_id,
+            Notification.status.in_(CONTACTED_STATUSES),
+            Notification.sent_at >= start,
+            Notification.sent_at < end,
+        )
+        .group_by(Notification.channel)
+    )
+    counts: dict[Channel, int] = dict.fromkeys(ALL_CHANNELS, 0)
+    for channel, total in session.execute(stmt).all():
+        counts[channel] = int(total)
     return counts
 
 

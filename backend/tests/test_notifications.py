@@ -59,7 +59,12 @@ from app.db.enums import (
     UserRole,
 )
 from app.db.models import AgentDecision, Contract, ExtractedField, Notification, Tenant, User
-from app.db.repositories import PENDING_CHANNELS, pending_overdue_counts
+from app.db.repositories import (
+    ALL_CHANNELS,
+    CONTACTED_STATUSES,
+    UNDELIVERED_STATUSES,
+    pending_overdue_counts,
+)
 from app.db.session import session_scope
 from app.main import create_app
 from app.workers.dispatch import (
@@ -1419,7 +1424,7 @@ def test_a_contract_further_out_than_every_milestone_is_refused() -> None:
 GRACE = timedelta(minutes=15)
 
 #: The result for a board with nothing overdue: every channel, zero-filled.
-NOTHING_OVERDUE: dict[Channel, int] = dict.fromkeys(PENDING_CHANNELS, 0)
+NOTHING_OVERDUE: dict[Channel, int] = dict.fromkeys(ALL_CHANNELS, 0)
 
 
 def overdue(
@@ -1572,3 +1577,32 @@ def test_the_counts_are_per_channel_and_not_one_total(
         Channel.SMS: 1,
         Channel.VOICE: 0,
     }
+
+
+# --- the status sets themselves --------------------------------------------
+def test_the_three_status_sets_partition_the_status_enum() -> None:
+    """Every ``NotificationStatus`` is pending, contacted, or undelivered — once.
+
+    Three readers slice the same column: the stuck-row count takes ``pending``, the
+    attention check takes ``undelivered``, and the dashboard's channel mix takes
+    ``contacted``. That is only safe while the three are a *partition*.
+    ``CONTACTED_STATUSES`` is written by inclusion ("everything that reached
+    somebody") and ``UNDELIVERED_STATUSES`` by name, so they can drift the moment a
+    status is added: a sixth status in neither set would simply never be counted,
+    and the mix would under-report contact with no error raised anywhere.
+
+    Asserting the partition makes that drift fail here instead — in the cheapest
+    place it can, and on the commit that introduces the status rather than on the
+    day somebody notices a number looks low.
+
+    ``pending`` is the third cell and is deliberately not a named constant: it is
+    exactly one status, and a one-element tuple would invite a second "pending-ish"
+    state rather than a decision about which of the two real sets it belongs to.
+    """
+    contacted = set(CONTACTED_STATUSES)
+    undelivered = set(UNDELIVERED_STATUSES)
+
+    assert contacted.isdisjoint(undelivered)
+    # Equality, not a subset check: this also fails if either set names a status
+    # the enum no longer has, which is what a rename would leave behind.
+    assert contacted | undelivered | {NotificationStatus.PENDING} == set(NotificationStatus)

@@ -27,11 +27,13 @@ from app.db.repositories.fields import (
     fields_for_reseal,
 )
 from app.db.repositories.notifications import (
+    ALL_CHANNELS,
+    CONTACTED_STATUSES,
     DEFAULT_NOTIFICATION_LIMIT,
     MAX_NOTIFICATION_LIMIT,
-    PENDING_CHANNELS,
     UNDELIVERED_STATUSES,
     NotificationRepository,
+    channel_mix_counts_for_tenant,
     pending_overdue_counts,
     undelivered_counts,
 )
@@ -49,13 +51,14 @@ from app.db.repositories.security import LoginAttemptRepository, RefreshTokenRep
 from app.db.repositories.users import IdentityDirectory, UserRepository, normalize_email
 
 __all__ = [
+    "ALL_CHANNELS",
+    "CONTACTED_STATUSES",
     "DEFAULT_ESCALATION_QUEUE_LIMIT",
     "DEFAULT_NOTIFICATION_LIMIT",
     "DEFAULT_RESPONSE_HISTORY_LIMIT",
     "MAX_ESCALATION_QUEUE_LIMIT",
     "MAX_NOTIFICATION_LIMIT",
     "MAX_RESPONSE_HISTORY_LIMIT",
-    "PENDING_CHANNELS",
     "UNDELIVERED_STATUSES",
     "AgentDecisionRepository",
     "AuditLogRepository",
@@ -74,6 +77,7 @@ __all__ = [
     "TenantScopedRepository",
     "UserRepository",
     "backoff_seconds",
+    "channel_mix_counts_for_tenant",
     "contract_for_operator",
     "dead_letter_count",
     "dead_lettered",

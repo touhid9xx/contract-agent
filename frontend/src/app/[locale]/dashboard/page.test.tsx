@@ -25,6 +25,11 @@
  *     prints its `0`. No figure is derived by summing the bands: the ladder reaches
  *     further than the expiring window, so a sum of it sits beside that count as
  *     though the two answered the same question.
+ *   * the channel mix is printed as **counts of contacts**, one row per channel in the
+ *     server's order and zero-filled, with its own backwards window printed from the
+ *     payload. It is not a share of the portfolio, so a fixture whose contacts exceed
+ *     `contracts_total` must print unchanged — nothing here normalises it into a
+ *     percentage or clamps it into a breakdown.
  *   * an empty portfolio is a heading and a sentence, not an error.
  *
  * The harness is the one `attention/page.test.tsx` established: a real `QueryClient`
@@ -132,6 +137,19 @@ function board(overrides: Partial<DashboardView> = {}): DashboardView {
       { milestone: "T-30", days: 30, start: "2026-03-16", end: "2026-03-31", contracts: 6 },
       { milestone: "T-14", days: 14, start: "2026-03-01", end: "2026-03-15", contracts: 0 },
     ],
+    // A backwards window, and deliberately *not* `today`–`window_end`: 30 days before
+    // 2026-03-01 is 2026-01-30, so a screen that reused the expiring window here
+    // would label these counts with the wrong month and fail the assertion below.
+    channel_mix_since: "2026-01-30",
+    channel_mix_until: "2026-03-01",
+    // Counts, not shares. `voice` is a genuine `0` — the channel-only case a "skip the
+    // empty ones" shortcut would hide. None of these is `1`, `2`, `3` or `7`, which the
+    // assertions elsewhere on this page reserve.
+    channel_mix: [
+      { channel: "email", contacts: 240 },
+      { channel: "sms", contacts: 96 },
+      { channel: "voice", contacts: 0 },
+    ],
     fields_awaiting_review: 5,
     escalations_open: 3,
     escalations_overdue: 1,
@@ -161,6 +179,10 @@ function emptyBoard(): DashboardView {
     // them at zero would make "the ladder exists and nothing is due" read as "this
     // deployment has no ladder".
     reminder_windows: board().reminder_windows.map((band) => ({ ...band, contracts: 0 })),
+    // Re-counted, not emptied, for the same reason as the ladder: `0` contacts is an
+    // answer — nothing was sent — whereas a missing row would read as a channel this
+    // deployment cannot send on at all. The window itself still exists and is printed.
+    channel_mix: board().channel_mix.map((entry) => ({ ...entry, contacts: 0 })),
     fields_awaiting_review: 0,
     escalations_open: 0,
     escalations_overdue: 0,
@@ -215,11 +237,11 @@ function hrefOf(name: string): string | null {
 /**
  * The `<dl>` a caption introduces, rather than "the first `<dl>` on the page".
  *
- * There are two definition lists here now — the lifecycle breakdown and the reminder
- * ladder — so a positional lookup would have quietly started reading the wrong card
- * the day one was inserted above the other. Anchoring on the caption's own text keeps
- * each helper on the card it names, and fails loudly (returns `null`) if the markup
- * stops putting the list beside its caption.
+ * There are three definition lists here now — the lifecycle breakdown, the reminder
+ * ladder and the channel mix — so a positional lookup would have quietly started
+ * reading the wrong card the day one was inserted above the other. Anchoring on the
+ * caption's own text keeps each helper on the card it names, and fails loudly (returns
+ * `null`) if the markup stops putting the list beside its caption.
  */
 function listUnder(caption: string): HTMLElement | null {
   const next = screen.getByText(caption).nextElementSibling;
@@ -248,6 +270,22 @@ function ladderRows(): { label: string; count: string }[] {
   return [...list.querySelectorAll("div")].map((band) => ({
     label: band.querySelector("dt")?.textContent ?? "",
     count: band.querySelector("dd")?.textContent ?? "",
+  }));
+}
+
+/**
+ * The channel mix as the page printed it, in document order.
+ *
+ * Order and completeness are both the claim: the rows arrive in the server's enum
+ * order and every channel is present, including one sitting at `0`. A reader asking
+ * "did we use voice at all?" needs the row, not an absence to interpret.
+ */
+function mixRows(): { label: string; count: string }[] {
+  const list = listUnder(EN.dashboard.channelMixBody);
+  if (list === null) return [];
+  return [...list.querySelectorAll("div")].map((entry) => ({
+    label: entry.querySelector("dt")?.textContent ?? "",
+    count: entry.querySelector("dd")?.textContent ?? "",
   }));
 }
 
@@ -411,6 +449,84 @@ describe("the reminder ladder is a partition, printed as one", () => {
     const summed = view.reminder_windows.reduce((total, band) => total + band.contracts, 0);
     expect(summed).toBeGreaterThan(0);
     expect(screen.queryByText(String(summed))).toBeNull();
+  });
+});
+
+describe("the channel mix is a count of contacts, in its own window", () => {
+  it("prints every channel in the server's order, and one nobody used still prints `0`", async () => {
+    // The row set is the channel enum's, not "the channels that appear in the counts":
+    // `voice: 0` is the answer to "do we contact anyone by voice?", and a screen that
+    // dropped empty rows would leave that question unanswerable — the same reasoning as
+    // the zero-filled breakdown and the ladder's empty rung.
+    const view = board();
+    setSession(sessionFor("operator"));
+    vi.mocked(dashboard.read).mockResolvedValue(view);
+    renderScreen();
+
+    expect(await screen.findByText(EN.dashboard.channelMixBody)).toBeDefined();
+    expect(mixRows()).toStrictEqual(
+      view.channel_mix.map((entry) => ({
+        label: EN.contracts.channels[entry.channel],
+        count: String(entry.contacts),
+      })),
+    );
+    expect(mixRows().map((entry) => entry.count)).toContain("0");
+  });
+
+  it("labels them with their own backward window, not the expiring window above", async () => {
+    // The two windows point opposite ways: the expiring card looks forward at terms
+    // about to lapse, this one looks back at contact already sent. A page that reused
+    // `today`–`window_end` would print a plausible sentence about a month nobody
+    // counted, so both boundaries are asserted from the payload's own strings and the
+    // expiring sentence is asserted *absent* from this card.
+    const view = board();
+    setSession(sessionFor("operator"));
+    vi.mocked(dashboard.read).mockResolvedValue(view);
+    renderScreen();
+
+    expect(await screen.findByText(EN.dashboard.channelMixBody)).toBeDefined();
+    expect(
+      screen.getByText(
+        say(EN.dashboard.channelMixWindow, {
+          start: day("en", view.channel_mix_since),
+          end: day("en", view.channel_mix_until),
+        }),
+      ),
+    ).toBeDefined();
+    expect(view.channel_mix_since).not.toBe(view.today);
+    expect(
+      screen.queryByText(
+        say(EN.dashboard.channelMixWindow, {
+          start: day("en", view.today),
+          end: day("en", view.window_end),
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("prints the counts unchanged even when they exceed the portfolio total", async () => {
+    // The mistake this panel could invite is reading it as a breakdown: 1900 contacts
+    // against 1265 contracts looks like a bad partition unless you know one contract can
+    // be reminded several times. The screen's answer is to print the counts as they
+    // arrived and say what they are — so the assertion is that nothing is normalised
+    // into a share and the counts still sum to more than the total.
+    const view = board({
+      channel_mix: [
+        { channel: "email", contacts: 900 },
+        { channel: "sms", contacts: 700 },
+        { channel: "voice", contacts: 300 },
+      ],
+    });
+    setSession(sessionFor("operator"));
+    vi.mocked(dashboard.read).mockResolvedValue(view);
+    renderScreen();
+
+    expect(await screen.findByText(EN.dashboard.channelMixNote)).toBeDefined();
+    expect(mixRows().map((entry) => entry.count)).toStrictEqual(["900", "700", "300"]);
+    const contacts = view.channel_mix.reduce((total, entry) => total + entry.contacts, 0);
+    expect(contacts).toBeGreaterThan(view.contracts_total);
+    expect(screen.queryByText(String(contacts))).toBeNull();
+    expect(mixRows().filter((entry) => entry.label.includes("%"))).toStrictEqual([]);
   });
 });
 

@@ -450,7 +450,7 @@ export type EscalationStatus = "open" | "in_progress" | "resolved" | "sla_breach
 /** Wire values of `app.db.enums.ResponseType`. */
 export type ResponseType = "reply" | "click" | "call_answered" | "manual";
 
-/** The channels a customer can reply on (`app.db.enums.Channel`). */
+/** The channels a customer can be reached on or reply on (`app.db.enums.Channel`). */
 export type ContactChannel = "email" | "sms" | "voice";
 
 /**
@@ -1256,6 +1256,27 @@ export interface ReminderWindow {
 }
 
 /**
+ * One channel, and how many contacts actually went out on it.
+ *
+ * A **count**, not a share, and the difference is the reason this type has no
+ * `percent` field. A percentage has to be a percentage *of* something, and the only
+ * honest denominator would be all the contact that could have happened — a set that
+ * includes the rows that failed. `email: 60%` would leave a reader to guess what
+ * filled the other forty, and "channels we did not use" is the least likely answer.
+ * A count cannot be misread that way; the window beside it says when.
+ *
+ * `contacts` excludes failed and suppressed rows on purpose: those reached nobody,
+ * and counting them here would make this panel contradict the notification queue.
+ * The attention board already answers for the undelivered ones.
+ */
+export interface ChannelMixEntry {
+  /** The channel contacted on — the `app.db.enums.Channel` wire value. */
+  channel: ContactChannel;
+  /** Notifications in a `sent`-or-later state on this channel, dispatched in the window. */
+  contacts: number;
+}
+
+/**
  * One organisation's portfolio totals, `GET /api/v1/dashboard`.
  *
  * Every number here is a server-side `COUNT` over the tenant's own rows, and that
@@ -1311,6 +1332,31 @@ export interface DashboardView {
    * an offer nobody can accept.
    */
   reminder_windows: ReminderWindow[];
+  /**
+   * First day of the channel-mix window, inclusive, `YYYY-MM-DD`.
+   *
+   * Its own window rather than a reuse of `today`–`window_end`: that one looks
+   * *forward* at terms about to lapse, and this one looks *backward* at contact that
+   * already happened. They are different questions about different rows, which is why
+   * the server keeps a separate constant for each instead of tying one to the other.
+   */
+  channel_mix_since: string;
+  /** Last day of the channel-mix window, inclusive — always `today`. */
+  channel_mix_until: string;
+  /**
+   * Contacts per channel over `[channel_mix_since, channel_mix_until]`, one entry per
+   * member of the channel enum, **zero-filled** so a channel nothing was sent on
+   * prints `0` rather than vanishing.
+   *
+   * Order is the server's enum order, not a sort performed here: re-sorting would be
+   * a second opinion about an order nothing on this screen needs to disagree with.
+   *
+   * The counts are *not* a partition of `contracts_total` and are not comparable to
+   * any figure on the rest of this payload — one contract can receive several
+   * reminders, and the window is its own. The screen says so rather than leaving the
+   * panel to be read as a breakdown of the portfolio.
+   */
+  channel_mix: ChannelMixEntry[];
   /**
    * A bounded, newest-first slice of the tenant's contracts — the rows *returned*,
    * not a total. Printing `recent_contracts.length` as an activity figure would be

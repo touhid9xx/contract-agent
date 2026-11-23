@@ -41,8 +41,9 @@ of field primary keys.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 import pytest
@@ -51,13 +52,31 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.v1.dashboard import (
+    DEFAULT_CHANNEL_MIX_WINDOW_DAYS,
     DEFAULT_EXPIRING_WINDOW_DAYS,
     RECENT_CONTRACT_LIMIT,
     reminder_window_bands,
 )
 from app.db.base import utc_now
-from app.db.enums import ContractStatus, EscalationStatus, FieldName, FieldStatus, UserRole
-from app.db.models import AuditLog, Contract, Escalation, ExtractedField, Tenant, User
+from app.db.enums import (
+    Channel,
+    ContractStatus,
+    EscalationStatus,
+    FieldName,
+    FieldStatus,
+    NotificationStatus,
+    UserRole,
+)
+from app.db.models import (
+    AuditLog,
+    Contract,
+    Escalation,
+    ExtractedField,
+    Notification,
+    Tenant,
+    User,
+)
+from app.db.repositories.notifications import ALL_CHANNELS
 from app.db.session import session_scope
 from app.workers.dispatch import DEFAULT_MILESTONE_DAYS
 
@@ -141,6 +160,40 @@ def add_escalation(
             sla_deadline=moment + deadline_in,
             status=status,
             resolved_at=moment if status is EscalationStatus.RESOLVED else None,
+        )
+        session.add(row)
+        session.flush()
+        return int(row.id)
+
+
+def add_notification(
+    session_factory: sessionmaker[Session],
+    contract: Contract,
+    *,
+    channel: Channel = Channel.EMAIL,
+    status: NotificationStatus = NotificationStatus.SENT,
+    sent_at: object = ...,
+    template: str = "T-30",
+) -> int:
+    """One notification row in a chosen state, as a channel-mix input.
+
+    ``sent_at`` defaults to "a moment ago" — inside the window — and accepts an
+    explicit instant or ``None``. ``template`` is varied by each caller because the
+    model's ``uq_notification_slot`` is unique on
+    ``(contract_id, template, scheduled_date)``: two rows wanting the same slot have
+    to differ somewhere, and the slot is not the thing under test here.
+    """
+    when: Any = utc_now() if sent_at is ... else sent_at
+    with session_scope(session_factory) as session:
+        row = Notification(
+            tenant_id=contract.tenant_id,
+            contract_id=contract.id,
+            channel=channel,
+            template=template,
+            status=status,
+            scheduled_date=utc_now().date(),
+            sent_at=when,
+            idempotency_key=f"dash-{uuid.uuid4().hex}",
         )
         session.add(row)
         session.flush()
@@ -473,6 +526,214 @@ def test_a_neighbours_terms_are_in_nobodys_window(
 
     assert sum(w["contracts"] for w in read(client, busy)["reminder_windows"]) == 1
     assert sum(w["contracts"] for w in read(client, quiet)["reminder_windows"]) == 0
+
+
+# --- channel mix ----------------------------------------------------------
+def test_the_mix_counts_contact_that_happened_and_nothing_else(
+    client: TestClient,
+    tenant: Tenant,
+    make_user: Callable[..., User],
+    make_contract: Callable[..., Contract],
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Seven rows, three of them contact — each exclusion for its own reason.
+
+    The three counted rows are ``sent``, ``delivered`` and ``machine``, because
+    "reached the customer" is wider than "was delivered": a voicemail reached a
+    mailbox even though the spec refuses to call it a response, and excluding it
+    would make the board undercount the very calls that generate escalations.
+
+    The four excluded rows fail four *different* ways — ``failed`` and
+    ``suppressed`` reached nobody, ``pending`` never went out at all (no
+    ``sent_at``), and one sent row is outside the window. A single negative would
+    pass against a query that dropped rows for the wrong reason; only having all
+    four means a wrong predicate cannot produce the right total by luck.
+    """
+    contract = make_contract(tenant)
+    long_ago = utc_now() - timedelta(days=DEFAULT_CHANNEL_MIX_WINDOW_DAYS + 1)
+    add_notification(session_factory, contract, channel=Channel.EMAIL, template="T-60")
+    add_notification(
+        session_factory,
+        contract,
+        channel=Channel.EMAIL,
+        status=NotificationStatus.DELIVERED,
+        template="T-30",
+    )
+    add_notification(
+        session_factory,
+        contract,
+        channel=Channel.VOICE,
+        status=NotificationStatus.MACHINE,
+        template="T-14",
+    )
+    # The four that must not be counted.
+    add_notification(
+        session_factory,
+        contract,
+        status=NotificationStatus.FAILED,
+        template="T-7",
+    )
+    add_notification(
+        session_factory,
+        contract,
+        status=NotificationStatus.SUPPRESSED,
+        template="T-3",
+    )
+    add_notification(
+        session_factory,
+        contract,
+        status=NotificationStatus.PENDING,
+        sent_at=None,
+        template="T-1",
+    )
+    add_notification(session_factory, contract, sent_at=long_ago, template="T-0")
+    headers = auth(client, tenant, make_user)
+
+    body = read(client, headers)
+
+    mix = {entry["channel"]: entry["contacts"] for entry in body["channel_mix"]}
+    assert mix == {"email": 2, "sms": 0, "voice": 1}
+
+
+def test_a_channel_nobody_used_reads_zero_rather_than_missing(
+    client: TestClient,
+    tenant: Tenant,
+    make_user: Callable[..., User],
+) -> None:
+    """Every channel is present, in enum order, even on a silent portfolio.
+
+    The same two failure modes the status rows have, and the same consequence: a
+    missing key leaves the client to draw whatever it drew last time, and a missing
+    zero makes "we never text anyone" indistinguishable from "this board forgot to
+    count texts". The order is asserted too, because a panel that reorders itself
+    between reads is a change nobody notices until two screenshots are compared.
+    """
+    headers = auth(client, tenant, make_user)
+
+    mix = read(client, headers)["channel_mix"]
+
+    assert [entry["channel"] for entry in mix] == [channel.value for channel in ALL_CHANNELS]
+    assert [entry["contacts"] for entry in mix] == [0] * len(ALL_CHANNELS)
+
+
+def test_the_mix_states_its_window_and_the_window_trails_the_reading(
+    client: TestClient,
+    tenant: Tenant,
+    make_user: Callable[..., User],
+    make_contract: Callable[..., Contract],
+) -> None:
+    """A count with no window beside it is not checkable, so the window ships.
+
+    This is the one panel whose window points **backwards**: the reminder bands and
+    ``contracts_expiring`` look forward at terms about to lapse, this looks back at
+    sends that already happened. Both are thirty days and they are deliberately two
+    constants, so a future change to the reminder horizon cannot silently rewrite
+    what "the last month of contact" means.
+
+    The bounds are calendar days rather than instants, and that is load-bearing
+    rather than cosmetic: this route promises the same payload twice, and a window
+    taken from ``now`` moves between two calls a millisecond apart. Checking that
+    with days is also the only version a test *can* write — comparing `until` to a
+    ``utc_now()`` captured here would fail whenever that comparison straddled
+    midnight, so it is pinned to the ``today`` the payload itself reports instead.
+    """
+    make_contract(tenant)
+    headers = auth(client, tenant, make_user)
+    before = utc_now().date()
+
+    body = read(client, headers)
+
+    since = date.fromisoformat(body["channel_mix_since"])
+    until = date.fromisoformat(body["channel_mix_until"])
+    assert until - since == timedelta(days=DEFAULT_CHANNEL_MIX_WINDOW_DAYS)
+    assert since < until
+    # It trails the reading rather than leading it: the last counted day is the day
+    # the reading was taken, so the whole window is already in the past — that is
+    # what makes this a history and not a horizon.
+    assert until == date.fromisoformat(body["today"])
+    assert since < before
+
+
+def test_the_window_ends_at_midnight_after_its_last_day(
+    client: TestClient,
+    tenant: Tenant,
+    make_user: Callable[..., User],
+    make_contract: Callable[..., Contract],
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Both ends are *days*, so the far edge is midnight and not a rounded instant.
+
+    The window is stored as two dates and turned into a half-open instant range on
+    the way to SQL. Getting that conversion wrong in either direction is invisible
+    in every other test in this file: an ``until`` compared with ``<`` against
+    ``time.max`` would silently drop a send in the last microsecond of the day, and
+    a ``since`` compared with ``<`` would silently drop a send at exactly midnight
+    when the window opened. Both edges are pinned here, one row each.
+    """
+    contract = make_contract(tenant)
+    last_day = utc_now().date()
+    add_notification(
+        session_factory,
+        contract,
+        sent_at=datetime.combine(last_day, time.max),
+        template="T-60",
+    )
+    add_notification(
+        session_factory,
+        contract,
+        channel=Channel.SMS,
+        sent_at=datetime.combine(last_day + timedelta(days=1), time(0, 0)),
+        template="T-30",
+    )
+    add_notification(
+        session_factory,
+        contract,
+        channel=Channel.VOICE,
+        sent_at=datetime.combine(
+            last_day - timedelta(days=DEFAULT_CHANNEL_MIX_WINDOW_DAYS), time(0, 0)
+        ),
+        template="T-14",
+    )
+    headers = auth(client, tenant, make_user)
+
+    mix = {entry["channel"]: entry["contacts"] for entry in read(client, headers)["channel_mix"]}
+
+    # The send at 00:00 on the window's first day is inside it; the one at 00:00 the
+    # morning after its last day is not.
+    assert mix == {"email": 1, "sms": 0, "voice": 1}
+
+
+def test_a_neighbours_contacts_are_in_nobodys_mix(
+    client: TestClient,
+    tenant: Tenant,
+    other_tenant: Tenant,
+    make_user: Callable[..., User],
+    make_contract: Callable[..., Contract],
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Three sends at the neighbour, one here: neither board may see the other.
+
+    The quiet side carries the assertion. A grouped ``COUNT`` that dropped the
+    tenant predicate is the easiest leak in this file to write — ``group_by`` reads
+    like it already scoped the rows — and the busy tenant would look perfectly
+    correct while the leak happened.
+    """
+    add_notification(session_factory, make_contract(other_tenant), template="T-60")
+    add_notification(
+        session_factory, make_contract(other_tenant), channel=Channel.SMS, template="T-30"
+    )
+    add_notification(
+        session_factory, make_contract(other_tenant), channel=Channel.VOICE, template="T-14"
+    )
+    add_notification(session_factory, make_contract(tenant), template="T-60")
+
+    busy = auth(client, other_tenant, make_user, email="ops@globex.test")
+    quiet = auth(client, tenant, make_user, email=EMAIL)
+
+    busy_mix = {e["channel"]: e["contacts"] for e in read(client, busy)["channel_mix"]}
+    quiet_mix = {e["channel"]: e["contacts"] for e in read(client, quiet)["channel_mix"]}
+    assert busy_mix == {"email": 1, "sms": 1, "voice": 1}
+    assert quiet_mix == {"email": 1, "sms": 0, "voice": 0}
 
 
 # --- isolation ------------------------------------------------------------
