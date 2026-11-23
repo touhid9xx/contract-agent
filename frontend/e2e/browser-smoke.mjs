@@ -35,6 +35,8 @@
  * means all of it agreed. Requires the `playwright` browsers
  * (`npx playwright install chromium`) and a frontend build; a build made against a
  * different API address is rebuilt, because `next build` fixes the proxy target.
+ * That rebuilt `.next` is removed on the way out, so this script never leaves a
+ * build behind that proxies to a port only this run listened on.
  *
  *   node e2e/browser-smoke.mjs            # headless
  *   SMOKE_HEADED=1 node e2e/browser-smoke.mjs
@@ -65,6 +67,15 @@ const WEB_PORT = Number(process.env.SMOKE_WEB_PORT ?? 3100);
 const WEB = `http://127.0.0.1:${WEB_PORT}`;
 let API = `http://127.0.0.1:${API_PORT}`;
 const LOCALE = "en";
+
+/**
+ * The port this run rebuilt `.next` for, or null when it reused the build it
+ * found. A rebuilt `.next` records *this run's* API address in
+ * `.next/routes-manifest.json`, so leaving it on disk after the run means the
+ * next `npm run start` proxies every `/api/*` call to a port nothing listens on
+ * any more — and says so only as failed sign-ins. `finally` removes it.
+ */
+let rebuiltForPort = null;
 
 // The account this script creates, and the contract it seeds. Both are asserted
 // against, so they are written once and read from one place.
@@ -533,6 +544,7 @@ function ensureBuiltFor(apiPort) {
   });
   const rebuilt = builtProxy();
   need(rebuilt.port === apiPort, `after rebuilding, the frontend still proxies to ${rebuilt.href}`);
+  rebuiltForPort = apiPort;
 }
 
 async function bootFrontend() {
@@ -645,6 +657,22 @@ async function main() {
     if (browser) await browser.close();
     for (const child of children.reverse()) stop(child);
     if (tempRoot) rmSync(tempRoot, { recursive: true, force: true });
+    // Deliberately after the frontend server is stopped: `next start` holds the
+    // directory open on Windows, and a half-deleted `.next` is worse than none.
+    // A failed removal is reported and not thrown — it happens inside `finally`,
+    // where a throw would replace the real failure with this one.
+    if (rebuiltForPort !== null) {
+      try {
+        rmSync(join(FRONTEND, ".next"), { recursive: true, force: true });
+        say(
+          `· removed .next: it was built for ${API}, and no later \`npm run start\` ` +
+            `should proxy there`,
+        );
+      } catch (error) {
+        say(`! could not remove the run-specific .next: ${error.message}`);
+        say(`  run \`npm run build\` in frontend/ before serving it again`);
+      }
+    }
   }
 }
 

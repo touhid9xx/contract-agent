@@ -10728,10 +10728,11 @@ produces a verdict rather than a skip.
 reads it with a screen reader, or visits the second locale `frontend/src/i18n/config.ts` declares —
 `bn` is built and unrendered. The journey is one path through eight screens, not a regression net
 over every control; clicking through the consent mutations and the review decisions is still
-`jsdom`'s job. The run leaves a frontend built against port 8010 behind whenever 8000 is occupied,
-so a later deploy needs `npm run build` without `API_PROXY_URL` first. The script's two Windows-only
-paths — `npm.cmd` through a shell and `taskkill /T` to stop a child tree — are never reached on
-`ubuntu-latest`, so CI proves the Linux half and a developer proves the other; the
+`jsdom`'s job. The run used to leave a frontend built against port 8010 behind whenever 8000 was
+occupied, so a later deploy needed `npm run build` without `API_PROXY_URL` first — a rule a person
+had to remember. `D10-142` removed that: a rebuild is deleted again on the way out. The script's two
+Windows-only paths — `npm.cmd` through a shell and `taskkill /T` to stop a child tree — are never
+reached on `ubuntu-latest`, so CI proves the Linux half and a developer proves the other; the
 `spawn(..., shell: true)` call also emits Node's `DEP0190` warning, which is not suppressed because
 suppressing it would hide the arguments that warning is about.
 
@@ -11147,7 +11148,7 @@ at all, so the number is larger than a reader comparing it with the old text mig
 here is cached, so the count is what a scraper adds up to the database for every visit the screen
 makes.
 
-### D10-141 — The channel mix counts contact, and says which window it counted
+### D10-141 — The channel mix counts contacts, and says which window it counted
 
 `D10-137` returned four of the demo's five dashboard panels and left the fifth out on a rule it
 stated plainly: no panel built by summing a page. `D10-139` served the reminder ladder and named the
@@ -11211,3 +11212,47 @@ query rewritten onto `scheduled_date`. `D10-139`'s "all ten are indexed range sc
 name the exception, and the route now issues eleven statements a visit, nine of them `COUNT`s.
 Finally these are contacts, not confirmed delivery: a message that reached a mailbox nobody opened
 still counts, and the undelivered board is where a send that never left is visible.
+
+### D10-142 — The browser smoke deletes the build it made for itself
+
+`D10-133` closed by recording a rule a person then had to hold in their head: "The run leaves a
+frontend built against port 8010 behind whenever 8000 is occupied, so a later deploy needs `npm run
+build` without `API_PROXY_URL` first." The sentence was accurate — `ensureBuiltFor` rebuilds `.next`
+with `API_PROXY_URL` set to this run's address, and `next build` bakes that address into
+`.next/routes-manifest.json` — and being accurate is what made it the wrong kind of limit. A
+developer who ran the smoke while a Docker stack held port 8000, then ran `npm run start`, served a
+bundle whose every `/api/*` call went to 8010. That arrives as a rejected password or an empty list
+on a screen whose data is fine, which is `D10-133`'s own first defect returning through the back
+door, and it was being held off by a sentence in a document.
+
+**Decision.** `frontend/e2e/browser-smoke.mjs` removes the `.next` it rebuilt, in its `finally`,
+after the frontend child is stopped. A run that rebuilt has already consumed the build it found:
+that build pointed at a different API, so it was never reusable for this run, and the replacement
+is valid only for a port this run owns and closes. Leaving it is leaving a claim that outlives its
+truth.
+Removing it makes the next `npm run start` fail with Next's own "could not find a production build",
+which names the one correct next action instead of silently serving the wrong address. The reminder
+became an error message.
+
+**What it deliberately does not do.** It does not rebuild against the default on the way out: that
+spends a second build on an artefact nobody asked for, and the address the next person wants is not
+knowable from here. It deletes nothing when no rebuild happened — a run on a free 8000 reuses the
+build already on disk, and that build is what a plain `npm run build` would produce, so it is left
+exactly as found. The removal is reported and not thrown, because it runs inside `finally`, where a
+throw would replace the real failure with the cleanup's own.
+
+**What gated it.** `node --check e2e/browser-smoke.mjs` exits `0`, and `npm run lint` is clean: the
+file is linted, which is how the first draft's unread flag was caught — `rebuiltForPort` was
+assigned in `ensureBuiltFor` before anything read it, so ESLint failed the edit rather than the
+review. The branch was then exercised for real rather than argued for. `.next` was built with
+`API_PROXY_URL=http://127.0.0.1:8999`; a foreign process already held port 8000, so the smoke chose
+8010, rebuilt against it, rendered eleven screens signed out plus the signed-in journey, and exited
+`0` saying it had removed a `.next` built for 8010. Afterwards `Test-Path .next` was `False`. `npm
+run test`, `npm run lint` and the ledger check are clean.
+
+**Limits.** This closes a hazard, not a gap: it says nothing about what a screen looks like, and the
+`bn` locale stays unrendered. The removal is exercised when a rebuild happens, so CI — which builds
+for `http://127.0.0.1:8000` and finds 8000 free — takes the no-rebuild path and never reaches it;
+like the two Windows-only paths in `D10-133`, that half is proven by a developer and not by the
+pipeline. A reader who wants a build after running the smoke has to make one, which is the intended
+trade and the one the removed `npm run start` error tells them to make.

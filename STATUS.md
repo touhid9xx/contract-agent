@@ -8930,6 +8930,29 @@ honest fix is a composite index leading on `(tenant_id, status, sent_at)` or a d
 query rewritten onto `scheduled_date`. The route now issues eleven statements a visit, nine of them
 `COUNT`s.
 
+### D10-142 — The browser smoke no longer leaves a build pointed at its own port
+
+`D10-133` ended by handing the reader something to remember: a run on a busy port 8000 rebuilt
+`.next` against its own address, so a later deploy needed `npm run build` without `API_PROXY_URL`.
+That is now the script's job rather than the reader's. A rebuild is deleted in `finally`, after the
+frontend child is stopped, so the next `npm run start` fails with Next's "could not find a
+production build" — one action, correctly named — instead of serving a bundle whose every `/api/*`
+call goes to a port nobody listens on and reporting it as a rejected password. A run that reused
+the build it found deletes nothing, because that build is what a plain `npm run build` would make.
+
+**What gated it.** `node --check` exits `0` and `npm run lint` is clean — ESLint, not review, caught
+the first draft assigning the new flag before anything read it. The branch was then run rather than
+argued for: `.next` was built with `API_PROXY_URL=http://127.0.0.1:8999`, something was already
+holding 8000, so the smoke chose 8010, rebuilt against it, rendered eleven screens signed out plus
+the signed-in journey, and exited `0` after printing that it had removed a `.next` built for 8010.
+Afterwards `Test-Path .next` was `False`. `npm run test` and the ledger check are clean.
+
+**Limits.** It closes a hazard, not a gap: nothing here judges what a screen looks like, and `bn`
+stays unrendered. The removal is exercised only when a rebuild happens, and CI builds for 8000 and
+finds it free, so the pipeline takes the reuse path and never reaches it — the same shape of limit
+`D10-133` records for its Windows-only paths. Anyone who runs the smoke and then wants a served
+build has to make one, which is the intended trade.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.
