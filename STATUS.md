@@ -8844,6 +8844,26 @@ bands carry only remindable statuses, a neighbour's terms are in nobody's window
 wire order with the dates the server counted, a `0` band still prints, and no figure on the page is
 the sum of the ladder. `ruff`, `mypy --strict`, lint, typecheck and the ledger check are clean.
 
+### D10-140 — The dashboard's statement count is now a measured figure
+
+**Corrected, `D10-140`.** `D10-137` and `D10-139` both stated how many statements a dashboard visit
+issues, and both figures were derived by reading the route rather than executed: four `COUNT`s
+became seven, and the amendment named *four statements, now seven*. Instrumenting one authenticated
+visit measures ten statements now — the principal lookup, five `COUNT`s, the three band `COUNT`s and
+a page of recent rows — against seven before the bands, five of those `COUNT`s.
+
+**The argument did not depend on the number.** The recall in parentheses was that the bands cost
+what the existing readers cost; they cost one `COUNT` each, which is what the sentence said and what
+the measurement shows. What changed is only the figure, amended in place in both places it was
+stated, because a Limits paragraph is what the next reader budgets against and a stale one
+understates the bill rather than overstating it.
+
+**What gated it.** The count is taken through the same in-memory harness the route's own sixteen
+tests use, and the scaffolding that measured it was deleted rather than shipped: this slice adds no
+test, because a test pinning *ten* would fail on the next deliberate addition to the route and teach
+a reader to update a number instead of reading it. `ruff`, `mypy --strict`, lint and typecheck are
+untouched — no source file changes here — and the ledger check passes over both new blocks.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

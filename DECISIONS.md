@@ -10998,7 +10998,7 @@ clean.
 **Limits.** The expiring window is UTC, not the customer's local calendar, so a contract ending on
 the boundary day in a far-east zone is counted a day early or late — the route says which window it
 used rather than pretending to a per-contract answer. The recent list is a bounded window, and the
-screen says so in words. There is no caching: each visit ran four `COUNT`s, seven since `D10-139`
+screen says so in words. There is no caching: each visit issued five `COUNT`s, eight since `D10-139`
 added the bands, which is cheap at demo scale and would need a materialised view before it were free
 on a tenant with a million rows. And the dashboard is a read, not a live view — it is as stale as
 the moment it was fetched until the screen is reloaded.
@@ -11104,5 +11104,37 @@ counted, a band reading `0` still prints, and no figure on the page is the sum o
 resolve a per-contract timezone, so a term ending on a boundary day in a far-east zone can sit a
 band early or late. The tail is a cliff — a contract whose end date is beyond the loosest milestone
 appears in no band and the panel does not say how many those are, so `contracts_total` remains the
-only figure covering them. The route ran four statements a visit and now runs seven, one per band
-plus the four it had, which is still indexed range scans and still uncached.
+only figure covering them. The route issues ten statements a visit: the principal lookup, five
+`COUNT`s, the three band `COUNT`s and one page of recent rows. It issued seven before this slice —
+the same route without the bands, five of those seven being `COUNT`s. `D10-140` records why the
+figure first written here was wrong. All ten are indexed range scans, and none of them is cached.
+
+### D10-140 — A statement count is not arithmetic on a route's shape
+
+`D10-137` closed by saying *each visit runs four `COUNT`s*, and `D10-139` amended that to *seven
+since `D10-139`* and then wrote that the route *ran four statements a visit and now runs seven, one
+per band plus the four it had*. The second sentence was the tell: it named the bands as the only
+addition and derived both totals by counting the calls in the source. Nobody had counted an
+execution. The route issues ten.
+
+**The measurement.** One authenticated `GET /api/v1/dashboard` through the in-memory harness, with a
+listener on SQLAlchemy's `before_cursor_execute`, records: the principal lookup that authenticates
+the bearer token, `count_by_status`, `count_expiring`, `count_awaiting_review`, `count_open`, the
+overdue-escalation count, the three band counts and the page of recent rows — ten statements, eight
+of them `COUNT`s. Before the bands it was seven statements, of which five were `COUNT`s. Both
+earlier figures were wrong, and wrong in opposite directions: the pre-slice count was understated by
+one `COUNT`, and the post-slice figure happened to read as the pre-slice one.
+
+**What the correction changes, and what it does not.** The two sentences are amended in place — five
+and eight in `D10-137`, ten in `D10-139` — because a figure in a Limits paragraph is what the next
+reader budgets against, and *seven* left in place while the route issued ten would have been a claim
+shrinking the bill. Nothing else in either block moves: the argument that the panel needed a
+parameterised query rather than a new one is unaffected by how many statements the route runs, and
+the `D10-139` band arithmetic was never in question.
+
+**Limits.** The figure is per visit, measured on SQLite through the test harness — it is a count of
+statements issued, not of MySQL's plans, and it says nothing about what any single statement costs
+on a large tenant. It also includes the principal lookup, which earlier drafts had not been counting
+at all, so the number is larger than a reader comparing it with the old text might expect. Nothing
+here is cached, so the count is what a scraper adds up to the database for every visit the screen
+makes.
