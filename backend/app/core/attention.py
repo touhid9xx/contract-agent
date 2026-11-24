@@ -82,9 +82,13 @@ question: **is there a setting whose change would make this channel deliverable?
   as an explained park, and treated the same way: counted, published, and deliberately
   **not** a reason in :attr:`AttentionReport.needs_attention`. An install that failed
   every run after its first reminder would be muted within a week.
-* ``unsupported`` — no transport for the channel exists in this build (``voice``:
-  nothing here places a call). No environment variable fixes it; the human action is to
-  change what may be consented, or to approve an address a channel can use. A reason.
+* ``unsupported`` — the channel is outside :data:`~app.core.config.NOTIFIABLE_CHANNELS`.
+  No environment variable moves it; the human action is to change what may be consented,
+  or to approve an address a channel can use. A reason. ``voice`` was its only occupant
+  until ``D10-144`` gave it a dialler, so **no configuration this build ships puts
+  anything here today** — the bucket is kept because the ceiling is a statement about
+  the ``Channel`` enum, and a channel added to the enum before it can be sent would land
+  in exactly this bucket.
 * ``stuck`` — the channel *is* deliverable and the row is still overdue, so the send
   path is not running. A reason, and a fault on every configuration.
 
@@ -149,10 +153,11 @@ class AttentionReport:
     #: off. Explained by configuration, so counted and published but not a reason —
     #: the treatment an explained park already gets, and for the same reason.
     notifications_pending_unconfigured: int
-    #: The same population on a channel **no setting can deliver**: nothing in this build
-    #: sends it, so no environment variable clears these and a human has to act.
-    #: Deliberately separate from ``unconfigured`` because the next move differs: one is
-    #: a transport to configure, the other a consent or an address to change.
+    #: The same population on a channel **outside ``NOTIFIABLE_CHANNELS``**: a ceiling
+    #: rather than a switch, so no environment variable clears these and a human has to
+    #: act. Deliberately separate from ``unconfigured`` because the next move differs: one
+    #: is a transport to configure, the other a consent or an address to change. Empty on
+    #: every configuration this build ships since ``D10-144`` put ``voice`` in the ceiling.
     notifications_pending_unsupported: int
     #: The same population on a channel that *is* deliverable — so the queue is not
     #: draining and the send path is the fault. Counted apart from the other two because
@@ -218,9 +223,10 @@ class AttentionReport:
         moment the first reminder is produced, so failing on it would make the verdict
         meaningless. :attr:`notifications_pending_unsupported` and
         :attr:`notifications_pending_stuck` are the opposite: no setting explains
-        either, the first because nothing in this build can ever send that channel and
-        the second because the channel *can* be sent and is not being, so both mean a
-        person has to decide something.
+        either, the first because the channel sits outside ``NOTIFIABLE_CHANNELS`` — a
+        ceiling, and empty on every configuration this build ships since ``D10-144`` —
+        and the second because the channel *can* be sent and is not being, so both mean
+        a person has to decide something.
         """
         return bool(
             self.parks_unexplained

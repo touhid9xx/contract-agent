@@ -44,8 +44,9 @@ test:
   cap and every one of them stays ``pending`` for ever while the board reads clean.
   The population is split by *is there a setting whose change would deliver this?*:
   ``unconfigured`` (yes, and it is off — published, deliberately not a reason, or
-  every default install would page from its first reminder), ``unsupported`` (no
-  transport exists in this build, so no setting clears it) and ``stuck`` (the
+  every default install would page from its first reminder), ``unsupported`` (no,
+  because the channel sits outside ``NOTIFIABLE_CHANNELS`` — a ceiling, and empty
+  on every configuration this build ships since ``D10-144``) and ``stuck`` (the
   channel works and the send path is not draining). Only the last two raise the
   verdict, and the grace window is what stops a deployment doing its job from
   looking like one that is stuck.

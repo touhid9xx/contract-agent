@@ -166,10 +166,13 @@ groups:
       #     alarm here would fire from a default install's first reminder onward and be muted long
       #     before the deployment it described was fixed. Published, and left to the attention
       #     verdict, which is where a person reads standing state rather than an incident.
-      #   * `unsupported` — no build of this system sends the channel (`voice`), so no setting
-      #     clears these rows either; a customer has to give an address something can send to, or
-      #     consent has to change. Same treatment: published, counted in the verdict, on `doctor`,
-      #     and not paged, because a page that repeats for ever is one an operator mutes.
+      #   * `unsupported` — no, because the channel sits outside `NOTIFIABLE_CHANNELS`: that set is
+      #     a ceiling rather than a switch, so no setting clears these rows either, and a customer
+      #     has to give an address something can send to, or consent has to change. Empty on every
+      #     configuration this build ships since `D10-144`, which moved `voice` inside the ceiling
+      #     while leaving its deliverability to `VOICE_TRANSPORT`. Same treatment: published,
+      #     counted in the verdict, on `doctor`, and not paged, because a page that repeats for
+      #     ever is one an operator mutes.
       #   * `stuck` — a deliverable channel, a due row, a grace elapsed, and nothing sent it.
       #     Nothing about the configuration explains it and nothing clears it by itself. This is
       #     the population a page exists for: reminders nobody is being told about while the board

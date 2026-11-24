@@ -8494,9 +8494,11 @@ counted nowhere.
 **The count is split three ways, and only two of them are a reason.**
 `unconfigured` — a setting exists and is off: counted, published, logged, **not** a reason,
 because on the default install it is non-zero from the first reminder onward and an alarm on
-it would be muted by Thursday. `unsupported` — nothing in this build sends the channel, which
-is `voice`: counted and a reason. `stuck` — the channel is deliverable and the send path is
-not draining: counted and a reason, the only one that says "the scheduler is down".
+it would be muted by Thursday. `unsupported` — the channel sits outside `NOTIFIABLE_CHANNELS`,
+a ceiling rather than a switch: counted and a reason. `voice` was its only occupant until
+`D10-144` gave it a dialler and moved it inside. `stuck` — the channel is deliverable and the
+send path is not draining: counted and a reason, the only one that says "the scheduler is
+down".
 `NOTIFIABLE_CHANNELS` is checked **first**, so no configuration accident can reclassify
 `voice` as a fault. Three series are published every tick including the zeros, and
 `NotificationsPendingOverdue` alerts on `state="stuck"` with `for: 10m`, proved by
@@ -9042,6 +9044,36 @@ inside the row lock; a call that rings out and a call to a dead trunk both look 
 that was created.
 
 **Landed.** `dff00bc`, and CI run `45414776406` is ten jobs of ten on it, `CI gate` included.
+
+### D10-145 — `unsupported` is a ceiling, not a missing transport
+
+**Served.** Nothing new, and that is the point: six places that said "nothing in this build
+sends the channel" now say what `unsupported` means — the channel sits outside
+`NOTIFIABLE_CHANNELS`, a ceiling over the `Channel` enum rather than a switch over a transport,
+so the bucket is empty on every configuration `D10-144` left behind and is kept for the channel
+added to the enum before its adapter exists. The six: `metrics.py`'s exposition note,
+`ops/prometheus/rules.yml`'s comment above the rule, `attention.py` in three places,
+`attention_alerts.py`'s operator e-mail body and the `test_attention_watch.py` module docstring.
+
+**The alert rule did not change.** Still published, still counted in the verdict, still on
+`doctor`, still not paged: `D10-129`'s reasoning holds whatever populates the bucket, and
+`test_attention_alerts.py`'s "no setting can deliver" phrase survives in the new wording rather
+than the test being relaxed to fit.
+
+**Amended, not rewritten.** `D10-129`'s `unsupported` sentence in this ledger and in
+`DECISIONS.md` named `voice` as what the bucket holds "today"; both now name `D10-144`. Earlier
+`Landing`/`Landed` sentences are untouched.
+
+**What gated it.** `pytest` 1385 passed and 16 skipped over 1401 collected, `ruff check` clean,
+`ruff format --check` clean over 158 files, `mypy` clean over 78, ledger check clean at 70
+blocks with 23 deferring and 0 failed.
+
+**Limits.** No test reads those comments, so the sweep was a search for one claim, not a guard
+against the next: only `voice` was looked for, and a stale sentence phrased without the word
+would have been missed.
+
+**Landed.** `docs(attention): stop claiming voice cannot be sent`, with the run recorded in the
+ledger follow-up.
 
 ## Non-negotiable reminders
 

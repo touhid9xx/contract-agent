@@ -530,9 +530,13 @@ NOTIFICATION_PENDING_STUCK: Final = "stuck"
 #:   on, for the reason ``transport_disabled`` is not: on the default install it is
 #:   non-zero from the first reminder onward, so an alarm on it would be muted by
 #:   Thursday, which is how a real one stops being read.
-#: * ``unsupported`` — no. Nothing in this build sends the channel (``voice``), so no
-#:   environment variable clears these; the human action is to change what may be
-#:   consented or supply an address a channel can use.
+#: * ``unsupported`` — no, because the channel sits outside
+#:   :data:`~app.core.config.NOTIFIABLE_CHANNELS`: a ceiling rather than a switch, so
+#:   no environment variable clears these and the human action is to change what may be
+#:   consented or supply an address a channel can use. Empty on every configuration
+#:   this build ships since ``D10-144`` moved ``voice`` inside the ceiling; the bucket
+#:   is kept because the ceiling is a statement about the ``Channel`` enum, and a
+#:   channel added to it before it can be sent would land here.
 #: * ``stuck`` — the channel *is* deliverable and the send path is not running. A fault
 #:   on every configuration, and the only one of the three that says "the scheduler is
 #:   down" rather than "the scheduler has nothing it can send".

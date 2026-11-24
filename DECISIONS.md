@@ -10284,10 +10284,11 @@ deployment at two in the morning.
 **A `pending` row is not a fault until the reason it has not moved is named, so the count is
 split by why.** Three causes, separated by one question — *is there a setting whose change
 would make this channel deliverable?* `unconfigured`: yes, and it is off. `unsupported`: no,
-and nothing in this build can send it, which is `voice` today — consentable, with no transport
-in existence. `stuck`: the channel *is* deliverable and the send path is not draining it,
-which is the only one of the three that says something about the scheduler rather than about
-the configuration. Membership in `NOTIFIABLE_CHANNELS` is checked **first**, so a channel
+because the channel sits outside `NOTIFIABLE_CHANNELS` — a ceiling, and empty on every
+configuration this build ships since `D10-144` moved `voice` inside it. `stuck`: the channel
+*is* deliverable and the send path is not draining it, which is the only one of the three that
+says something about the scheduler rather than about the configuration. Membership in
+`NOTIFIABLE_CHANNELS` is checked **first**, so a channel
 outside the build's ceiling is `unsupported` whatever the settings say; checking `deliverable`
 first would reclassify a `voice` row as a stuck queue the day a configuration bug let `voice`
 into that set, and send an operator looking for a scheduler fault that does not exist.
@@ -11433,3 +11434,49 @@ deployment does not run.
 
 **Landed.** `dff00bc`, and CI run `45414776406` built it green: ten jobs of ten, `CI gate` among
 them, read from the run's own job list rather than from a badge.
+
+### D10-145 — `unsupported` is a ceiling, and six docstrings were calling it a transport
+
+`D10-144` moved `voice` inside `NOTIFIABLE_CHANNELS` and gave it a switch, so nothing this build
+ships parks `unsupported` any more. Six places said otherwise, and each said it as a fact about
+the build rather than a fact about the bucket: `metrics.py`'s exposition note ("Nothing in this
+build sends the channel"), the comment above the alert in `rules.yml` ("no build of this system
+sends the channel"), the operator e-mail body in `attention_alerts.py` ("a channel that no
+setting can deliver at all in this build"), `attention.py` in three places, and the
+`test_attention_watch.py` module docstring. A comment is not executed, which is exactly why the
+drift is worth a slice: the metric's note is read by whoever writes the next alert rule, and a
+rule author told "this can never be non-zero" writes a threshold that fires on the first
+`unsupported` row some future channel produces.
+
+**The correction is one sentence, repeated rather than re-derived.** `unsupported` means the
+channel is outside `NOTIFIABLE_CHANNELS` — a ceiling over the `Channel` enum, not a switch over
+a transport — so the bucket is empty on every configuration this build ships, and it is kept
+because a channel added to the enum before its adapter lands in exactly this bucket. That is
+`D10-144`'s own argument, so every file now states it instead of asserting a count of transports.
+
+**Two ledger paragraphs were amended, and only two.** `D10-129`'s `unsupported` sentence in this
+file and in `STATUS.md` read in the present tense and named `voice` as what the bucket holds
+"today". A dated entry describing the build of its day is honest; one that says "today" about a
+state `D10-144` ended is a trap for the next reader, so both now name `D10-144` rather than
+assert a live fact. Nothing else in the history was touched: earlier entries' `Landing` and
+`Landed` sentences stay exactly as they were written.
+
+**What deliberately did not change.** The alert rule's expression, and the rule that it is not
+paged on. `unsupported` is still published, still counted in the verdict and still reported by
+`doctor`; `D10-129`'s reasoning for muting it holds whatever populates the bucket.
+`test_attention_alerts.py` pins the phrase "no setting can deliver" in the raised headline, and
+the new wording keeps that phrase, so the structural check still tests what it was written to
+test rather than being relaxed to fit the rewrite.
+
+**What gated it.** `pytest` 1385 passed and 16 skipped over 1401 collected, `ruff check` clean,
+`ruff format --check` clean over 158 files, `mypy` clean over 78 source files, and the ledger
+check clean at 70 blocks with 23 deferring and 0 failed. `test_alert_rules.py` re-read
+`rules.yml` and still found every series and label value it expects.
+
+**Limits.** No test reads these comments, so nothing would have caught the drift had it not been
+searched for: this is a sweep of one claim across the tree, not a guard against the next one. The
+sweep was `voice` over `backend/app`, `ops/` and the ledgers; a stale claim phrased without the
+word would not have been found.
+
+**Landed.** `docs(attention): stop claiming voice cannot be sent`. The run that built it is
+recorded in the ledger follow-up rather than guessed here.
