@@ -9072,8 +9072,7 @@ blocks with 23 deferring and 0 failed.
 against the next: only `voice` was looked for, and a stale sentence phrased without the word
 would have been missed.
 
-**Landed.** `docs(attention): stop claiming voice cannot be sent`, with the run recorded in the
-ledger follow-up.
+**Landed.** `f6bf2f9`, and CI run `45445513672` is ten jobs of ten on it, `CI gate` included.
 
 ## Non-negotiable reminders
 

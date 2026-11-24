@@ -11478,5 +11478,5 @@ searched for: this is a sweep of one claim across the tree, not a guard against 
 sweep was `voice` over `backend/app`, `ops/` and the ledgers; a stale claim phrased without the
 word would not have been found.
 
-**Landed.** `docs(attention): stop claiming voice cannot be sent`. The run that built it is
-recorded in the ledger follow-up rather than guessed here.
+**Landed.** `f6bf2f9`, and CI run `45445513672` built it green: ten jobs of ten, `CI gate` among
+them, read from the run's own job list rather than from a badge.
