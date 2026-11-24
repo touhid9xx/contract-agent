@@ -8953,6 +8953,56 @@ finds it free, so the pipeline takes the reuse path and never reaches it — the
 `D10-133` records for its Windows-only paths. Anyone who runs the smoke and then wants a served
 build has to make one, which is the intended trade.
 
+### D10-143 — P2-H: pull-mode ingestion reaches a company API, or refuses to
+
+**Served.** `POST /api/v1/contracts/pull` takes `{"url": ...}` and imports every contract the source
+returns, answering `url`, `bytes_read`, `imported` and `skipped`. It is the first route in the build
+where *we* open the connection, so P2-H stops being a milestone with no code behind it: `DEMO.md`'s
+one-line requirement is now met by a route, a guarded transport in `app/core/pull_source.py`, four
+settings and an injectable dependency. Admin and operator may call it; a viewer is refused.
+
+**The socket is the guard.** Only `https`, and no credential in the URL. Every address the host
+resolves to must be global — all of them, not the first. No redirect is followed. The body is
+capped both from `Content-Length` and during the read, so a source that lies about its length still
+cannot stream unbounded bytes into a request thread. Anything that is not JSON of a known shape is
+a refusal, never an empty import. `PULL_ALLOW_PRIVATE_HOSTS` is the local-double door that permits
+`http` and a loopback address, and staging and production refuse to boot with it set — otherwise
+whoever can reach the API could aim a pull at this deployment's metadata service and read the reply
+back in an error message.
+
+**All or nothing, and a re-sync is not a conflict.** Every record is validated before the first row
+is written and the batch shares one transaction, so one bad record imports none of the others and
+the refusal names which. A contract the tenant already holds is **skipped** and reported with its
+id rather than 409'd, because a company API returns its whole list on every pull and a 409 would
+make every pull after the first fail forever. `source` is forced to `API` so a record cannot
+sidestep the dedupe fingerprint, records are flushed one at a time so two identical records in one
+pull import once, and the log line names the pull's host rather than its URL.
+
+**What gated it.** Sixteen tests in `backend/tests/test_pull_ingestion.py` — thirteen functions, one
+parameterized over the four transport refusals — against a `StubSource` subclass injected through
+the `pull_source` dependency, so the route holds no testing branch. They cover every refusal code
+and status, the all-or-nothing case at record ten, the skip-on-existing path, the empty and
+over-limit answers, two identical records in one pull, role gating and the unauthenticated case.
+Two defects surfaced and both were mine: a `model_validator` has an empty pydantic `loc`, so
+`PULL_RECORD_INVALID` was reporting `{"field": ""}` and now reports `"record"`; and a test claiming
+`source: "upload"`, which is not a legal `ContractSource` value, so pydantic refused it and the
+test proved nothing until it claimed a legal `pdf` and asserted the override. `README.md`'s two
+P2-H statements and its `GATE 3` row moved with the slice, and `test_readme.py`'s literal `have no
+code at all` became a regex — it would have forced the row to read `P2-F have no code at all` the
+moment exactly one milestone was unbuilt. `pytest` 1368 passed and 16 skipped, `ruff check` and
+`ruff format --check` clean over 153 files, `mypy` clean over 78, `npm run test` 395 passed across
+21 files, `npm run lint` exit `0`, ledger check clean.
+
+**Limits.** No live company API was exercised: the route is proven against a stub, and the
+transport's refusals are reasoned from `urlsplit`, `getaddrinfo` and `ipaddress` rather than run
+against a hostile server — the same shape of limit `D10-133` records for its Windows-only paths.
+The address check resolves the host and `urllib` resolves it again to connect, so a DNS answer that
+changes between the two calls is a window this leaves open; pinning the address through a custom
+opener is the fix if a deployment ever pulls from a name it does not control. No credential
+support, so a source needing an API key needs a different feature. It is a one-shot pull, not a
+sync: no cursor, no incremental window, no schedule. `pull_max_contracts` bounds the transaction
+rather than memory, and nothing inspects a payload beyond `ContractCreateRequest`.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

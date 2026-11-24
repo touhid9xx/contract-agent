@@ -286,6 +286,34 @@ class Settings(BaseSettings):
     #: below anything that would trouble the host.
     document_max_bytes: int = Field(default=10 * 1024 * 1024, gt=0, le=100 * 1024 * 1024)
 
+    # --- pull-mode ingestion (P2-H) --------------------------------------
+    # The upload routes ask a client to send a contract; the pull route names a URL
+    # and lets *this* process open the connection instead. Every knob below is a
+    # bound on that one outbound request, because a caller-chosen URL is a
+    # caller-chosen destination for a socket this deployment owns.
+    #: Upper bound on the whole conversation with a source: connect, TLS, headers,
+    #: body. A pull runs inside a request, so an unbounded one would let a source
+    #: that accepts the connection and then says nothing hold a worker open.
+    pull_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    #: Largest body accepted, in bytes. The read stops one byte past this, so a
+    #: source that lies about ``Content-Length`` still cannot stream unbounded
+    #: bytes into the API process. 1 MiB is generous for contract metadata and far
+    #: below anything that would trouble a host also serving other requests.
+    pull_max_bytes: int = Field(default=1024 * 1024, gt=0, le=20 * 1024 * 1024)
+    #: Contracts one pull may carry. Bounds the transaction, not a lock: every row
+    #: in a pull commits together (see the route), so this is what keeps one call
+    #: from writing an unbounded batch in a single transaction.
+    pull_max_contracts: int = Field(default=100, gt=0, le=1000)
+    #: Permit ``http`` and skip the "public address only" check.
+    #:
+    #: **Development and test only**, and refused outside them below. Its whole
+    #: purpose is a local double — a fake company API on ``127.0.0.1`` — so the
+    #: real transport can be exercised end to end without a certificate or a public
+    #: hostname. A deployment that can be told to fetch ``http://10.0.0.7/`` is a
+    #: deployment whose internal network is reachable by anyone who can reach the
+    #: API, which is the request-forgery lever this feature would otherwise add.
+    pull_allow_private_hosts: bool = False
+
     # --- notification dispatch (F10) -------------------------------------
     notification_transport: NotificationTransport = "none"
     #: Quiet hours, as **local wall-clock hours in the contract's own time zone**
@@ -988,6 +1016,20 @@ class Settings(BaseSettings):
                     f"{self.ollama_base_url!r}. The feature vector and every "
                     "completion would otherwise cross the network unencrypted."
                 )
+        # Pull-mode ingestion adds an outbound request whose destination a caller
+        # chooses, so the development allowance for a loopback double is refused
+        # here: with it on, any operator could point a pull at this deployment's
+        # own network — a metadata service, an admin port on a sidecar, another
+        # tenant's internal host — and read the answer back in an error message.
+        # The flag exists to exercise the transport against a local double, and a
+        # local double is never what staging or production is talking to.
+        if self.pull_allow_private_hosts:
+            raise ValueError(
+                "PULL_ALLOW_PRIVATE_HOSTS must not be enabled in "
+                f"{self.app_env}: it lifts the public-address rule on outbound pulls, "
+                "so anyone who can call the API could make it reach its internal "
+                "network. It exists for a local double in development and test."
+            )
         # The example's two field keys, refused on the same rule as the secret above
         # and for a sharper version of the same reason: `ENCRYPTION_KEY` seals every
         # stored contact value and `CONTACT_BLIND_INDEX_KEY` is what makes a digest

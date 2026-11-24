@@ -87,12 +87,15 @@ PROSE_LANDED = re.compile(
 )
 PROSE_ABSENT = re.compile(r"What has no code at all is (?P<list>.+?)\.(?:\s|$)")
 
-#: The three states the delivery table's `GATE 3` row sorts milestones into, with the
-#: phrase that introduces each. A milestone is landed, has no code, or is unspecified.
+#: The three states the delivery table's `GATE 3` row sorts milestones into, with a regex
+#: for the phrase that introduces each. Regexes rather than literals for one reason: how
+#: many milestones sit in a state changes as slices land, so a literal `have` demanded that
+#: the row read `P2-F have no code at all` the moment P2-H shipped. A guard that makes the
+#: README ungrammatical is a guard the next author deletes, taking the check with it.
 ROW_STATES = (
-    ("have landed slices", "landed"),
-    ("have no code at all", "no code"),
-    ("unspecified", "unspecified"),
+    (re.compile(r"ha(?:ve|s) landed slices"), "landed"),
+    (re.compile(r"ha(?:ve|s) no code at all"), "no code"),
+    (re.compile(r"unspecified"), "unspecified"),
 )
 
 #: A full id (`P2-F`) or the shorthand the table uses after the first one (`-F`), each
@@ -206,8 +209,9 @@ def _table_milestones(text: str) -> dict[str, set[str]]:
         # (`P2-A … P2-L`) — an id list that is not a statement about any milestone.
         segment = segment.split("in progress:", 1)[-1]
         for phrase, state in ROW_STATES:
-            if phrase in segment:
-                found[state] = _milestones(segment.split(phrase, 1)[0])
+            match = phrase.search(segment)
+            if match is not None:
+                found[state] = _milestones(segment[: match.start()])
 
     assert set(found) == {state for _, state in ROW_STATES}, (
         f"parsed {sorted(found)} out of the `GATE 3` row. It must name all three states — "

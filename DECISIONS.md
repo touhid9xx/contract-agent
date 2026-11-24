@@ -11256,3 +11256,97 @@ for `http://127.0.0.1:8000` and finds 8000 free — takes the no-rebuild path an
 like the two Windows-only paths in `D10-133`, that half is proven by a developer and not by the
 pipeline. A reader who wants a build after running the smoke has to make one, which is the intended
 trade and the one the removed `npm run start` error tells them to make.
+
+### D10-143 — A pull names a socket this deployment opens, so the socket is the guard
+
+`DEMO.md`'s P2-H line is one arrow — *pull from company API* — and until this slice it had no code
+behind it. Every ingestion route in the build before now asked a client to **send** us a contract:
+`POST /contracts`, then `POST /contracts/document`. `POST /contracts/pull` inverts that. An
+operator names a URL and *we* open the connection, which is the whole of the risk and therefore the
+whole of what this slice had to get right: a caller-chosen URL is a caller-chosen destination for a
+socket this deployment owns, and a "company API" pointed at
+`http://169.254.169.254/latest/meta-data/` reads a cloud instance's credentials instead of a
+contract. The feature is a server-side request forgery lever with a business name.
+
+**The guard is its own module, and the route only maps it.** `app/core/pull_source.py` refuses four
+things. Only `https`, and a URL may carry no username or password — refused rather than stripped,
+because a credential in a URL is sent in the request line and cannot be kept out of the log that
+names the URL. Every address the host resolves to must be global, and all of them rather than the
+first: a name with one public and one private record is a name whose second answer is the
+interesting one, and which of its answers the resolver hands over is not ours to decide. No
+redirect is followed, because the address that was validated is the first hop and the second is
+chosen by whoever answers. The body is bounded twice — `Content-Length` is refused when it already
+exceeds the cap, and the read stops one byte past it, so a source that lies about its length still
+cannot stream unbounded bytes into a request thread. Anything that is not JSON of a known shape is
+a refusal rather than an empty import, because "imported 0" is what a URL pointed at the wrong page
+looks like and it must not read as a success.
+
+**The one door, and who may not open it.** `PULL_ALLOW_PRIVATE_HOSTS` permits `http` and skips the
+address check, because a local double on `127.0.0.1` is how the real transport gets exercised
+without a certificate or a public hostname. It is refused at startup outside development and test,
+on the same validator that refuses placeholder secrets: with it on, anyone who can reach the API
+could point a pull at this deployment's metadata service or an admin port on a sidecar and read the
+answer back in an error message. A deployment that can be told to fetch `http://10.0.0.7/` is a
+deployment whose internal network is reachable by whoever can reach the API.
+
+**Two decisions inside the route, both about a source that returns everything every time.** All or
+nothing: every record is validated before the first row is written and the writes share one
+transaction, so nine good records and one inverted date imports nothing and says which record was
+wrong — the alternative leaves an operator with a half-copied portfolio and a re-pull that cannot
+tell which half is missing. And a contract the tenant already holds is **skipped, not refused**,
+which is the one place in this build where a duplicate is not a 409: a company API returns its
+whole list on every pull, so a 409 would make the second pull of a working integration fail
+forever, and the per-tenant `(tenant_id, sha256)` key already makes a re-import a no-op.
+`POST /contracts` still answers 409, because a retried single write is a conflict and a re-sync is
+not. The response reports `imported` and `skipped` as disjoint lists, so their two lengths are a
+check the operator can make against the source itself rather than a total to be trusted.
+
+**What the route refuses to let a source decide.** `source` is forced to `ContractSource.API` after
+validation, because it participates in the dedupe fingerprint — honouring a record's own claim
+would let a source sidestep idempotency by labelling its rows as uploaded PDFs. Records are flushed
+one at a time, which is what makes two identical records inside one pull import once instead of
+twice, since the flush puts the first row where `by_sha256` looks for the second. `PullRequest`
+carries a `url` and nothing else: no `source`, no `customer_ref`, so a caller cannot label a batch
+it did not write. The log line names the pull's **host** and never its URL, because a query string
+is operator input and can carry a token.
+
+**A duplication this slice closed rather than extended.** The five-key `contract.ingested` payload
+existed twice, in the metadata route and in the document route; a third ingestion path would have
+made three copies of something every consumer reads as one fact. They are one `_announce_ingested`
+helper now, and the two older routes call it.
+
+**What gated it.** Sixteen tests in `backend/tests/test_pull_ingestion.py` — thirteen functions,
+one of them parameterized over the four transport refusals — against a `StubSource` that subclasses
+the real `PullSource` and overrides `fetch`, injected through the `pull_source` dependency so the
+route carries no testing branch of its own. They pin: every record imported; a second pull of the
+same source skipping what it already holds instead of 409ing; two identical records in one pull
+importing once; record ten invalid importing none of the first nine; an empty answer refused; an
+over-limit answer refused; a body that is not contracts refused; each of the four fetch failures
+landing on its own status and code; the size refusal carrying both numbers; and a viewer — and a
+caller with no token — refused before the source is asked anything. Two defects surfaced that way
+and both were mine. The date-order rule is a `model_validator`, so pydantic's `loc` is empty and
+`PULL_RECORD_INVALID` was reporting `{"field": ""}`; it reports `"record"` now, with a comment
+saying why an empty string would read as a bug in the mapping rather than as a rule about the
+record. The other was a test asserting `source: "upload"`, which is not a legal `ContractSource`
+value, so pydantic refused it and the test proved nothing at all — it claims a *legal* `pdf` now and
+asserts the override, which is the only version that proves anything. `README.md`'s two P2-H
+statements and its `GATE 3` row moved with the slice, and `backend/tests/test_readme.py`'s three
+state phrases became regexes: the literal `have no code at all` demanded the row read `P2-F have no
+code at all` the moment exactly one milestone was unbuilt, and a guard that forces bad English is
+one the next author deletes, taking the check with it. `pytest` 1368 passed and 16 skipped with
+`test_pull_ingestion` collecting 16, `ruff check` clean, `ruff format --check` clean over 153
+files, `mypy` clean over 78, `npm run test` 395 passed across 21 files, `npm run lint` exit `0`.
+
+**Limits.** No live company API was reached. The route is proven against a stub, and the transport
+is the half CI does not touch: its refusals are reasoned from `urlsplit`, `getaddrinfo` and
+`ipaddress`, not run against a hostile server, so they are argued in the same sense `D10-133`
+records for its Windows-only paths. `_public_addresses` resolves the host and `urllib` resolves it
+again in order to connect, so a name whose DNS answer changes between the two calls is a window
+this leaves open; pinning the resolved address through a custom opener closes it, and is the fix to
+reach for the day a deployment points a pull at a name it does not control. There is no credential
+support and no place to put one: a company API that needs an API key needs a different feature that
+stores that secret, and the URL is deliberately not a channel for it. It is a one-shot pull, not a
+sync — no cursor, no incremental window, no schedule, so an operator calls it and re-pulls the whole
+list. `pull_max_contracts` bounds one transaction rather than memory (the byte cap does that), and
+nothing inspects a pulled payload beyond `ContractCreateRequest`, so a source can ship contract
+metadata and not a file.

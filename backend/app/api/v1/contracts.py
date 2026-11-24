@@ -41,15 +41,21 @@ import re
 import uuid
 from datetime import date, datetime
 from typing import Annotated
+from urllib.parse import urlsplit
 
 import structlog
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
-from app.api.deps import document_store_or_503, get_request_session, require_roles
+from app.api.deps import (
+    document_store_or_503,
+    get_request_session,
+    pull_source,
+    require_roles,
+)
 from app.core.documents import (
     DocumentStore,
     DocumentTooLargeError,
@@ -58,6 +64,13 @@ from app.core.documents import (
 )
 from app.core.middleware import correlation_id_or_new
 from app.core.principal import Principal
+from app.core.pull_source import (
+    PullPayloadError,
+    PullSource,
+    PullTooLargeError,
+    PullUnavailableError,
+    PullUrlRefusedError,
+)
 from app.db.base import as_utc
 from app.db.enums import (
     Channel,
@@ -110,6 +123,11 @@ _TIMEZONE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_+\-]*(?:/[A-Za-z0-9_+\-]+)*$")
 
 #: Column width of ``contracts.timezone``.
 MAX_TIMEZONE_LENGTH = 64
+
+#: Longest source URL ``POST /contracts/pull`` will accept (RFC 7230's practical
+#: limit for a request target). Bounded here so an operator pasting a megabyte of
+#: query string gets a 422 from the schema rather than from the socket layer.
+MAX_PULL_URL_LENGTH = 2048
 
 #: Media type of the upload body (``POST /contracts/document``).
 #:
@@ -223,6 +241,35 @@ def _fingerprint(payload: ContractCreateRequest) -> str:
     }
     encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _announce_ingested(session: Session, *, contract: Contract, tenant_id: uuid.UUID) -> uuid.UUID:
+    """Publish ``contract.ingested`` for a row whose id already exists.
+
+    One helper for every ingestion route, because the payload's five keys are a
+    consumer's contract and three copies of them is how one route starts
+    publishing a key the other two don't. What a consumer may rely on is that the
+    shape does not depend on the route that produced the fact; only ``source``
+    differs, and that is a field it already reads.
+    """
+    event = enqueue_event(
+        session,
+        tenant_id=tenant_id,
+        correlation_id=correlation_id_or_new(),
+        event_type=CONTRACT_INGESTED_EVENT,
+        topic=CONTRACT_EVENTS_TOPIC,
+        # All events for one contract share a partition, so a consumer sees them in
+        # order.
+        partition_key=str(contract.id),
+        payload={
+            "contract_id": contract.id,
+            "end_date": contract.end_date.isoformat() if contract.end_date else None,
+            "sha256": contract.sha256,
+            "source": contract.source.value,
+            "status": contract.status.value,
+        },
+    )
+    return event.event_id
 
 
 def _summary(contract: Contract, *, outbox_event_id: uuid.UUID) -> ContractSummary:
@@ -456,24 +503,12 @@ def ingest_contract(
         # discards both rows together, which is the property being bought.
         session.flush()
 
-        event = enqueue_event(
-            session,
-            tenant_id=principal.tenant_id,
-            correlation_id=correlation_id_or_new(),
-            event_type=CONTRACT_INGESTED_EVENT,
-            topic=CONTRACT_EVENTS_TOPIC,
-            # All events for one contract share a partition, so a consumer sees
-            # them in order.
-            partition_key=str(contract.id),
-            payload={
-                "contract_id": contract.id,
-                "end_date": contract.end_date.isoformat() if contract.end_date else None,
-                "sha256": contract.sha256,
-                "source": contract.source.value,
-                "status": contract.status.value,
-            },
+        summary = _summary(
+            contract,
+            outbox_event_id=_announce_ingested(
+                session, contract=contract, tenant_id=principal.tenant_id
+            ),
         )
-        summary = _summary(contract, outbox_event_id=event.event_id)
         session.commit()
     except IntegrityError:
         # The uniqueness check above is advisory: two concurrent requests can both
@@ -595,26 +630,15 @@ def ingest_contract_document(
         )
         session.flush()
 
-        event = enqueue_event(
-            session,
-            tenant_id=principal.tenant_id,
-            correlation_id=correlation_id_or_new(),
-            event_type=CONTRACT_INGESTED_EVENT,
-            topic=CONTRACT_EVENTS_TOPIC,
-            partition_key=str(contract.id),
-            # The same five keys the metadata route publishes. A consumer must not
-            # be able to tell which route produced the fact; what differs is
-            # ``source`` (``pdf`` here, ``api`` there), which is a field it already
-            # reads.
-            payload={
-                "contract_id": contract.id,
-                "end_date": contract.end_date.isoformat() if contract.end_date else None,
-                "sha256": contract.sha256,
-                "source": contract.source.value,
-                "status": contract.status.value,
-            },
+        # The same helper the metadata route and the pull route use, so the five
+        # keys a consumer reads cannot depend on which ingestion path produced the
+        # fact. What differs is ``source`` (``pdf`` here), which it already reads.
+        summary = _summary(
+            contract,
+            outbox_event_id=_announce_ingested(
+                session, contract=contract, tenant_id=principal.tenant_id
+            ),
         )
-        summary = _summary(contract, outbox_event_id=event.event_id)
         session.commit()
     except IntegrityError:
         session.rollback()
@@ -634,6 +658,226 @@ def ingest_contract_document(
         storage_key=stored.key,
     )
     return summary
+
+
+class PullRequest(BaseModel):
+    """Where to pull contracts from.
+
+    One field, and deliberately no ``source`` and no ``customer_ref``: the first is
+    ``api`` by definition for a pulled row, and the second is read from each record
+    the source returns. A caller cannot label the whole batch.
+    """
+
+    url: str = Field(min_length=1, max_length=MAX_PULL_URL_LENGTH)
+
+
+class PulledExisting(BaseModel):
+    """A record the source offered that this tenant already holds.
+
+    Reported rather than silently dropped: an operator asking "did the pull work?"
+    needs to see that eight of ten records were already there, and a response that
+    listed only new ids would look like two records vanished.
+    """
+
+    contract_id: int
+    customer_ref: str
+    sha256: str
+
+
+class PullIngestionResponse(BaseModel):
+    """What one pull did, record by record.
+
+    ``imported`` and ``skipped`` are disjoint and together cover every record the
+    source returned, so the two lengths are a check an operator can make against the
+    source itself.
+    """
+
+    url: str
+    #: Bytes the source actually sent, after the cap. Not a contract count: a pull
+    #: that read 4 KiB and imported nothing is the shape of a wrong endpoint.
+    bytes_read: int
+    imported: list[ContractSummary]
+    skipped: list[PulledExisting]
+
+
+def _pull_detail(code: str, message: str, **details: object) -> dict[str, object]:
+    """The ``{code, message, details}`` envelope this module's refusals use.
+
+    Matches the shape ``POST /contracts/document`` already answers for
+    ``DOCUMENT_TOO_LARGE``, so a client that learned one ingestion refusal can read
+    the others without a second parser. ``details`` stays a free mapping because
+    each refusal has a different one to give: a position, a size, a limit.
+    """
+    return {"code": code, "message": message, "details": details}
+
+
+@router.post(
+    "/pull",
+    response_model=PullIngestionResponse,
+    summary="Pull contracts from a company API and ingest them (P2-H)",
+)
+def pull_contracts(
+    payload: PullRequest,
+    principal: Principal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
+    session: Session = Depends(get_request_session),
+    source: PullSource = Depends(pull_source),
+) -> PullIngestionResponse:
+    """Fetch a company API and ingest every contract it returns.
+
+    The first route in the build where **we** open the connection instead of
+    answering one, which is why the guard lives in ``app.core.pull_source`` and this
+    function only maps its refusals: an https-only, public-address-only, no-redirect,
+    capped fetch, and then the *same* ``ContractCreateRequest`` the upload route
+    uses, so there is exactly one definition of a valid contract.
+
+    **All or nothing.** Every record is validated before the first row is written,
+    and the writes share one transaction, so a source that returns nine good records
+    and one with an inverted date imports nothing and says which record was wrong.
+    The alternative — import the nine — leaves an operator with a half-copied
+    portfolio and a re-pull that cannot tell which half.
+
+    **An already-held contract is skipped, not refused.** This is the one place a
+    duplicate is not a 409. A source returns its *whole* list on every pull, so a
+    409 would make the second pull of a working integration fail forever; the
+    per-tenant ``(tenant_id, sha256)`` key already makes a re-import a no-op, so the
+    route reports the existing ids instead. ``POST /contracts`` still answers 409,
+    because a retried single write is a conflict and a re-sync is not.
+
+    Viewer is excluded: another organisation's contracts appear in the caller's
+    portfolio as a result, so this is a write, like every other ingestion route.
+    """
+    try:
+        pulled = source.fetch(payload.url)
+        records = source.contracts_from(pulled.document)
+    except PullUrlRefusedError as exc:
+        # 422, not 400: the request is well-formed JSON and the URL is the field the
+        # caller must change. The message names the host and the address it was
+        # refused for, never a credential — the module strips those first.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=_pull_detail("PULL_URL_REFUSED", str(exc)),
+        ) from None
+    except PullTooLargeError as exc:
+        # 413 for the same reason the document route answers 413: the request is
+        # valid and the client's only problem is size.
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=_pull_detail("PULL_TOO_LARGE", str(exc), size=exc.size, limit=exc.limit),
+        ) from None
+    except PullUnavailableError as exc:
+        # 502: our process is fine, the thing we were told to reach is not. Not 504 —
+        # a timeout is one of several causes and they do not all come from upstream.
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=_pull_detail("PULL_UNAVAILABLE", str(exc)),
+        ) from None
+    except PullPayloadError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=_pull_detail("PULL_PAYLOAD_INVALID", str(exc)),
+        ) from None
+
+    requests: list[ContractCreateRequest] = []
+    for position, record in enumerate(records, start=1):
+        try:
+            parsed = ContractCreateRequest.model_validate(record)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=_pull_detail(
+                    "PULL_RECORD_INVALID",
+                    f"contract {position} of {len(records)} is not a valid contract",
+                    contract=position,
+                    errors=[
+                        {
+                            # ``loc`` only, never ``input``: pydantic echoes the
+                            # offending value in ``input``, and the values here are
+                            # whatever a customer API chose to send.
+                            #
+                            # A model-level validator (the date-order rule) has an
+                            # empty ``loc``, so it names no field. ``record`` says
+                            # that on purpose: an empty string would read as a bug in
+                            # this mapping rather than as a rule about the record.
+                            "field": ".".join(str(part) for part in error["loc"]) or "record",
+                            "message": error["msg"],
+                        }
+                        for error in exc.errors()
+                    ],
+                ),
+            ) from None
+        # Forced, not taken from the record: a source cannot declare that its rows
+        # arrived as an uploaded PDF, and ``source`` participates in the dedupe
+        # fingerprint, so honouring it would let a source sidestep idempotency.
+        parsed.source = ContractSource.API
+        requests.append(parsed)
+
+    repository = ContractRepository(session, principal.tenant_id)
+    imported: list[ContractSummary] = []
+    skipped: list[PulledExisting] = []
+    try:
+        for request_ in requests:
+            fingerprint = _fingerprint(request_)
+            existing = repository.by_sha256(fingerprint)
+            if existing is not None:
+                skipped.append(
+                    PulledExisting(
+                        contract_id=existing.id,
+                        customer_ref=existing.customer_ref,
+                        sha256=fingerprint,
+                    )
+                )
+                continue
+            contract = repository.create(
+                customer_ref=request_.customer_ref,
+                sha256=fingerprint,
+                source=request_.source,
+                start_date=request_.start_date,
+                end_date=request_.end_date,
+                timezone=request_.timezone,
+                created_by=principal.user_id,
+            )
+            # Flush per record: the event's partition key is the contract id, and
+            # the flush also makes the row visible to ``by_sha256`` for the *next*
+            # record — which is what makes two identical records inside one pull
+            # import once instead of twice.
+            session.flush()
+            imported.append(
+                _summary(
+                    contract,
+                    outbox_event_id=_announce_ingested(
+                        session, contract=contract, tenant_id=principal.tenant_id
+                    ),
+                )
+            )
+        # One commit for the batch: the rollback below discards every row and every
+        # event together, which is the all-or-nothing property.
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=_pull_detail(
+                "PULL_CONFLICT",
+                "Another request ingested one of these contracts while this pull was "
+                "running, so nothing was imported. Pull again.",
+            ),
+        ) from None
+
+    log.info(
+        "contracts_pulled",
+        # The host, not the URL: a source URL's query string is operator input and
+        # can carry a token, and the log's job here is to say which integration ran.
+        pull_host=urlsplit(pulled.url).hostname,
+        bytes_read=pulled.bytes_read,
+        imported=len(imported),
+        skipped=len(skipped),
+    )
+    return PullIngestionResponse(
+        url=pulled.url,
+        bytes_read=pulled.bytes_read,
+        imported=imported,
+        skipped=skipped,
+    )
 
 
 class ExtractedFieldSummary(BaseModel):

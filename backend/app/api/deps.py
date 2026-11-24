@@ -36,6 +36,7 @@ from app.core.config import Settings
 from app.core.crypto import FieldCipher, MissingEncryptionKeyError, build_cipher
 from app.core.documents import DocumentStore, build_document_store
 from app.core.principal import Principal
+from app.core.pull_source import PullSource, build_pull_source
 from app.core.security import InvalidTokenError, TokenExpiredError, decode_access_token
 from app.db.enums import UserRole
 from app.db.repositories.users import IdentityDirectory
@@ -122,6 +123,21 @@ def document_store_or_503(
     the failure to start serving documents in one place.
     """
     return build_document_store(settings, cipher=cipher)
+
+
+def pull_source(settings: Settings = Depends(app_settings)) -> PullSource:
+    """The outbound pull client this deployment is configured for.
+
+    A dependency rather than a construction inside the route for the same reason
+    ``cipher_or_503`` is: the pull carries a timeout, a byte cap and a resolution
+    rule, and a test that wants to point a pull at a local double must be able to
+    substitute the whole object without the route growing an ``if testing`` branch.
+
+    It never 503s. A pull is not a capability the installation can lack — every
+    setting it reads has a default — so a misconfigured source url is the caller's
+    error to see, not a missing-key symptom.
+    """
+    return build_pull_source(settings)
 
 
 def _unauthorized() -> HTTPException:
