@@ -11350,3 +11350,6 @@ sync — no cursor, no incremental window, no schedule, so an operator calls it 
 list. `pull_max_contracts` bounds one transaction rather than memory (the byte cap does that), and
 nothing inspects a pulled payload beyond `ContractCreateRequest`, so a source can ship contract
 metadata and not a file.
+
+**Landed.** `23b67f8`, and CI run `45376144295` built it green: ten jobs of ten, `CI gate` among
+them, read from the run's own job list rather than from a badge.

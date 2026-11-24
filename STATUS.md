@@ -9003,6 +9003,8 @@ support, so a source needing an API key needs a different feature. It is a one-s
 sync: no cursor, no incremental window, no schedule. `pull_max_contracts` bounds the transaction
 rather than memory, and nothing inspects a payload beyond `ContractCreateRequest`.
 
+**Landed.** `23b67f8`, and CI run `45376144295` is ten jobs of ten on it, `CI gate` included.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.
