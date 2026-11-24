@@ -11431,5 +11431,5 @@ that the call was placed. A number that reaches a dead trunk is indistinguishabl
 rang out, because both are a channel created and later hung up by a Stasis application this
 deployment does not run.
 
-**Landed.** In this commit. The run that built it is recorded in the ledger follow-up, which is
-where the slices above put theirs.
+**Landed.** `dff00bc`, and CI run `45414776406` built it green: ten jobs of ten, `CI gate` among
+them, read from the run's own job list rather than from a badge.

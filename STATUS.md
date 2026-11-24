@@ -9041,7 +9041,7 @@ standing as `D10-133`'s Windows-only paths. No answering-machine detection, no a
 inside the row lock; a call that rings out and a call to a dead trunk both look like a channel
 that was created.
 
-**Landed.** In this commit; the run that built it is recorded in the ledger follow-up.
+**Landed.** `dff00bc`, and CI run `45414776406` is ten jobs of ten on it, `CI gate` included.
 
 ## Non-negotiable reminders
 
