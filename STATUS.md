@@ -9110,6 +9110,8 @@ inside the request, so `CLAMD_TIMEOUT_SECONDS` is added to one upload's worst ca
 the default: the feature is available, not enforced. `DEMO.md`'s row and the demo's disabled upload
 tooltip now say what shipped instead of implying nothing did.
 
+**Landed.** `e546804`, and CI run `45501888868` is ten jobs of ten on it, `CI gate` included.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

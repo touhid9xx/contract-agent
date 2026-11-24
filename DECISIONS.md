@@ -11538,3 +11538,6 @@ real ClamAV build's version quirks are not. The scan happens inside the request,
 `CLAMD_TIMEOUT_SECONDS` is added to one upload's worst case instead of being hidden in a worker. And
 `none` stays the default, so a deployment that never sets `VIRUS_SCAN_TRANSPORT` stores documents
 exactly as it did before: this makes a scan available, it does not make one mandatory.
+
+**Landed.** `e546804`, and CI run `45501888868` built it green: ten jobs of ten, `CI gate` among
+them, read from the run's own job list rather than from a badge.
