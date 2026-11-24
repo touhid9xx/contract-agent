@@ -5,9 +5,10 @@ import { Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 /**
- * Sketch 1/2 require a visible upload affordance. PDF ingestion is P2-A, so in
- * Phase 0 the control is rendered disabled with a visible explanation rather
- * than hidden — the demo must show the finished product's shape.
+ * Sketch 1/2 require a visible upload affordance. That ingestion exists in the
+ * API, but this demo serves fixtures rather than an upload path, so the control
+ * is rendered disabled with a visible explanation rather than hidden — the demo
+ * must show the finished product's shape.
  */
 export function UploadContractButton() {
   return (
@@ -15,7 +16,7 @@ export function UploadContractButton() {
       <Button
         size="sm"
         disabled
-        title="PDF upload arrives in milestone P2-A (magic-byte + ClamAV + sha256 dedup). Disabled in the Phase 0 demo."
+        title="PDF upload ships in the API (sha256 dedup, magic-byte detection, opt-in ClamAV). This Phase 0 demo serves fixtures only, so the control is disabled."
         aria-describedby="upload-disabled-reason"
       >
         <Plus className="h-3.5 w-3.5" aria-hidden />

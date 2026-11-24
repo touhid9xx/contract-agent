@@ -11480,3 +11480,61 @@ word would not have been found.
 
 **Landed.** `f6bf2f9`, and CI run `45445513672` built it green: ten jobs of ten, `CI gate` among
 them, read from the run's own job list rather than from a badge.
+
+### D10-146 — P2-A's third ingredient is a switch, because "no scan" has to be sayable
+
+`DEMO.md`'s build-your-own column described an upload as "magic-byte + ClamAV + sha256 dedup", and
+two of the three shipped with gap 12: `document_digest` keys a blob by its own SHA-256, and
+`document_kind` decides the format from the bytes rather than from the name the client chose. The
+third lived in a table row and a disabled button's tooltip — the kind of debt that survives because
+nothing executes it. This slice is that third ingredient: one adapter, one switch, one refusal
+family. It is not a feature, and it does not claim P2-A's PDF reading.
+
+**Unconfigured is not clean.** `VIRUS_SCAN_TRANSPORT` is the fourth selector in `config.py` and the
+only one that is not a channel. `build_scanner` returns `None` rather than a no-op scanner, and the
+route branches on that `None` explicitly: a `DocumentScanner` that returns without looking is a
+verdict a caller can mistake for approval, while an absent component is a fact the caller can state.
+`none` therefore means the document was stored *unexamined*, never that it was found clean.
+
+**Fail closed, in three ways.** `INSTREAM` has four answers, not two: clean, a signature, something
+this build does not recognise, or silence. Only the first permits storage. The three refusals are
+three exceptions because the operator response differs — an infection is a security event, silence
+is a daemon or network problem, an unreadable reply is a proxy or a version — and the route maps
+them to `DOCUMENT_INFECTED` 422, `DOCUMENT_SCAN_UNAVAILABLE` 503 and `DOCUMENT_SCAN_UNREADABLE`
+502, with a `DocumentScanError` catch-all so an unforeseen refusal stays a refusal rather than a 500
+that stores nothing and says nothing.
+
+**The reply is data, not a message.** A verdict arrives over an unauthenticated socket, so a
+signature name is far-end text that would otherwise be reflected into a 422 body and a log line.
+Errors carry the fact and nothing else: no reply, no document bytes, no endpoint. It is `D10-144`'s
+rule for `AriVoiceSender`'s HTTP status, applied to a socket that is even less trustworthy.
+
+**Scan after the duplicate check, before the store.** Both ends are deliberate: a refused document
+never reaches the disk, so an infection cannot become a blob that a later request deduplicates
+against; and a digest the tenant already holds answers its 409 without paying for a scan of bytes
+this deployment has already accepted.
+
+**The socket it crosses is the guard.** clamd has no TLS and no password, so what crosses it is a
+customer's contract in clear text. Settings therefore refuses a *literal public* `CLAMD_HOST` in
+every environment, not only production, and deliberately does not resolve a name: DNS at boot is
+its own failure mode, and a name pointing somewhere public is a decision this file cannot see. A
+Compose service name, a loopback address and a `10.x` address all stay legal, which is what a
+deployment pins.
+
+**One write path, so one insertion point.** `POST /api/v1/contracts/document` is the only place a
+document blob is written; pull-mode ingestion imports records, and the CLI only loads and ciphers
+what is already stored. The dependency is `document_scanner` rather than a construction inside the
+route, so a test can refuse an upload with a fake infection instead of patching a socket — the same
+reason `pull_source` is a dependency.
+
+**What gated it.** `pytest` 1412 passed and 16 skipped over 1428 collected, `ruff check` clean,
+`ruff format --check` clean over 160 files, `mypy` clean over 79 source files, and the ledger check
+clean at 72 blocks with 23 deferring and 0 failed. `test_antivirus.py` pins the wire by speaking to
+a real loopback daemon rather than a mocked socket, and asserts the signature name reaches neither
+`str()` nor `repr()` of the error or of the scanner.
+
+**Limits.** No clamd runs in CI, so the daemon is a loopback double: the protocol is exercised, a
+real ClamAV build's version quirks are not. The scan happens inside the request, so
+`CLAMD_TIMEOUT_SECONDS` is added to one upload's worst case instead of being hidden in a worker. And
+`none` stays the default, so a deployment that never sets `VIRUS_SCAN_TRANSPORT` stores documents
+exactly as it did before: this makes a scan available, it does not make one mandatory.

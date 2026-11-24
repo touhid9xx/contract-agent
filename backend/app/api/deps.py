@@ -27,6 +27,7 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.core.antivirus import DocumentScanner, build_scanner
 from app.core.blind_index import (
     ContactBlindIndex,
     MissingBlindIndexKeyError,
@@ -123,6 +124,25 @@ def document_store_or_503(
     the failure to start serving documents in one place.
     """
     return build_document_store(settings, cipher=cipher)
+
+
+def document_scanner(settings: Settings = Depends(app_settings)) -> DocumentScanner | None:
+    """The malware scanner this deployment is configured for, or ``None``.
+
+    A dependency rather than a construction inside the route for the reason
+    ``pull_source`` is one: a test that wants to refuse an upload with a fake
+    infection must be able to substitute the scanner, not patch a socket.
+
+    It never 503s, like ``pull_source`` and unlike ``cipher_or_503``. Scanning is not
+    a capability the installation can *lack* — ``VIRUS_SCAN_TRANSPORT`` defaults to
+    ``none`` — so it is an absent component rather than a missing key, and an absent
+    component must not read as a broken one.
+
+    ``None`` means documents are stored **unexamined**, not that they were found
+    clean. The route branches on it explicitly so that distinction survives into the
+    code that acts on it; see :func:`app.core.antivirus.build_scanner`.
+    """
+    return build_scanner(settings)
 
 
 def pull_source(settings: Settings = Depends(app_settings)) -> PullSource:

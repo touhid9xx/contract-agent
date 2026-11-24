@@ -115,7 +115,7 @@ states, skeleton loaders, toasts, and confirmation before destructive actions.
 | Contract detail fields + agent panel | P2-I (+ P2-D) | `agent_decisions`, `extracted_fields` |
 | Timeline events | P2-I | `audit_log`, `notifications`, `agent_decisions`, `customer_responses`, `escalations` |
 | Review queue accept/reject/diff/409 | **P2-C Human Review** | `SELECT … FOR UPDATE SKIP LOCKED`, optimistic locking |
-| Upload control (currently disabled) | **P2-A PDF Upload** | magic-byte + ClamAV + sha256 dedup |
+| Upload control (currently disabled) | **P2-A PDF Upload** | shipped in the API: sha256 dedup + magic-byte reader, and an opt-in ClamAV scan (`VIRUS_SCAN_TRANSPORT`, `D10-146`); this demo serves fixtures, so the control stays off |
 | Extracted field values & confidences | **P2-B Extraction** | pdfplumber + regex/spaCy, per-field confidence |
 | Agent decision panel (channel/confidence/reasoning) | **P2-D AI Agent** | smolagents + local Ollama, Pydantic validation |
 | Notification rows, retries, idempotency keys | **P2-E Notifications** | SMTP/textbee, daily-scan scheduler |

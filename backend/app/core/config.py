@@ -9,6 +9,7 @@ fail-fast requirement. Nothing here ever logs a secret value.
 from __future__ import annotations
 
 import base64
+import ipaddress
 import ssl
 from datetime import timedelta
 from functools import lru_cache
@@ -57,6 +58,14 @@ VoiceTransport = Literal["none", "ari"]
 #: ``SMS_TRANSPORT=textbee`` with ``INBOUND_TRANSPORT=none`` is a deployment that talks
 #: and cannot listen. The name exists only because :mod:`app.api.v1.inbound` does.
 InboundTransport = Literal["none", "textbee"]
+#: Which selector answers "was this uploaded document examined for malware before it
+#: was stored". A fourth independent switch, and the only one here that is not a
+#: channel: a deployment can serve contracts without a scanner, exactly as it can send
+#: without a gateway, and refusing to start over one would be a worse answer than the
+#: behaviour it already has. ``clamd`` selects
+#: :class:`~app.core.antivirus.ClamdScanner` and, as everywhere in this file, the name
+#: exists only because the adapter does.
+VirusScanTransport = Literal["none", "clamd"]
 #: Which selector answers "which channel should we contact this customer on".
 #: ``deterministic`` is the F9 contact policy and the default: it decides, and the
 #: row records that it did. ``ollama`` adds the local model *on top of* it, as an
@@ -301,6 +310,41 @@ class Settings(BaseSettings):
     #: API. 10 MiB clears a scanned contract with room to spare and stays far
     #: below anything that would trouble the host.
     document_max_bytes: int = Field(default=10 * 1024 * 1024, gt=0, le=100 * 1024 * 1024)
+
+    # --- document scanning (P2-A) ----------------------------------------
+    # P2-A described an upload as "magic-byte + ClamAV + sha256 dedup". Two of the
+    # three shipped with gap 12 — the content-addressed key in
+    # :mod:`app.core.documents` and the magic-byte reader in
+    # :mod:`app.core.document_text`. This is the third. Unlike the other two it is a
+    # *switch* rather than a rule, because it needs a daemon running beside the app,
+    # and no setting here may ever claim a scan that did not happen.
+    #: Whether an uploaded document is examined for malware before it is sealed.
+    #:
+    #: ``none`` is the default and it is the honest one: it describes exactly what this
+    #: build did before the scanner existed, so an installation without a clamd keeps
+    #: accepting the documents it always accepted rather than losing the feature. What
+    #: ``none`` must never do is stand in for a verdict — an unscanned document is
+    #: *unexamined*, not clean, and the module that owns the scan says so in one place
+    #: rather than letting every caller invent its own wording.
+    virus_scan_transport: VirusScanTransport = "none"
+    #: Where clamd listens. TCP rather than the unix socket clamd also offers, because
+    #: the two processes normally live in different containers, where a server's socket
+    #: path names a file this container cannot open.
+    #:
+    #: The protocol is plain and unauthenticated — there is no TLS to enable — so the
+    #: host is refused at start-up when it is a *public* address: that would send a
+    #: customer's contract in clear text to a daemon with no password. A hostname is
+    #: not resolved here (DNS at boot is its own failure mode); the rule applies to
+    #: addresses written out literally, which is what a deployment pins.
+    clamd_host: str = "127.0.0.1"
+    clamd_port: int = Field(default=3310, ge=1, le=65535)
+    #: Upper bound on one socket operation against clamd, not on the whole scan: a large
+    #: but healthy scan keeps making progress and never trips it, while a daemon that
+    #: accepts the connection and then says nothing is cut off here.
+    #:
+    #: This is also the worst case added to one upload's latency, since the scan runs
+    #: inside the request (see :func:`app.api.v1.contracts.ingest_contract_document`).
+    clamd_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
 
     # --- pull-mode ingestion (P2-H) --------------------------------------
     # The upload routes ask a client to send a contract; the pull route names a URL
@@ -1028,6 +1072,33 @@ class Settings(BaseSettings):
                     "The route would accept every STOP and honour none of them."
                 )
 
+        # A scanner sits on the far side of a plain, unauthenticated socket, and what
+        # crosses it is a customer's contract in the clear. A clamd on a *public*
+        # address would therefore be a document leak with a malware check attached,
+        # so a literal public address is refused here. Checked in every environment,
+        # not only production: development is where the value is first typed.
+        #
+        # A hostname is deliberately not resolved. DNS at boot is its own failure
+        # mode — it makes start-up depend on a resolver, and a name that resolves
+        # publicly is an operator decision this file cannot see. The rule applies to
+        # addresses written out literally, which is what a deployment pins.
+        if self.virus_scan_transport == "clamd":
+            host = self.clamd_host.strip()
+            if not host:
+                raise ValueError(
+                    "CLAMD_HOST must be set when VIRUS_SCAN_TRANSPORT=clamd; it is "
+                    "empty, which would fail at the first upload rather than here. "
+                    "Unset VIRUS_SCAN_TRANSPORT to accept documents unexamined."
+                )
+            if _is_public_address(host):
+                raise ValueError(
+                    "CLAMD_HOST must not be a public address when "
+                    f"VIRUS_SCAN_TRANSPORT=clamd; got {host!r}. The clamd protocol "
+                    "has no TLS and no authentication, so every document would cross "
+                    "the network in clear text to a daemon that anything reaching "
+                    "that port could answer for. Use a loopback or private address."
+                )
+
         if self.app_env in {"staging", "production"}:
             # Refused rather than merely documented, because the cost of being wrong
             # is a message to a real person that they cannot stop. An SMS with no
@@ -1273,6 +1344,22 @@ def _is_plausible_address(value: str) -> bool:
 def _is_loopback(origin: str) -> bool:
     host = origin.split("://", 1)[-1].split("/", 1)[0].rsplit(":", 1)[0]
     return host in _LOOPBACK_HOSTS
+
+
+def _is_public_address(host: str) -> bool:
+    """Whether ``host`` is written out as an address on the public internet.
+
+    Only a literal address is judged. A name is not resolved, both because a
+    resolver dependency at start-up is its own failure mode and because what a name
+    points at is a decision this process cannot observe. ``is_global`` is the exact
+    question being asked — loopback, link-local, private and unspecified ranges all
+    answer ``False`` — so a Compose service name or a ``10.x`` address stays legal
+    while a bare public IP does not.
+    """
+    try:
+        return ipaddress.ip_address(host).is_global
+    except ValueError:
+        return False
 
 
 def _is_absolute_path(value: str) -> bool:

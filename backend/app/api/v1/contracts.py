@@ -51,10 +51,18 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
 from app.api.deps import (
+    document_scanner,
     document_store_or_503,
     get_request_session,
     pull_source,
     require_roles,
+)
+from app.core.antivirus import (
+    DocumentInfectedError,
+    DocumentScanError,
+    DocumentScanner,
+    DocumentScanUnavailableError,
+    DocumentScanUnreadableError,
 )
 from app.core.documents import (
     DocumentStore,
@@ -546,6 +554,7 @@ def ingest_contract_document(
     principal: Principal = Depends(require_roles(UserRole.ADMIN, UserRole.OPERATOR)),
     session: Session = Depends(get_request_session),
     store: DocumentStore = Depends(document_store_or_503),
+    scanner: DocumentScanner | None = Depends(document_scanner),
 ) -> ContractSummary:
     """Register a contract **and** keep the document it was read from (gap 12).
 
@@ -590,6 +599,63 @@ def ingest_contract_document(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"This document has already been ingested as contract {existing.id}",
         )
+
+    # Scan before sealing, and after the duplicate check. The order is deliberate on
+    # both ends: a document refused here never reaches the disk, so an infection
+    # cannot become a stored blob that a later request deduplicates against; and a
+    # document that is already stored is answered with its 409 without paying for a
+    # scan of bytes this deployment has already accepted.
+    if scanner is not None:
+        try:
+            scanner.scan(payload)
+        except DocumentInfectedError as exc:
+            # 422, not 400: the request is well-formed and answered the way an
+            # unacceptable body is answered everywhere else in this router. The
+            # document is discarded, so a repeat attempt starts from nothing.
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={
+                    "code": "DOCUMENT_INFECTED",
+                    "message": str(exc),
+                    "details": {"scanner": "clamd"},
+                },
+            ) from None
+        except DocumentScanUnavailableError as exc:
+            # 503 rather than 502: nothing upstream misbehaved, a dependency this
+            # deployment says it has is not reachable. Retrying is the right advice
+            # and the document was not stored, so a retry is safe.
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "code": "DOCUMENT_SCAN_UNAVAILABLE",
+                    "message": str(exc),
+                    "details": {"scanner": "clamd"},
+                },
+            ) from None
+        except DocumentScanUnreadableError as exc:
+            # 502: something answered on that address and it was not the daemon this
+            # build speaks to. Distinguished from the 503 above because the operator
+            # response differs — a proxy or a wrong version, not a dead service.
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={
+                    "code": "DOCUMENT_SCAN_UNREADABLE",
+                    "message": str(exc),
+                    "details": {"scanner": "clamd"},
+                },
+            ) from None
+        except DocumentScanError as exc:
+            # Every refusal above is a subclass; this keeps an unforeseen one a
+            # refusal rather than a 500 that stores nothing but tells the caller
+            # nothing either.
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "code": "DOCUMENT_SCAN_FAILED",
+                    "message": str(exc),
+                    "details": {"scanner": "clamd"},
+                },
+            ) from None
 
     try:
         stored = store.save(payload)

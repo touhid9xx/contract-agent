@@ -9074,6 +9074,42 @@ would have been missed.
 
 **Landed.** `f6bf2f9`, and CI run `45445513672` is ten jobs of ten on it, `CI gate` included.
 
+### D10-146 — The third ingredient of P2-A's upload exists, and it can say "unexamined"
+
+**Served.** `POST /api/v1/contracts/document` now scans the bytes before it seals them, whenever
+`VIRUS_SCAN_TRANSPORT=clamd`. Four new settings (`VIRUS_SCAN_TRANSPORT`, `CLAMD_HOST`, `CLAMD_PORT`,
+`CLAMD_TIMEOUT_SECONDS`), a `document_scanner` dependency, the `ClamdScanner` adapter in
+`app/core/antivirus.py`, and four refusal codes on the upload route: `DOCUMENT_INFECTED` 422,
+`DOCUMENT_SCAN_UNAVAILABLE` 503, `DOCUMENT_SCAN_UNREADABLE` 502, and a `DOCUMENT_SCAN_FAILED` 503
+catch-all. `none` stays the default, and it means the document was stored **unexamined** rather than
+found clean — the route says so rather than letting a no-op scanner imply a verdict.
+
+**Three refusals, because the fix differs.** `INSTREAM` answers clean, a signature, something this
+build does not recognise, or nothing at all; only the first stores the document. An infection is a
+security event, silence is a dead daemon or a network, an unreadable reply is a proxy or a version,
+and the status code says which one an operator is looking at.
+
+**Ordering is the guarantee.** The scan runs after the per-tenant duplicate check and before
+`store.save`, so an infected document never reaches the disk and never becomes a blob a later
+request deduplicates against, while a resend of bytes the tenant already holds still answers its
+409 without paying for a scan.
+
+**One write path.** `POST /api/v1/contracts/document` is the only place a document blob is written:
+pull-mode ingestion imports records, and the CLI only loads and ciphers what is already stored. The
+start-up guard is the socket itself — clamd is plain TCP with no TLS — so `CLAMD_HOST` is refused
+when it is written out as a literal public address, in every environment.
+
+**What gated it.** `pytest` 1412 passed and 16 skipped over 1428 collected, `ruff check` clean,
+`ruff format --check` clean over 160 files, `mypy` clean over 79, ledger check clean at 72 blocks
+with 23 deferring and 0 failed. `test_antivirus.py` speaks to a real loopback daemon so the framing
+is exercised rather than a mocked socket, and it asserts the signature name reaches neither `str()`
+nor `repr()` of the error.
+
+**Limits.** CI runs no clamd, so a real ClamAV build's version quirks are untested. The scan is
+inside the request, so `CLAMD_TIMEOUT_SECONDS` is added to one upload's worst case. `none` remains
+the default: the feature is available, not enforced. `DEMO.md`'s row and the demo's disabled upload
+tooltip now say what shipped instead of implying nothing did.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.
