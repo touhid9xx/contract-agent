@@ -119,7 +119,7 @@ states, skeleton loaders, toasts, and confirmation before destructive actions.
 | Extracted field values & confidences | **P2-B Extraction** | pdfplumber + regex/spaCy, per-field confidence |
 | Agent decision panel (channel/confidence/reasoning) | **P2-D AI Agent** | smolagents + local Ollama, Pydantic validation |
 | Notification rows, retries, idempotency keys | **P2-E Notifications** | SMTP/textbee, daily-scan scheduler |
-| Voice + AMD rows | **P2-F Voice** | Asterisk ARI + Whisper AMD |
+| Voice + AMD rows | **P2-F Voice** (call placement only) | ARI dialler (`D10-144`), which creates the channel; Whisper AMD and the Stasis application that hears the answer are not built |
 | Escalation queue, SLA, assign-to-me | **P2-G Response & Escalation** | `escalations`, 2-week worker |
 | "Pull from company API" ingestion | **P2-H Contracts API** | pull-mode ingestion → outbox |
 | Everything (auth, tenant, correlation IDs) | Phase 1 F1–F7 | real stack |

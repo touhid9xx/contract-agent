@@ -34,17 +34,17 @@ Four properties this adapter is built around:
    protects a conversation with whoever is in the middle of it.
 
 One adapter per channel, each refusing the others. :class:`SmtpSender` implements
-e-mail, :class:`TextbeeSender` implements SMS, and ``voice`` has no adapter at all
-— there is no gateway to send it through. A transport therefore refuses a channel
-it does not implement rather than delivering, say, a ``voice`` reminder as an
-e-mail. The refusal is a :class:`~app.workers.dispatch.SenderError`, which the
-policy records as a failed attempt: the row spends its retry budget and parks
-``failed`` where an operator sees it, instead of a channel quietly changing on the
-way out.
+e-mail, :class:`TextbeeSender` implements SMS and :class:`AriVoiceSender` implements
+voice by asking an Asterisk REST Interface dialler to ring the customer. A transport
+therefore refuses a channel it does not implement rather than delivering, say, a
+``voice`` reminder as an e-mail. The refusal is a
+:class:`~app.workers.dispatch.SenderError`, which the policy records as a failed
+attempt: the row spends its retry budget and parks ``failed`` where an operator
+sees it, instead of a channel quietly changing on the way out.
 
-:class:`RoutingSender` is how the two compose: it holds one delegate per channel
-and reports the union as its :attr:`~RoutingSender.channels`, so a deployment with
-a relay and no gateway (or the reverse) declares exactly what it can deliver and
+:class:`RoutingSender` is how they compose: it holds one delegate per channel and
+reports the union as its :attr:`~RoutingSender.channels`, so a deployment with a
+relay and no gateway (or the reverse) declares exactly what it can deliver and
 :func:`~app.workers.dispatch.dispatch_notification` can refuse the rest *before*
 reading a contact value. That set, not a single "is a transport configured" flag,
 is the thing the policy asks.
@@ -58,17 +58,19 @@ product copy.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import smtplib
 import ssl
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
 from email.message import EmailMessage
 from typing import Any, Protocol, cast
 
-from app.core.config import Settings
+from app.core.config import ARI_NUMBER_PLACEHOLDER, Settings
 from app.core.logging import redact_text
 from app.db.enums import Channel
 from app.workers.dispatch import (
@@ -80,6 +82,7 @@ from app.workers.dispatch import (
 
 __all__ = [
     "SUBJECT",
+    "AriVoiceSender",
     "HttpTransport",
     "RoutingSender",
     "SmtpClient",
@@ -87,6 +90,7 @@ __all__ = [
     "TextbeeSender",
     "build_sender",
     "build_ssl_context",
+    "create_ari_sender",
     "create_smtp_sender",
     "create_textbee_sender",
     "open_smtp_client",
@@ -386,6 +390,136 @@ def _sms_provider_id(raw: bytes) -> str | None:
     return None
 
 
+#: The ARI resource that creates an outbound channel.
+#:
+#: A path rather than a URL: the origin comes from ``ARI_BASE_URL`` and the query
+#: string is built here, so one function decides what a dial is made of.
+_ARI_CHANNELS_PATH = "/ari/channels"
+
+
+class AriVoiceSender:
+    """Places one call per message through the Asterisk REST Interface.
+
+    What this adapter does, and does not do, is worth stating plainly because "voice
+    reminder" sounds like more than it is. It creates a channel: Asterisk originates
+    the call to the endpoint named by ``ARI_ENDPOINT`` with the customer's number
+    substituted, and hands the answered channel to the Stasis application named by
+    ``ARI_APP``. Whether a human or an answering machine picked up, and what is said
+    after that, happen inside that application, which is not part of this build.
+
+    So the evidence this transport produces is *the call was placed* — never *the
+    customer heard it*. That is the same line :class:`~app.db.enums.NotificationStatus`
+    already draws for e-mail, and it is the reason ``voice_transport=ari`` does not by
+    itself make anyone reachable.
+
+    Nothing about the recipient reaches an error. ``Notification.last_error`` is
+    rendered by ``GET /notifications`` to any viewer, and the dial string carries the
+    customer's number once rendered, so a failure reports the HTTP status and nothing
+    else — the rule :class:`TextbeeSender` follows for a rejected number.
+    """
+
+    def __init__(
+        self,
+        transport: HttpTransport,
+        *,
+        username: str,
+        password: str,
+        base_url: str,
+        endpoint: str,
+        app: str,
+        caller_id: str = "",
+        ring_seconds: int = 25,
+    ) -> None:
+        self._transport = transport
+        self._username = username
+        self._password = password
+        self._base_url = base_url.rstrip("/")
+        self._endpoint = endpoint
+        self._app = app
+        self._caller_id = caller_id
+        self._ring_seconds = ring_seconds
+
+    def __repr__(self) -> str:
+        # The password is a credential, and the endpoint becomes a phone number the
+        # moment it is rendered. Neither may reach a log line through an accidental
+        # repr, which is the same reason ``TextbeeSender`` prints neither its key nor
+        # its recipient.
+        return f"AriVoiceSender(base_url={self._base_url!r}, app={self._app!r})"
+
+    @property
+    def channels(self) -> frozenset[Channel]:
+        """Voice only: this transport has no way to deliver anything else."""
+        return frozenset({Channel.VOICE})
+
+    def send(self, message: OutgoingMessage) -> str | None:
+        """Place one call, returning the ARI channel id when it supplies one."""
+        if message.channel is not Channel.VOICE:
+            raise SenderError(
+                f"the voice transport cannot deliver channel={message.channel.value}; "
+                "voice is the only channel it implements"
+            )
+
+        params: dict[str, str | int] = {
+            "endpoint": self._render_endpoint(message.recipient),
+            "app": self._app,
+            "timeout": self._ring_seconds,
+        }
+        if self._caller_id:
+            params["callerId"] = self._caller_id
+        # ``urlencode`` percent-encodes the dial string, including the ``+`` an
+        # international number starts with, so the endpoint arrives as one parameter
+        # rather than being split on it.
+        query = urllib.parse.urlencode(params)
+        credentials = base64.b64encode(f"{self._username}:{self._password}".encode()).decode(
+            "ascii"
+        )
+        # The scheme is fixed by settings and the origin is operator configuration
+        # validated at start-up (https, or loopback); bandit flags a non-literal URL.
+        request = urllib.request.Request(  # noqa: S310  # nosec B310
+            f"{self._base_url}{_ARI_CHANNELS_PATH}?{query}",
+            data=b"",
+            headers={"Authorization": f"Basic {credentials}"},
+            method="POST",
+        )
+        try:
+            raw = self._transport(request, float(self._ring_seconds))
+        except urllib.error.HTTPError as exc:
+            # The status is the actionable part and is all this carries: ARI's error
+            # body echoes the request back, which here includes the dial string.
+            raise SenderError(f"voice call failed (HTTP {exc.code})") from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise SenderError(f"voice call failed: {_failure_name(exc)}") from exc
+        return _ari_channel_id(raw)
+
+    def _render_endpoint(self, number: str) -> str:
+        """The dial string for one recipient.
+
+        ``str.replace`` rather than ``str.format``: the template is operator
+        configuration and may legitimately hold braces that are not placeholders, and
+        a ``KeyError`` out of ``format`` would surface as a failed send for a reason
+        that has nothing to do with dialling.
+        """
+        return self._endpoint.replace(ARI_NUMBER_PLACEHOLDER, number)
+
+
+def _ari_channel_id(raw: bytes) -> str | None:
+    """The ARI channel id, or ``None`` when the reply does not name one.
+
+    The same acknowledgement rule as :func:`_sms_provider_id`: the call returned, so
+    the channel was created. A body this parser cannot read must not turn an accepted
+    dial into a failed attempt, because the retry would ring a real customer again.
+    """
+    try:
+        parsed: Any = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if isinstance(parsed, dict):
+        value = parsed.get("id")
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 class RoutingSender:
     """Delivers each message on whichever transport implements its channel.
 
@@ -429,6 +563,27 @@ def create_textbee_sender(settings: Settings) -> TextbeeSender:
         device_id=settings.textbee_device_id,
         base_url=settings.textbee_base_url,
         timeout_seconds=settings.sms_timeout_seconds,
+    )
+
+
+def create_ari_sender(settings: Settings) -> AriVoiceSender:
+    """Build the voice sender for the configured ARI dialler.
+
+    The HTTP call is opened per send, like the SMS adapter's, so what is passed in
+    is the transport function rather than a connection. ``voice_ring_seconds``
+    doubles as the client timeout: the dial happens inside the transaction holding
+    the row's lock, so a call that never answers must not hold it open longer than
+    the ring itself could have lasted.
+    """
+    return AriVoiceSender(
+        _urlopen_transport,
+        username=settings.ari_username,
+        password=settings.ari_password,
+        base_url=settings.ari_base_url,
+        endpoint=settings.ari_endpoint,
+        app=settings.ari_app,
+        caller_id=settings.ari_caller_id,
+        ring_seconds=settings.voice_ring_seconds,
     )
 
 
@@ -530,13 +685,14 @@ def create_smtp_sender(settings: Settings) -> SmtpSender:
 def build_sender(settings: Settings) -> MessageSender:
     """Select the transport(s) the settings name, one per channel.
 
-    Two independent switches, because the channels are independent: a deployment may
-    hold a CSIRT-blessed relay and no gateway, or a gateway and no relay, and either
-    way the other channel must refuse rather than silently send nothing.
+    Three independent switches, because the channels are independent: a deployment
+    may hold a CSIRT-blessed relay and no gateway, a gateway and no relay, or a
+    dialler and neither, and either way a channel with no transport must refuse
+    rather than silently send nothing.
 
-    When neither switch names a transport the stand-in is returned with a reason
-    naming *both* settings, so an operator reading a 409 or a row's ``last_error``
-    learns every value to change, not just the first.
+    When no switch names a transport the stand-in is returned with a reason naming
+    *every* setting, so an operator reading a 409 or a row's ``last_error`` learns
+    every value to change, not just the first.
 
     **Which** channels are wired is not decided here: it is
     :attr:`~app.core.config.Settings.deliverable_notification_channels`, which the
@@ -552,6 +708,7 @@ def build_sender(settings: Settings) -> MessageSender:
     factories: dict[Channel, Callable[[Settings], MessageSender]] = {
         Channel.EMAIL: create_smtp_sender,
         Channel.SMS: create_textbee_sender,
+        Channel.VOICE: create_ari_sender,
     }
     deliverable = settings.deliverable_notification_channels
     by_channel = {
@@ -572,8 +729,9 @@ def build_sender(settings: Settings) -> MessageSender:
     if not by_channel:
         return UnavailableSender(
             reason=(
-                f"NOTIFICATION_TRANSPORT={settings.notification_transport} and "
-                f"SMS_TRANSPORT={settings.sms_transport}"
+                f"NOTIFICATION_TRANSPORT={settings.notification_transport}, "
+                f"SMS_TRANSPORT={settings.sms_transport} and "
+                f"VOICE_TRANSPORT={settings.voice_transport}"
             )
         )
     return RoutingSender(by_channel)

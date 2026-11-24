@@ -10,14 +10,16 @@ and escalation to a human operator.
 > side effect through a transactional outbox, authenticates real users with Argon2id
 > and rotating refresh tokens, seals PII with Fernet, extracts contract fields, gates
 > them behind human review, and dispatches a reminder over a real authenticated SMTP
-> socket. ~~**Phase 2 (P2-A … P2-L) has not started.**~~ **It has: nine of the twelve
-> milestones have landed slices** — P2-A, P2-B, P2-C, P2-D, P2-E, P2-G, P2-H, P2-I
-> and P2-J — recorded part by part in `STATUS.md`. What has no code at all is P2-F (voice and
-> answering-machine detection). P2-I is complete: its timeline, board and dashboard landed
-> as `D10-135`, `D10-136` and `D10-137`, and P2-H's pull-mode contracts API as `D10-143`.
-> P2-K and P2-L are specified nowhere but the range in this file, so nothing can be
-> built against them yet. The struck clause was true when written and became false the
-> commit the first `P2` slice landed, which is why it is struck rather than deleted.
+> socket. ~~**Phase 2 (P2-A … P2-L) has not started.**~~ **It has: ten of the twelve
+> milestones have landed slices** — P2-A, P2-B, P2-C, P2-D, P2-E, P2-F, P2-G, P2-H,
+> P2-I and P2-J — recorded part by part in `STATUS.md`. What has no code at all is
+> nothing. P2-I is complete: its timeline, board and dashboard landed as `D10-135`,
+> `D10-136` and `D10-137`, P2-H's pull-mode contracts API as `D10-143`, and P2-F's ARI
+> dialler as `D10-144` — a dialler, not an answering-machine detector, which is a Stasis
+> application this build does not contain. P2-K and P2-L are specified nowhere but the
+> range in this file, so nothing can be built against them yet. The struck clause was
+> true when written and became false the commit the first `P2` slice landed, which is
+> why it is struck rather than deleted.
 >
 > What is still missing, stated plainly rather than left to be discovered: there is
 > **no Kafka broker and no consumer**. ~~**no CI** — gating runs from `pre-commit` on a
@@ -111,7 +113,7 @@ that matters.
 | --- | --- | --- |
 | 0 | Interactive mocked demo — every screen, all states, one command | **GATE 1** — ✅ approved |
 | 1 | Real foundation F1–F10 (infra, DB/outbox, auth, bus, observability, review, decisions, dispatch, PII encryption) | **GATE 2** — ✅ signed (`5c3e077`) |
-| 2 | P2-A … P2-L features, one milestone per commit, human picks the order | **GATE 3** — in progress: P2-A, -B, -C, -D, -E, -G, -H, -I, -J have landed slices; P2-F has no code at all; P2-K/-L unspecified (see `STATUS.md`) |
+| 2 | P2-A … P2-L features, one milestone per commit, human picks the order | **GATE 3** — in progress: P2-A, -B, -C, -D, -E, -F, -G, -H, -I and -J have landed slices; nothing has no code at all; P2-K/-L unspecified (see `STATUS.md`) |
 
 Rules that are not negotiable anywhere in this repo:
 

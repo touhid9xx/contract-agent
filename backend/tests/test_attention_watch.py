@@ -85,7 +85,7 @@ from structlog.testing import capture_logs
 from structlog.typing import EventDict
 
 from app.core import metrics
-from app.core.config import Settings
+from app.core.config import ARI_NUMBER_PLACEHOLDER, Settings
 from app.core.crypto import FieldCipher
 from app.core.metrics import (
     NOTIFICATION_PENDING_STUCK,
@@ -141,6 +141,23 @@ DELIVERABLE = Settings(
     notification_transport="smtp",
     smtp_host="relay.example.com",
     smtp_from=NOTIFICATION_SENDER_ADDRESS,
+)
+
+#: The same deployment, plus a dialler — so ``voice`` is deliverable too, and only an
+#: ``sms`` row is left with nothing behind it. Used by the split test, which needs one
+#: row of each cause and therefore a configuration that produces ``unsupported`` for a
+#: channel a switch *does* clear.
+DELIVERABLE_WITH_A_DIALLER = Settings(
+    app_env="test",
+    log_json=False,
+    notification_transport="smtp",
+    smtp_host="relay.example.com",
+    smtp_from=NOTIFICATION_SENDER_ADDRESS,
+    voice_transport="ari",
+    ari_base_url="http://127.0.0.1:8088",
+    ari_username="ari-user",
+    ari_password="ari_test_secret",
+    ari_endpoint=f"PJSIP/{ARI_NUMBER_PLACEHOLDER}@trunk",
 )
 
 
@@ -829,15 +846,17 @@ def test_a_reminder_the_default_install_cannot_send_is_counted_and_excused(
     assert events(captured) == ["attention_watch_clean"]
 
 
-def test_a_voice_reminder_is_no_setting_s_fault_so_it_raises(
+def test_a_voice_reminder_is_a_setting_s_fault_now_that_a_dialler_exists(
     session_factory: sessionmaker[Session], settings: Settings, contract: Contract
 ) -> None:
-    """``unsupported`` is a reason on every configuration, including the default one.
+    """``D10-144`` moved a queued voice row from ``unsupported`` to ``unconfigured``.
 
-    Nothing in this build places a call, so no environment variable clears these and
-    a person has to change what may be consented or approve an address a channel can
-    use. It is separated from ``unconfigured`` for exactly that reason — the two share
-    a symptom and differ in the only thing an operator needs: the next move.
+    Before it, no transport in this build placed a call, so the ceiling was the build
+    and no environment variable cleared a voice row — which is why this file pinned it
+    as *paged*. ``VOICE_TRANSPORT=ari`` is now a switch that clears it, so the row is
+    excused exactly like an sms row on a default install: the operator's next move is a
+    setting rather than a code change, and a verdict that fails every run of a correct
+    deployment is a verdict that gets ignored.
     """
     add_notification(
         session_factory,
@@ -851,12 +870,39 @@ def test_a_voice_reminder_is_no_setting_s_fault_so_it_raises(
         report = AttentionWatch(session_factory, settings=settings).run_once()
 
     assert pending() == {
-        NOTIFICATION_PENDING_UNCONFIGURED: 0.0,
-        NOTIFICATION_PENDING_UNSUPPORTED: 1.0,
+        NOTIFICATION_PENDING_UNCONFIGURED: 1.0,
+        NOTIFICATION_PENDING_UNSUPPORTED: 0.0,
         NOTIFICATION_PENDING_STUCK: 0.0,
     }
+    assert report.needs_attention is False
+    assert events(captured) == ["attention_watch_clean"]
+
+
+def test_a_voice_reminder_on_a_configured_dialler_is_stuck(
+    session_factory: sessionmaker[Session], contract: Contract
+) -> None:
+    """The other side of the same move: with a dialler wired, silence is a fault.
+
+    Nothing about the row changed — only the switch did — so this is the pair that
+    shows the split reads configuration rather than the channel name.
+    """
+    assert Channel.VOICE in DELIVERABLE_WITH_A_DIALLER.deliverable_notification_channels
+    add_notification(
+        session_factory,
+        contract,
+        NotificationStatus.PENDING,
+        channel=Channel.VOICE,
+        scheduled_at=utc_now() - OVERDUE,
+    )
+
+    report = AttentionWatch(session_factory, settings=DELIVERABLE_WITH_A_DIALLER).run_once()
+
+    assert pending() == {
+        NOTIFICATION_PENDING_UNCONFIGURED: 0.0,
+        NOTIFICATION_PENDING_UNSUPPORTED: 0.0,
+        NOTIFICATION_PENDING_STUCK: 1.0,
+    }
     assert report.needs_attention is True
-    assert events(captured) == ["attention_watch_needs_attention"]
 
 
 def test_a_queued_reminder_on_a_working_channel_is_stuck_and_raises(
@@ -964,15 +1010,26 @@ def test_a_row_with_no_scheduled_time_is_aged_from_created_at(
 
 
 def test_the_three_causes_are_counted_separately(
-    session_factory: sessionmaker[Session], contract: Contract
+    session_factory: sessionmaker[Session], contract: Contract, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Unequal counts, because equal ones pass on a writer that copies one number.
 
-    Under :data:`DELIVERABLE` an email row is ``stuck``, a voice row is
-    ``unsupported`` and an sms row is ``unconfigured``: three causes, three different
-    numbers. The cheap mistake — publishing one total on all three series — renders a
-    perfectly plausible gauge and destroys the distinction the split exists for.
+    An email row is ``stuck``, a voice row is ``unsupported`` and an sms row is
+    ``unconfigured``: three causes, three different numbers. The cheap mistake —
+    publishing one total on all three series — renders a perfectly plausible gauge
+    and destroys the distinction the split exists for.
+
+    ``D10-144`` closed the only route to ``unsupported`` a real deployment had (voice
+    with no dialler), so the branch is exercised here the way the ceiling is meant to
+    be read: a channel that leaves ``NOTIFIABLE_CHANNELS`` is unsupported **even though
+    ``VOICE_TRANSPORT=ari`` makes it deliverable**. A copy of the classification that
+    checked ``deliverable`` first would report ``stuck`` and fail this test, which is
+    the ordering the function's docstring claims and would otherwise be unobservable.
     """
+    monkeypatch.setattr(
+        "app.core.attention.NOTIFIABLE_CHANNELS",
+        frozenset({Channel.EMAIL, Channel.SMS}),
+    )
     now = utc_now() - OVERDUE
     add_notification(
         session_factory, contract, NotificationStatus.PENDING, template="T-60", scheduled_at=now
@@ -997,7 +1054,7 @@ def test_the_three_causes_are_counted_separately(
         scheduled_at=now,
     )
 
-    AttentionWatch(session_factory, settings=DELIVERABLE).run_once()
+    AttentionWatch(session_factory, settings=DELIVERABLE_WITH_A_DIALLER).run_once()
 
     assert pending() == {
         NOTIFICATION_PENDING_UNCONFIGURED: 1.0,

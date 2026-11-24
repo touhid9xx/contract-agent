@@ -271,11 +271,14 @@ def _pending_by_cause(
     :func:`~app.workers.senders.build_sender` wires its senders from, so the board and
     the send path cannot disagree about whether a channel exists at all.
 
-    Order matters: a channel missing from :data:`~app.core.config.NOTIFIABLE_CHANNELS`
-    is ``unsupported`` **whatever** ``deliverable`` says, because the ceiling is the
-    build and no switch reaches it. Checking membership in ``deliverable`` first would
-    silently reclassify a voice row as a fault the day a settings bug let ``voice``
-    into that set.
+    Order matters, and since ``D10-144`` it is the only thing keeping ``unsupported``
+    meaningful. Every member of :class:`~app.db.enums.Channel` is now in
+    :data:`~app.core.config.NOTIFIABLE_CHANNELS`, so on any configuration this build
+    ships the branch is unreachable and no row lands in it. It is kept rather than
+    deleted because the ceiling it encodes is real and outlives the switch: a channel
+    added to the enum before a transport exists would produce exactly these rows, and
+    checking membership in ``deliverable`` first would then report them as something
+    an operator can fix when the truth is that the build cannot send them at all.
 
     Returns ``(unconfigured, unsupported, stuck)``.
     """

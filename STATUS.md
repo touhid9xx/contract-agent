@@ -9005,6 +9005,44 @@ rather than memory, and nothing inspects a payload beyond `ContractCreateRequest
 
 **Landed.** `23b67f8`, and CI run `45376144295` is ten jobs of ten on it, `CI gate` included.
 
+### D10-144 — P2-F: voice is sendable, and the promise stops at the dial
+
+**Served.** `VOICE_TRANSPORT=ari` makes `Channel.VOICE` a channel this build can attempt:
+`AriVoiceSender` asks an Asterisk REST Interface dialler to create a channel
+(`POST {ARI_BASE_URL}/ari/channels`, Basic auth, `endpoint` / `app` / `timeout` and an optional
+`callerId`), and `deliverable_notification_channels` reports voice once that switch is on.
+Before this slice voice was held out of `NOTIFIABLE_CHANNELS` on *every* configuration, so a
+queued voice reminder could only park `unsupported` — the state `test_config.py` pinned as a
+relationship, deliberately, so that a channel becoming deliverable would fail the test instead
+of inheriting it. Answering-machine detection on Whisper and the Stasis application that would
+hear the answer are not built, and `DEMO.md`'s voice row now reads "call placement only".
+
+**Configuration is a third switch, and refuses four shapes.** `VOICE_TRANSPORT`,
+`ARI_BASE_URL`, `ARI_USERNAME`, `ARI_PASSWORD`, `ARI_ENDPOINT`, `ARI_APP`, `ARI_CALLER_ID` and
+`VOICE_RING_SECONDS` live in their own block, mirroring the SMS one. Setting the switch
+requires both credentials (ARI has no other authentication), an absolute URL, `https` or
+loopback, and an `ARI_ENDPOINT` containing `{number}` — the last being the one that matters,
+since a fixed endpoint would dial one phone for the whole queue and report every call as
+placed. `ARI_NUMBER_PLACEHOLDER` is shared by the setting, the refusal and the sender, and
+substitution is `str.replace`, so an operator's unrelated brace cannot raise `KeyError` mid-send.
+
+**What gated it.** 32 cases from 29 functions in `backend/tests/test_voice.py`, plus rewritten
+`test_config.py` voice assertions and a `test_sms_sender.py` stand-in reason that now names all
+three switches. Three existing tests were repaired rather than deleted: the attention
+classifier's three-cause fixture (voice stopped being `unsupported`), the `attention.py` and
+`attention_watch.py` docstrings that said so, and `test_readme.py`, which needed
+`NO_MILESTONES` once the "no code at all" bucket emptied. `pytest` 1385 passed and 16 skipped
+over 1401 collected, `ruff check` and `ruff format --check` clean over 158 files, `mypy` clean
+over 78, ledger check clean. No frontend file changed.
+
+**Limits.** No live Asterisk: the refusals are argued from `Settings` and `urlsplit`, the same
+standing as `D10-133`'s Windows-only paths. No answering-machine detection, no audio, no DTMF.
+`voice_ring_seconds` is both ARI's ring bound and the HTTP timeout, because the dial happens
+inside the row lock; a call that rings out and a call to a dead trunk both look like a channel
+that was created.
+
+**Landed.** In this commit; the run that built it is recorded in the ledger follow-up.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

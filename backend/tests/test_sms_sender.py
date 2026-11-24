@@ -307,7 +307,7 @@ def test_the_router_raises_rather_than_reporting_a_send_that_never_happened() ->
 
 
 # --- selection -------------------------------------------------------------
-def test_no_switch_at_all_yields_the_stand_in_naming_both_settings() -> None:
+def test_no_switch_at_all_yields_the_stand_in_naming_every_switch() -> None:
     built: MessageSender = build_sender(Settings(app_env="test", log_json=False))
 
     assert isinstance(built, UnavailableSender)
@@ -317,6 +317,9 @@ def test_no_switch_at_all_yields_the_stand_in_naming_both_settings() -> None:
     # Naming one setting would send the operator to the wrong place.
     assert "NOTIFICATION_TRANSPORT=none" in str(raised.value)
     assert "SMS_TRANSPORT=none" in str(raised.value)
+    # And voice, since adding its adapter made it a third switch an operator can
+    # get wrong: a reason that named two of three would be a treasure hunt.
+    assert "VOICE_TRANSPORT=none" in str(raised.value)
 
 
 def test_the_sms_switch_alone_yields_a_router_that_delivers_sms_only() -> None:

@@ -85,10 +85,15 @@ everywhere and dead in the only configuration an operator runs.
 ``notifications_pending_overdue{state=...}`` is that population, split by *is there a
 setting whose change would make this channel deliverable?* — ``unconfigured`` (yes,
 and it is off: published, never paged, or a default install would be muted by
-Thursday), ``unsupported`` (no: nothing in this build sends ``voice``), and ``stuck``
+Thursday), ``unsupported`` (no: no setting reaches this channel), and ``stuck``
 (the channel is deliverable and the send path is not claiming rows). Only the last two
-are alerted on. The rule needs a ``for:`` window, unlike the other three, because a row
-one tick late is not a fault — and that window is why
+are alerted on. ``unsupported`` had one real occupant until ``D10-144`` — ``voice``,
+which no build could send — and now has none on any configuration this build ships.
+The branch stays because the ceiling it describes is the enum, not the transport: a
+channel added to ``Channel`` before its adapter lands would land in exactly this bucket.
+
+The rule needs a ``for:`` window, unlike the other three, because a row one tick late
+is not a fault — and that window is why
 :attr:`~app.core.config.Settings.notification_overdue_grace` exists: a grace shorter
 than the scheduler's own poll interval would make a healthy deployment indistinguishable
 from a dead one.

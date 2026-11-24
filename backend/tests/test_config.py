@@ -343,6 +343,18 @@ TEXTBEE = {
     "textbee_device_id": "device-123",
 }
 
+#: And for voice: the ARI credentials and a dial string carrying the number
+#: placeholder are all required once the switch is on, and each is checked at
+#: start-up. Loopback is used because that is how a real deployment reaches ARI —
+#: a sidecar on the same host — not as a way round the https rule.
+ARI = {
+    "voice_transport": "ari",
+    "ari_base_url": "http://127.0.0.1:8088",
+    "ari_username": "ari",
+    "ari_password": "ari_test_secret_do_not_log",
+    "ari_endpoint": "PJSIP/{number}@trunk",
+}
+
 
 def deliverable(**overrides: object) -> frozenset[Channel]:
     values: dict[str, object] = {"app_env": "test", "log_json": False}
@@ -376,19 +388,27 @@ def test_both_transports_make_both_deliverable() -> None:
     assert deliverable(**SMTP, **TEXTBEE) == frozenset({Channel.EMAIL, Channel.SMS})
 
 
-def test_voice_is_undeliverable_on_every_configuration() -> None:
-    """No setting puts a voice call on the wire, so ``voice`` is never deliverable.
+def test_voice_becomes_deliverable_only_when_a_dialler_is_configured() -> None:
+    """``D10-144``: ``voice`` is a configuration question, not a hardcoded no.
 
-    Asserted as a set *relationship* rather than by checking one channel is absent:
-    a fourth channel added to :class:`Channel` would otherwise inherit "deliverable"
-    silently, and the attention board would then report it as a fault the operator
-    has no move for. Making this assertion fail is the intended way to notice.
+    Before the ARI dialler existed no setting could put a call on the wire, so this
+    file pinned ``voice`` as absent from *every* configuration. That fact has moved
+    into the switch, and what is left to assert is the same relationship from the
+    other side: every channel in :class:`Channel` has a transport that can be
+    switched on, and none of them is deliverable while its switch is off.
+
+    Still asserted as a set *relationship* rather than one channel at a time: a
+    fourth channel added to :class:`Channel` without a factory would otherwise
+    inherit "deliverable" silently, and the attention board would then report it as
+    a fault the operator has no move for. Making this fail is the intended way to
+    notice.
     """
-    everything_on = deliverable(**SMTP, **TEXTBEE)
+    everything_off = deliverable(**SMTP, **TEXTBEE)
 
-    assert Channel.VOICE not in everything_on
-    assert everything_on == NOTIFIABLE_CHANNELS
-    assert set(Channel) - NOTIFIABLE_CHANNELS == {Channel.VOICE}
+    assert Channel.VOICE not in everything_off
+    assert everything_off == frozenset({Channel.EMAIL, Channel.SMS})
+    assert deliverable(**SMTP, **TEXTBEE, **ARI) == frozenset(Channel)
+    assert frozenset(Channel) == NOTIFIABLE_CHANNELS
 
 
 def test_the_overdue_grace_is_the_interval_the_queries_compare() -> None:

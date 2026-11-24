@@ -11353,3 +11353,83 @@ metadata and not a file.
 
 **Landed.** `23b67f8`, and CI run `45376144295` built it green: ten jobs of ten, `CI gate` among
 them, read from the run's own job list rather than from a badge.
+
+### D10-144 — A dialler makes voice sendable, and the promise stops at the dial
+
+`NOTIFIABLE_CHANNELS` held `voice` out on every configuration, and
+`deliverable_notification_channels` hardcoded it absent, so a queued voice reminder could
+only ever park `unsupported`. That was written as a *relationship* rather than a fact:
+`test_config.py` pinned voice as the member that is absent, and its docstring says it exists
+so that a channel becoming deliverable fails the test rather than inheriting it quietly. This
+is the slice that makes that test fail, which is the only reason it was worth writing that
+way. A third switch decides it, `VOICE_TRANSPORT=none|ari`, on the reasoning `SMS_TRANSPORT`
+and `INBOUND_TRANSPORT` already record: the channels are independent, so the switches are. The
+name `ari` exists because an adapter does — the rule those two settings state and this one
+inherits.
+
+**What the adapter does, and what it does not.** `AriVoiceSender` in `app/workers/senders.py`
+creates one channel per message: Basic auth over `POST {ARI_BASE_URL}/ari/channels` with
+`endpoint`, `app` and `timeout`, and `callerId` when one is configured. That is a call
+*placed*. Whether a person or an answering machine picked up, and what is said afterwards,
+happen inside the Stasis application — Whisper AMD and the application itself are not in this
+build, and `DEMO.md`'s voice row says so instead of crediting the milestone. So
+`VOICE_TRANSPORT=ari` does not make anyone reachable; it makes a reminder sendable and its
+outcome observable, the same line `NotificationStatus` already draws for e-mail.
+
+**Four refusals at start-up, one of which is the interesting one.** Both credentials, because
+ARI offers no other authentication and a half pair is a 401 at the first ring — which the
+scheduler performs holding the row's lock. An absolute `ARI_BASE_URL`, so that a bare
+`host:port` cannot be mistaken for one. `https` except on loopback: a plaintext hop carries the
+customer's number in the query string and the credential in a header, and a sidecar reached on
+`127.0.0.1` is how ARI is normally deployed, so loopback stays legal in every environment
+rather than being a development door. And `ARI_ENDPOINT` must contain `{number}` — a fixed
+endpoint would dial the same phone for every reminder in the queue and report every one of them
+as placed. `ARI_NUMBER_PLACEHOLDER` is a module constant, so the setting's help, the refusal
+and the sender cannot disagree about the token; the sender substitutes with `str.replace`
+rather than `str.format`, because the template is operator configuration and may legitimately
+hold a brace that is not a placeholder, and a `KeyError` out of `format` would surface as a
+failed send for a reason that has nothing to do with dialling.
+
+**The recipient never reaches an error.** `Notification.last_error` is rendered by
+`GET /notifications` to any viewer, and a rendered dial string *is* the customer's number, so a
+failure reports the HTTP status and nothing else — the rule `TextbeeSender` already follows for
+a rejected number. `__repr__` prints the base URL and the Stasis app, never the password or the
+endpoint. A reply the parser cannot read returns `None` rather than raising, because the call
+returned and the channel exists: turning an accepted dial into a failed attempt would ring a
+real customer a second time when the retry ran, which is the acknowledgement rule
+`_sms_provider_id` records. `voice_ring_seconds` doubles as the HTTP timeout, since the dial
+happens inside the transaction holding the row's lock and a call that never answers must not
+hold it open longer than the ring itself could have lasted.
+
+**What gated it.** `backend/tests/test_voice.py` collects 32 cases from 29 functions — the
+request shape (route, Basic auth, substituted endpoint, an encoded `+`, app and ring bound,
+`callerId` only when configured), `str.replace` leaving an unrelated brace alone, an unreadable
+reply returning `None`, the transport refusing e-mail and SMS *before* opening a socket, the
+number absent from every error and the password and endpoint absent from the repr, the three
+routing cases, and each start-up refusal including one that pins the refusal to quote the same
+constant the sender substitutes. Three older tests had to change rather than be deleted.
+`test_attention_watch.py` pinned three *different* counts across three causes so that a writer
+copying one number would fail; making voice deliverable collapsed two of them, so it now
+shrinks `NOTIFIABLE_CHANNELS` to keep the order the classifier claims observable.
+`attention.py` and `attention_watch.py` both said voice is `unsupported` "whatever
+`deliverable` says" — true until now — and both now say the branch is unreachable on any
+configuration this build ships, and why it is kept anyway: the ceiling is the `Channel` enum
+rather than the transport, so a channel added before its adapter lands in exactly this bucket.
+`test_readme.py` gained `NO_MILESTONES`, because P2-F landing emptied the "no code at all"
+bucket, and a guard that can only be satisfied by naming an unbuilt milestone would be deleted
+the day the last one shipped, taking the agreement check with it. `pytest` 1385 passed and 16
+skipped over 1401 collected, `ruff check` clean, `ruff format --check` clean over 158 files,
+`mypy` clean over 78, ledger check clean. No frontend file changed, so the frontend suite was
+not re-run.
+
+**Limits.** No Asterisk was reached. Every refusal is argued from `Settings` and `urlsplit`
+rather than run against a real ARI, which is the same standing `D10-133` records for its
+Windows-only paths. Nothing here detects an answering machine, plays audio or reads a DTMF
+digit: the transport creates a channel and reports what ARI said about it. `timeout` is ARI's
+own ring bound in seconds, not a promise that the call was answered, and the row records only
+that the call was placed. A number that reaches a dead trunk is indistinguishable from one that
+rang out, because both are a channel created and later hung up by a Stasis application this
+deployment does not run.
+
+**Landed.** In this commit. The run that built it is recorded in the ledger follow-up, which is
+where the slices above put theirs.

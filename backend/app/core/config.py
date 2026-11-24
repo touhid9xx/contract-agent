@@ -34,8 +34,8 @@ ExtractionBackend = Literal["pattern", "ollama"]
 #: dispatch records an attempt and fails visibly instead of pretending a message
 #: left the building. ``smtp`` selects :class:`~app.workers.senders.SmtpSender`,
 #: and it exists only because that adapter does: a transport is never named here
-#: ahead of the code that implements it, which is why there is still no ``voice``
-#: member.
+#: ahead of the code that implements it. Each channel gets its own switch below
+#: rather than a member here, because the channels are independently deployable.
 NotificationTransport = Literal["none", "smtp"]
 #: Transport SMS is sent through, and a **second switch rather than a third
 #: ``NotificationTransport`` member**. The two channels are independently
@@ -44,6 +44,14 @@ NotificationTransport = Literal["none", "smtp"]
 #: ``textbee`` selects :class:`~app.workers.senders.TextbeeSender`; as above, the
 #: name exists only because the adapter does.
 SmsTransport = Literal["none", "textbee"]
+#: Transport a voice reminder is *placed* through, and a **third switch rather than
+#: a ``NotificationTransport`` member**, for the same reason as :data:`SmsTransport`.
+#: ``ari`` selects :class:`~app.workers.senders.AriVoiceSender`, which dials through
+#: the Asterisk REST Interface; as above, the name exists only because the adapter
+#: does. There is deliberately no ``twilio``-style member: the media side (what the
+#: call says, and whether a human or a machine answered) belongs to the Stasis
+#: application the call is handed to, not to this transport.
+VoiceTransport = Literal["none", "ari"]
 #: Which selector answers "is there a route that *reads* a customer's reply".
 #: A third independent switch, because sending and hearing are separate capabilities:
 #: ``SMS_TRANSPORT=textbee`` with ``INBOUND_TRANSPORT=none`` is a deployment that talks
@@ -103,21 +111,29 @@ MIN_INBOUND_SECRET_LENGTH = 32
 #: The channels this build has a transport *factory* for at all — the ceiling that no
 #: setting can raise.
 #:
-#: ``Channel.VOICE`` is deliberately absent and no environment variable adds it: nothing
-#: in this build places a call, so a queued voice notification is unsendable here
-#: whatever the deployment is configured to do. That is a **different fact** from "the
-#: transport is switched off", and the difference is an operator's next move — one is
-#: fixed by an environment variable, the other by changing what may be consented or by
-#: approving an address a channel can use. :func:`app.core.attention.attention_report`
-#: publishes the two as separate series for exactly that reason (``D10-129``).
+#: ``Channel.VOICE`` is a member, and that is the whole of what ``D10-144`` changed: a
+#: dialler now exists (:class:`~app.workers.senders.AriVoiceSender`), so a queued voice
+#: notification is no longer unsendable *by construction*. Whether it is deliverable is
+#: then an ordinary configuration question answered by
+#: :attr:`Settings.deliverable_notification_channels` — ``VOICE_TRANSPORT=none``, the
+#: default, keeps it out of that set.
 #:
-#: It is the same pair :func:`app.workers.senders.build_sender` builds factories for, and
+#: The two facts stay separate because they are an operator's two different next moves —
+#: one is fixed by an environment variable, the other by shipping code, or by approving a
+#: value a channel can use. :func:`app.core.attention.attention_report` publishes them as
+#: separate series for exactly that reason (``D10-129``).
+#:
+#: It is the same set :func:`app.workers.senders.build_sender` builds factories for, and
 #: that function raises rather than accept a deliverable channel it cannot build, so a
 #: channel added here without a sender fails at start-up instead of queueing silently.
-NOTIFIABLE_CHANNELS = frozenset({Channel.EMAIL, Channel.SMS})
+NOTIFIABLE_CHANNELS = frozenset({Channel.EMAIL, Channel.SMS, Channel.VOICE})
 _VALID_LOG_LEVELS = frozenset({"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"})
 #: Hosts considered non-public. Used to *detect* a development origin, never to bind.
 _LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "0.0.0.0", "::1")  # nosec B104
+#: The token an ARI dial string must contain, formatted with the recipient. Named
+#: rather than inlined so the setting's documentation, the validator below and
+#: :class:`~app.workers.senders.AriVoiceSender` cannot disagree about its spelling.
+ARI_NUMBER_PLACEHOLDER = "{number}"
 
 
 class Settings(BaseSettings):
@@ -561,6 +577,49 @@ class Settings(BaseSettings):
     #: ``smtp_timeout_seconds``: the scheduler sends while holding the row lock.
     sms_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
 
+    # --- voice -----------------------------------------------------------
+    #: Read only when ``voice_transport == "ari"``. Its own switch for the same
+    #: reason ``sms_transport`` has one.
+    #:
+    #: ``ari`` is a real dialler or nothing at all. It does **not** make the call
+    #: audible or intelligent: what the customer hears, and whether a human or an
+    #: answering machine picked up, is decided by the Stasis application named in
+    #: ``ari_app``, which lives outside this build. What this switch buys is a
+    #: channel that is actually created — a phone that rings — and a refusal that
+    #: names the reason when it is not.
+    voice_transport: VoiceTransport = "none"
+    #: The Asterisk REST Interface origin, e.g. ``http://asterisk:8088``. Checked
+    #: below to be https unless loopback: the request carries the customer's number
+    #: in a query parameter and the credentials in a header. Loopback stays legal in
+    #: every environment because that is how ARI is normally reached — the dialler
+    #: runs as a sidecar to Asterisk, not across a network.
+    ari_base_url: str = ""
+    #: HTTP Basic credentials for ARI. ARI has no other authentication, so both are
+    #: required whenever the transport is on, and neither is ever logged or
+    #: returned — see ``AriVoiceSender.__repr__``.
+    ari_username: str = ""
+    ari_password: str = ""
+    #: The dial string the call is originated to: the *tech/data* half of an ARI
+    #: endpoint, with the recipient written as ``{number}`` —
+    #: ``PJSIP/{number}@trunk``, not a URL. The placeholder is required. A fixed
+    #: endpoint would place every reminder of the tenant to the same phone, which is
+    #: not a smaller bug than not dialling at all, so start-up refuses a template
+    #: without it. The rendered string carries the customer's number, which is why it
+    #: is treated as credential-shaped: never logged, never in an error.
+    ari_endpoint: str = ""
+    #: The Stasis application the answered channel is handed to. It is what the call
+    #: *becomes* after this transport's job ends.
+    ari_app: str = "contract-reminders"
+    #: What the customer sees as caller ID. Optional: an empty value lets Asterisk
+    #: use the endpoint's own number, which is the right default for a trunk that
+    #: only permits one.
+    ari_caller_id: str = ""
+    #: Upper bound on how long the far end may ring before Asterisk gives up, and
+    #: simultaneously the bound on this dialler's HTTP call — for the same
+    #: correctness reason as ``sms_timeout_seconds``: the scheduler sends while
+    #: holding the row lock.
+    voice_ring_seconds: int = Field(default=25, gt=0, le=120)
+
     # --- inbound ---------------------------------------------------------
     #: Whether this deployment can read a reply. ``none`` is the default and the only
     #: honest one for a build that has never been registered with a gateway.
@@ -901,6 +960,42 @@ class Settings(BaseSettings):
                     "network unencrypted."
                 )
 
+        # The dialler's requirements, checked at boot for the same reason the SMS ones
+        # are: a half-configured transport would otherwise surface at the first ring,
+        # which the scheduler performs *inside* the row lock.
+        if self.voice_transport == "ari":
+            if not self.ari_username.strip() or not self.ari_password:
+                raise ValueError(
+                    "ARI_USERNAME and ARI_PASSWORD must both be set when "
+                    "VOICE_TRANSPORT=ari; ARI offers no other authentication, so an "
+                    "empty pair is a 401 at the first call rather than an error here"
+                )
+            url = urlsplit(self.ari_base_url)
+            host = url.hostname or ""
+            if not host:
+                raise ValueError(
+                    "ARI_BASE_URL must be an absolute URL when VOICE_TRANSPORT=ari; "
+                    f"got {self.ari_base_url!r}"
+                )
+            if host not in _LOOPBACK_HOSTS and url.scheme != "https":
+                raise ValueError(
+                    "ARI_BASE_URL must be https (or loopback) when VOICE_TRANSPORT=ari; "
+                    f"got {self.ari_base_url!r}. The dialled number and the ARI "
+                    "credentials would otherwise cross the network unencrypted."
+                )
+            # The placeholder is what makes the endpoint a *template* rather than an
+            # address. Without it every reminder the tenant queues would ring the same
+            # phone — the deployment's own, most likely — and nothing would say so:
+            # ARI would happily create the channel and this build would record a send.
+            if ARI_NUMBER_PLACEHOLDER not in self.ari_endpoint:
+                raise ValueError(
+                    "ARI_ENDPOINT must contain "
+                    f"{ARI_NUMBER_PLACEHOLDER!r} when VOICE_TRANSPORT=ari; got "
+                    f"{self.ari_endpoint!r}. It is formatted with the customer's number "
+                    "for every call, and a fixed endpoint would dial one phone for every "
+                    "reminder without reporting anything wrong."
+                )
+
         # ``CONTACT_BLIND_INDEX_KEY``'s shape is checked by
         # :meth:`_check_blind_index_key` above, which runs only when the variable is
         # actually present. Checking it again here would have to answer "absent" and
@@ -1121,10 +1216,13 @@ class Settings(BaseSettings):
         send starts disagreeing with the attention check about whether a channel exists
         at all — the same failure ``D10-129`` found in the alerting.
 
-        ``voice`` is absent by construction, not by omission: no transport in this build
-        places calls, so a queued voice notification is unsendable on *every*
-        configuration. :attr:`Channel` carries the member anyway because the agent may
-        rank among it and an inbound voice reply is representable.
+        ``voice`` joins the other two on exactly the same terms: it is present when
+        ``VOICE_TRANSPORT`` names a dialler and absent when it does not. Before
+        ``D10-144`` the answer was hardcoded — no transport in this build placed calls,
+        so a queued voice notification was unsendable on *every* configuration — and
+        that fact now lives where it belongs, in the switch, rather than in this method.
+        What the switch does **not** claim is that anyone answers: ``voice`` means the
+        call is placed, and the media side belongs to the Stasis application.
 
         A frozenset of :attr:`Channel` rather than of :class:`str` so a caller cannot
         compare it against a raw column value without going through the enum, which is
@@ -1135,6 +1233,8 @@ class Settings(BaseSettings):
             channels.add(Channel.EMAIL)
         if self.sms_transport != "none":
             channels.add(Channel.SMS)
+        if self.voice_transport != "none":
+            channels.add(Channel.VOICE)
         return frozenset(channels)
 
 

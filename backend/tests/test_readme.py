@@ -34,12 +34,15 @@ around them. A job could be renamed, or split in two and another merged into it,
 count stay nine with the README describing the old shape. Catching that would mean writing
 all nine job ids into the README — the duplication this file exists to avoid — so it is
 left uncaught rather than paid for. The same holds for every other claim in the README:
-that one command brings the stack up, that `P2-F` has no code, that every screen has a
-spec. `screens.test.ts` checks the last of those independently, and nothing checks the
-rest. The milestone test is the narrowest of the three and must not be read as wider: it
-proves the paragraph and the table *agree about* `P2-F`, not that `P2-F` has no code — the
-tree is never consulted for that, and only a test that could tell would make the claim
-safe to leave unguarded.
+that one command brings the stack up, that `P2-K` and `P2-L` are specified nowhere, that
+every screen has a spec. `screens.test.ts` checks the last of those independently, and
+nothing checks the rest. The milestone test is the narrowest of the three and must not be
+read as wider: it proves the paragraph and the table *agree about* a milestone, never that
+the milestone has the code it is credited with — the tree is never consulted for that, and
+only a test that could tell would make the claim safe to leave unguarded. What it does buy
+is that a slice cannot land in one of the two statements alone: `D10-144` moved `P2-F`
+from one bucket to the other, and had it been edited in the paragraph only, this file
+would have failed rather than let the README describe two different repositories.
 """
 
 from __future__ import annotations
@@ -102,6 +105,9 @@ ROW_STATES = (
 #: optionally carrying a possessive gloss (`P2-I's new views`). The gloss is dropped.
 FULL_ID = re.compile(r"P2-(?P<letter>[A-Z])(?:'s\b.*)?\Z")
 SHORT_ID = re.compile(r"-(?P<letter>[A-Z])(?:'s\b.*)?\Z")
+
+#: The words that mean "and none of them", for a milestone list that has emptied out.
+NO_MILESTONES = {"nothing", "none"}
 
 
 def _count_of(word: str) -> int:
@@ -184,11 +190,18 @@ def _milestones(listed: str) -> set[str]:
     The glosses matter: the prose writes `P2-F (voice and answering-machine detection) and
     P2-H (...)`, and splitting that on `and` without removing the brackets reads three
     tokens, one of which is not a milestone.
+
+    :data:`NO_MILESTONES` is the empty set spelled out. It exists because the "no code"
+    bucket empties the day the last milestone lands a slice, and a guard that could only be
+    satisfied by naming an unbuilt milestone would be deleted that day — taking the
+    agreement check with it, which is the failure this file exists to prevent.
     """
 
     listed = re.sub(r"\([^)]*\)", "", listed).replace(" and ", ", ")
     tokens = [token.strip() for chunk in listed.split(",") for token in chunk.split("/")]
-    return {_milestone_id(token) for token in tokens if token}
+    return {
+        _milestone_id(token) for token in tokens if token and token.lower() not in NO_MILESTONES
+    }
 
 
 def _table_milestones(text: str) -> dict[str, set[str]]:

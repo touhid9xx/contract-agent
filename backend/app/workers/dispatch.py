@@ -24,19 +24,23 @@ repo rather than invented here:
    to mean 08:00 where the customer is. An unresolvable zone is refused, never
    silently treated as UTC.
 4. **Nothing reaches a caller without a transport that exists.** Every member of
-   ``notification_transport`` names an adapter that is really there: ``none`` wires
-   the refusing stand-in, and ``smtp`` — added with
-   :class:`~app.workers.senders.SmtpSender`, not before it — wires the only
-   transport this build implements. A dispatch against ``none`` records the
-   attempt and fails visibly, which is the same choice ``UnavailablePublisher``
-   makes for events.
+   ``notification_transport``, ``sms_transport`` and ``voice_transport`` names an
+   adapter that is really there: ``none`` wires the refusing stand-in, and
+   ``smtp`` / ``textbee`` / ``ari`` — each added with its adapter, not before it —
+   wire the transports this build implements. A dispatch against ``none`` records
+   the attempt and fails visibly, which is the same choice
+   ``UnavailablePublisher`` makes for events.
 
 What is deliberately **not** here yet, so it is not mistaken for done:
 
-* **No SMS and no voice.** ``SmtpSender`` delivers ``email`` only, and refuses the
-  other two channels rather than substituting one for another. There is no
-  dialler and no gateway, so a customer who is only reachable by phone still
-  cannot be reached by this build.
+* **Nothing here decides what a voice call *contains*.** ``voice`` now has an
+  adapter — :class:`~app.workers.senders.AriVoiceSender` — but what it does is
+  create a channel: Asterisk dials, and the answered call is handed to a Stasis
+  application that lives outside this build. So the evidence a voice send
+  produces is *the call was placed*, never *the customer heard it*, and this
+  module records exactly that. ``VOICE_TRANSPORT=none``, the default, keeps the
+  channel out of :attr:`~app.core.config.Settings.deliverable_notification_channels`
+  altogether.
 * **No transport code in this module.** The concrete adapter lives in
   :mod:`app.workers.senders`, as ``KafkaPublisher`` lives in ``publishers``. This
   module must stay importable, and testable, without ``smtplib`` or a relay.
