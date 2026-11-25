@@ -11698,3 +11698,39 @@ instead of in a comment about the driver.
 
 **Landed.** `895e0a4`, and CI run `45612135746` built it green: ten jobs of ten, `CI gate` among
 them, read from the run's own job list rather than from a badge.
+
+### D10-150 — The guard was on one of the three functions that take a limit
+
+`D10-149` wrote that `prune_terminal_before` returns `[]` for `limit <= 0` "for every other
+caller". The threat in that sentence was right and its scope was wrong: `outbox.py` has three
+functions taking a `limit`, and only the one that deletes had been guarded. Measured against real
+SQLite before correcting the record — `replay_dead_lettered(limit=-1)` requeued **all seven** parked
+rows, and `dead_lettered(limit=-1)` returned all seven. Same defect, same direction, opposite
+consequence: the value that reads as a cap is *unbounded*.
+
+**The parser guard could not have covered it.** `_count_arg` refuses a non-positive `--limit` on
+the command line, which is where the operator types it, but `replay_dead_lettered` is also
+reachable with a computed page size — "requeue the rest of the budget" is an ordinary expression,
+and nothing in the signature stops it going negative. `DEFAULT_REPLAY_LIMIT` is a constant and
+safe; the argument is not. So the guard belongs at the boundary of the function that hands the
+value to SQL, which is where it now is: both `replay_dead_lettered` and `dead_lettered` return an
+empty result before building a statement.
+
+**A requeue is the write that matters here.** The prune guard was belt-and-braces because the
+statement was a `DELETE`. This one is closer: an unbounded replay marks every parked row `pending`
+and resets its attempt counter, which does not merely publish more events than asked — it discards
+the retry budget and the `last_error` text that told the operator *why* each row had stopped. The
+recoverable error the parked rows were preserving becomes unrecoverable at the moment the recovery
+command runs. `dry_run` is unaffected and still reports the page it would have touched.
+
+**What gated it.** `pytest` 1445 passed and 16 skipped over 1461 collected, `ruff check` clean,
+`ruff format --check backend` clean over 156 files, `mypy` clean over 79 source files, and the
+ledger check clean at 80 blocks with 23 deferring and 0 failed — both new blocks are silent, so the
+deferring figure did not move. Six cases are new: two parametrized cases over `0`, `-1` and `-1000`,
+one for the replay and one for the listing.
+
+**Limits.** Only the negative values are canaries. With the guards removed the two `0` cases still
+pass, because `LIMIT 0` returns nothing either way — the `0` parametrisation is there for parity
+with `D10-149`'s case, not because it proves anything, and it is recorded so a later reader does not
+mistake four failures for six. And the shape of the mistake outlives this fix: a fourth function
+taking a `limit` re-opens it, and nothing enumerates that set.

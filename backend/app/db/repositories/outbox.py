@@ -280,7 +280,14 @@ def dead_lettered(session: Session, *, limit: int = DEFAULT_REPLAY_LIMIT) -> lis
 
     ``last_error`` is returned as stored: that text is the reason an operator is
     looking at these rows in the first place.
+
+    A ``limit`` of zero or less returns nothing rather than reaching the database,
+    where a negative ``LIMIT`` is *unbounded* — the same guard, for the same
+    reason, as :func:`replay_dead_lettered` and :func:`prune_terminal_before`.
     """
+    if limit <= 0:
+        return []
+
     stmt = (
         select(OutboxEvent)
         .where(OutboxEvent.status == OutboxStatus.FAILED)
@@ -390,7 +397,17 @@ def replay_dead_lettered(
     No ``SELECT ... FOR UPDATE``: the relay never claims a ``failed`` row, so
     there is no concurrent writer to fence off. Two simultaneous replays would
     both set ``pending``, which is idempotent.
+
+    A ``limit`` of zero or less returns nothing instead of being handed to the
+    database: a negative ``LIMIT`` means *unbounded* to SQLite and MySQL, so one
+    passed straight through would requeue the entire parked backlog while looking
+    like a one-row recovery. ``prune_terminal_before`` carries the same guard for
+    the same reason. The CLI refuses a non-positive ``--limit`` before it gets
+    here; this is for every other caller.
     """
+    if limit <= 0:
+        return []
+
     stmt = select(OutboxEvent).where(OutboxEvent.status == OutboxStatus.FAILED)
     if event_ids is not None:
         stmt = stmt.where(OutboxEvent.id.in_(list(event_ids)))

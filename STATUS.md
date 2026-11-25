@@ -9204,6 +9204,34 @@ rather than something measured here, which is why the guard is in our code.
 
 **Landed.** `895e0a4`, and CI run `45612135746` is ten jobs of ten on it, `CI gate` included.
 
+### D10-150 — The guard was on one of the three functions that take a limit
+
+`D10-149` said `prune_terminal_before` held the non-positive guard "for every other caller". The
+scope was wrong: `outbox.py` has three functions taking a `limit` and only the deleting one was
+guarded. Measured on real SQLite — `replay_dead_lettered(limit=-1)` requeued all seven parked rows,
+`dead_lettered(limit=-1)` returned all seven.
+
+| Area | Detail |
+| --- | --- |
+| `backend/app/db/repositories/outbox.py` | `replay_dead_lettered` and `dead_lettered` both return an empty result for `limit <= 0` before building a statement, matching `prune_terminal_before` |
+| `backend/tests/test_outbox_replay.py` | Two parametrized cases over `0`, `-1` and `-1000`: replay requeues nothing and leaves `attempts`/`last_error` intact; the listing returns an empty page |
+
+**Why the parser guard was not enough.** `_count_arg` refuses a non-positive `--limit` where the
+operator types it, but the replay function is also reachable with a computed page size, and nothing
+in the signature stops that going negative. The guard belongs where the value reaches SQL.
+
+**An unbounded replay destroys what the replay was for.** It resets the attempt counter and clears
+`last_error` on every parked row, so the reason each row stopped — the thing an operator opens the
+list to read — is gone at the moment the recovery command runs. `dry_run` still reports the page.
+
+**What gated it.** `pytest` 1445 passed and 16 skipped over 1461 collected, `ruff check` clean,
+`ruff format --check backend` clean over 156 files, `mypy` clean over 79 source files, and the
+ledger check clean at 80 blocks with 23 deferring and 0 failed.
+
+**Limits.** Only the negative cases are canaries: with the guards removed the two `0` cases still
+pass, because `LIMIT 0` returns nothing either way. A fourth function taking a `limit` re-opens the
+mistake, and nothing enumerates that set.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

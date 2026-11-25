@@ -181,6 +181,36 @@ def test_replay_respects_the_limit(
     assert load(session_factory, ids[2]).status is OutboxStatus.FAILED
 
 
+@pytest.mark.parametrize("bad_limit", [0, -1, -1000])
+def test_replay_refuses_a_non_positive_limit_and_requeues_nothing(
+    bad_limit: int,
+    session_factory: sessionmaker[Session],
+    enqueue_event: Callable[..., int],
+) -> None:
+    """The CLI refuses ``--limit -1``; every other caller must be refused too.
+
+    Measured before this guard: replaying with ``limit=-1`` requeued the entire
+    parked backlog while looking like a one-row recovery. A negative ``LIMIT`` is
+    *unbounded* to SQLite and MySQL, so the value that reads as most cautious is the
+    one that removes the cap -- which is why the guard sits at the function's
+    boundary and not only in the argument parser. The rows must also be left exactly
+    as parked: ``attempts`` and ``last_error`` intact, since those are what an
+    operator reads to understand why the row stopped.
+    """
+    ids = [enqueue_event() for _ in range(2)]
+    for event_id in ids:
+        park(session_factory, event_id)
+
+    with session_scope(session_factory) as session:
+        assert replay_dead_lettered(session, limit=bad_limit) == []
+
+    for event_id in ids:
+        row = load(session_factory, event_id)
+        assert row.status is OutboxStatus.FAILED
+        assert row.attempts == MAX_ATTEMPTS
+        assert row.last_error == PARK_ERROR
+
+
 def test_replay_can_target_specific_ids(
     session_factory: sessionmaker[Session], enqueue_event: Callable[..., int]
 ) -> None:
@@ -243,6 +273,25 @@ def test_dead_lettered_lists_only_parked_rows_oldest_first(
 
     assert [row.id for row in rows] == parked_ids
     assert rows[0].last_error == PARK_ERROR
+
+
+@pytest.mark.parametrize("bad_limit", [0, -1, -1000])
+def test_the_listing_refuses_a_non_positive_limit(
+    bad_limit: int,
+    session_factory: sessionmaker[Session],
+    enqueue_event: Callable[..., int],
+) -> None:
+    """A page of "everything" is not a page: negative ``LIMIT`` means unbounded.
+
+    The read side takes the same guard as the write side for the same reason, so
+    what an operator is shown can never be a silently-truncated view of the whole
+    parked backlog presented as if it were a bounded page.
+    """
+    event_id = enqueue_event()
+    park(session_factory, event_id)
+
+    with session_scope(session_factory) as session:
+        assert dead_lettered(session, limit=bad_limit) == []
 
 
 # --- the operator command -------------------------------------------------
