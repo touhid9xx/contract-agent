@@ -172,7 +172,14 @@ class ExtractedFieldRepository(TenantScopedRepository[ExtractedField]):
         which contract a field blocks, and one query beats N. Both sides carry the
         tenant predicate: the join is on ``contract_id`` and would otherwise be a
         path to another tenant's row if the two ever disagreed.
+
+        A ``limit`` of zero or less returns an empty page rather than reaching the
+        database, where a negative ``LIMIT`` is *unbounded* — the same guard, for
+        the same reason, as :func:`~app.db.repositories.outbox.dead_lettered`.
         """
+        if limit <= 0:
+            return []
+
         stmt = (
             self.scoped(ExtractedField)
             .add_columns(Contract)
@@ -322,7 +329,15 @@ def fields_for_reseal(
 
     Ordered by id so ``--limit`` takes a stable prefix and a second run continues
     where the first stopped instead of re-reading the same rows.
+
+    A ``limit`` of zero or less reads nothing instead of being handed to the
+    database, where a negative ``LIMIT`` is *unbounded*: this is a write path, and
+    the second run is meant to resume a bounded prefix, not to sweep the table in
+    one go. The same guard, for the same reason, as the sibling readers below.
     """
+    if limit <= 0:
+        return []
+
     stmt = select(ExtractedField).order_by(ExtractedField.id.asc()).limit(limit)
     if field_ids is not None:
         stmt = stmt.where(ExtractedField.id.in_(list(field_ids)))
@@ -355,7 +370,14 @@ def fields_for_reseal_for_tenant(
     prefix, and a full page means the count is a **floor**, which the caller reports
     as ``field_scan_truncated`` rather than rounding away.
     ``ix_extracted_fields_tenant_status`` leads on ``tenant_id``.
+
+    A ``limit`` of zero or less reads nothing rather than reaching the database,
+    where a negative ``LIMIT`` is *unbounded* — the sibling's guard, for the
+    sibling's reason.
     """
+    if limit <= 0:
+        return []
+
     stmt = (
         select(ExtractedField)
         .where(ExtractedField.tenant_id == tenant_id)
@@ -406,7 +428,15 @@ def fields_needing_blind_index(
 
     Ordered by id, so a bounded run takes a stable prefix and the next run resumes
     where this one stopped.
+
+    A ``limit`` of zero or less reads nothing rather than reaching the database,
+    where a negative ``LIMIT`` is *unbounded*: a repair run that examined the whole
+    table in one statement is exactly the unbounded batch this bound exists to
+    prevent.
     """
+    if limit <= 0:
+        return []
+
     stmt = (
         select(ExtractedField)
         .where(
@@ -453,7 +483,16 @@ def contracts_for_contact(
 
     Ordered by id so the cap takes a stable prefix, and returning a list rather than a
     lazy result so the caller sees a snapshot it can reason about after the commit.
+
+    A ``limit`` of zero or less matches nothing rather than reaching the database,
+    where a negative ``LIMIT`` is *unbounded*. That matters more here than
+    anywhere else in this module: :data:`MAX_OPT_OUT_CONTRACTS` is a denial-of-
+    service bound on an unauthenticated webhook, and an unbounded match would
+    uncap the fan-out behind it in one request.
     """
+    if limit <= 0:
+        return []
+
     stmt = (
         select(Contract)
         .join(ExtractedField, ExtractedField.contract_id == Contract.id)

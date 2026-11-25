@@ -53,7 +53,14 @@ class NotificationRepository(TenantScopedRepository[Notification]):
         ``created_at``: what a reader wants from this table is "the most recent
         slot", and two rows created in the same second must still come back in a
         deterministic order — the same tiebreak argument F9 made for decisions.
+
+        A ``limit`` of zero or less returns nothing rather than reaching the
+        database, where a negative ``LIMIT`` is *unbounded* — the same guard, for
+        the same reason, as :func:`~app.db.repositories.outbox.dead_lettered`.
         """
+        if limit <= 0:
+            return []
+
         stmt = (
             self.scoped(Notification)
             .where(Notification.contract_id == contract_id)
@@ -73,8 +80,13 @@ class NotificationRepository(TenantScopedRepository[Notification]):
 
         ``status`` and ``channel`` filter *after* the tenant predicate and never
         replace it: the filters are caller-supplied query parameters, and adding one
-        must not be a way to widen the scope.
+        must not be a way to widen the scope. Nor is a non-positive ``limit``: it
+        returns nothing rather than reaching the database, where a negative
+        ``LIMIT`` is *unbounded* (D10-149).
         """
+        if limit <= 0:
+            return []
+
         stmt = self.scoped(Notification)
         if status is not None:
             stmt = stmt.where(Notification.status == status)

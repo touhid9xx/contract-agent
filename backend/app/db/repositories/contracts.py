@@ -131,7 +131,14 @@ class ContractRepository(TenantScopedRepository[Contract]):
         combined with the tenant predicate from :meth:`scoped`, so a guessed id
         from another organisation narrows this tenant's own rows rather than
         disclosing someone else's.
+
+        A ``limit`` of zero or less returns an empty page rather than reaching the
+        database, where a negative ``LIMIT`` is *unbounded* — the same guard, for
+        the same reason, as :func:`claim_reminder_candidates` in this module.
         """
+        if limit <= 0:
+            return []
+
         stmt = self.scoped(Contract)
         if status is not None:
             stmt = stmt.where(Contract.status == status)

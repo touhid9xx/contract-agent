@@ -144,7 +144,15 @@ class OutboxRepository:
         without blocking. SQLite has no ``FOR UPDATE`` clause; SQLAlchemy omits
         it there, which is acceptable because the test suite is single-writer —
         the real locking behaviour is covered by the MySQL integration test.
+
+        A ``limit`` of zero or less leases nothing instead of reaching the
+        database: a negative ``LIMIT`` is *unbounded* to SQLite and MySQL, so it
+        would lease every due row in one statement — the same guard, for the same
+        reason, as :func:`dead_lettered` and :func:`prune_terminal_before`.
         """
+        if limit <= 0:
+            return []
+
         now = utc_now()
         due = or_(
             and_(

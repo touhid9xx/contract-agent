@@ -9256,11 +9256,13 @@ enumeration both earlier blocks asked for is the thing worth keeping.
 `ruff format --check backend` clean over 157 files, `mypy` clean over 79 source files, and the
 ledger check clean at 82 blocks with 23 deferring and 0 failed.
 
-**Limits.** It reads declarations, not call sites: a runtime-computed value handed to a repository
-is invisible to it, and `claim_due` is now the one `limit` consumer in `outbox.py` with no
-in-function guard — deliberate, because its only production caller passes a settings field that
-cannot be non-positive. The pinned counts force this file to be edited when the API legitimately
-gains a `limit`, and a green run proves a floor was declared, not that the number is right.
+**Limits.** It read declarations and not call sites, so a runtime-computed value handed to a
+repository was invisible to it, and `claim_due` went without a guard on the argument that its only
+production caller passes a settings field the config bounds. `D10-153` measured that claim and found
+fourteen unguarded forwarders rather than one, so the net now reads bodies too; what it still cannot
+see is arithmetic on the way to SQL. The pinned counts force this file to be edited when the API
+legitimately gains a `limit`, and a green run proves a floor was declared, not that the number is
+right.
 
 **Landed.** `c253afe`, and **no CI run was ever created for it** — the runs API answers `total_count
 0` for that full `head_sha` 33 minutes after the push, into a GitHub incident naming `Actions`, `Git
@@ -9304,6 +9306,56 @@ about it was right.
 **Limits.** No instrument reads arithmetic in prose, so a future figure can be wrong the same way;
 and the corrected sentence carries a unit a reader can re-check with one command, not a derivation,
 so nothing in the repository makes them check it.
+
+### D10-153 — Fourteen forwarders handed SQL an unbounded page
+
+`D10-151` recorded one hole in its own net and one example of it, and called that example
+deliberate. Measured against the tree it was written on, twenty functions hand a caller's count to
+SQL and fourteen of them refused nothing. All twenty refuse now, and a fourth test case reads the
+function bodies to keep it that way.
+
+| Area | Detail |
+| --- | --- |
+| `outbox.py` | `claim_due` refuses a non-positive batch instead of leasing every due row |
+| `contracts.py`, `agent.py` | `ContractRepository.recent` and two agent readers |
+| `notifications.py` | Both readers, which feed the dispatch queue |
+| `escalations.py` | `claim_silent_contracts` (the write path), `queue`, `for_contract` |
+| `fields.py` | Five: reseal, blind-index and `contracts_for_contact` among them |
+| `test_limit_guards.py` | Fourth case: parses `app/`, pins twenty forwarders |
+
+**Measured, not sampled.** Scanning `app/` for functions that accept `limit` or `*_limit` and pass
+it into `.limit()`, `fetchmany()`, `slice()` or a `limit=` keyword finds twenty forwards across the
+six repository modules. At `HEAD` before this slice, six refused a non-positive value and fourteen
+did not: `claim_due`, `ContractRepository.recent`, both `AgentDecisionRepository` readers, both
+`NotificationRepository` readers, the escalation queue and its customer-response reader,
+`claim_silent_contracts`, and five in `fields.py`.
+
+**The sentence it contradicted.** `expiry.py:268` says the convention outright: *Settings forbid a
+zero batch, but the constructor takes an override and the repository guards the case.*
+`OutboxRelay.__init__` takes `batch_size` as a keyword-only override and stores it unchecked, so the
+repository was the only place left that could refuse it — and it did not. `D10-151`'s reasoning that
+the caller is bounded describes the wired path, not the seam.
+
+**Why the count mattered.** The consequences are not the same size. `claim_due` would lease every
+due row in one statement; `claim_silent_contracts` takes `FOR UPDATE` and *writes*, so an unbounded
+round would lock and escalate every silent contract in one transaction; `contracts_for_contact`
+would drop `MAX_OPT_OUT_CONTRACTS`, the denial-of-service bound on an unauthenticated webhook; the
+reseal readers would sweep a table a repair run meant to walk in bounded prefixes.
+
+**What the net does now.** The fourth case in `backend/tests/test_limit_guards.py` parses `app/` and
+requires every count-forwarder to refuse a non-positive value before SQL sees it, pinned at twenty
+so a rename cannot empty the scan. `.agent-cache/probe_guard_sites.py` deletes two of the guards —
+`claim_due` and `contracts_for_contact`, two modules with different consequences — reruns the case
+expecting failure, and restores both files byte-identically by SHA-256. Both were caught.
+
+**What gated it.** `pytest` 1454 passed and 16 skipped over 1470 collected, nine cases in
+`test_limit_guards.py`; `ruff check` clean, `ruff format --check backend` clean over 157 files,
+`mypy` clean over 79 source files, and the ledger check at 86 blocks with 23 deferring and 0 failed.
+
+**Limits.** The scan keys on names, so a count called `n` or `size` handed to `.limit()` is still
+invisible; it proves a refusal exists rather than that it is sufficient, since a function may refuse
+`limit <= 0` and then hand SQL `limit - 1`; and the twenty are pinned, so a new reader forces an
+edit.
 
 ## Non-negotiable reminders
 

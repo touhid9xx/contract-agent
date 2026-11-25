@@ -137,7 +137,14 @@ class EscalationRepository(TenantScopedRepository[Escalation]):
         which ids exist. It lives here rather than in a second ``for_contract``
         method so "most urgent first" is decided in exactly one place; a copy would
         be free to drift from this one.
+
+        A ``limit`` of zero or less returns an empty queue rather than reaching the
+        database, where a negative ``LIMIT`` is *unbounded* — the same guard, for the
+        same reason, as :func:`~app.db.repositories.outbox.dead_lettered`.
         """
+        if limit <= 0:
+            return []
+
         stmt = self.scoped(Escalation)
         if statuses is not None:
             stmt = stmt.where(Escalation.status.in_(list(statuses)))
@@ -201,7 +208,15 @@ class CustomerResponseRepository(TenantScopedRepository[CustomerResponse]):
         *,
         limit: int = DEFAULT_RESPONSE_HISTORY_LIMIT,
     ) -> list[CustomerResponse]:
-        """Responses for one contract, newest first."""
+        """Responses for one contract, newest first.
+
+        A ``limit`` of zero or less returns nothing rather than reaching the
+        database, where a negative ``LIMIT`` is *unbounded* — the same guard, for
+        the same reason, as :func:`~app.db.repositories.outbox.dead_lettered`.
+        """
+        if limit <= 0:
+            return []
+
         stmt = (
             self.scoped(CustomerResponse)
             .where(CustomerResponse.contract_id == contract_id)
@@ -285,7 +300,18 @@ def claim_silent_contracts(
     and read the same way, but only this shape keeps the statement to a single
     table in ``FOR UPDATE``, which is what makes ``SKIP LOCKED`` safe to reason
     about: the lock is taken on the contract rows the caller is about to mutate.
+
+    A ``limit`` of zero or less returns nothing instead of being handed to the
+    database, where a negative ``LIMIT`` is *unbounded*: this is the one caller
+    that *writes*, so an unbounded round would lock and escalate every silent
+    contract the deployment has in a single transaction. The scanner's batch size
+    comes from :class:`~app.core.config.Settings` but its constructor takes an
+    override, which is the reason the sibling claim queries refuse the value
+    themselves rather than trusting the caller.
     """
+
+    if limit <= 0:
+        return []
 
     def _contacted(instant: ColumnElement[bool]) -> Exists:
         """One accepted contact for this contract, at ``instant``.

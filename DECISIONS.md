@@ -11775,15 +11775,16 @@ compared. A green net that has never been shown to fail is a claim about the cod
 ledger check clean at 82 blocks with 23 deferring and 0 failed — 23 because both new blocks are
 silent, the deferring figure unmoved. Eight cases are new.
 
-**Limits.** Three. It reads declarations, not call sites, so a value computed at runtime and handed
-to a repository is invisible to it — `claim_due(batch_size - len(claimed))` is the shape, and
-`claim_due` is now the one `limit` consumer in `outbox.py` without an in-function guard. That is
-deliberate: its only production caller passes a settings field the test above proves cannot be
-non-positive, and that reasoning lives in prose rather than in the net. Second, the counts are
-pinned — five query parameters, at least fifty numeric settings, six modules — so a route that
-legitimately gains a `limit` forces this file to be edited, which is the price of not letting the
-assertion pass over an empty set; without the pin, renaming a parameter would quietly empty it.
-Third, a green run proves a floor was declared, never that the floor holds the right number.
+**Limits.** Three. It read declarations and not call sites, so the count a worker hands a repository
+was invisible to it — and `claim_due` went without a guard for a stated reason: its only production
+caller passes a settings field the config bounds. `D10-153` measured that space instead of trusting
+the sentence and found fourteen holes, not one, so the net now reads bodies as well. What it still
+cannot see is arithmetic on the way: a function that refuses `limit <= 0` and then hands SQL
+`limit - 1` passes. Second, the counts are pinned — five query parameters, at least fifty numeric
+settings, six modules, twenty forwarders — so a route that legitimately gains a `limit` forces this
+file to be edited, which is the price of not letting the assertion pass over an empty set; without
+the pin, renaming a parameter would quietly empty it. Third, a green run proves a floor was
+declared, never that the floor holds the right number.
 
 **Landed.** `c253afe`, and **no CI run was ever created for it.** The push reached the remote —
 `ls-remote` reads back `c253afe9c` — but the runs API answers `total_count 0` for that exact
@@ -11839,3 +11840,71 @@ is the line `check_ledger_close.py` declined to cross when it refused to dictate
 the corrected sentence now carries a unit and not a derivation: *one commit on from `c253afe`* is
 checkable by a reader who thinks to check it, and there is nothing in the repository that makes
 them.
+
+### D10-153 — Fourteen of twenty count-forwarders had no guard
+
+`D10-151` closed by naming a hole in its own net and naming one example: the net reads declarations,
+not call sites, so *a value computed at runtime and handed to a repository is invisible to it*, and
+`claim_due` is the one `limit` consumer in `outbox.py` without an in-function guard — deliberately,
+because its only production caller passes a settings field the config bounds. The example was
+honest; the arithmetic was not. A scan of `app/` for every function that accepts a name matching
+`limit` or `*_limit` and passes it into `.limit()`, `fetchmany()`, `slice()` or a `limit=`/`count=`
+keyword answers twenty forwards across the six repository modules, measured against the tree that
+sentence was written on. Six refused a non-positive value. Fourteen did not — `claim_due` among
+them, and thirteen more the sentence never mentioned.
+
+**The argument was the thing to check, and it was false.** `expiry.py:268` states the convention in
+as many words: *Settings forbid a zero batch, but the constructor takes an override and the
+repository guards the case.* `OutboxRelay.__init__` takes `batch_size` as a keyword-only override,
+stores it unchecked, and `run_once` hands it to `claim_due` — the same shape as `ExpirySweep`, whose
+repository does guard. So *its only production caller passes a proven-bounded field* describes the
+wired path and nothing else: the constructor is the boundary, and a repository that trusts its
+caller is trusting a number nobody validated at the seam that produces it. `D10-151` wrote that
+reasoning a few lines below a docstring in `expiry.py` that refuses it, which is the failure this
+whole family of guards exists to catch — a rule remembered in one module and not in the next.
+
+**Why fourteen and not one: the failure is not uniform.** The consequences differ in kind, which is
+why the count was worth pinning rather than sampling. On `claim_due` a negative limit leases *every*
+due row in one statement, and the relay then publishes against leases that expire underneath it. On
+`claim_silent_contracts` it is the one caller that writes: the statement takes `FOR UPDATE` on the
+contract rows it is about to mutate, so an unbounded round locks and escalates every silent contract
+the deployment has in a single transaction. On `contracts_for_contact` it removes
+`MAX_OPT_OUT_CONTRACTS` — a hundred — which is the denial-of-service bound on an unauthenticated
+webhook, so the fan-out behind a STOP reply stops being bounded. On `fields_for_reseal` and its
+siblings it turns a repair run meant to resume a bounded prefix into one that sweeps the table.
+
+**Fourteen guards, each citing its sibling.** `if limit <= 0: return []` in `claim_due`,
+`ContractRepository.recent`, both `AgentDecisionRepository` readers, both `NotificationRepository`
+readers, the escalation queue and its customer-response reader, `claim_silent_contracts`, and five
+functions in `fields.py`: `awaiting_review`, `fields_for_reseal`, `fields_for_reseal_for_tenant`,
+`fields_needing_blind_index` and `contracts_for_contact`. Zero or less now returns an empty page
+rather than reaching SQL, where a negative `LIMIT` is *unbounded* to both SQLite and MySQL — the
+fact `D10-149` measured by deleting twenty-nine settled rows. Every docstring names the sibling
+guard it copies and the consequence specific to that function, because *the same guard, for the same
+reason* is only true once the reason is written down.
+
+**The net now reads bodies.** A fourth case in `backend/tests/test_limit_guards.py` parses `app/`,
+requires that every function handing its own count to SQL refuse a non-positive one first, and pins
+the total at twenty so a rename cannot shrink the scan to nothing. It is the only case in that file
+that would have failed on the tree it was written against: fourteen of twenty. A refusal counts as a
+branch on the parameter or as a clamp, so `max(0, limit)` passes the same way `if limit <= 0` does.
+
+**Proved by breaking it.** `.agent-cache/probe_guard_sites.py` deletes the guard from `claim_due`
+and from `contracts_for_contact` — two modules, two different consequences, the lease path and the
+unauthenticated ceiling — reruns the new case expecting failure, and restores each file
+byte-identically by SHA-256. Both were caught, `pytest` exiting `1` each time, and the restored tree
+was re-measured at twenty of twenty. A green net never shown to fail is a claim about the code, not
+about the net.
+
+**What gated it.** `pytest` 1454 passed and 16 skipped over 1470 collected — one more than
+`D10-151`'s 1469, which is the new case — with nine cases in `test_limit_guards.py`, up from eight.
+`ruff check` clean, `ruff format --check backend` clean over 157 files, `mypy` clean over 79 source
+files, and the ledger check clean at 86 blocks with 23 deferring and 0 failed. This block claims
+nothing about the run its own commit will open.
+
+**Limits.** Three. The scan keys on names — `limit` and `*_limit` — so a count called `n`, `size` or
+`count` and handed to `.limit()` is invisible to it, which is the same class of hole one level down.
+It proves a refusal *exists*, never that it is sufficient: a function that refuses `limit <= 0` and
+then hands SQL `limit - 1` passes, and nothing here says the constant in the guard is the right one.
+And the twenty are pinned, so a new repository reader forces that file to be edited — the price of
+an assertion that cannot pass over an empty set.

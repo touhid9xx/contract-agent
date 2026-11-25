@@ -57,7 +57,14 @@ class AgentDecisionRepository(TenantScopedRepository[AgentDecision]):
         decisions made in the same second store the *same* timestamp. Without the
         tiebreak they would come back in whatever order the database chose — and
         "the newest decision" has to be one row, not two candidates.
+
+        A ``limit`` of zero or less returns nothing rather than reaching the
+        database, where a negative ``LIMIT`` is *unbounded* — the same guard, for
+        the same reason, as :func:`~app.db.repositories.outbox.dead_lettered`.
         """
+        if limit <= 0:
+            return []
+
         stmt = (
             self.scoped(AgentDecision)
             .where(AgentDecision.contract_id == contract_id)
@@ -71,8 +78,12 @@ class AgentDecisionRepository(TenantScopedRepository[AgentDecision]):
 
         The dashboard view needs "what did the agent decide lately" without naming
         a contract. Same ordering and same bound as :meth:`for_contract`, so the two
-        listings cannot disagree about which row is newest.
+        listings cannot disagree about which row is newest — including on the
+        non-positive ``limit`` :meth:`for_contract` refuses.
         """
+        if limit <= 0:
+            return []
+
         stmt = (
             self.scoped(AgentDecision)
             .order_by(AgentDecision.created_at.desc(), AgentDecision.id.desc())
