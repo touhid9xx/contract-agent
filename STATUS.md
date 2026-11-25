@@ -9268,6 +9268,10 @@ Operations` and `Webhooks` and declared six minutes later. `ci.yml` has no `path
 `active`, and is present in that tree, so the trigger event was dropped platform-side. This
 follow-up's push is the first since, so its run is the first to build this code.
 
+**Built, eventually.** The push's run arrived: `45659894007`, ten of ten successful, `CI gate` among
+them, on `3a6ed7e` — the first run to build `test_limit_guards.py`. It proves the tree two commits
+on from `c253afe`; the sentences above are all that separate them.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

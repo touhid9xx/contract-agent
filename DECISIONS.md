@@ -11796,3 +11796,9 @@ This follow-up's own push is the first since then, so the run it produces builds
 same `test_limit_guards.py` and the sentences above it. Nothing in the repository notices a dropped
 event: a green ledger and a clean tree read the same on a commit nobody built, which is the gap
 this paragraph cannot close.
+
+**Built, eventually.** The run this follow-up's push produced is `45659894007`, and it is green:
+ten jobs, ten successful, `CI gate` among them, on `3a6ed7e`. It is the first run to build
+`test_limit_guards.py`, so the code the incident left unbuilt is now built — two commits late, and
+proving `3a6ed7e` rather than `c253afe` byte-for-byte, since the ledger sentences written between
+them are all that separates the two trees.
