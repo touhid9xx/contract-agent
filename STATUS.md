@@ -9232,6 +9232,8 @@ ledger check clean at 80 blocks with 23 deferring and 0 failed.
 pass, because `LIMIT 0` returns nothing either way. A fourth function taking a `limit` re-opens the
 mistake, and nothing enumerates that set.
 
+**Landed.** `c3c8f3c`, and CI run `45643503058` is ten jobs of ten on it, `CI gate` included.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

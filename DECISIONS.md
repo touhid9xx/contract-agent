@@ -11734,3 +11734,6 @@ pass, because `LIMIT 0` returns nothing either way — the `0` parametrisation i
 with `D10-149`'s case, not because it proves anything, and it is recorded so a later reader does not
 mistake four failures for six. And the shape of the mistake outlives this fix: a fourth function
 taking a `limit` re-opens it, and nothing enumerates that set.
+
+**Landed.** `c3c8f3c`, and CI run `45643503058` built it green: ten jobs of ten, `CI gate` among
+them, read from the run's own job list rather than from a badge.
