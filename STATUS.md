@@ -9167,6 +9167,8 @@ only deleted once an operator decides the parks are explained, which `D10-131` l
 than something this closes. And it has never run against a deployment's data — only SQLite in
 tests, the limit `reseal-fields` and `backfill-blind-index` also carry.
 
+**Landed.** `a2b8590`, and CI run `45591767419` is ten jobs of ten on it, `CI gate` included.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

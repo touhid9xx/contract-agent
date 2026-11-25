@@ -11640,3 +11640,6 @@ rather than something this closes. And it has never run against a deployment's d
 in tests, the same limit `reseal-fields` and `backfill-blind-index` carry: MySQL's
 `DELETE ... WHERE id IN (...)` at the default bound of 1000 rows is one statement whose cost on a
 large table has not been measured.
+
+**Landed.** `a2b8590`, and CI run `45591767419` built it green: ten jobs of ten, `CI gate` among
+them, read from the run's own job list rather than from a badge.
