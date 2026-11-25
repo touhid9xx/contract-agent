@@ -11695,3 +11695,6 @@ any future `limit` parameter read straight from `int` re-opens it, and only the 
 stands in the way. The measurement was SQLite; MySQL reading a negative `LIMIT` as unbounded is
 documented behaviour rather than something measured here, which is why the guard lives in our code
 instead of in a comment about the driver.
+
+**Landed.** `895e0a4`, and CI run `45612135746` built it green: ten jobs of ten, `CI gate` among
+them, read from the run's own job list rather than from a badge.

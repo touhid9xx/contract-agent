@@ -9202,6 +9202,8 @@ future `limit` read straight from `int` re-opens it, and only the parametrized c
 way. The measurement was SQLite; MySQL's reading of a negative `LIMIT` is documented behaviour
 rather than something measured here, which is why the guard is in our code.
 
+**Landed.** `895e0a4`, and CI run `45612135746` is ten jobs of ten on it, `CI gate` included.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.
