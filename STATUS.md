@@ -9234,6 +9234,34 @@ mistake, and nothing enumerates that set.
 
 **Landed.** `c3c8f3c`, and CI run `45643503058` is ten jobs of ten on it, `CI gate` included.
 
+### D10-151 — Three boundaries kept a count out of SQL, and no test enumerated them
+
+`D10-149` and `D10-150` fixed the same defect four times and both closed by naming the gap they
+left: nothing enumerates the set, so the mistake returns at the next boundary. All four boundaries
+were audited — CLI, HTTP, `Settings`, repository page defaults — and nothing was reachable, which is
+the finding.
+
+| Area | Detail |
+| --- | --- |
+| `backend/tests/test_limit_guards.py` | Eight cases: every `limit` query parameter must declare a positive `minimum` in `app.openapi()`, every numeric `Settings` field must carry `ge`/`gt`, and every page constant across the six repository modules must be positive |
+| `.agent-cache/probe_limit_guards.py` | Mutation probe: `ge=1` deleted from a route, an unbounded numeric setting added, a page default lowered to zero — all three caught, every file restored byte-identically |
+
+**Why a net and not a fix.** Nothing was reachable: 25 `add_argument` calls tallied with every
+`--limit` on `_count_arg`, the one bare `type=int` being a row id; five `limit` query parameters all
+declaring `ge=1`; 52 numeric settings with zero unbounded; six repository modules whose page
+constants are all positive. A guard invented for a path that cannot be taken is churn — the
+enumeration both earlier blocks asked for is the thing worth keeping.
+
+**What gated it.** `pytest` 1453 passed and 16 skipped over 1469 collected, `ruff check` clean,
+`ruff format --check backend` clean over 157 files, `mypy` clean over 79 source files, and the
+ledger check clean at 82 blocks with 23 deferring and 0 failed.
+
+**Limits.** It reads declarations, not call sites: a runtime-computed value handed to a repository
+is invisible to it, and `claim_due` is now the one `limit` consumer in `outbox.py` with no
+in-function guard — deliberate, because its only production caller passes a settings field that
+cannot be non-positive. The pinned counts force this file to be edited when the API legitimately
+gains a `limit`, and a green run proves a floor was declared, not that the number is right.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

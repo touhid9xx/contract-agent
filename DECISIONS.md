@@ -11737,3 +11737,50 @@ taking a `limit` re-opens it, and nothing enumerates that set.
 
 **Landed.** `c3c8f3c`, and CI run `45643503058` built it green: ten jobs of ten, `CI gate` among
 them, read from the run's own job list rather than from a badge.
+
+### D10-151 — Three boundaries kept a count out of SQL, and no test enumerated them
+
+`D10-149` and `D10-150` fixed the same defect four times — once at the parser, three times in
+`outbox.py` — and both closed with the same Limits sentence: nothing enumerates that set, so the
+mistake returns wherever the next boundary is opened. This slice asked the question those fixes kept
+raising instead of assuming they had finished it.
+
+**Nothing was reachable, which is the finding.** Four boundaries can hand a count to SQL, and all
+four refuse a non-positive value today. The CLI: all 25 `add_argument` calls in `backend/app/cli.py`
+were read; every `--limit` goes through `_count_arg`, and the single surviving bare `type=int` is
+`extract --contract-id`, a row id where a negative value can only select nothing. The HTTP layer:
+five `limit` query parameters, each declaring `ge=1`, read back from `app.openapi()` — the schema
+FastAPI generates from the bound it then enforces, rather than from the source text. `Settings`: 52
+numeric fields, every one carrying `ge` or `gt`; the introspection found zero unbounded, so no
+environment variable can make a batch size negative. And the repository page defaults, which is what
+`D10-150` leaned on.
+
+**So the deliverable is a net, not a fix.** A defect that is not there cannot be fixed, and
+inventing a guard would have been churn. What was missing is the thing both earlier blocks named: a
+check that fails when a boundary is added without a floor. `backend/tests/test_limit_guards.py` is
+that check, in eight cases — one per boundary, plus one per repository module for its page
+constants. It reads the route contract from `app.openapi()` rather than by parsing the routers,
+because that object is the argument list the framework actually enforces; the settings half reads
+`Settings.model_fields`; the constants half walks the repository package for `DEFAULT_*_LIMIT` and
+`MAX_*_LIMIT`.
+
+**The net was checked by breaking it.** Three mutations, applied and reverted by
+`.agent-cache/probe_limit_guards.py`, each rerun against the specific case that should notice:
+`ge=1` deleted from a route, an unbounded numeric setting added to `Settings`, a page default
+lowered to zero. All three were caught, and each file was restored byte-identically, SHA-256
+compared. A green net that has never been shown to fail is a claim about the code, not the net.
+
+**What gated it.** `pytest` 1453 passed and 16 skipped over 1469 collected, `ruff check` clean,
+`ruff format --check backend` clean over 157 files, `mypy` clean over 79 source files, and the
+ledger check clean at 82 blocks with 23 deferring and 0 failed — 23 because both new blocks are
+silent, the deferring figure unmoved. Eight cases are new.
+
+**Limits.** Three. It reads declarations, not call sites, so a value computed at runtime and handed
+to a repository is invisible to it — `claim_due(batch_size - len(claimed))` is the shape, and
+`claim_due` is now the one `limit` consumer in `outbox.py` without an in-function guard. That is
+deliberate: its only production caller passes a settings field the test above proves cannot be
+non-positive, and that reasoning lives in prose rather than in the net. Second, the counts are
+pinned — five query parameters, at least fifty numeric settings, six modules — so a route that
+legitimately gains a `limit` forces this file to be edited, which is the price of not letting the
+assertion pass over an empty set; without the pin, renaming a parameter would quietly empty it.
+Third, a green run proves a floor was declared, never that the floor holds the right number.
