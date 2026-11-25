@@ -11570,3 +11570,73 @@ file changed, so no behaviour moved: this slice adds the assertion, not the arm.
 **Limits.** The arm is reachable only through a dependency override, so no real clamd ever
 exercises it, and the test proves the mapping rather than a scanner. One case is added, not a
 family: the three specific codes keep the coverage they already had.
+
+### D10-148 — The outbox has a retention path, and the period is the operator's
+
+`D10-131` decided that a switched-off bus parks events rather than discarding them at write time.
+That decision was right, and it made the table grow: nothing in this repository has ever deleted an
+`outbox_events` row, so every published event and every explained park stays forever. This is the
+retention half of gap 25, and it is the half that needed no owner decision — because the cutoff is
+supplied by the operator on every run rather than defaulted in the code.
+
+**`--before` is required and has no default.** "How much history do we keep" is a retention
+policy, and a policy supplied by a function's default is a decision made by whoever wrote that
+default last. An operator states the cutoff per invocation, exactly as `outbox-replay --ids` lets
+an operator state which parked rows to replay, so a deployment inherits no invented promise about
+how much history exists.
+
+**`published_at` for published rows, `updated_at` for parked ones.** The two settled states record
+when they settled differently, and the predicate says so rather than flattening them.
+`published_at` means "this row's job was done", which is what makes that column trustworthy for a
+delete: a row published moments ago is not old however long ago it was enqueued, so `created_at`
+would be the wrong column. A parked row has no terminal timestamp, so it uses `updated_at`, which
+the `onupdate` hook moves on the write that parked it. That is the closest thing the schema has,
+and the schema is not being extended for a housekeeping command.
+
+**`pending` and `publishing` cannot be deleted, as a predicate rather than a convention.** A
+retention pass that could remove an unpublished row would lose an event, which is the one thing the
+outbox exists to make impossible, so the exclusion lives inside `_settled_before` where a caller
+cannot leave it out.
+
+**`--include-failed` is a second, deliberate keystroke.** `D7-01` chose dead-letter with replay
+over log-and-drop: a parked row is a row a human was supposed to look at, and pruning it ends that
+possibility permanently. It is off by default, and the help text says what the flag costs.
+
+**No lease and no `FOR UPDATE`.** `claim_due` reads only `pending` and `publishing`, so a settled
+row has no concurrent writer to fence off. Two simultaneous prunes delete disjoint id sets, or one
+finds its rows already gone; the second statement re-states the status predicate anyway, so the
+destructive one is safe to read on its own.
+
+**A future cutoff is refused before a session opens.** `--before 2099-01-01` would delete every
+settled row including one that published a second ago, and the mistake is far likelier to be a
+typo'd year or a host with a wrong clock than an intent. An offset-carrying cutoff is converted to
+UTC and one without an offset is read as UTC — the only timezone this deployment stores — so the
+comparison is naive against the naive columns it is compared with.
+
+**The report is built from the rows as they were read**, the reason `DeadLetterReplay` exists:
+after the `DELETE` there is nothing left to describe. `truncated` travels inside the same line as
+the count, because a full page means the cutoff probably still covers rows this run did not reach
+and a floor that reads like a total is the reading that misleads. The command always exits
+`EXIT_OK`: an empty result is the steady state of a pruned table, not a failure. There is
+deliberately no `EXIT_NO_MATCH` arm — naming an id that is not parked means the operator read the
+wrong database, whereas a cutoff cannot be "not found" the same way.
+
+**What gated it.** `pytest` 1431 passed and 16 skipped over 1447 collected, `ruff check` clean,
+`ruff format --check backend` clean over 156 files, `mypy` clean over 79 source files, and the
+ledger check clean at 76 blocks with 23 deferring and 0 failed. Eighteen cases are new: ten on the
+predicate and the write, eight on the command. The two that carry the weight are the negative ones
+— a pending or in-flight row survives any cutoff, which is the single failure this command must
+not have, and a dry run returns the rows without deleting.
+
+**The format figure moved with the invocation, not the tree.** Earlier blocks quote 160, which is
+what `ruff format --check .` prints from the repository root; CI runs `ruff format --check backend`
+and prints 156. Both were measured on this tree, and file discovery finds the same 155 files either
+way, so nothing was reformatted — only the number a reader compares against the CI log changes.
+
+**Limits.** Nothing schedules it: a table pruned only when somebody types the command still grows,
+so the deployment that needs retention is a cron entry that does not exist yet. A parked row is
+only deleted once an operator decides the parks are explained, which is what `D10-131` left open
+rather than something this closes. And it has never run against a deployment's data — only SQLite
+in tests, the same limit `reseal-fields` and `backfill-blind-index` carry: MySQL's
+`DELETE ... WHERE id IN (...)` at the default bound of 1000 rows is one statement whose cost on a
+large table has not been measured.

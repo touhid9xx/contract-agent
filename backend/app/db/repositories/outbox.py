@@ -20,8 +20,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.db.base import truncate_to_second, utc_now
 from app.db.enums import OutboxStatus
@@ -41,6 +42,13 @@ MAX_ERROR_LENGTH = 500
 #: Default number of parked rows one inspection or replay touches. Bounded so an
 #: operator command cannot load an unbounded table into memory.
 DEFAULT_REPLAY_LIMIT = 100
+
+#: Default number of settled rows one prune removes. Larger than the replay bound
+#: because a prune is doing housekeeping rather than asking a human to read every
+#: row: a deployment that has never pruned has thousands of settled rows, and a
+#: hundred-at-a-time tool would need a loop to be useful. Still bounded, for the
+#: same reason — one statement must not try to delete a table.
+DEFAULT_PRUNE_LIMIT = 1000
 
 
 def backoff_seconds(attempts: int) -> int:
@@ -413,3 +421,137 @@ def replay_dead_lettered(
         event.last_error = None
     session.flush()
     return replays
+
+
+# --- retention (operator operations) --------------------------------------
+# The outbox has been append-only for its whole life, which is right for a
+# delivery record and wrong for a table: every published row and every parked row
+# stays forever. ``D10-131`` chose to *park* events enqueued while the bus is off
+# rather than discard them at write time, so an installation running the default
+# ``none`` transport accumulates one parked row per business event and has no way
+# to give any of them back. That is the retention half of gap 25, and it is what
+# this section answers. Like replay it is a module-level function: the relay's
+# claim/fence machinery is not what a retention pass is, and a prune has no worker
+# identity or lease to supply.
+
+
+@dataclass(frozen=True)
+class PrunedEvent:
+    """One settled row being removed, described before it stops existing.
+
+    The same reasoning as :class:`DeadLetterReplay`: once the ``DELETE`` runs there
+    is nothing left to report, so the operator's log has to be fed from the rows as
+    they were read. ``tenant_id`` and ``event_type`` are here because "how much of
+    which tenant's history did I just delete" is the only question this report
+    exists to answer.
+    """
+
+    id: int
+    tenant_id: str
+    event_type: str
+    status: str
+
+
+def _settled_before(before: datetime, *, include_failed: bool) -> ColumnElement[bool]:
+    """The predicate for "this row's work finished before ``before``".
+
+    Two branches, because the two settled states record when they settled
+    differently, and both are honest rather than exact:
+
+    * **published** has ``published_at`` — the column that literally means "this
+      row's job was done at". Exact, and it is why the branch can be trusted to
+      delete: a row published moments ago is not old however long ago it was
+      enqueued, which is why ``created_at`` would be the wrong column here.
+    * **failed** has no terminal timestamp, so the cutoff uses ``updated_at``,
+      which the ``onupdate`` hook moves on the write that parked the row. That is
+      the parking instant for a row parked where it stood; for a row parked by
+      ``claim_due`` on its way past the attempt ceiling it is also the last write.
+      Either way it is the closest thing the schema has, and the schema is not
+      being extended for a housekeeping command.
+
+    ``pending`` and ``publishing`` are absent on purpose and are absent **by
+    predicate**, not by a caller remembering to filter: a retention pass that could
+    delete an unpublished row would lose an event, which is the one thing the
+    outbox exists to make impossible.
+    """
+    branches = [
+        and_(
+            OutboxEvent.status == OutboxStatus.PUBLISHED,
+            OutboxEvent.published_at.is_not(None),
+            OutboxEvent.published_at <= before,
+        )
+    ]
+    if include_failed:
+        branches.append(
+            and_(
+                OutboxEvent.status == OutboxStatus.FAILED,
+                OutboxEvent.updated_at <= before,
+            )
+        )
+    return or_(*branches)
+
+
+def prune_terminal_before(
+    session: Session,
+    *,
+    before: datetime,
+    limit: int = DEFAULT_PRUNE_LIMIT,
+    include_failed: bool = False,
+    dry_run: bool = False,
+) -> list[PrunedEvent]:
+    """Delete settled rows older than ``before``; return what was removed.
+
+    ``before`` is mandatory and has no default. That is the whole design: "how long
+    do we keep published events" is a retention **policy**, and a policy chosen by
+    this function's default would be a decision made by whichever engineer wrote
+    last. An operator states the cutoff per invocation instead, exactly as
+    ``--ids`` lets an operator state which parked rows to replay, and the deployment
+    inherits no invented promise about how much history exists.
+
+    ``include_failed`` is off by default so the destructive half is a second,
+    deliberate keystroke. A parked row is a row a human was *supposed* to look at
+    (``D7-01``: dead letter with replay, never log-and-drop), and pruning it ends
+    that possibility permanently. Passed, it means the operator has decided the
+    parks are explained and past keeping — which for a ``none``-transport
+    deployment is exactly the case ``D10-131`` left open.
+
+    ``dry_run`` reads the same rows and returns them without deleting, so an
+    operator can count before committing. The ``DELETE`` re-states the status
+    predicate as well as the ids: a row cannot be published and re-parked between
+    the two statements, but re-asserting the guard inside the write costs nothing
+    and means the destructive statement is safe to read on its own.
+
+    No ``SELECT ... FOR UPDATE`` and no lease: settled rows are never claimed by the
+    relay again (``claim_due`` reads only ``pending`` and ``publishing``), so there
+    is no concurrent writer to fence off. Two simultaneous prunes would simply
+    delete disjoint id sets, or one would find its rows already gone.
+    """
+    stmt = (
+        select(OutboxEvent)
+        .where(_settled_before(before, include_failed=include_failed))
+        .order_by(OutboxEvent.id)
+        .limit(limit)
+    )
+    rows = list(session.execute(stmt).scalars())
+
+    pruned = [
+        PrunedEvent(
+            id=row.id,
+            tenant_id=str(row.tenant_id),
+            event_type=row.event_type,
+            status=str(row.status),
+        )
+        for row in rows
+    ]
+
+    if dry_run or not rows:
+        return pruned
+
+    session.execute(
+        delete(OutboxEvent).where(
+            OutboxEvent.id.in_([row.id for row in rows]),
+            _settled_before(before, include_failed=include_failed),
+        )
+    )
+    session.flush()
+    return pruned

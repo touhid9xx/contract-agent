@@ -14,6 +14,7 @@ needed a tool and the tool needs rules, which are what this file pins down:
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import timedelta
 
 import pytest
 from sqlalchemy import update
@@ -320,3 +321,200 @@ def test_the_command_is_a_no_op_when_nothing_is_parked(
     code = cli_main(["outbox-replay"], settings=settings, session_factory=session_factory)
 
     assert code == EXIT_OK
+
+
+# --- the prune command ----------------------------------------------------
+# ``outbox-prune`` is the other half of the pair: ``outbox-replay`` brings a row
+# back, prune takes a finished one away. The difference that matters is that
+# replay needs an id and prune needs a *cutoff*, which the operator supplies
+# every run. Nothing here defaults a retention period, so the two ways a cutoff
+# can be wrong -- unreadable, or in the future -- are refused rather than
+# clamped. A typo'd year must not look like a decision.
+
+
+def publish(session_factory: sessionmaker[Session], event_id: int) -> None:
+    """Drive one row to ``published`` through the relay's own path."""
+    with session_scope(session_factory) as session:
+        relay(session).claim_due(10)
+    with session_scope(session_factory) as session:
+        relay(session).record_outcome(event_id, error=None)
+
+
+def age(session_factory: sessionmaker[Session], event_id: int, **values: object) -> None:
+    with session_scope(session_factory) as session:
+        session.execute(
+            update(OutboxEvent)
+            .where(OutboxEvent.id == event_id)
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        )
+
+
+def cutoff() -> str:
+    """An ISO instant every aged row in these tests is older than."""
+    return (utc_now() - timedelta(days=30)).isoformat()
+
+
+def test_a_dry_run_reports_the_rows_and_deletes_nothing(
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+    enqueue_event: Callable[..., int],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The count is the whole reason to run this one first."""
+    event_id = enqueue_event()
+    publish(session_factory, event_id)
+    age(session_factory, event_id, published_at=utc_now() - timedelta(days=90))
+
+    code = cli_main(
+        ["outbox-prune", "--before", cutoff(), "--dry-run"],
+        settings=settings,
+        session_factory=session_factory,
+    )
+
+    assert code == EXIT_OK
+    assert load(session_factory, event_id) is not None
+    said = capsys.readouterr()
+    assert "outbox_prune" in said.out + said.err
+
+
+def test_the_command_deletes_a_settled_row_past_the_cutoff(
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+    enqueue_event: Callable[..., int],
+) -> None:
+    event_id = enqueue_event()
+    publish(session_factory, event_id)
+    age(session_factory, event_id, published_at=utc_now() - timedelta(days=90))
+
+    code = cli_main(
+        ["outbox-prune", "--before", cutoff()],
+        settings=settings,
+        session_factory=session_factory,
+    )
+
+    assert code == EXIT_OK
+    with session_scope(session_factory) as session:
+        assert session.get(OutboxEvent, event_id) is None
+
+
+def test_the_command_is_a_no_op_when_nothing_has_settled(
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A clean table and a busy one both exit zero: this runs on a timer."""
+    code = cli_main(
+        ["outbox-prune", "--before", cutoff()],
+        settings=settings,
+        session_factory=session_factory,
+    )
+
+    assert code == EXIT_OK
+    said = capsys.readouterr()
+    assert "outbox_prune_nothing_settled" in said.out + said.err
+
+
+def test_a_parked_row_needs_the_flag_saying_so(
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+    enqueue_event: Callable[..., int],
+) -> None:
+    """Deleting a row a human was meant to read takes a word, not a default."""
+    event_id = enqueue_event()
+    park(session_factory, event_id)
+    age(session_factory, event_id, updated_at=utc_now() - timedelta(days=90))
+
+    without = cli_main(
+        ["outbox-prune", "--before", cutoff()],
+        settings=settings,
+        session_factory=session_factory,
+    )
+
+    assert without == EXIT_OK
+    assert load(session_factory, event_id) is not None
+
+    with_flag = cli_main(
+        ["outbox-prune", "--before", cutoff(), "--include-failed"],
+        settings=settings,
+        session_factory=session_factory,
+    )
+
+    assert with_flag == EXIT_OK
+    with session_scope(session_factory) as session:
+        assert session.get(OutboxEvent, event_id) is None
+
+
+def test_a_future_cutoff_is_refused_and_nothing_is_deleted(
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+    enqueue_event: Callable[..., int],
+) -> None:
+    """The mistake is a typo'd year or a host clock, never an intent."""
+    event_id = enqueue_event()
+    publish(session_factory, event_id)
+    age(session_factory, event_id, published_at=utc_now() - timedelta(days=90))
+
+    with pytest.raises(SystemExit) as refused:
+        cli_main(
+            ["outbox-prune", "--before", "2099-01-01T00:00:00Z"],
+            settings=settings,
+            session_factory=session_factory,
+        )
+
+    assert refused.value.code == 2
+    # Refused while parsing, before any session opened: the row is not spared,
+    # it was never looked at.
+    assert load(session_factory, event_id) is not None
+
+
+def test_an_unreadable_cutoff_is_refused(
+    session_factory: sessionmaker[Session], settings: Settings
+) -> None:
+    with pytest.raises(SystemExit) as refused:
+        cli_main(
+            ["outbox-prune", "--before", "last tuesday"],
+            settings=settings,
+            session_factory=session_factory,
+        )
+
+    assert refused.value.code == 2
+
+
+def test_the_cutoff_is_required_rather_than_defaulted(
+    session_factory: sessionmaker[Session], settings: Settings
+) -> None:
+    """No retention period lives in this program: the operator states one each run."""
+    with pytest.raises(SystemExit) as refused:
+        cli_main(["outbox-prune"], settings=settings, session_factory=session_factory)
+
+    assert refused.value.code == 2
+
+
+def test_a_cutoff_carrying_an_offset_is_accepted(
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+    enqueue_event: Callable[..., int],
+) -> None:
+    """An operator in another zone should not have to convert by hand.
+
+    The same instant written at ``+02:00`` must compare as UTC, or a cutoff an hour
+    either side of a row's ``published_at`` would decide differently depending on
+    whose clock typed it.
+    """
+    event_id = enqueue_event()
+    publish(session_factory, event_id)
+    age(session_factory, event_id, published_at=utc_now() - timedelta(days=90))
+
+    # 30 days ago, expressed as local time in a +02:00 zone.
+    local = utc_now() - timedelta(days=30) + timedelta(hours=2)
+
+    code = cli_main(
+        ["outbox-prune", "--before", f"{local.isoformat()}+02:00"],
+        settings=settings,
+        session_factory=session_factory,
+    )
+
+    assert code == EXIT_OK
+    with session_scope(session_factory) as session:
+        assert session.get(OutboxEvent, event_id) is None

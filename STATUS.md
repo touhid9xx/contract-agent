@@ -3926,9 +3926,13 @@ above read "passed" because a hook finally ran and passed.
     whole of what is left.~~ **Answered and closed by `D10-131`:** `none` keeps meaning enqueue and
     park, because after `D10-130` established that no consumer is coming under any transport,
     discarding at write time preserves nothing and costs the one record that an event was meant.
-    What stays open here is retention rather than semantics — nothing prunes the outbox, so the
-    explained parks grow without bound. The heading's "nothing says so" is likewise narrower than it
-    reads: something says so now, quietly and on a timer, to a log nobody reads.
+    ~~What stays open here is retention rather than semantics — nothing prunes the outbox, so
+    the explained parks grow without bound.~~ **Amended by `D10-148`, not deleted:** a retention
+    path now exists — `python -m app.cli outbox-prune --before <instant>` deletes settled rows
+    past the operator's cutoff — so "nothing prunes the outbox" is no longer true. What is still
+    true is that nothing *schedules* it, so a table pruned only when somebody types the command
+    still grows. The heading's "nothing says so" is likewise narrower than it reads: something
+    says so now, quietly and on a timer, to a log nobody reads.
 
 ## The workers have a daemon ✅ (`D10-25`)
 
@@ -9123,6 +9127,45 @@ event, the scanner's own sentence carried through, and the document bytes absent
 `pytest` 1413 passed and 16 skipped over 1429 collected, `ruff check` clean,
 `ruff format --check` clean over 160 files, `mypy` clean over 79 source files. No production file
 changed.
+
+### D10-148 — The outbox can be pruned, and the cutoff is the operator's
+
+`D10-131` chose to park events rather than discard them at write time, which is right, and nothing
+has ever deleted an `outbox_events` row, so the table grew forever. This adds the retention half of
+gap 25: `prune_terminal_before` in the outbox repository, and
+`python -m app.cli outbox-prune --before <instant> [--include-failed] [--limit N] [--dry-run]` over
+it.
+
+| Area | Detail |
+| --- | --- |
+| `backend/app/db/repositories/outbox.py` | `prune_terminal_before`, `_settled_before`, `PrunedEvent`, `DEFAULT_PRUNE_LIMIT = 1000` (larger than the replay bound because a prune is housekeeping rather than a page a human reads, and still bounded because one statement must not try to delete a table). Module-level, not an `OutboxRepository` method: a prune has no worker identity and no lease to supply, the same reasoning replay carries |
+| `backend/app/cli.py` | `outbox-prune`, plus `_instant_arg` — `--before` required (ISO-8601; a future instant is refused before a session opens), `--include-failed`, `--limit`, `--dry-run`. Logs `outbox_prune` with a `truncated` flag inside the count's line, or `outbox_prune_nothing_settled` when the cutoff covers nothing; always `EXIT_OK` |
+| `backend/tests/test_outbox.py` | Ten cases: a published row past the cutoff deleted and named, one inside it surviving, `pending` and `publishing` surviving any cutoff, a parked row needing the flag, a recent park surviving an old cutoff, the limit bounding one run and a second run finishing, a dry run deleting nothing, an empty table |
+| `backend/tests/test_outbox_replay.py` | Eight cases on the command: deletes a settled row, no-ops on a clean table, a future cutoff refused, unparseable text refused, `--before` required rather than defaulted, an offset-carrying cutoff converted |
+
+**The predicate, not the caller, is the guarantee.** Published rows match on `published_at` — the
+column that means "this row's job was done", so a row published a second ago is not old however
+long ago it was enqueued — and parked rows on `updated_at`, because a park has no terminal
+timestamp. `pending` and `publishing` are excluded inside `_settled_before` rather than by a filter
+a caller applies afterwards, so the one failure that matters is unreachable: retention cannot
+delete an event that was never published.
+
+**The cutoff is a policy, so the deployment states it.** There is no default retention period, the
+way there is no default `--ids` for a replay: a constant chosen here would be a promise about
+history that this file invented. `--include-failed` stays a second, deliberate keystroke because
+`D7-01` chose dead-letter with replay over log-and-drop, and pruning a park ends that permanently.
+
+**What gated it.** `pytest` 1431 passed and 16 skipped over 1447 collected, `ruff check` clean,
+`ruff format --check backend` clean over 156 files — the figure CI prints, against 160 for the same
+check run from the repository root — `mypy` clean over 79 source files, and the ledger check clean
+at 76 blocks with 23 deferring and 0 failed. Eighteen cases are new; the two that carry the weight
+are the negative ones, `pending`/`publishing` surviving any cutoff and a dry run deleting nothing.
+
+**Limits.** Nothing schedules it: a table pruned only when somebody types the command still grows,
+so the deployment that needs retention is a cron entry that does not exist yet. Parked rows are
+only deleted once an operator decides the parks are explained, which `D10-131` left open rather
+than something this closes. And it has never run against a deployment's data — only SQLite in
+tests, the limit `reseal-fields` and `backfill-blind-index` also carry.
 
 ## Non-negotiable reminders
 

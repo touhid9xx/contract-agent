@@ -38,13 +38,16 @@ from app.db.repositories.notifications import (
     undelivered_counts,
 )
 from app.db.repositories.outbox import (
+    DEFAULT_PRUNE_LIMIT,
     DeadLetterReplay,
     OutboxRepository,
+    PrunedEvent,
     backoff_seconds,
     dead_letter_count,
     dead_lettered,
     enqueue_event,
     outbox_pending_overdue_count,
+    prune_terminal_before,
     replay_dead_lettered,
 )
 from app.db.repositories.security import LoginAttemptRepository, RefreshTokenRepository
@@ -55,6 +58,7 @@ __all__ = [
     "CONTACTED_STATUSES",
     "DEFAULT_ESCALATION_QUEUE_LIMIT",
     "DEFAULT_NOTIFICATION_LIMIT",
+    "DEFAULT_PRUNE_LIMIT",
     "DEFAULT_RESPONSE_HISTORY_LIMIT",
     "MAX_ESCALATION_QUEUE_LIMIT",
     "MAX_NOTIFICATION_LIMIT",
@@ -72,6 +76,7 @@ __all__ = [
     "MissingTenantContextError",
     "NotificationRepository",
     "OutboxRepository",
+    "PrunedEvent",
     "RefreshTokenRepository",
     "ReviewCursor",
     "TenantScopedRepository",
@@ -88,6 +93,7 @@ __all__ = [
     "normalize_email",
     "outbox_pending_overdue_count",
     "pending_overdue_counts",
+    "prune_terminal_before",
     "replay_dead_lettered",
     "undelivered_counts",
 ]

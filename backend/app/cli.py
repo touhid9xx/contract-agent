@@ -5,6 +5,8 @@ Run from ``backend/``::
     python -m app.cli outbox-replay --list
     python -m app.cli outbox-replay --dry-run
     python -m app.cli outbox-replay --ids 12,14
+    python -m app.cli outbox-prune --before 2026-01-31T00:00:00Z --dry-run
+    python -m app.cli outbox-prune --before 2026-01-31T00:00:00Z --include-failed
     python -m app.cli extract --contract-id 12 --text-file contract.txt
     python -m app.cli reseal-fields --dry-run
     python -m app.cli reseal-fields
@@ -42,6 +44,7 @@ import re
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +68,7 @@ from app.core.documents import DocumentStoreError, build_document_store
 from app.core.logging import configure_logging
 from app.core.middleware import correlation_id_or_new
 from app.core.security import MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH, hash_password
+from app.db.base import utc_now
 from app.db.enums import UserRole
 from app.db.models import Contract, Tenant
 from app.db.repositories.audit import (
@@ -89,9 +93,12 @@ from app.db.repositories.fields import (
     fields_needing_blind_index,
 )
 from app.db.repositories.outbox import (
+    DEFAULT_PRUNE_LIMIT,
     DEFAULT_REPLAY_LIMIT,
     DeadLetterReplay,
+    PrunedEvent,
     dead_lettered,
+    prune_terminal_before,
     replay_dead_lettered,
 )
 from app.db.repositories.users import (
@@ -339,6 +346,42 @@ def _ids_arg(value: str) -> list[int]:
         ) from exc
 
 
+def _instant_arg(value: str) -> datetime:
+    """Parse ``--before`` and refuse a cutoff that has not happened yet.
+
+    Two refusals, both of them domain checks rather than shape checks (the reason
+    :func:`_f1_arg` rejects ``--min-f1 85``):
+
+    * **A future instant.** ``--before 2099-01-01`` would delete every settled row
+      including one published a second ago — nobody means that, and the mistake is
+      far more likely to be a typo'd year or a host with a wrong clock than an
+      intent. Refusing it here makes the dangerous run impossible rather than
+      merely unlikely.
+    * **Unparseable text.** ISO-8601 only, and a bare date is accepted because
+      ``fromisoformat`` accepts it and "everything before the 1st of January" is a
+      legitimate way to say a cutoff.
+
+    A cutoff carrying an offset is converted to UTC; one without is taken to be UTC
+    already, which is the only timezone this deployment stores
+    (``app.db.base.utc_now``). Naive from here on, because every timestamp compared
+    against it — ``published_at``, ``updated_at`` — is a naive UTC column.
+    """
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "expected an ISO-8601 instant, e.g. --before 2026-01-31T00:00:00Z"
+        ) from exc
+
+    moment = parsed.astimezone(UTC).replace(tzinfo=None) if parsed.tzinfo else parsed
+    if moment > utc_now():
+        raise argparse.ArgumentTypeError(
+            "expected a cutoff in the past; a future --before would delete rows "
+            "that have only just settled"
+        )
+    return moment
+
+
 def _f1_arg(value: str) -> float:
     """Parse ``--min-f1`` and refuse a threshold outside ``0.0-1.0``.
 
@@ -397,6 +440,51 @@ def build_parser() -> argparse.ArgumentParser:
         help="report what would be requeued without writing anything",
     )
     replay.set_defaults(handler=_outbox_replay)
+
+    prune = commands.add_parser(
+        "outbox-prune",
+        help="delete settled outbox rows older than an operator-supplied cutoff",
+        description=(
+            "Remove housekeeping residue: rows whose work is over. Published rows "
+            "are always eligible; rows parked in the dead-letter state are only "
+            "deleted when --include-failed says so, because deleting one destroys "
+            "a replay that operators are meant to be able to make. Rows still "
+            "pending or in flight are never deleted, whatever their age. There is "
+            "no default cutoff: retention is a deployment decision, so the operator "
+            "states it on every run."
+        ),
+    )
+    prune.add_argument(
+        "--before",
+        type=_instant_arg,
+        required=True,
+        metavar="ISO8601",
+        help=(
+            "delete rows whose work settled before this instant, e.g. "
+            "2026-01-31T00:00:00Z (UTC assumed when no offset is given)"
+        ),
+    )
+    prune.add_argument(
+        "--include-failed",
+        action="store_true",
+        help=(
+            "also delete rows parked in the dead-letter state; they can no longer "
+            "be replayed afterwards"
+        ),
+    )
+    prune.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_PRUNE_LIMIT,
+        metavar="N",
+        help=f"maximum rows to delete in one run (default: {DEFAULT_PRUNE_LIMIT})",
+    )
+    prune.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report what would be deleted without writing anything",
+    )
+    prune.set_defaults(handler=_outbox_prune)
 
     extract = commands.add_parser(
         "extract",
@@ -641,6 +729,83 @@ def _describe(replays: Sequence[DeadLetterReplay]) -> list[dict[str, Any]]:
         }
         for replay in replays
     ]
+
+
+def _describe_pruned(pruned: Sequence[PrunedEvent]) -> list[dict[str, Any]]:
+    """What was removed, described from the rows as they were read.
+
+    Same reasoning as :func:`_describe`: after the ``DELETE`` the rows are gone, so
+    the only report an operator can get is the one built before it ran.
+    """
+    return [
+        {
+            "id": row.id,
+            "tenant_id": row.tenant_id,
+            "event_type": row.event_type,
+            "status": row.status,
+        }
+        for row in pruned
+    ]
+
+
+def _outbox_prune(
+    args: argparse.Namespace,
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+) -> int:
+    """``outbox-prune``: delete settled rows older than the operator's cutoff.
+
+    Always ``EXIT_OK``: an empty result is the steady state of a pruned table, not a
+    failure, so a scheduled run does not page anyone for having nothing to do. There
+    is deliberately no ``EXIT_NO_MATCH`` arm mirroring ``outbox-replay --ids`` --
+    that arm exists because naming an id that is not parked means the operator read
+    the wrong database, and a cutoff cannot be "not found" the same way.
+
+    ``settings`` is unused, like it is for the commands whose only deployment input
+    is the database URL; it stays in the signature because every handler is called
+    the same way (``cli.main``'s dispatch).
+    """
+    before: datetime = args.before
+    limit = int(args.limit)
+    include_failed = bool(args.include_failed)
+    dry_run = bool(args.dry_run)
+
+    with session_scope(session_factory) as session:
+        pruned = prune_terminal_before(
+            session,
+            before=before,
+            limit=limit,
+            include_failed=include_failed,
+            dry_run=dry_run,
+        )
+
+    if not pruned:
+        # Nothing settled before the cutoff: the cutoff is too old, or the table is
+        # already clean. Reported rather than silent so a retention schedule has a
+        # heartbeat to check.
+        log.info(
+            "outbox_prune_nothing_settled",
+            dry_run=dry_run,
+            before=before.isoformat(),
+            include_failed=include_failed,
+        )
+        return EXIT_OK
+
+    log.info(
+        "outbox_prune",
+        dry_run=dry_run,
+        include_failed=include_failed,
+        before=before.isoformat(),
+        pruned=len(pruned),
+        # A full page means the cutoff probably still covers rows this run did not
+        # reach, so the count is a floor rather than a total. Reported inside the
+        # line the count is in, for the reason ``attention_report`` renders
+        # ``field_scan_truncated`` beside ``fields_scanned``: a floor that looks
+        # like a total is the reading that misleads.
+        truncated=len(pruned) == limit,
+        events=_describe_pruned(pruned),
+    )
+    return EXIT_OK
 
 
 def _outbox_replay(

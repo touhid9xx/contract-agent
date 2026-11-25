@@ -22,6 +22,7 @@ from app.db.repositories.outbox import (
     backoff_seconds,
     backoff_with_jitter,
     outbox_pending_overdue_count,
+    prune_terminal_before,
 )
 from app.db.session import session_scope
 
@@ -422,3 +423,222 @@ def test_jitter_stays_within_bounds() -> None:
         base = backoff_seconds(attempts)
         for _ in range(50):
             assert base * 0.8 <= backoff_with_jitter(attempts) <= base * 1.2
+
+
+# --- retention (outbox-prune) ---------------------------------------------
+# The outbox is a delivery record, not a history: a published row has done its job
+# and a parked row is a human's to-do. Pruning therefore has to be surgical, and
+# every test below is a way it could be wrong. What must never happen is a
+# ``pending`` or ``publishing`` row disappearing, because that loses an event --
+# the one thing the outbox exists to make impossible.
+
+#: How far back the helpers below push a row's timestamps.
+AGED = timedelta(days=90)
+
+#: A cutoff every aged row is older than, and no freshly written row is.
+CUTOFF = utc_now() - timedelta(days=30)
+
+
+def publish(session_factory: sessionmaker[Session], event_id: int) -> None:
+    """Drive one row to ``published`` the way the relay does."""
+    with session_scope(session_factory) as session:
+        repository(session).claim_due(10)
+    with session_scope(session_factory) as session:
+        repository(session).record_outcome(event_id, error=None)
+
+
+def park(session_factory: sessionmaker[Session], event_id: int) -> None:
+    """Drive one row to ``failed`` the way the relay does, without sleeping."""
+    for _ in range(MAX_ATTEMPTS):
+        with session_scope(session_factory) as session:
+            repository(session).claim_due(10)
+        with session_scope(session_factory) as session:
+            repository(session).record_outcome(event_id, error="RuntimeError: broker down")
+            force_due(session, event_id)
+
+
+def age_row(session_factory: sessionmaker[Session], event_id: int, **values: object) -> None:
+    """Move a row's timestamps into the past without waiting for one.
+
+    Explicit ``values`` beat the model's ``onupdate`` hook, which is what lets a
+    test age a ``failed`` row's ``updated_at`` and pin the second branch of the
+    prune predicate.
+    """
+    with session_scope(session_factory) as session:
+        session.execute(
+            update(OutboxEvent)
+            .where(OutboxEvent.id == event_id)
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        )
+
+
+def exists(session_factory: sessionmaker[Session], event_id: int) -> bool:
+    with session_scope(session_factory) as session:
+        return session.get(OutboxEvent, event_id) is not None
+
+
+def test_a_published_row_past_the_cutoff_is_deleted_and_named(
+    session_factory: sessionmaker[Session], enqueue_event: Callable[..., int]
+) -> None:
+    """The report is built before the ``DELETE``, so it can name what it removed."""
+    event_id = enqueue_event()
+    publish(session_factory, event_id)
+    age_row(session_factory, event_id, published_at=utc_now() - AGED)
+
+    with session_scope(session_factory) as session:
+        pruned = prune_terminal_before(session, before=CUTOFF)
+
+    assert [row.id for row in pruned] == [event_id]
+    assert pruned[0].status == OutboxStatus.PUBLISHED.value
+    assert pruned[0].event_type == "contract.ingested"
+    # Asked because "how much of which tenant's history did I just delete" is the
+    # only question this report exists to answer.
+    assert pruned[0].tenant_id
+    assert not exists(session_factory, event_id)
+
+
+def test_a_published_row_inside_the_cutoff_survives(
+    session_factory: sessionmaker[Session], enqueue_event: Callable[..., int]
+) -> None:
+    """Publishing is what dates a row, not enqueueing: ``published_at`` is the cutoff."""
+    event_id = enqueue_event()
+    publish(session_factory, event_id)
+    age_row(session_factory, event_id, created_at=utc_now() - AGED)
+
+    with session_scope(session_factory) as session:
+        assert prune_terminal_before(session, before=CUTOFF) == []
+
+    # Old enough to enqueue is not old enough to delete: it finished its job today.
+    assert exists(session_factory, event_id)
+
+
+def test_a_pending_row_is_never_deleted_however_old(
+    session_factory: sessionmaker[Session], enqueue_event: Callable[..., int]
+) -> None:
+    """The one failure this command must not have: deleting an undelivered event."""
+    event_id = enqueue_event()
+    age_row(
+        session_factory,
+        event_id,
+        created_at=utc_now() - AGED,
+        next_attempt_at=utc_now() - AGED,
+    )
+
+    with session_scope(session_factory) as session:
+        assert prune_terminal_before(session, before=utc_now(), include_failed=True) == []
+
+    assert exists(session_factory, event_id)
+
+
+def test_an_in_flight_row_is_never_deleted_however_old(
+    session_factory: sessionmaker[Session], enqueue_event: Callable[..., int]
+) -> None:
+    """``publishing`` means a relay holds the row. Its status is not settled, so nor is it."""
+    event_id = enqueue_event()
+    with session_scope(session_factory) as session:
+        repository(session).claim_due(10)
+    age_row(session_factory, event_id, updated_at=utc_now() - AGED)
+
+    with session_scope(session_factory) as session:
+        assert prune_terminal_before(session, before=utc_now(), include_failed=True) == []
+
+    assert exists(session_factory, event_id)
+
+
+def test_a_parked_row_survives_by_default(
+    session_factory: sessionmaker[Session], enqueue_event: Callable[..., int]
+) -> None:
+    """``D7-01``: a park is a row a human was meant to look at, so it is not housekeeping."""
+    event_id = enqueue_event()
+    park(session_factory, event_id)
+    age_row(session_factory, event_id, updated_at=utc_now() - AGED)
+
+    with session_scope(session_factory) as session:
+        assert prune_terminal_before(session, before=CUTOFF) == []
+
+    assert exists(session_factory, event_id)
+
+
+def test_a_parked_row_is_deleted_once_the_operator_says_so(
+    session_factory: sessionmaker[Session], enqueue_event: Callable[..., int]
+) -> None:
+    event_id = enqueue_event()
+    park(session_factory, event_id)
+    age_row(session_factory, event_id, updated_at=utc_now() - AGED)
+
+    with session_scope(session_factory) as session:
+        pruned = prune_terminal_before(session, before=CUTOFF, include_failed=True)
+
+    assert [row.id for row in pruned] == [event_id]
+    assert pruned[0].status == OutboxStatus.FAILED.value
+    assert not exists(session_factory, event_id)
+
+
+def test_a_recently_parked_row_survives_an_old_cutoff(
+    session_factory: sessionmaker[Session], enqueue_event: Callable[..., int]
+) -> None:
+    """A parked row has no terminal timestamp, so ``updated_at`` stands in for one.
+
+    Measuring it from ``created_at`` instead would delete a row parked a minute ago
+    because the event it carries was enqueued months ago.
+    """
+    event_id = enqueue_event()
+    age_row(session_factory, event_id, created_at=utc_now() - AGED)
+    park(session_factory, event_id)
+
+    with session_scope(session_factory) as session:
+        assert prune_terminal_before(session, before=CUTOFF, include_failed=True) == []
+
+    assert exists(session_factory, event_id)
+
+
+def test_the_limit_bounds_one_run_and_a_second_run_finishes_the_job(
+    session_factory: sessionmaker[Session], enqueue_event: Callable[..., int]
+) -> None:
+    ids = [enqueue_event() for _ in range(3)]
+    for event_id in ids:
+        publish(session_factory, event_id)
+        age_row(session_factory, event_id, published_at=utc_now() - AGED)
+
+    with session_scope(session_factory) as session:
+        first = prune_terminal_before(session, before=CUTOFF, limit=2)
+    with session_scope(session_factory) as session:
+        second = prune_terminal_before(session, before=CUTOFF, limit=2)
+
+    assert [row.id for row in first] == ids[:2]
+    assert [row.id for row in second] == ids[2:]
+    assert all(not exists(session_factory, event_id) for event_id in ids)
+
+
+def test_a_dry_run_reports_the_rows_and_deletes_nothing(
+    session_factory: sessionmaker[Session], enqueue_event: Callable[..., int]
+) -> None:
+    """Counting before committing is the point: the same rows, read twice."""
+    event_id = enqueue_event()
+    publish(session_factory, event_id)
+    age_row(session_factory, event_id, published_at=utc_now() - AGED)
+
+    with session_scope(session_factory) as session:
+        dry = prune_terminal_before(session, before=CUTOFF, dry_run=True)
+
+    assert [row.id for row in dry] == [event_id]
+    assert exists(session_factory, event_id)
+
+    with session_scope(session_factory) as session:
+        real = prune_terminal_before(session, before=CUTOFF)
+
+    assert real == dry
+    assert not exists(session_factory, event_id)
+
+
+def test_an_empty_table_is_not_an_error(
+    session_factory: sessionmaker[Session], enqueue_event: Callable[..., int]
+) -> None:
+    """The steady state of a pruned table. Deleting nothing is the success case."""
+    with session_scope(session_factory) as session:
+        assert prune_terminal_before(session, before=CUTOFF) == []
+
+    enqueue_event()
+    with session_scope(session_factory) as session:
+        assert prune_terminal_before(session, before=CUTOFF) == []
