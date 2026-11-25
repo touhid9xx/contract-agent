@@ -25,6 +25,9 @@ What gets the attention:
 * **the scan happens between the duplicate check and the store.** An infected
   document never reaches the disk, and a document this deployment already stored
   is answered with its 409 without a second scan.
+* **every refusal is a mapped refusal.** The three specific subclasses map to their
+  own status codes; the base class is mapped too, so a scanner this build did not
+  write cannot turn "I will not accept this" into a 500 that says nothing.
 """
 
 from __future__ import annotations
@@ -46,6 +49,7 @@ from app.api.deps import document_scanner
 from app.core.antivirus import (
     ClamdScanner,
     DocumentInfectedError,
+    DocumentScanError,
     DocumentScanUnavailableError,
     DocumentScanUnreadableError,
     build_scanner,
@@ -648,3 +652,58 @@ def test_the_route_asks_the_scanner_the_dependency_resolves(
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "DOCUMENT_SCAN_UNAVAILABLE"
     assert substitute.seen == [PAYLOAD]
+
+
+def test_an_unforeseen_scanner_refusal_is_still_a_refusal(
+    settings: Settings,
+    tmp_path: Path,
+    session_factory: sessionmaker[Session],
+    tenant: Tenant,
+    make_user: Callable[..., User],
+) -> None:
+    """The base class keeps somebody else's scanner out of the 500 branch.
+
+    ``ClamdScanner`` raises one of the three specific subclasses, so the route's
+    ``except DocumentScanError`` is only reachable by a scanner this build did not
+    write. It is worth pinning anyway: the alternative to a mapped refusal is a
+    handler that stores nothing *and* tells the caller nothing, which reads as a
+    server fault rather than as a document that was refused.
+    """
+
+    class OpaqueScanner:
+        def __init__(self) -> None:
+            self.seen: list[bytes] = []
+
+        def scan(self, payload: bytes) -> None:
+            self.seen.append(payload)
+            raise DocumentScanError("the scanner refused without saying which way")
+
+    substitute = OpaqueScanner()
+    app = create_app(
+        settings.model_copy(
+            update={
+                "encryption_key": Fernet.generate_key().decode("ascii"),
+                "document_store_path": str(tmp_path / "documents"),
+                "document_max_bytes": ONE_MIB,
+            }
+        ),
+        session_factory=session_factory,
+    )
+    app.dependency_overrides[document_scanner] = lambda: substitute
+
+    root = tmp_path / "documents"
+    with TestClient(app) as client:
+        response = upload(client, auth(client, tenant, make_user))
+
+    assert response.status_code == 503, response.text
+    assert response.json()["error"]["code"] == "DOCUMENT_SCAN_FAILED"
+    # The scanner really was asked, so this is a refusal and not a skipped step.
+    assert substitute.seen == [PAYLOAD]
+    # A refusal is not an acceptance: nothing sealed, no row, no event.
+    assert not blobs(root)
+    assert contract_rows(session_factory) == []
+    assert outbox_rows(session_factory) == []
+    # The scanner's own sentence is the caller's only actionable detail, and the
+    # document must not travel out with it.
+    assert "refused without saying which way" in response.text
+    assert PAYLOAD not in response.content

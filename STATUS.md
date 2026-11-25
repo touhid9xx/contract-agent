@@ -9112,6 +9112,18 @@ tooltip now say what shipped instead of implying nothing did.
 
 **Landed.** `e546804`, and CI run `45501888868` is ten jobs of ten on it, `CI gate` included.
 
+### D10-147 — The fourth refusal code is exercised now
+
+`D10-146` mapped four refusal codes on the document upload route and tested three.
+`DOCUMENT_SCAN_FAILED` is the base-`DocumentScanError` arm, which `ClamdScanner` cannot reach —
+every refusal it raises is one of the three specific subclasses — so only a substituted scanner
+provokes it. `test_antivirus.py` now does, and asserts `503`, no blob, no contract row, no outbox
+event, the scanner's own sentence carried through, and the document bytes absent from the body.
+
+`pytest` 1413 passed and 16 skipped over 1429 collected, `ruff check` clean,
+`ruff format --check` clean over 160 files, `mypy` clean over 79 source files. No production file
+changed.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

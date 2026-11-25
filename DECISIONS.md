@@ -11541,3 +11541,32 @@ exactly as it did before: this makes a scan available, it does not make one mand
 
 **Landed.** `e546804`, and CI run `45501888868` built it green: ten jobs of ten, `CI gate` among
 them, read from the run's own job list rather than from a badge.
+
+### D10-147 — The fourth refusal code was mapped, and nothing exercised it
+
+`D10-146` gave the upload route four refusal codes. `test_antivirus.py` asserted three of them.
+The fourth, `DOCUMENT_SCAN_FAILED`, is the `except DocumentScanError` arm that catches the base
+class, and `ClamdScanner` cannot reach it by construction: every refusal that adapter raises is
+one of the three specific subclasses. The arm therefore exists only for a scanner this build did
+not write.
+
+**Why an unreachable-by-our-code branch is worth a test.** Because nothing fails when it goes.
+A branch no in-tree caller reaches is a branch the next tidy-up deletes, and deleting it turns a
+mapped refusal into an unhandled exception: the caller gets a 500 for a document the deployment
+deliberately did not keep, and learns nothing about why. The distinction the route is drawing —
+*refused*, not *broken* — survives only as long as something asserts it.
+
+**What the test pins.** A substituted scanner that raises the base class produces `503` with
+`DOCUMENT_SCAN_FAILED`, and the same three negative assertions the sibling cases make: no blob,
+no contract row, no outbox event. It also asserts the scanner's own sentence reaches the caller —
+that sentence is the only actionable detail a custom scanner can supply — and that the document
+bytes do not travel out beside it, which is the rule the module's `repr` and `str` are already
+held to.
+
+**What gated it.** `pytest` 1413 passed and 16 skipped over 1429 collected, `ruff check` clean,
+`ruff format --check` clean over 160 files, and `mypy` clean over 79 source files. No production
+file changed, so no behaviour moved: this slice adds the assertion, not the arm.
+
+**Limits.** The arm is reachable only through a dependency override, so no real clamd ever
+exercises it, and the test proves the mapping rather than a scanner. One case is added, not a
+family: the three specific codes keep the coverage they already had.
