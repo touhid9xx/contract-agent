@@ -11797,8 +11797,45 @@ same `test_limit_guards.py` and the sentences above it. Nothing in the repositor
 event: a green ledger and a clean tree read the same on a commit nobody built, which is the gap
 this paragraph cannot close.
 
-**Built, eventually.** The run this follow-up's push produced is `45659894007`, and it is green:
-ten jobs, ten successful, `CI gate` among them, on `3a6ed7e`. It is the first run to build
-`test_limit_guards.py`, so the code the incident left unbuilt is now built — two commits late, and
+**Built, eventually.** The run this follow-up's push produced is `45659894007`, and it is green: ten
+jobs, ten successful, `CI gate` among them, on `3a6ed7e`. It is the first run to build
+`test_limit_guards.py`, so the code the incident left unbuilt is now built — one commit late, and
 proving `3a6ed7e` rather than `c253afe` byte-for-byte, since the ledger sentences written between
 them are all that separates the two trees.
+
+### D10-152 — The gap was one commit, and the ledger said two
+
+`D10-151` closes by saying how far apart the two commits in its story were — *two commits late* in
+`DECISIONS.md`, *two commits on from `c253afe`* in `STATUS.md` — and the log answers one, not two.
+`git --no-pager rev-list --count c253afe..3a6ed7e` reads `1`; the same command against `333ed8d`,
+which carries this correction, reads `2`. The run that replaced the dropped one therefore built a
+tree one commit after the commit it substituted for, and both sentences overstated the gap by one.
+
+**Two conventions, and the reason for this one.** Counting `c253afe` as the first of two makes the
+old sentence read true; `rev-list`'s range semantics exclude the left end and call `3a6ed7e` one
+commit on. This block pins the second, because a reader can reproduce it with a command and the
+first is a way of counting no tool in the tree performs. The unit was as unpinned as the figure: a
+distance with no stated counting rule is not a fact, which is what let a number nobody had run a
+command against sit in the record of a slice about unpinned numbers.
+
+**Why no gate could see it.** Every check here counts something else. `check_ledger_close.py` counts
+blocks and asks that a deferring block's final paragraph name a run id and a short sha — which
+`D10-151` supplied, and supplied correctly. The width checker counts columns, `pytest` counts tests.
+A number inside a sentence is prose to all three, so a figure that is wrong and one that is right
+are indistinguishable to them. Only `rev-list` knows how far apart two commits sit, and until this
+block nothing in the tree asked it. `D10-140` replaced inferred counts with measured ones for the
+same reason; here the missing measurement was a one-line command.
+
+**Green on both sides of the edit.** `45659894007` built `3a6ed7e`, ten jobs of ten with `CI gate`
+among them, and `45661390490` built `333ed8d`, likewise ten of ten. The sentences being corrected
+have therefore been through two green runs, the second carrying the false figure — which is the
+point: a green run says the code was built, never that the prose about it was right. This block
+claims nothing about the run its own commit will open.
+
+**Limits.** Two. There is still no instrument that reads arithmetic in prose, so a future figure can
+be wrong in exactly this way, and the guard that would catch it — pulling every number out of both
+ledgers and checking it against `git` — would be asserting about prose rather than about code, which
+is the line `check_ledger_close.py` declined to cross when it refused to dictate closing words. And
+the corrected sentence now carries a unit and not a derivation: *one commit on from `c253afe`* is
+checkable by a reader who thinks to check it, and there is nothing in the repository that makes
+them.

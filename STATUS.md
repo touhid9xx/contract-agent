@@ -9269,8 +9269,41 @@ Operations` and `Webhooks` and declared six minutes later. `ci.yml` has no `path
 follow-up's push is the first since, so its run is the first to build this code.
 
 **Built, eventually.** The push's run arrived: `45659894007`, ten of ten successful, `CI gate` among
-them, on `3a6ed7e` — the first run to build `test_limit_guards.py`. It proves the tree two commits
-on from `c253afe`; the sentences above are all that separate them.
+them, on `3a6ed7e` — the first run to build `test_limit_guards.py`. It proves the tree one commit on
+from `c253afe`; the sentences above are all that separate them.
+
+### D10-152 — The commit gap in `D10-151`'s close was off by one
+
+`D10-151` closed by saying how far apart the stranding commit and the commit whose run replaced it
+were, and said two — in both ledgers. The log says one. Both sentences are corrected in place rather
+than struck, because the incident they record still happened exactly as described: only the distance
+was wrong.
+
+| Area | Detail |
+| --- | --- |
+| `DECISIONS.md` | *two commits late* became *one commit late* |
+| `STATUS.md` | *two commits on from* became *one commit on from* |
+| `.agent-cache/apply_d152.py` | Applies both edits, reusing `apply_d139.py`'s wrappers |
+
+**Measured.** `git --no-pager rev-list --count c253afe..3a6ed7e` reads `1`; the same command against
+`333ed8d` reads `2`. So the run that replaced the dropped one built a tree one commit after it, not
+two. Two conventions existed and neither was stated, which is the real defect: `rev-list`'s range
+semantics exclude the left end, and that is the convention both sentences now use because it is the
+one a reader can reproduce with a command.
+
+**Why every gate passed it.** `check_ledger_close.py` counts blocks and asks a deferring block's
+last paragraph for a run id and a short sha, which `D10-151` supplied and supplied correctly. The
+width checker counts columns, `pytest` counts tests. None of them reads arithmetic in a sentence, so
+a wrong figure and a right one look identical to all three.
+
+**Green twice.** `45659894007` built `3a6ed7e`, ten jobs of ten with `CI gate` among them;
+`45661390490` built `333ed8d`, likewise ten of ten. The corrected sentences have run twice, the
+second time carrying the false figure — a green run proves the code was built, not that the prose
+about it was right.
+
+**Limits.** No instrument reads arithmetic in prose, so a future figure can be wrong the same way;
+and the corrected sentence carries a unit a reader can re-check with one command, not a derivation,
+so nothing in the repository makes them check it.
 
 ## Non-negotiable reminders
 
