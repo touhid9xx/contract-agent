@@ -11643,3 +11643,55 @@ large table has not been measured.
 
 **Landed.** `a2b8590`, and CI run `45591767419` built it green: ten jobs of ten, `CI gate` among
 them, read from the run's own job list rather than from a badge.
+
+### D10-149 — A negative `--limit` was not a smaller run
+
+`D10-148` shipped `outbox-prune` with `--limit` as its stated cap on one run, and the help text
+called it "maximum rows to delete in one run". It was not. Measured against real SQLite before
+believing that sentence: `--limit 0` deleted nothing, `--limit 1` deleted one row, and `--limit -1`
+deleted **all 29 settled rows, parked ones included**. `type=int` accepts `-1`, and a negative
+`LIMIT` is not "no rows" in SQL — SQLite and MySQL both read it as *unbounded*. So the invocation
+that looked most cautious, an operator adding a cap to be careful, was the one that removed the
+cap.
+
+**Refused, not clamped, and refused at parse time.** `_count_arg` rejects any value below one
+before a session opens, so the rows are not spared by a policy decision — they are never read.
+Clamping `-1` to "one row" would be worse than the bug it fixes: the operator would go on believing
+they had asked for a cap. `0` is refused from the other side, because a run that by construction
+touches nothing is a mistyped number rather than a request, the same shape `test_expiry` already
+established for an empty page.
+
+**The guard went on all five, not on the one that was measured.** `outbox-replay`, `outbox-prune`,
+`reseal-fields`, `backfill-blind-index` and `doctor` all take `--limit` as the cap on one run's
+blast radius, so the check belongs on the shared type rather than on the newest command. A
+parametrized case enumerates every subcommand carrying the option, so the sixth one to acquire a
+bare `type=int` fails here rather than in production.
+
+**The library refuses it too.** `prune_terminal_before` returns `[]` for `limit <= 0` without
+building a statement, because the CLI is not the only caller and the danger belongs to the value
+rather than to who typed it. `claim_reminder_candidates` already guards its page size the same way
+and the expiry sweep returns an empty page instead of issuing `LIMIT 0`. Belt and braces here
+because the statement is a `DELETE`: a read that returns everything is a bug, a write that removes
+everything is an incident.
+
+**Pruning parked rows also silences the alert that they existed.** `--include-failed` deletes
+exactly the population `dead_letter_count` counts, so `attention_report` — and the `D10-40`
+operator email that fires when its verdict changes — will afterwards announce that the board is
+clear. `D10-148` already says the flag costs a replay permanently and each pruned row's status is
+in the log line, but "the alert stops mentioning it" was not written down. It is a consequence
+rather than a defect: the operator asked for those rows to go. It is recorded because an alert
+going quiet is indistinguishable from a problem being fixed, and the two deserve different
+readings.
+
+**What gated it.** `pytest` 1439 passed and 16 skipped over 1455 collected, `ruff check` clean,
+`ruff format --check backend` clean over 156 files, `mypy` clean over 79 source files, and the
+ledger check clean at 78 blocks with 23 deferring and 0 failed — the two new blocks are silent, so
+the deferring figure did not move. Eight cases are new: one repository case over both predicate
+branches and three `limit` values, two CLI cases, and a five-way parametrized case over the
+subcommands.
+
+**Limits.** The guard covers the five commands this CLI ships today, not the shape of the mistake:
+any future `limit` parameter read straight from `int` re-opens it, and only the parametrized case
+stands in the way. The measurement was SQLite; MySQL reading a negative `LIMIT` as unbounded is
+documented behaviour rather than something measured here, which is why the guard lives in our code
+instead of in a comment about the driver.

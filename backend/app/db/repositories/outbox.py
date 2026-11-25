@@ -525,7 +525,16 @@ def prune_terminal_before(
     relay again (``claim_due`` reads only ``pending`` and ``publishing``), so there
     is no concurrent writer to fence off. Two simultaneous prunes would simply
     delete disjoint id sets, or one would find its rows already gone.
+
+    A ``limit`` of zero or less returns nothing instead of being handed to the
+    database: a negative ``LIMIT`` means *unbounded* to SQLite and MySQL, so passing
+    one straight through would turn the caller's cap into the opposite of a cap.
+    The same guard ``claim_reminder_candidates`` uses. The CLI refuses a non-positive
+    ``--limit`` before it gets here; this is for every other caller.
     """
+    if limit <= 0:
+        return []
+
     stmt = (
         select(OutboxEvent)
         .where(_settled_before(before, include_failed=include_failed))

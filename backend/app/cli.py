@@ -398,6 +398,35 @@ def _f1_arg(value: str) -> float:
     return parsed
 
 
+def _count_arg(value: str) -> int:
+    """Parse a ``--limit`` and refuse a count that is not positive.
+
+    Not a cosmetic check. Every ``--limit`` in this CLI is the cap on one run's
+    blast radius, and a message like "maximum rows to delete in one run" is a promise
+    the operator is entitled to rely on. ``type=int`` alone accepts ``-1``, and a
+    negative ``LIMIT`` is not "no rows" in SQL: SQLite and MySQL both read it as
+    *unbounded*. Measured on the shipped ``outbox-prune``: ``--limit 0`` deleted
+    nothing, ``--limit -1`` deleted all 29 settled rows, parked ones included. So the
+    single most dangerous invocation was the one that looked most cautious, because
+    a cap the operator believes is set is worse than no cap at all.
+
+    Refused rather than clamped, and refused at parse time so it happens before any
+    session opens. Silently reading ``-1`` as "one row" would leave the operator
+    believing they had asked for something else; ``0`` is refused too, because a run
+    that by construction touches nothing is a typo, not a request.
+    """
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected a positive whole number of rows") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(
+            "expected a positive whole number of rows; a negative --limit is not a "
+            "smaller run, it is no limit at all"
+        )
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the operator CLI parser."""
     parser = argparse.ArgumentParser(
@@ -429,7 +458,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     replay.add_argument(
         "--limit",
-        type=int,
+        type=_count_arg,
         default=DEFAULT_REPLAY_LIMIT,
         metavar="N",
         help=f"maximum rows to touch in one run (default: {DEFAULT_REPLAY_LIMIT})",
@@ -474,7 +503,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     prune.add_argument(
         "--limit",
-        type=int,
+        type=_count_arg,
         default=DEFAULT_PRUNE_LIMIT,
         metavar="N",
         help=f"maximum rows to delete in one run (default: {DEFAULT_PRUNE_LIMIT})",
@@ -536,7 +565,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reseal.add_argument(
         "--limit",
-        type=int,
+        type=_count_arg,
         default=DEFAULT_RESEAL_LIMIT,
         metavar="N",
         help=f"maximum rows to examine in one run (default: {DEFAULT_RESEAL_LIMIT})",
@@ -568,7 +597,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     backfill.add_argument(
         "--limit",
-        type=int,
+        type=_count_arg,
         default=DEFAULT_BLIND_INDEX_BACKFILL_LIMIT,
         metavar="N",
         help=(
@@ -598,7 +627,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doctor.add_argument(
         "--limit",
-        type=int,
+        type=_count_arg,
         default=DEFAULT_RESEAL_LIMIT,
         metavar="N",
         help=(

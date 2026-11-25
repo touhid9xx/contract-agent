@@ -611,6 +611,38 @@ def test_the_limit_bounds_one_run_and_a_second_run_finishes_the_job(
     assert all(not exists(session_factory, event_id) for event_id in ids)
 
 
+def test_a_limit_that_is_not_positive_deletes_nothing(
+    session_factory: sessionmaker[Session], enqueue_event: Callable[..., int]
+) -> None:
+    """A negative ``LIMIT`` is *unbounded* in SQL, so the cap must never reach the query.
+
+    Measured before this guard existed: pruning with ``--limit -1`` removed every
+    settled row in the table, parked ones included, while the command reported a cap
+    of minus one. Zero is refused from the other side -- it reads as "do nothing" but
+    a caller only passes it by mistyping the number they meant, and neither value may
+    turn a bounded run into an unbounded one. Both branches of the predicate are
+    exercised so the parked population is covered too, since that is the set
+    ``attention_report`` counts.
+    """
+    published = [enqueue_event() for _ in range(2)]
+    for event_id in published:
+        publish(session_factory, event_id)
+        age_row(session_factory, event_id, published_at=utc_now() - AGED)
+
+    parked = enqueue_event()
+    park(session_factory, parked)
+    age_row(session_factory, parked, updated_at=utc_now() - AGED)
+
+    for bad_limit in (0, -1, -1000):
+        with session_scope(session_factory) as session:
+            assert (
+                prune_terminal_before(session, before=CUTOFF, include_failed=True, limit=bad_limit)
+                == []
+            )
+
+    assert all(exists(session_factory, event_id) for event_id in [*published, parked])
+
+
 def test_a_dry_run_reports_the_rows_and_deletes_nothing(
     session_factory: sessionmaker[Session], enqueue_event: Callable[..., int]
 ) -> None:

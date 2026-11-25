@@ -9169,6 +9169,39 @@ tests, the limit `reseal-fields` and `backfill-blind-index` also carry.
 
 **Landed.** `a2b8590`, and CI run `45591767419` is ten jobs of ten on it, `CI gate` included.
 
+### D10-149 — A negative `--limit` was not a smaller cap
+
+`D10-148` described `--limit` as the cap on one run's blast radius, and nothing enforced it: the
+options were bare `type=int`, and a negative `LIMIT` is *unbounded* to SQLite and MySQL. Measured
+on the shipped command — `--limit 0` deleted nothing, `--limit 1` deleted one row, `--limit -1`
+deleted all 29 settled rows, parked ones included. The invocation that looked most cautious was
+the one that removed the cap.
+
+| Area | Detail |
+| --- | --- |
+| `backend/app/cli.py` | `_count_arg` refuses `<= 0` at parse time, so before any session opens; applied to `outbox-replay`, `outbox-prune`, `reseal-fields`, `backfill-blind-index` and `doctor`. A parametrized case enumerates all five, so a future bare `type=int` fails there |
+| `backend/app/db/repositories/outbox.py` | `prune_terminal_before` returns `[]` for `limit <= 0` without building a statement: the CLI is not the only caller. `claim_reminder_candidates` guards its page size the same way |
+| `backend/tests/test_outbox.py` | One case over `0`, `-1` and `-1000`, both predicate branches, so the parked population `attention_report` counts is covered |
+| `backend/tests/test_outbox_replay.py` | Two cases: the command refuses `0` and `-1` and deletes nothing, and every subcommand carrying `--limit` refuses a negative one |
+
+**Refused rather than clamped.** Reading `-1` as "one row" would leave the operator believing they
+had asked for a cap when they had asked for something else. `0` is refused too: a run that by
+construction touches nothing is a mistyped number, not a request.
+
+**Pruning parked rows also silences the alert that they existed.** `--include-failed` deletes
+exactly the population `dead_letter_count` counts, so `attention_report` and the `D10-40` operator
+email will afterwards announce a clear board. Recorded because an alert going quiet reads the same
+as a problem being fixed.
+
+**What gated it.** `pytest` 1439 passed and 16 skipped over 1455 collected, `ruff check` clean,
+`ruff format --check backend` clean over 156 files, `mypy` clean over 79 source files, and the
+ledger check clean at 78 blocks with 23 deferring and 0 failed.
+
+**Limits.** The guard covers the five commands shipping today, not the shape of the mistake: a
+future `limit` read straight from `int` re-opens it, and only the parametrized case stands in the
+way. The measurement was SQLite; MySQL's reading of a negative `LIMIT` is documented behaviour
+rather than something measured here, which is why the guard is in our code.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

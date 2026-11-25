@@ -20,7 +20,7 @@ import pytest
 from sqlalchemy import update
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.cli import EXIT_NO_MATCH, EXIT_OK
+from app.cli import EXIT_NO_MATCH, EXIT_OK, build_parser
 from app.cli import main as cli_main
 from app.core.config import Settings
 from app.db.base import utc_now
@@ -518,3 +518,56 @@ def test_a_cutoff_carrying_an_offset_is_accepted(
     assert code == EXIT_OK
     with session_scope(session_factory) as session:
         assert session.get(OutboxEvent, event_id) is None
+
+
+@pytest.mark.parametrize("bad_limit", ["0", "-1"])
+def test_a_non_positive_limit_is_refused_and_nothing_is_deleted(
+    bad_limit: str,
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+    enqueue_event: Callable[..., int],
+) -> None:
+    """Measured before this guard: ``--limit -1`` deleted every settled row.
+
+    A negative ``LIMIT`` is *unbounded* to SQLite and MySQL, so the invocation that
+    looked most cautious -- the operator adding a cap to be safe -- was in fact the
+    one that removed the cap. Refused at parse time, so the rows are not spared by
+    a policy decision; they are never looked at.
+    """
+    event_id = enqueue_event()
+    publish(session_factory, event_id)
+    age(session_factory, event_id, published_at=utc_now() - timedelta(days=90))
+
+    with pytest.raises(SystemExit) as refused:
+        cli_main(
+            ["outbox-prune", "--before", cutoff(), "--limit", bad_limit],
+            settings=settings,
+            session_factory=session_factory,
+        )
+
+    assert refused.value.code == 2
+    assert load(session_factory, event_id) is not None
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["outbox-replay"],
+        ["outbox-prune", "--before", "2020-01-01T00:00:00Z"],
+        ["reseal-fields"],
+        ["backfill-blind-index"],
+        ["doctor"],
+    ],
+    ids=["outbox-replay", "outbox-prune", "reseal-fields", "backfill-blind-index", "doctor"],
+)
+def test_every_command_that_takes_a_limit_refuses_a_negative_one(argv: list[str]) -> None:
+    """One guard, five commands. A new ``type=int`` --limit fails here.
+
+    Each ``--limit`` is that command's cap on one run's blast radius, so accepting a
+    negative value re-opens the same hole in a different subcommand. Parsed rather
+    than executed: this must fail before a database is touched at all.
+    """
+    with pytest.raises(SystemExit) as refused:
+        build_parser().parse_args([*argv, "--limit=-1"])
+
+    assert refused.value.code == 2
