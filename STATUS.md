@@ -9262,6 +9262,12 @@ in-function guard — deliberate, because its only production caller passes a se
 cannot be non-positive. The pinned counts force this file to be edited when the API legitimately
 gains a `limit`, and a green run proves a floor was declared, not that the number is right.
 
+**Landed.** `c253afe`, and **no CI run was ever created for it** — the runs API answers `total_count
+0` for that full `head_sha` 33 minutes after the push, into a GitHub incident naming `Actions`, `Git
+Operations` and `Webhooks` and declared six minutes later. `ci.yml` has no `paths` filter, reads
+`active`, and is present in that tree, so the trigger event was dropped platform-side. This
+follow-up's push is the first since, so its run is the first to build this code.
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

@@ -11784,3 +11784,15 @@ pinned — five query parameters, at least fifty numeric settings, six modules �
 legitimately gains a `limit` forces this file to be edited, which is the price of not letting the
 assertion pass over an empty set; without the pin, renaming a parameter would quietly empty it.
 Third, a green run proves a floor was declared, never that the floor holds the right number.
+
+**Landed.** `c253afe`, and **no CI run was ever created for it.** The push reached the remote —
+`ls-remote` reads back `c253afe9c` — but the runs API answers `total_count 0` for that exact
+`head_sha` 33 minutes after the push, while the four pushes before it each had a run within
+seconds. GitHub had a live incident by `15:55:19Z` naming `Actions`, `Git Operations` and
+`Webhooks` among the degraded components, so the trigger event was dropped platform-side, not by
+configuration: `.github/workflows/ci.yml` has no `paths` filter, `push: branches: [main]` is its
+only push trigger, the workflow reads `active`, and `ci.yml` is present in that commit's tree.
+This follow-up's own push is the first since then, so the run it produces builds this tree — the
+same `test_limit_guards.py` and the sentences above it. Nothing in the repository notices a dropped
+event: a green ledger and a clean tree read the same on a commit nobody built, which is the gap
+this paragraph cannot close.
