@@ -1,0 +1,34 @@
+# The datasource every provisioned dashboard queries (D10-155).
+#
+# Why `uid` is spelled out rather than left to Grafana: an unset uid is generated per
+# run, so a dashboard JSON that names `prometheus-local` would find no datasource and
+# every panel would render "No data" — a dashboard that looks like a quiet deployment.
+# `tests/test_grafana_provisioning.py` compares the uid here with the one every panel
+# carries, which is the only check that can see that mismatch: Grafana starts happily
+# either way, and `/api/health` answers before any dashboard is loaded.
+#
+# The url is the Compose service by name, exactly as `ops/prometheus/prometheus.yml`
+# names `alertmanager:9093` for its receiver. `prometheus:9090` is what the stack
+# actually runs; `127.0.0.1:9090` would be the host port, which does not resolve from
+# inside this container and would be the same value only on a developer's machine.
+#
+# `editable: false` is a decision, not a default: this file is the record. A datasource
+# changed in the UI would be overwritten on the next start and the change lost either
+# way, so allowing the edit only makes the loss silent.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus-local
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      # The stack scrapes and evaluates every 15s (`ops/prometheus/prometheus.yml`)
+      # and retains six hours (`docker-compose.yml`). Restated here so `$__rate_interval`
+      # is computed against the real scrape loop instead of Grafana's 15s guess.
+      timeInterval: 15s
+      # Prometheus accepts POSTed queries; a long expression in a URL is what breaks first.
+      httpMethod: POST

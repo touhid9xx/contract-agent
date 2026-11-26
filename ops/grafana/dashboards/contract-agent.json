@@ -1,0 +1,239 @@
+{
+  "uid": "contract-agent-overview",
+  "title": "Contract Agent — delivery and queues",
+  "description": "Every family app/core/metrics.py declares, on one screen. Provisioned from ops/grafana; the UI is not the record.",
+  "tags": ["contract-agent", "provisioned"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Scrape targets answering",
+      "description": "up is Prometheus' own series, not one this code declares: a target that is down is what a target list is for. Seven workers and one api.",
+      "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 7 }] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto" },
+      "targets": [
+        { "refId": "A", "expr": "sum(up{job=\"workers\"})", "legendFormat": "workers", "datasource": { "type": "prometheus", "uid": "prometheus-local" } },
+        { "refId": "B", "expr": "sum(up{job=\"api\"})", "legendFormat": "api", "datasource": { "type": "prometheus", "uid": "prometheus-local" } }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Undelivered — failed",
+      "description": "A transport was configured, reached, and refused, and the retry budget is spent. Nothing in the deployment clears this by itself.",
+      "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto" },
+      "targets": [
+        { "refId": "A", "expr": "sum(notifications_undelivered{status=\"failed\"})", "legendFormat": "failed", "datasource": { "type": "prometheus", "uid": "prometheus-local" } }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Overdue and unsent — stuck",
+      "description": "Due, grace elapsed, channel deliverable, and nothing sent it. The one state that says the scheduler is not draining rather than that it has nothing to send.",
+      "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto" },
+      "targets": [
+        { "refId": "A", "expr": "sum(notifications_pending_overdue{state=\"stuck\"})", "legendFormat": "stuck", "datasource": { "type": "prometheus", "uid": "prometheus-local" } }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Outbox parked — relay_failed",
+      "description": "Only the population a person must act on. Parks recorded as transport_disabled are a configuration, are published on the panel below, and are deliberately not here.",
+      "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto" },
+      "targets": [
+        { "refId": "A", "expr": "sum(outbox_parked_events{outcome=\"relay_failed\"})", "legendFormat": "relay_failed", "datasource": { "type": "prometheus", "uid": "prometheus-local" } }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Escalation mail failures (1h)",
+      "description": "The series EscalationEmailFailed reads. Present on every process because an unlabelled counter is seeded to zero; only the scanner's copy can rise.",
+      "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 4 },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto" },
+      "targets": [
+        { "refId": "A", "expr": "sum(increase(escalation_email_failed_total[1h]))", "legendFormat": "failed", "datasource": { "type": "prometheus", "uid": "prometheus-local" } }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Outbox backlog",
+      "description": "Events nothing has claimed for longer than a lease — what a relay that is not running looks like from outside. No alert rule ships on it; nobody has stated a threshold.",
+      "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 4 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto" },
+      "targets": [
+        { "refId": "A", "expr": "sum(outbox_pending_count)", "legendFormat": "pending", "datasource": { "type": "prometheus", "uid": "prometheus-local" } }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Extraction backlog",
+      "description": "Stored documents no worker has extracted yet. The only series here that answers whether the extractor is keeping up: the counter beside it keeps rising while the queue grows.",
+      "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 4 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto" },
+      "targets": [
+        { "refId": "A", "expr": "sum(extraction_backlog)", "legendFormat": "backlog", "datasource": { "type": "prometheus", "uid": "prometheus-local" } }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Notifications sent (1h)",
+      "description": "Dispatch attempts across the window, every channel and outcome. On the shipped NOTIFICATION_TRANSPORT=none this stays at zero, which is a fact about the deployment rather than an outage.",
+      "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 4 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto" },
+      "targets": [
+        { "refId": "A", "expr": "sum(increase(notifications_sent_total[1h]))", "legendFormat": "attempts", "datasource": { "type": "prometheus", "uid": "prometheus-local" } }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Reminders planned, by outcome",
+      "description": "already_planned should dominate in the steady state: it is the no-op tick. A planner that is running and finding nothing is indistinguishable from one that is not, unless the ticks are counted.",
+      "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (outcome) (increase(reminder_plans_total[$__rate_interval]))", "legendFormat": "{{outcome}}", "datasource": { "type": "prometheus", "uid": "prometheus-local" } }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Notifications sent, by status",
+      "description": "channel and status together, because a channel that only ever reaches one status is the interesting shape.",
+      "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (channel, status) (increase(notifications_sent_total[$__rate_interval]))", "legendFormat": "{{channel}} {{status}}", "datasource": { "type": "prometheus", "uid": "prometheus-local" } }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Contracts extracted, by outcome",
+      "description": "A standing unreadable is the one series that names work for a person: bytes this deployment cannot get text out of at all keep the row in the queue.",
+      "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (outcome) (increase(contracts_extracted_total[$__rate_interval]))", "legendFormat": "{{outcome}}", "datasource": { "type": "prometheus", "uid": "prometheus-local" } }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Extraction confidence, p50 and p90",
+      "description": "The only histogram this build records. Read as quantiles rather than a mean because the review gate is a threshold, and a mean hides the tail it lets through.",
+      "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.5, sum by (le) (rate(extraction_confidence_bucket[$__rate_interval])))", "legendFormat": "p50", "datasource": { "type": "prometheus", "uid": "prometheus-local" } },
+        { "refId": "B", "expr": "histogram_quantile(0.9, sum by (le) (rate(extraction_confidence_bucket[$__rate_interval])))", "legendFormat": "p90", "datasource": { "type": "prometheus", "uid": "prometheus-local" } }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Escalations, by status",
+      "description": "What the response window produced: opened against resolved, over the window.",
+      "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (status) (increase(escalations_total[$__rate_interval]))", "legendFormat": "{{status}}", "datasource": { "type": "prometheus", "uid": "prometheus-local" } }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Inbound SMS, by outcome",
+      "description": "unmatched is the number to watch: a reply we could not tie to a contract means somebody asked us to stop and we could not find them to honour it.",
+      "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (outcome) (increase(sms_inbound_total[$__rate_interval]))", "legendFormat": "{{outcome}}", "datasource": { "type": "prometheus", "uid": "prometheus-local" } }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Call outcomes, by verdict",
+      "description": "human against machine, as the dialler decided them. A deployment whose calls are all machine is dialling voicemail boxes, which VOICE_TRANSPORT=ari alone could never report.",
+      "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (outcome) (increase(voice_outcome_total[$__rate_interval]))", "legendFormat": "{{outcome}}", "datasource": { "type": "prometheus", "uid": "prometheus-local" } }
+      ]
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Contracts expired, by outcome",
+      "description": "expired dominating is a backlog cleared and then quiet; still_current is normal; a standing unknown_timezone is a set of contracts that will never close.",
+      "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (outcome) (increase(contracts_expired_total[$__rate_interval]))", "legendFormat": "{{outcome}}", "datasource": { "type": "prometheus", "uid": "prometheus-local" } }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Extraction runs, by status",
+      "description": "Runs of extract_contract, not documents: `metrics.py` keeps this separate from contracts_extracted_total because one counts calls to the function and the other counts the contract outcomes those calls produced, and neither can answer the other's question. A flat line here over a growing contract count means the worker stopped being invoked.",
+      "datasource": { "type": "prometheus", "uid": "prometheus-local" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 40 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (status) (increase(extractions_total[$__rate_interval]))", "legendFormat": "{{status}}", "datasource": { "type": "prometheus", "uid": "prometheus-local" } }
+      ]
+    }
+  ]
+}

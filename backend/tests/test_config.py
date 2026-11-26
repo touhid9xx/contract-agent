@@ -456,6 +456,11 @@ COMPOSE_FILE = Path(__file__).resolve().parents[2] / "docker-compose.yml"
 COMPOSE_ONLY_KEYS = frozenset(
     {
         "FRONTEND_PORT",
+        # D10-155. The dashboards' port and the password `docker-compose.yml` refuses to
+        # start without. Neither is a `Settings` field: they configure a container rather
+        # than this process, and no code in `app/` reads either one.
+        "GRAFANA_ADMIN_PASSWORD",
+        "GRAFANA_PORT",
         "PROMETHEUS_PORT",
         "MYSQL_DATABASE",
         "MYSQL_PASSWORD",

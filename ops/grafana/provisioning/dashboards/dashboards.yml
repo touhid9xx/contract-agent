@@ -1,0 +1,29 @@
+# Where Grafana finds the dashboards this repository ships (D10-155).
+#
+# `path` is `/etc/grafana/dashboards`, not the image's `/var/lib/grafana/dashboards`
+# default, for the dull reason `ops/prometheus/prometheus.yml` gives about its own
+# path: `/etc/grafana` is where the compose file already mounts this directory
+# read-only, so the file the guard test reads in this repository is byte-for-byte the
+# file the container loads. A dashboard on the image's state volume would be a copy of
+# a file that could drift from the one in `ops/`.
+#
+# `disableDeletion: true` keeps a provisioned dashboard from being deleted in the UI
+# and silently reappearing on the next tick, which is the behaviour that teaches an
+# operator the UI is not the record. `allowUiUpdates: false` goes with it: an edit in
+# the browser is not saved anywhere, and this way that is what happens rather than a
+# change that survives until the next container restart and then vanishes.
+apiVersion: 1
+
+providers:
+  - name: contract-agent
+    orgId: 1
+    folder: Contract Agent
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    # The provisioner rescans on its own (default 10s) and again every update here, so
+    # a dashboard edited in `ops/` appears without restarting the container.
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/dashboards
+      foldersFromFilesStructure: false

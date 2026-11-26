@@ -34,6 +34,7 @@ from app.db.repositories.notifications import (
     UNDELIVERED_STATUSES,
     NotificationRepository,
     channel_mix_counts_for_tenant,
+    notification_for_provider_message_id,
     pending_overdue_counts,
     undelivered_counts,
 )
@@ -91,6 +92,7 @@ __all__ = [
     "enqueue_event",
     "fields_for_reseal",
     "normalize_email",
+    "notification_for_provider_message_id",
     "outbox_pending_overdue_count",
     "pending_overdue_counts",
     "prune_terminal_before",

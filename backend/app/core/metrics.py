@@ -366,6 +366,27 @@ SMS_INBOUND_TOTAL: Final = _declare(
     )
 )
 
+#: Call-outcome callbacks from Asterisk, by outcome (``D10-154``).
+#:
+#: ``human`` and ``machine`` are the two verdicts that move a notification's status,
+#: and they are the point of the family: a deployment whose calls are all ``machine``
+#: is dialling voicemail boxes, which is exactly the fact ``VOICE_TRANSPORT=ari`` alone
+#: could never report. ``unknown`` is AMD's own ``NOTSURE`` — counted and *not* written,
+#: because inventing one of the two verdicts from a refusal to give one would be a
+#: record of something that did not happen.
+#:
+#: ``unmatched`` is the series an operator watches: a callback naming a channel id no
+#: row holds means a call was placed that this database has no record of, or the
+#: callback is arriving before the dispatch committed it. Either way the answer is lost
+#: and only the count says so — the route answers the same 202 regardless.
+VOICE_OUTCOME_TOTAL: Final = _declare(
+    Counter(
+        "voice_outcome_total",
+        "Call-outcome callbacks received from the dialler, by outcome.",
+        ("outcome",),
+    )
+)
+
 #: One tick of the expiry sweep, counted per contract it leased.
 #:
 #: ``outcome`` is ``expired`` (the term had ended on the customer's own calendar, so

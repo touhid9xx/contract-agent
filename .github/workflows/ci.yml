@@ -478,15 +478,26 @@ jobs:
     name: observability (prometheus config, alert rule, alert delivery)
     runs-on: ubuntu-latest
     # The tags live here and are read from Compose below, so a version bump cannot
-    # make this job validate a Prometheus or an Alertmanager the stack does not run.
+    # make this job validate a Prometheus, an Alertmanager or a Grafana the stack does
+    # not run.
     env:
       PROM_VERSION: v2.55.0
       AM_VERSION: v0.27.0
+      # D10-155. The tag is here for the same reason and one more: the dashboard JSON
+      # names a datasource uid that only this tree's provisioning file defines, so a
+      # Grafana whose provisioning format moved would start, answer `/api/health` with
+      # 200, and serve zero dashboards. `tests/test_grafana_provisioning.py` checks the
+      # JSON against the metrics the code declares; only this job checks the tag loads
+      # it.
+      GF_VERSION: 11.3.0
     steps:
       - uses: actions/checkout@v4
 
       - name: pull the pinned Prometheus image
         run: docker pull "prom/prometheus:${PROM_VERSION}"
+
+      - name: pull the pinned Grafana image
+        run: docker pull "grafana/grafana:${GF_VERSION}"
 
       - name: the config loads, including the rule file it names
         run: |
@@ -544,6 +555,10 @@ jobs:
           wanted = {
               "prom/prometheus": os.environ["PROM_VERSION"],
               "prom/alertmanager": os.environ["AM_VERSION"],
+              # D10-155. Same failure, one layer out: a Grafana bump in the stack that
+              # this job kept validating would still pass every step here, because
+              # nothing below is version-specific until the boot does not provision.
+              "grafana/grafana": os.environ["GF_VERSION"],
           }
           for image, version in wanted.items():
               found = re.search(rf"image: {re.escape(image)}:(\S+)", compose)
@@ -594,6 +609,73 @@ jobs:
       # proves the path is real, which is exactly the claim `D10-111` could not make.
       - name: a firing rule reaches a mailbox (prometheus -> alertmanager -> mailpit)
         run: python3 backend/tests/smoke_alert_delivery.py
+
+      # D10-155. `tests/test_grafana_provisioning.py` reads `ops/grafana/` and the
+      # metric registry and proves they agree, with no container. What it cannot prove
+      # is that the pinned image *loads* them: a provisioning schema change, a provider
+      # path case difference, or a uid that collides all leave that test green and the
+      # operator with an empty Grafana. So this boots the image the stack pins with the
+      # stack's own mounts and asks Grafana itself — does the uid the panels name
+      # resolve, and does the dashboard come back marked as provisioned from this tree?
+      #
+      # The anonymous probe is the security half. `GF_AUTH_ANONYMOUS_ENABLED=false` is
+      # the stack's setting; if a later image defaulted open, or honoured a renamed
+      # variable instead of this one, the panels — queue depths and contract counts per
+      # tenant — would be readable by anyone who reached the port.
+      #
+      # What it does not prove: that a panel *renders* against a live Prometheus. No
+      # Prometheus runs here, so every query would answer empty. This says the JSON was
+      # accepted and stored — the claim the test above cannot make, and this one stops
+      # there.
+      #
+      # The wait polls the dashboard endpoint rather than `/api/health`: this image runs
+      # its migrations on first start (measured at over two minutes on a slow host), and
+      # `/api/health` answers 200 before provisioning has finished, which would make
+      # this a race that fails on the slowest runner in the fleet.
+      - name: the pinned Grafana serves the provisioned dashboard
+        env:
+          GF_ADMIN: ci-grafana-check
+        run: |
+          set -euo pipefail
+          docker rm -f ci-grafana >/dev/null 2>&1 || true
+          trap 'docker rm -f ci-grafana >/dev/null 2>&1 || true' EXIT
+          docker run -d --name ci-grafana \
+            --publish 127.0.0.1:3001:3000 \
+            -v "$PWD/ops/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro" \
+            -v "$PWD/ops/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro" \
+            -v "$PWD/ops/grafana/dashboards:/etc/grafana/dashboards:ro" \
+            -e GF_SECURITY_ADMIN_PASSWORD="$GF_ADMIN" \
+            -e GF_AUTH_ANONYMOUS_ENABLED=false \
+            -e GF_USERS_ALLOW_SIGN_UP=false \
+            -e GF_ANALYTICS_REPORTING_ENABLED=false \
+            -e GF_ANALYTICS_CHECK_FOR_UPDATES=false \
+            "grafana/grafana:${GF_VERSION}"
+
+          dashboard=http://127.0.0.1:3001/api/dashboards/uid/contract-agent-overview
+          for attempt in $(seq 1 90); do
+            if curl -fsS -u "admin:$GF_ADMIN" "$dashboard" -o /tmp/dashboard.json; then
+              echo "the dashboard was served after ${attempt} attempts"
+              break
+            fi
+            sleep 2
+          done
+
+          test -s /tmp/dashboard.json || { docker logs ci-grafana; exit 1; }
+          grep -q '"provisioned":true' /tmp/dashboard.json
+          grep -q '"provisionedExternalId":"contract-agent.json"' /tmp/dashboard.json
+          echo "the dashboard is provisioned from ops/grafana/dashboards/contract-agent.json"
+
+          curl -fsS -u "admin:$GF_ADMIN" \
+            http://127.0.0.1:3001/api/datasources/uid/prometheus-local \
+            | grep -q '"url":"http://prometheus:9090"'
+          echo "the datasource uid the panels name resolves to the stack's Prometheus"
+
+          code=$(curl -s -o /dev/null -w '%{http_code}' "$dashboard")
+          test "$code" = 401 || {
+            echo "anonymous access answered $code, not 401 — the panels are public"
+            exit 1
+          }
+          echo "the panels are not readable without a login"
 
   # ------------------------------------------------------------------- image
   # `Dockerfile.backend` is the artifact `docker-compose.yml` runs, and until this

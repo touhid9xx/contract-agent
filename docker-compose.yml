@@ -473,6 +473,76 @@ services:
       retries: 3
       start_period: 10s
 
+  grafana:
+    # D10-155. Prometheus has been scraped and alerting since D10-111 and D10-116, and every
+    # family `app/core/metrics.py` declares was written for a screen that did not exist: the
+    # only way to read one was `curl localhost:9090/api/v1/query`. The dashboards are
+    # provisioned from `ops/grafana/`, which is the same argument the Prometheus block makes
+    # two screens up — the JSON a test reads in this tree is byte-for-byte the JSON this
+    # container loads, because `ops/` is mounted where the provider looks rather than copied
+    # to a state volume.
+    #
+    # Pinned. The reason is stronger here than for the scraper: the dashboard JSON names a
+    # datasource uid that only this tree's provisioning file defines, so a tag whose
+    # provisioning format moved would load zero dashboards and still answer `/api/health`
+    # with 200. `tests/test_grafana_provisioning.py` guards the uid pair without a
+    # container; the CI smoke proves this tag actually serves them.
+    image: grafana/grafana:11.3.0
+    volumes:
+      # Mounted by leaf, not as `./ops/grafana/provisioning` whole. Measured: the whole tree
+      # makes Grafana log, at error level on every boot, `can't read alerting provisioning
+      # files from directory /etc/grafana/provisioning/alerting: no such file or directory`,
+      # because this tree ships no Grafana alert rules — the rules are Prometheus rule files
+      # in `ops/prometheus/`. An error line that is always present is a line people learn to
+      # skip, and that is how the next real one gets missed.
+      - ./ops/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./ops/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./ops/grafana/dashboards:/etc/grafana/dashboards:ro
+    ports:
+      # Loopback only. Grafana serves a login form and, with anonymous access off, refuses
+      # everything else — but the panels name queue depths and contract counts, and a
+      # published port is how a local stack's operational view becomes somebody else's.
+      - "127.0.0.1:${GRAFANA_PORT:-3001}:3000"
+    environment:
+      # Written as a refusal, like the two MYSQL passwords: a `:-admin` default would be a
+      # well-known password on every machine that runs this stack, and the example file
+      # carries a value so `cp .env.example .env` still starts.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      # Stated rather than relied on. Both are already the upstream defaults; writing them
+      # down means a future default cannot quietly turn this deployment into an
+      # unauthenticated read of the panels above, or into an open sign-up form.
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # Grafana reports usage and checks for updates by default. This deployment's premise is
+      # that nothing leaves the machine, so both are off here instead of left as a default a
+      # later version could flip without this file changing.
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      # The provisioner rescans its directory this often; without it a dashboard edited in
+      # `ops/` needs a container restart even though `dashboards.yml` asks for 30s.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/contract-agent.json
+    # Measured: this image runs as uid 472 and writes `grafana.db` into `/var/lib/grafana`
+    # on boot, so the root-owned-tmpfs trap the Prometheus block records applies unchanged
+    # and the explicit mode is again the whole fix — `read_only` stays true. The cost is the
+    # same trade: the panels survive a restart because they are files, and anything starred
+    # or edited in the UI does not, which is the point of provisioning them.
+    tmpfs:
+      - /var/lib/grafana:mode=1777,size=64m
+      - /tmp:mode=1777,size=16m
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # Measured inside this image: `/usr/bin/wget --spider -q .../api/health` exits 0. It
+      # says "the server is serving", never "a dashboard rendered" — the second question is
+      # answered by the dashboard endpoint in CI, and by `up` for the thing being plotted.
+      test: ["CMD", "/usr/bin/wget", "--spider", "-q", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+
   # D10-116. The receiver the rule never had. `D10-111` recorded the gap in its own words —
   # "no Alertmanager, the rule fires into an empty `ALERTS`, nobody paged" — and the shape
   # of it was: `promtool` validated the rule, Prometheus evaluated it, `/alerts` listed it,

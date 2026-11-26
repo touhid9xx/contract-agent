@@ -468,6 +468,42 @@ def channel_mix_counts_for_tenant(
     return counts
 
 
+def notification_for_provider_message_id(
+    session: Session, provider_message_id: str
+) -> Notification | None:
+    """The row we sent as ``provider_message_id``, **unscoped**, or ``None``.
+
+    The third unscoped query in this module, and the reason is the same one
+    :func:`claim_next_due` gives: the caller has no principal to be scoped to. This
+    lookup serves the call-outcome webhook (:mod:`app.api.v1.inbound_voice`), where the
+    *provider's* channel id is the only handle that arrives. A tenant is never named in
+    that payload, and accepting one would let a caller redirect an outcome onto somebody
+    else's row — the same reasoning
+    :class:`~app.api.v1.inbound.WebhookMessage` gives for having no tenant field at all.
+
+    What makes the widening safe is that the value matched is not a guess. A channel id
+    is issued by the provider for one call this deployment placed, and it appears in
+    this table only because :mod:`app.workers.dispatch` recorded what our own dial
+    returned. A stranger cannot derive one from a phone number, and the route that calls
+    this is signed with a secret only our own dialler holds.
+
+    Two smaller decisions. An empty string matches nothing rather than matching the
+    unsent rows, which all share ``NULL`` and none of which could be the subject of a
+    callback. And the read is ordered newest-first: the column carries no unique
+    constraint, so a provider that ever reused an id would otherwise make the answer
+    depend on insertion order, which is not the same order on both engines.
+    """
+    if not provider_message_id:
+        return None
+    stmt = (
+        select(Notification)
+        .where(Notification.provider_message_id == provider_message_id)
+        .order_by(Notification.id.desc())
+        .limit(1)
+    )
+    return session.execute(stmt).scalars().first()
+
+
 #: Deliberately **no** tenant-scoped twin of :func:`pending_overdue_counts`.
 #:
 #: Its two siblings have one each because an operator reading a count and a tenant

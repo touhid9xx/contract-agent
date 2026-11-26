@@ -116,6 +116,11 @@ MIN_BLIND_INDEX_KEY_LENGTH = 32
 #: an internet-facing endpoint and anyone who can guess a phone number, and a wrong
 #: guess is answered by the same 202 a right one gets — so an attacker learns nothing
 #: per attempt and the only cost of guessing is the length of this value.
+#:
+#: Reused verbatim as the floor for ``VOICE_OUTCOME_SECRET`` (``D10-154``). The name
+#: predates the second signed webhook and is kept rather than generalised because the
+#: ledgers already cite it by that spelling; the *number* is the claim that matters, and
+#: it is the same claim: a signing key is the whole of the authentication.
 MIN_INBOUND_SECRET_LENGTH = 32
 #: The channels this build has a transport *factory* for at all — the ceiling that no
 #: setting can raise.
@@ -663,6 +668,20 @@ class Settings(BaseSettings):
     #: correctness reason as ``sms_timeout_seconds``: the scheduler sends while
     #: holding the row lock.
     voice_ring_seconds: int = Field(default=25, gt=0, le=120)
+    #: The shared secret Asterisk signs call-outcome callbacks with — the route that
+    #: finally answers what ``voice_transport`` alone cannot: whether a human or an
+    #: answering machine picked up (``D10-154``).
+    #:
+    #: This value *is* the switch. Unlike ``inbound_transport`` there is no separate
+    #: on/off variable, because the callback has exactly one possible author — our own
+    #: Asterisk — so "can we be told?" and "how do we authenticate the teller?" are the
+    #: same question. Empty means no route is mounted and the path answers 404, which is
+    #: the honest default for a build that never dials.
+    #:
+    #: Separate from ``inbound_webhook_secret`` on purpose: they authenticate different
+    #: callers with different lifetimes, and one leaked SMS gateway secret must not also
+    #: let its holder invent call outcomes.
+    voice_outcome_secret: str = ""
 
     # --- inbound ---------------------------------------------------------
     #: Whether this deployment can read a reply. ``none`` is the default and the only
@@ -1044,6 +1063,35 @@ class Settings(BaseSettings):
         # :meth:`_check_blind_index_key` above, which runs only when the variable is
         # actually present. Checking it again here would have to answer "absent" and
         # "blank" the same way, and they are not the same deployment.
+
+        # A call-outcome secret with no dialler is a callback nobody can place. This
+        # build writes a provider channel id from exactly one place — ``AriVoiceSender``
+        # — so with ``VOICE_TRANSPORT=none`` no notification row can ever carry the id a
+        # callback names and the route would accept signed traffic and match nothing,
+        # for ever. Refused in every environment, because it is a contradiction in the
+        # deployment rather than a production-only risk.
+        #
+        # Blank is *not* a half-configured switch the way an empty
+        # ``INBOUND_WEBHOOK_SECRET`` is: absent means "this deployment cannot hear call
+        # outcomes", which is honest and is the default. A value that is present but
+        # short is the operator believing they configured something.
+        outcome_secret = self.voice_outcome_secret.strip()
+        if outcome_secret:
+            if self.voice_transport != "ari":
+                raise ValueError(
+                    "VOICE_OUTCOME_SECRET must not be set when VOICE_TRANSPORT is not "
+                    "ari: only AriVoiceSender records the channel id a call-outcome "
+                    "callback names, so nothing could ever match and the route would "
+                    "answer 202 to every signed request for ever. Set "
+                    "VOICE_TRANSPORT=ari, or leave the secret empty."
+                )
+            if len(outcome_secret) < MIN_INBOUND_SECRET_LENGTH:
+                raise ValueError(
+                    "VOICE_OUTCOME_SECRET must be at least "
+                    f"{MIN_INBOUND_SECRET_LENGTH} characters; it is the signing key for "
+                    "the call-outcome callback, and a caller that can forge one can "
+                    "claim any call was answered by a person"
+                )
 
         # Inbound is the only feature that makes a reminder SMS stoppable, so enabling
         # it requires both halves. Refusing a half-configured gateway is what stops a

@@ -6360,8 +6360,12 @@ violation raises without echoing the value. See D10-90.
 **Not done, and not faked:** the other ten spec families (escalations, agent decisions, voice/AMD,
 ollama requests/latency/repair, circuit-breaker state, kafka lag, worker replicas, outbox pending,
 redis connections) are absent rather than declared-and-never-incremented, so no alert rule can be
-written yet; `extractions_total` records only `status="ok"`; quiet-hours deferrals are not counted;
-and there are still no Prometheus rules, Grafana dashboards or OpenTelemetry/Jaeger traces.
+written yet; `extractions_total` records only `status="ok"`; quiet-hours deferrals are not counted.
+This paragraph closed with "there are still no Prometheus rules, Grafana dashboards or
+OpenTelemetry/Jaeger traces" and `D10-155` amended it, because only the last of the three survives:
+rules ship since `D10-123`, a scrape config and receiver since `D10-116`, and a provisioned
+seventeen-panel dashboard since this slice. Tracing is still absent, and this entry does not claim
+otherwise.
 
 Gates: `pytest tests/test_metrics.py` -> 21 passed; the five suites covering the instrumented files
 -> 147 passed; `mypy app` -> no issues in 68 files.
@@ -9016,12 +9020,14 @@ rather than memory, and nothing inspects a payload beyond `ContractCreateRequest
 **Served.** `VOICE_TRANSPORT=ari` makes `Channel.VOICE` a channel this build can attempt:
 `AriVoiceSender` asks an Asterisk REST Interface dialler to create a channel
 (`POST {ARI_BASE_URL}/ari/channels`, Basic auth, `endpoint` / `app` / `timeout` and an optional
-`callerId`), and `deliverable_notification_channels` reports voice once that switch is on.
-Before this slice voice was held out of `NOTIFIABLE_CHANNELS` on *every* configuration, so a
-queued voice reminder could only park `unsupported` — the state `test_config.py` pinned as a
-relationship, deliberately, so that a channel becoming deliverable would fail the test instead
-of inheriting it. Answering-machine detection on Whisper and the Stasis application that would
-hear the answer are not built, and `DEMO.md`'s voice row now reads "call placement only".
+`callerId`), and `deliverable_notification_channels` reports voice once that switch is on. Before
+this slice voice was held out of `NOTIFIABLE_CHANNELS` on *every* configuration, so a queued voice
+reminder could only park `unsupported` — the state `test_config.py` pinned as a relationship,
+deliberately, so that a channel becoming deliverable would fail the test instead of inheriting it.
+Answering-machine detection on Whisper and the Stasis application that would hear the answer are
+still not built. `D10-154` added the half that did not need them: the dialplan's own `AMD()` posts
+its verdict to `POST /api/v1/voice/outcome`, so a contacted voice row now reaches `answered` or
+`machine`. `DEMO.md`'s voice row reads call placement *and* call outcome as a result.
 
 **Configuration is a third switch, and refuses four shapes.** `VOICE_TRANSPORT`,
 `ARI_BASE_URL`, `ARI_USERNAME`, `ARI_PASSWORD`, `ARI_ENDPOINT`, `ARI_APP`, `ARI_CALLER_ID` and
@@ -9356,6 +9362,90 @@ expecting failure, and restores both files byte-identically by SHA-256. Both wer
 invisible; it proves a refusal exists rather than that it is sufficient, since a function may refuse
 `limit <= 0` and then hand SQL `limit - 1`; and the twenty are pinned, so a new reader forces an
 edit.
+
+### D10-154 — A voice reminder can now say whether a person answered
+
+**Served.** `POST /api/v1/voice/outcome` lets the dialplan post Asterisk's own `AMD()` verdict back,
+and it is now the only path in the build that can write `NotificationStatus.ANSWERED` or
+`NotificationStatus.MACHINE` — two members declared since `0001_initial_schema.py` that nothing
+could reach until this slice. `human` moves a contacted row to `answered`, `machine` moves it to
+`machine`, and `NOTSURE` or `DONTCARE` move it nowhere at all: `STATUS_FOR_VERDICT` has two entries
+and `unknown` is not one of them, so the refusal to invent an outcome is a property of the mapping
+rather than a branch someone has to keep.
+
+**It reuses the inbound seam instead of copying it.** `hmac_matches`, `accepted_response` and
+`raw_body` moved out of `inbound.py`'s privates and are shared by both webhooks, so there is one
+constant-time comparison over the raw bytes rather than two that can drift. The gate order is size,
+then signature, then shape, then lookup, and every outcome past the gates gets the same `202` — a
+caller holding the secret still cannot tell a matched channel id from an unmatched one. An unset
+`VOICE_OUTCOME_SECRET` answers `404` rather than a permanently unmatchable `202`.
+
+**No migration.** The statuses were already in `0001`, model and MySQL enum both, so the slice is
+one route (`backend/app/api/v1/inbound_voice.py`), one recorder and one config key.
+`notification_for_provider_message_id` in `app/db/repositories/notifications.py` is the third
+unscoped read in that module and says why: the channel id is provider-issued for a call we placed,
+not derivable from a phone number, and an empty string matches nothing rather than racing the
+`NULL`-holding unsent rows. `VOICE_OUTCOME_TOTAL` carries six labels, matching `sms_inbound_total`'s
+spelling.
+
+**What gated it.** Eighteen tests in the new `backend/tests/test_inbound_voice.py`. Suite: 1472
+passed, 16 skipped, 1488 collected, 0 failed, 0 errors. `ruff check` clean, 159 files formatted,
+`mypy` clean across 80 sources, ledger closing.
+
+**Limits.** AMD decides on audio energy, not speech — a short greeting reads `machine` and a long
+voicemail greeting can read `human` — so the column holds the dialler's verdict, not ground truth.
+No audio, no transcript, no audit row. No test places a call: the route is proven against signed
+HTTP, not against a PBX, so the dialplan stanza is documented rather than exercised. Replay safety
+is idempotence by state, not a nonce, so a replay and a re-send are indistinguishable. The Stasis
+application with Whisper that `DEMO.md` fiction describes is still unbuilt; this records what
+Asterisk already knows.
+
+| Verdict to status | `HUMAN` → `answered`, `MACHINE` → `machine` |
+| Verdict to nothing | `NOTSURE`, `DONTCARE` → `unknown`, counted, no status written |
+| Refused before lookup | oversize `413`, bad signature `401`, unknown verdict `400` |
+| Refused before hashing | body over `MAX_WEBHOOK_BYTES`, on size alone |
+| Unconfigured | `VOICE_OUTCOME_SECRET` unset → `404`, not an unmatchable `202` |
+| Response | uniform `202`, identical for matched and unmatched |
+
+### D10-155 — The metrics had readers and no screen
+
+**Served.** `docker-compose.yml` gains `grafana` (`grafana/grafana:11.3.0`, loopback
+`${GRAFANA_PORT:-3001}`, `--read-only` with tmpfs for `/var/lib/grafana`, uid `472`,
+`no-new-privileges`, anonymous access and sign-up off), and `ops/grafana/` provisions one dashboard
+of seventeen panels over the families `app/core/metrics.py` already declares. Until this slice every
+one of those families was written for a screen that did not exist: the only reader was `curl`
+against Prometheus.
+
+**The guard is the part that makes it re-runnable.** `backend/tests/test_grafana_provisioning.py`
+reads the dashboard JSON, the datasource and provider YAML, and the metrics registry together, so a
+renamed family or a moved datasource uid fails in CI instead of emptying a panel. It reuses
+`_published` from `test_alert_rules.py` rather than growing a second AST reader, and asserts each
+panel separately so one failure cannot hide the rest. Writing it found two real defects in the
+dashboard — a declared family with no panel, and a range selector parsed as a series name.
+
+**Three leaf mounts, not the provisioning tree.** Measured: the whole tree makes Grafana log a
+missing `provisioning/alerting` directory at error level on every boot, because this tree ships
+Prometheus rule files rather than Grafana alert rules. The `observability` job now pulls the pinned
+tag, covers `grafana/grafana` in the existing three-way tag-parity loop, and boots the stack's own
+mounts to assert the dashboard, the datasource and anonymous `401` from Grafana itself.
+
+**What gated it.** Eight tests in the new guard. Suite: 1488 collected, 1472 passed, 16 skipped, 0
+failed, 0 errors. `ruff check` clean, 160 files formatted, `mypy` clean across 80 sources,
+`docker compose config -q` exit 0.
+
+**Limits.** No test asserts a panel renders: the guard proves Grafana stored the JSON and that every
+query names a declared series, and the CI step proves the pinned image serves it — a panel drawing
+nothing because Prometheus holds no samples is invisible to both. The two
+`xychart is already registered` boot errors are 11.3.0's own quirk. Dashboards are read-only by
+design, so a browser edit is lost at restart. Tracing is untouched: OpenTelemetry and Jaeger remain
+absent.
+
+| Dashboard | `contract-agent-overview`, 17 panels, 19 queries |
+| Datasource | `prometheus-local` → `http://prometheus:9090`, `editable: false` |
+| Provisioning | `ops/grafana/` mounted by leaf: datasources, dashboards provider, dashboards |
+| Read-only | `allowUiUpdates: false`, `disableDeletion: true` |
+| Guarded by | `tests/test_grafana_provisioning.py` against the metrics registry |
+| Proved by CI | the pinned image serves the dashboard; anonymous access answers `401` |
 
 ## Non-negotiable reminders
 

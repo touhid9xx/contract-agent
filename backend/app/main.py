@@ -28,6 +28,7 @@ from app.api.v1.dashboard import router as dashboard_router
 from app.api.v1.escalations import router as escalations_router
 from app.api.v1.health import router as health_router
 from app.api.v1.inbound import router as inbound_router
+from app.api.v1.inbound_voice import router as inbound_voice_router
 from app.api.v1.metrics import router as metrics_router
 from app.api.v1.notifications import router as notifications_router
 from app.api.v1.review import router as review_router
@@ -203,6 +204,12 @@ def create_app(
     # a gateway -- and it answers 404 when no inbound transport is configured, so a
     # deployment without SMS has no endpoint to find here.
     app.include_router(inbound_router, prefix=app_settings.api_v1_prefix)
+    # The second account-less route, and the same trade: our own dialler posts back what
+    # Asterisk's AMD() decided, so the endpoint authenticates the dialler rather than a
+    # principal. It carries its own secret because it writes a delivery fact rather than
+    # a consent revocation, and it answers 404 unless VOICE_OUTCOME_SECRET is set, so a
+    # deployment that dials nothing has no endpoint here to find.
+    app.include_router(inbound_voice_router, prefix=app_settings.api_v1_prefix)
 
     @app.get("/", include_in_schema=False)
     async def root() -> dict[str, Any]:

@@ -68,7 +68,19 @@ from app.db.repositories.contracts import apply_consent, consent_flags
 from app.db.repositories.fields import contracts_for_contact
 from app.workers.extraction import normalize_value
 
-__all__ = ["router"]
+#: ``router`` plus the webhook primitives the voice-outcome route
+#: (:mod:`app.api.v1.inbound_voice`) reuses. Exported deliberately: those two routes are
+#: the only unauthenticated entry points this API has, and the parts they must not
+#: disagree about — the size gate, the header name, the digest comparison, the uniform
+#: accepted response, and reading the body *before* parsing it — are stated once here.
+__all__ = [
+    "MAX_WEBHOOK_BYTES",
+    "SIGNATURE_HEADER",
+    "accepted_response",
+    "hmac_matches",
+    "raw_body",
+    "router",
+]
 
 log = structlog.get_logger(__name__)
 
@@ -150,14 +162,18 @@ def is_stop_word(text: str) -> bool:
     return cleaned in STOP_WORDS
 
 
-def valid_signature(settings: Settings, body: bytes, signature: str | None) -> bool:
-    """Whether ``signature`` is this deployment's HMAC over ``body``.
+def hmac_matches(secret: str, body: bytes, signature: str | None) -> bool:
+    """Whether ``signature`` is ``hex(HMAC-SHA256(secret, body))``.
+
+    Takes the secret as an argument rather than reading a setting, so the two signed
+    webhooks this API accepts — the gateway's ``STOP`` and Asterisk's call outcome —
+    share one comparison instead of two that could drift. They authenticate different
+    callers with different secrets, but the *arithmetic* has one correct form.
 
     Fails closed on every axis: no secret configured, no header, or a mismatch all
     answer ``False``. An unset secret must never mean "unsigned is fine" — that is the
     shape of bug that makes an open endpoint look authenticated.
     """
-    secret = settings.inbound_webhook_secret
     if not secret or not signature:
         return False
     expected = hmac.new(secret.encode("utf-8"), body, sha256).hexdigest()
@@ -170,12 +186,21 @@ def valid_signature(settings: Settings, body: bytes, signature: str | None) -> b
     return hmac.compare_digest(expected.encode("ascii"), signature.strip().lower().encode("utf-8"))
 
 
-def _accepted() -> JSONResponse:
+def valid_signature(settings: Settings, body: bytes, signature: str | None) -> bool:
+    """Whether ``signature`` is this deployment's inbound webhook HMAC over ``body``.
+
+    Kept as the named entry point it has always been — it is the gateway's secret that
+    is being checked here — with the comparison itself in :func:`hmac_matches`.
+    """
+    return hmac_matches(settings.inbound_webhook_secret, body, signature)
+
+
+def accepted_response() -> JSONResponse:
     """The single response every accepted webhook gets, whatever really happened."""
     return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content={"status": "accepted"})
 
 
-async def _raw_body(request: Request) -> bytes:
+async def raw_body(request: Request) -> bytes:
     """Read the body before parsing, because the signature covers the exact bytes.
 
     This is the only ``await`` on the path. FastAPI resolves dependencies before it
@@ -229,7 +254,7 @@ def _opt_out_one(
 
 
 def receive_sms(
-    body: bytes = Depends(_raw_body),
+    body: bytes = Depends(raw_body),
     settings: Settings = Depends(app_settings),
     session: Session = Depends(get_request_session),
     contact_index: ContactBlindIndex = Depends(blind_index_or_503),
@@ -239,7 +264,7 @@ def receive_sms(
 
     A plain ``def`` on purpose: the handler does blocking database work, so FastAPI
     runs it in a worker thread, while the only ``await`` in the path (reading the body)
-    lives in :func:`_raw_body`. An ``async`` handler calling this repository code
+    lives in :func:`raw_body`. An ``async`` handler calling this repository code
     directly would block the event loop for every other request.
     """
     # With no gateway configured there is no such endpoint. 404 rather than 403: a 403
@@ -276,7 +301,7 @@ def receive_sms(
 
     if not is_stop_word(message.text):
         SMS_INBOUND_TOTAL.inc(outcome=OUTCOME_IGNORED)
-        return _accepted()
+        return accepted_response()
 
     try:
         normalized = normalize_value(FieldName.PHONE, message.sender)
@@ -287,7 +312,7 @@ def receive_sms(
         # produces, and every one of those is an opt-out we did not honour.
         SMS_INBOUND_TOTAL.inc(outcome=OUTCOME_UNMATCHED)
         log.warning("sms_inbound_sender_not_a_phone_number", sms_id=message.sms_id)
-        return _accepted()
+        return accepted_response()
 
     digest = contact_digest(contact_index, FieldName.PHONE, normalized)
     if digest is None:
@@ -297,7 +322,7 @@ def receive_sms(
         # start succeeding; the operator needs the signal, not a retry storm.
         log.error("sms_inbound_opt_out_not_indexable", field=FieldName.PHONE.value)
         SMS_INBOUND_TOTAL.inc(outcome=OUTCOME_UNMATCHED)
-        return _accepted()
+        return accepted_response()
 
     matches = contracts_for_contact(
         session,
@@ -341,7 +366,7 @@ def receive_sms(
         SMS_INBOUND_TOTAL.inc(outcome=OUTCOME_ALREADY_OPTED_OUT)
         log.info("sms_inbound_already_opted_out", sms_id=message.sms_id)
 
-    return _accepted()
+    return accepted_response()
 
 
 router.add_api_route(
