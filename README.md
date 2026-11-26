@@ -60,6 +60,44 @@ and they ship inside the image: the one-shot `migrate` service applies
 hand instead, the same image does it without a checkout —
 `docker compose run --rm migrate`.
 
+A `.env` file is not optional: Compose reads it through `env_file` and refuses to start
+while a `${…:?}` variable is unset. `cp .env.example .env` produces one. A `.env`
+written before the observability tier landed is missing `GRAFANA_PORT` and
+`GRAFANA_ADMIN_PASSWORD`, and the whole stack then fails to start with an error that
+names the second one — adding those two lines is the fix.
+
+`.env` is a default, not an authority: a variable of the same name exported in your shell
+wins over the file silently, with no warning. So if the API reports `Access denied for
+user`, ask a container what it was actually given before touching a volume —
+
+```bash
+docker compose run --rm --no-deps --entrypoint python migrate \
+  -c "import os; print(os.environ['DATABASE_URL'])"
+```
+
+— and note that `docker compose down -v` answers the same error by deleting the database.
+
+## Watch the stack
+
+The application is a background system: its workers tick quietly and most of what they
+do leaves no screen behind. All of it is nonetheless visible on loopback, and none of it
+is required to run the stack. `make logs` (or `docker compose logs -f api`) follows the
+processes' own lines; the rest is below. Every port is loopback-only and can be moved
+with the matching `*_PORT` variable from `.env.example`.
+
+| Address | What it answers |
+| --- | --- |
+| <http://localhost:3000> | The application: contracts, review queue, decisions, queues. |
+| <http://127.0.0.1:3001> | Grafana. The dashboard under `ops/grafana/dashboards/` plots every family `app/core/metrics.py` declares. Sign in as `admin` with `GRAFANA_ADMIN_PASSWORD`; anonymous access is off. |
+| <http://127.0.0.1:9090> | Prometheus. `/targets` is the honest answer to "is anything being scraped" — the API and all seven workers are targets, and `up{job="workers"}` is a question a boot cannot answer for itself. |
+| <http://127.0.0.1:9093> | Alertmanager. `/alerts` lists what fired; silences and the notification log live here too, and die with the container. |
+| <http://127.0.0.1:8025> | Mailpit. Everything the stack mails — escalation alerts, attention alerts, and any notification sent with `NOTIFICATION_TRANSPORT=smtp` — arrives here and can be *read* rather than inferred from a log line saying it was sent. |
+
+The panels are provisioned from files, so nothing edited in the Grafana UI survives a
+restart and nothing forgotten there is lost. The JSON is guarded by
+`backend/tests/test_grafana_provisioning.py`, which fails if a panel queries a series the
+code does not declare.
+
 ## Run the demo
 
 The Phase-0 mocked demo is kept for reference — it is not the application and is not

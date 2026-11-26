@@ -9429,9 +9429,10 @@ Prometheus rule files rather than Grafana alert rules. The `observability` job n
 tag, covers `grafana/grafana` in the existing three-way tag-parity loop, and boots the stack's own
 mounts to assert the dashboard, the datasource and anonymous `401` from Grafana itself.
 
-**What gated it.** Eight tests in the new guard. Suite: 1488 collected, 1472 passed, 16 skipped, 0
-failed, 0 errors. `ruff check` clean, 160 files formatted, `mypy` clean across 80 sources,
-`docker compose config -q` exit 0.
+**What gated it.** Eight tests in the new guard. Suite: 1496 collected, 1480 passed, 16 skipped, 0
+failed, 0 errors — first written as 1488/1472, which is `D10-154`'s pre-Grafana state, eight short;
+re-measured from a JUnit report. `ruff check` clean, 160 files formatted, `mypy` clean across 80
+sources, `docker compose config -q` exit 0.
 
 **Limits.** No test asserts a panel renders: the guard proves Grafana stored the JSON and that every
 query names a declared series, and the CI step proves the pinned image serves it — a panel drawing
@@ -9446,6 +9447,36 @@ absent.
 | Read-only | `allowUiUpdates: false`, `disableDeletion: true` |
 | Guarded by | `tests/test_grafana_provisioning.py` against the metrics registry |
 | Proved by CI | the pinned image serves the dashboard; anonymous access answers `401` |
+
+### D10-156 — The stack started nothing
+
+**Booted, and both reasons it had not been.** After `D10-155` the stack answered nothing: `migrate`
+exited 1 and every dependent service waited on it. First cause: `${GRAFANA_ADMIN_PASSWORD:?}` is
+interpolated when Compose parses the file, before any service or profile is selected, so a `.env`
+predating the Grafana service blocked the *whole* stack rather than Grafana alone — profiles do not
+scope it, tried and measured. Second cause, the expensive one:
+`Access denied for user 'contract_agent'@'%'` was the calling shell's `MYSQL_PASSWORD=ci`, exported
+by an earlier probe and preferred by Compose over `.env`, so every container was handed a credential
+in no file.
+
+**Repaired without destroying anything.** `contract_agent` held thirteen tables at head `0008` and
+four contract rows, so `down -v` was never an option: `ALTER USER … IDENTIFIED BY` plus `GRANT` and
+`FLUSH PRIVILEGES` on the running MySQL, then `docker compose up -d` with the stray variables
+cleared. Two volumes exist under this project — `mysql-data` from the current file, `mysql_data`
+from an older spelling — which is its own reason not to aim a `down -v` at a name.
+
+**What "up" now means, measured.** Fifteen services running, `migrate` exit 0, `api` healthy;
+`up{job="api"}` and `up{job="workers"}` = 1 (all seven workers); the seventeen-panel dashboard
+serves to `admin` on :3001; `/health/ready` 200, `/en/login` 200, Mailpit answering. `README.md`
+gained the *Watch the stack* address table and the note that a variable of the same name in your
+shell beats the file.
+
+| Blocked by | a `.env` with no `GRAFANA_ADMIN_PASSWORD`; the whole file is refused |
+| Looked like | `Access denied for user 'contract_agent'` in the migrate log |
+| Actually was | `MYSQL_PASSWORD=ci` exported in the shell, preferred over `.env` |
+| Repair | `ALTER USER` + `GRANT` on the live MySQL; the datadir was kept |
+| Kept | 13 tables at head `0008`, 4 contract rows |
+| Proved up | 15 services; `up` = 1 for the API and all seven workers |
 
 ## Non-negotiable reminders
 

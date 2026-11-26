@@ -12061,13 +12061,15 @@ endpoint rather than `/api/health`, because this image runs migrations first and
 before provisioning finishes, which is a race that fails on the slowest runner.
 
 **What gated it.** Eight tests in the new `backend/tests/test_grafana_provisioning.py`. Across the
-suite: 1488 collected, 1472 passed, 16 skipped, 0 failed, 0 errors. `ruff check` clean,
-`ruff format --check` across 160 files, `mypy` clean across 80 sources. The CI shell body was
-validated structurally and every string it asserts was taken from a live response, but it was not
-executed on this workstation: its `bash.exe` is the WSL relay with no distribution installed, so the
-body is reviewed and the responses it looks for are measured, not run. `docker compose config -q`
-exits 0 and renders `image: grafana/grafana:11.3.0`, and the tag-parity loop was run against the
-stack's three pinned images before the step was added.
+suite: 1496 collected, 1480 passed, 16 skipped, 0 failed, 0 errors. The pair was first written as
+1488/1472 — `D10-154`'s own pre-Grafana state, eight guard tests short — and re-measured from a
+JUnit report. `ruff check` clean, `ruff format --check` across 160 files, `mypy` clean across 80
+sources. The CI shell body was validated structurally and every string it asserts was taken from a
+live response, but it was not executed on this workstation: its `bash.exe` is the WSL relay with no
+distribution installed, so the body is reviewed and the responses it looks for are measured, not
+run; CI run `45859897215` has since executed it on a clean runner and it passed.
+`docker compose config -q` exits 0 and renders `image: grafana/grafana:11.3.0`, and the tag-parity
+loop was run against the stack's three pinned images before the step was added.
 
 **Limits.** No test here asserts a panel *renders*. The guard proves Grafana accepted and stored the
 JSON and that every query names a series the code declares; the CI step proves the pinned image
@@ -12087,3 +12089,71 @@ OpenTelemetry/Jaeger traces". Both were true when written and both are now stale
 direction — this stack ships rules since `D10-123`, a scrape config and an Alertmanager receiver
 since `D10-116`, and dashboards since this slice. The trailing clause about tracing is the only one
 still true, so the amendments keep it and strike the rest.
+
+### D10-156 — The stack started nothing, and `.env` was not the authority
+
+The slice before this one landed, CI went green on the committed image, and `docker compose up` then
+produced a deployment that answered nothing at all. `migrate` exited 1, every service declared
+`depends_on: migrate` waited for a container that had already given up, and the honest description
+of fifteen containers was that they were running. Two independent causes, and neither of them was in
+`docker-compose.yml`: the file was correct and the state around it was not, which is the class of
+failure a compose file cannot describe and a test of the compose file cannot find.
+
+**A `${…:?}` guard is a parse-time requirement on the whole file, not on one service.**
+`GRAFANA_ADMIN_PASSWORD` is written as `${GRAFANA_ADMIN_PASSWORD:?…}` because a provisioned Grafana
+with a default admin password is a worse default than a refusal. Interpolation happens when Compose
+parses the file, before any service or profile is selected, so a `.env` written before `D10-155` had
+no Grafana password and Compose refused *the entire stack* rather than the Grafana service inside
+it. Putting Grafana behind a profile was tried and does not help — inactive profiles are
+interpolated too, measured rather than assumed — so the correct mental model is that `:?` is a
+deployment-wide requirement. The only honest place to announce one is `.env.example`, plus the
+sentence in `README.md` that names the exact error a stale `.env` produces.
+
+**And the error that actually dominated the log was not that one.** Once the two missing keys were
+in `.env`, `migrate` failed with `Access denied for user 'contract_agent'@'%'`, which reads as the
+classic stale-datadir problem: MySQL applies `MYSQL_PASSWORD` only when it initializes a datadir, so
+a volume created under an older password keeps the older password forever. That diagnosis was wrong
+here, and acting on it would have cost data. The real cause was Compose's precedence: the
+environment of the calling process is consulted *above* `env_file` and above `.env`. The shell that
+started this stack had `MYSQL_PASSWORD=ci` and `MYSQL_ROOT_PASSWORD=ci` exported into it by an
+earlier probe of mine, so every container was handed a password that appears in no file in this
+repository, while MySQL had been initialized, eleven days earlier, with the password `.env` has
+always carried. Both halves were correct and they never met.
+
+**It was diagnosed by asking a container what it had been given.** Reading `docker-compose.yml`
+again, or `.env` again, could only confirm what both already said.
+`docker compose run --rm --no-deps --entrypoint python migrate` with a `-c` program that prints
+`repr(os.environ['DATABASE_URL'])` answers with the value the process actually received, and it came
+back with `contract_agent:ci@mysql` — a credential in no file. That single command separates the
+three candidates (the file, the volume, the environment) in one step. The rule generalises past this
+bug: `.env` is a default, not an authority, and the parent process wins silently, with no warning
+anywhere and no way for the file to know it was overridden.
+
+**The repair was `ALTER USER`, and what decided it was counted first.** `contract_agent` held
+thirteen tables at alembic head `0008` and four contract rows. The volume was created on 2026-11-15
+and the MySQL entrypoint never logged *Initializing database*, which is precisely why
+`MYSQL_PASSWORD` had never been applied to it. So `docker compose down -v` would have re-initialized
+everything correctly and destroyed the lot, in order to change a password — the common advice, and
+destructive here. Instead `ALTER USER 'contract_agent'@'%' IDENTIFIED BY …` plus a `GRANT` and
+`FLUSH PRIVILEGES` against the running server, using the root password `.env` already had and which
+still worked. Two volumes also sit under this project — `contract-agent_mysql-data` created by the
+current file, and `contract-agent_mysql_data` left by an older spelling of the same mount — which is
+a second reason not to aim a `down -v` at a name.
+
+**What "up" was then measured to mean.** Fifteen services running, `migrate` at exit 0, `api`
+healthy; `up{job="api"}` and `up{job="workers"}` both 1, the latter for all seven workers once the
+scrape interval had passed; the provisioned dashboard served to `admin` with its seventeen panels;
+`/health/ready` 200 from the API, `/en/login` 200 from the frontend, Mailpit answering. The
+attention worker's first tick printed counts read through the same tenant-scoped session factory
+every other reader uses, which is the closest thing here to proof that the credential change took
+rather than merely stopped erroring.
+
+**Limits.** The repair was a hand operation on a live development datadir. Nothing in this
+repository performs it and nothing should: a fresh volume is initialized from the variables and
+never needs it, so a deployment in this state is one whose `.env` and volume had already diverged,
+and the fix there is a decision rather than a command. No test covers environment precedence —
+`test_config.py`'s `COMPOSE_ONLY_KEYS` pins that a compose-only key *exists*, not that it is read
+from the file an operator believes. And the stack is proved up at one instant only: the workers tick
+on intervals from minutes to hours, so what is recorded is that every process started, published
+`up`, and had a database it could read — not that any of them has since completed a cycle it was
+due.
