@@ -9,11 +9,16 @@ customer's own word sufficient.
 
 Four decisions shape it, and each one is the fail-safe direction:
 
-1. **Signed, over the raw bytes.** The gateway authenticates with
-   ``X-Signature: hex(HMAC-SHA256(secret, body))``. The digest is computed over the
-   bytes as received, before parsing, because a signature over a *re-serialized* body
-   is a signature over something the sender never signed. ``compare_digest`` so the
-   comparison does not leak the expected value byte by byte.
+1. **Signed, by whichever arithmetic the gateway uses.** A ``textbee`` webhook
+   authenticates with ``X-Signature: hex(HMAC-SHA256(secret, body))``, computed over
+   the bytes as received, before parsing, because a signature over a *re-serialized*
+   body is a signature over something the sender never signed. A ``twilio`` webhook
+   cannot be checked that way — Twilio signs the URL plus its sorted form fields with
+   the account auth token — so it is parsed first and verified second. Both use
+   ``compare_digest``, so neither comparison leaks the expected value byte by byte, and
+   both fail closed when the secret is unset. The transport is a configured setting
+   rather than a guess from the headers: accepting *either* signature would let the
+   weaker of the two authenticate every request.
 
 2. **The reply is always the same.** Every accepted outcome — opted out, already opted
    out, unknown number, not a stop word — returns ``202 {"status": "accepted"}``. The
@@ -41,9 +46,12 @@ texted us from" would be exactly the kind of secondary data an opt-out must not 
 
 from __future__ import annotations
 
+import base64
 import hmac
-from hashlib import sha256
+from collections.abc import Mapping
+from hashlib import sha1, sha256
 from typing import Annotated, Final
+from urllib.parse import parse_qsl
 
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
@@ -76,10 +84,12 @@ from app.workers.extraction import normalize_value
 __all__ = [
     "MAX_WEBHOOK_BYTES",
     "SIGNATURE_HEADER",
+    "TWILIO_SIGNATURE_HEADER",
     "accepted_response",
     "hmac_matches",
     "raw_body",
     "router",
+    "twilio_signature_matches",
 ]
 
 log = structlog.get_logger(__name__)
@@ -88,6 +98,10 @@ router = APIRouter(prefix="/inbound", tags=["inbound"])
 
 #: Header the gateway signs with. Named here so the route and its tests cannot drift.
 SIGNATURE_HEADER: Final = "X-Signature"
+
+#: Header Twilio signs with. A different header *and* a different digest to
+#: :data:`SIGNATURE_HEADER`: this one is ``base64(HMAC-SHA1(token, url + fields))``.
+TWILIO_SIGNATURE_HEADER: Final = "X-Twilio-Signature"
 
 #: A webhook is a few hundred bytes. Bounded so a *malformed* caller cannot make this
 #: process hold a large body in memory before the signature has been checked; the
@@ -195,6 +209,50 @@ def valid_signature(settings: Settings, body: bytes, signature: str | None) -> b
     return hmac_matches(settings.inbound_webhook_secret, body, signature)
 
 
+def twilio_signature_matches(
+    auth_token: str,
+    url: str,
+    params: Mapping[str, str],
+    signature: str | None,
+) -> bool:
+    """Whether ``signature`` is Twilio's signature over ``url`` and ``params``.
+
+    Twilio's scheme, which shares nothing with :func:`hmac_matches` but the idea:
+
+    * sort the form fields by key,
+    * concatenate each key with its value,
+    * append that to the full URL the request was made to,
+    * HMAC-SHA1 with the **account auth token**, then base64.
+
+    Three consequences worth stating, because each is a way to get this wrong:
+
+    ``url`` is an argument rather than read from the request. The URL is part of the
+    signed material, so a signature checked against a caller-supplied URL is a
+    signature the caller chose. It comes from settings, never from ``X-Forwarded-*``.
+
+    The key is the account auth token, which is *not* the API key secret that
+    authenticates outbound sends. They are different credentials and Twilio only ever
+    signs with the former.
+
+    SHA-1 here is not a choice — it is what Twilio computes, and this function only has
+    to agree with it. Its weakness is second-preimage, which is not the attack a
+    signature-over-a-shared-secret faces.
+
+    Fails closed on every axis, exactly like :func:`hmac_matches`: no token, no URL, no
+    header, or a mismatch all answer ``False``.
+    """
+    if not auth_token or not url or not signature:
+        return False
+    material = url + "".join(f"{key}{value}" for key, value in sorted(params.items()))
+    expected = base64.b64encode(
+        hmac.new(auth_token.encode("utf-8"), material.encode("utf-8"), sha1).digest()
+    )
+    # ``compare_digest`` over bytes: the header is decoded as latin-1, so a non-ASCII
+    # byte in ``X-Twilio-Signature`` must mismatch rather than raise a ``TypeError`` out
+    # of an unauthenticated handler.
+    return hmac.compare_digest(expected, signature.strip().encode("utf-8"))
+
+
 def accepted_response() -> JSONResponse:
     """The single response every accepted webhook gets, whatever really happened."""
     return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content={"status": "accepted"})
@@ -253,65 +311,78 @@ def _opt_out_one(
     return True
 
 
-def receive_sms(
-    body: bytes = Depends(raw_body),
-    settings: Settings = Depends(app_settings),
-    session: Session = Depends(get_request_session),
-    contact_index: ContactBlindIndex = Depends(blind_index_or_503),
-    signature: Annotated[str | None, Header(alias=SIGNATURE_HEADER)] = None,
-) -> JSONResponse:
-    """Accept one inbound message and, if it is a STOP, withdraw consent.
+def _read_twilio(
+    settings: Settings,
+    body: bytes,
+    signature: str | None,
+) -> tuple[str, str, str | None]:
+    """Verify a Twilio webhook and return ``(sender, text, message_sid)``.
 
-    A plain ``def`` on purpose: the handler does blocking database work, so FastAPI
-    runs it in a worker thread, while the only ``await`` in the path (reading the body)
-    lives in :func:`raw_body`. An ``async`` handler calling this repository code
-    directly would block the event loop for every other request.
+    Parsed *before* it is verified, unlike the JSON path, because Twilio's signature
+    covers the decoded fields rather than the received bytes — there is nothing to check
+    until the form has been read. That inversion is safe only because the size gate in
+    :func:`receive_sms` runs first: the parse is bounded before it happens.
+
+    Raises the same refusals the textbee path raises, so a probe cannot tell the two
+    transports apart by their error behaviour.
     """
-    # With no gateway configured there is no such endpoint. 404 rather than 403: a 403
-    # would confirm to a scanner that the route exists and is merely switched off.
-    if settings.inbound_transport == "none":
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
-
-    if len(body) > MAX_WEBHOOK_BYTES:
-        SMS_INBOUND_TOTAL.inc(outcome=OUTCOME_REJECTED)
-        raise HTTPException(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail="Webhook payload is too large",
-        )
-
-    if not valid_signature(settings, body, signature):
-        # Counted before raising because a non-zero rate here is one of two things the
-        # operator has to be able to see: somebody probing, or a gateway whose shared
-        # secret no longer matches ours. Both are otherwise invisible - the caller
-        # only ever learns "401".
-        SMS_INBOUND_TOTAL.inc(outcome=OUTCOME_REJECTED)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid webhook signature",
-        )
-
     try:
-        message = WebhookMessage.model_validate_json(body)
-    except ValidationError:
+        fields = dict(parse_qsl(body.decode("utf-8"), keep_blank_values=True))
+    except UnicodeDecodeError:
         SMS_INBOUND_TOTAL.inc(outcome=OUTCOME_MALFORMED)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Webhook payload was not a message",
         ) from None
 
-    if not is_stop_word(message.text):
-        SMS_INBOUND_TOTAL.inc(outcome=OUTCOME_IGNORED)
-        return accepted_response()
+    if not twilio_signature_matches(
+        settings.twilio_auth_token,
+        settings.twilio_webhook_url,
+        fields,
+        signature,
+    ):
+        SMS_INBOUND_TOTAL.inc(outcome=OUTCOME_REJECTED)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid webhook signature",
+        )
 
+    sender = fields.get("From", "").strip()
+    if not sender or len(sender) > 64:
+        # Twilio always sends ``From``. Treating its absence as malformed rather than as
+        # an unmatched number keeps "the gateway sent us something we do not understand"
+        # separate in the metrics from "a stranger texted us".
+        SMS_INBOUND_TOTAL.inc(outcome=OUTCOME_MALFORMED)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Webhook payload was not a message",
+        )
+    return sender, fields.get("Body", ""), fields.get("MessageSid") or None
+
+
+def _honour_stop(
+    session: Session,
+    contact_index: ContactBlindIndex,
+    *,
+    sender: str,
+    sms_id: str | None,
+) -> JSONResponse:
+    """Withdraw consent for whatever contracts hold ``sender``, and answer 202.
+
+    Shared by both transports rather than duplicated inside each: this is the part that
+    decides whether a customer's word is sufficient, and two copies of it would be two
+    places for the guarantee to rot. The caller has already established that ``sender``
+    is the gateway's and that the message is a bare stop word.
+    """
     try:
-        normalized = normalize_value(FieldName.PHONE, message.sender)
+        normalized = normalize_value(FieldName.PHONE, sender)
     except ValueError:
         # A number we could not canonicalise can never match a stored one: the digest
         # is taken over the normalized form on both sides. Counted, because a run of
         # these means the gateway is sending numbers in a shape the extractor never
         # produces, and every one of those is an opt-out we did not honour.
         SMS_INBOUND_TOTAL.inc(outcome=OUTCOME_UNMATCHED)
-        log.warning("sms_inbound_sender_not_a_phone_number", sms_id=message.sms_id)
+        log.warning("sms_inbound_sender_not_a_phone_number", sms_id=sms_id)
         return accepted_response()
 
     digest = contact_digest(contact_index, FieldName.PHONE, normalized)
@@ -353,20 +424,99 @@ def receive_sms(
     if not matches:
         SMS_INBOUND_TOTAL.inc(outcome=OUTCOME_UNMATCHED)
         # No row is written for an unmatched number: see the module docstring.
-        log.info("sms_inbound_no_matching_contract", sms_id=message.sms_id)
+        log.info("sms_inbound_no_matching_contract", sms_id=sms_id)
     elif suppressed:
         SMS_INBOUND_TOTAL.inc(outcome=OUTCOME_OPTED_OUT)
         log.info(
             "sms_inbound_opted_out",
-            sms_id=message.sms_id,
+            sms_id=sms_id,
             contracts=suppressed,
             correlation_id=correlation_id,
         )
     else:
         SMS_INBOUND_TOTAL.inc(outcome=OUTCOME_ALREADY_OPTED_OUT)
-        log.info("sms_inbound_already_opted_out", sms_id=message.sms_id)
+        log.info("sms_inbound_already_opted_out", sms_id=sms_id)
 
     return accepted_response()
+
+
+def _inbound_contact_index(settings: Settings = Depends(app_settings)) -> ContactBlindIndex:
+    """The contact index, but only once this route is known to be mounted at all.
+
+    ``blind_index_or_503`` is the shared dependency and answers ``503`` when the key is
+    missing, which is right for a route that exists and wrong for one this deployment
+    has switched off: ``INBOUND_TRANSPORT=none`` deliberately does not require the key,
+    so an unmounted route would still advertise itself with a ``503`` — exactly what the
+    ``404`` in the handler exists to avoid. FastAPI resolves dependencies before the
+    handler runs, so the ordering has to be enforced here rather than by that check.
+    """
+    if settings.inbound_transport == "none":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+    return blind_index_or_503(settings)
+
+
+def receive_sms(
+    body: bytes = Depends(raw_body),
+    settings: Settings = Depends(app_settings),
+    session: Session = Depends(get_request_session),
+    contact_index: ContactBlindIndex = Depends(_inbound_contact_index),
+    signature: Annotated[str | None, Header(alias=SIGNATURE_HEADER)] = None,
+    twilio_signature: Annotated[str | None, Header(alias=TWILIO_SIGNATURE_HEADER)] = None,
+) -> JSONResponse:
+    """Accept one inbound message and, if it is a STOP, withdraw consent.
+
+    A plain ``def`` on purpose: the handler does blocking database work, so FastAPI
+    runs it in a worker thread, while the only ``await`` in the path (reading the body)
+    lives in :func:`raw_body`. An ``async`` handler calling this repository code
+    directly would block the event loop for every other request.
+    """
+    # With no gateway configured there is no such endpoint. 404 rather than 403: a 403
+    # would confirm to a scanner that the route exists and is merely switched off.
+    # ``_inbound_contact_index`` enforces this before the handler and is what makes the
+    # answer hold when CONTACT_BLIND_INDEX_KEY is unset; the check stays here so that
+    # re-ordering the dependency cannot silently unmount the gate.
+    if settings.inbound_transport == "none":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+
+    if len(body) > MAX_WEBHOOK_BYTES:
+        SMS_INBOUND_TOTAL.inc(outcome=OUTCOME_REJECTED)
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail="Webhook payload is too large",
+        )
+
+    # Which signature is checked is decided by the configured transport, never by which
+    # header happens to be present: accepting either would let the weaker scheme
+    # authenticate every request.
+    if settings.inbound_transport == "twilio":
+        sender, text, sms_id = _read_twilio(settings, body, twilio_signature)
+    else:
+        if not valid_signature(settings, body, signature):
+            # Counted before raising because a non-zero rate here is one of two things the
+            # operator has to be able to see: somebody probing, or a gateway whose shared
+            # secret no longer matches ours. Both are otherwise invisible - the caller
+            # only ever learns "401".
+            SMS_INBOUND_TOTAL.inc(outcome=OUTCOME_REJECTED)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid webhook signature",
+            )
+
+        try:
+            message = WebhookMessage.model_validate_json(body)
+        except ValidationError:
+            SMS_INBOUND_TOTAL.inc(outcome=OUTCOME_MALFORMED)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Webhook payload was not a message",
+            ) from None
+        sender, text, sms_id = message.sender, message.text, message.sms_id
+
+    if not is_stop_word(text):
+        SMS_INBOUND_TOTAL.inc(outcome=OUTCOME_IGNORED)
+        return accepted_response()
+
+    return _honour_stop(session, contact_index, sender=sender, sms_id=sms_id)
 
 
 router.add_api_route(

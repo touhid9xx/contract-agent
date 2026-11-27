@@ -539,17 +539,18 @@ def test_without_a_gateway_the_endpoint_does_not_exist(
 ) -> None:
     """``404``, not ``403``: a scanner learns nothing about a route that is switched off.
 
-    The contact index is configured here deliberately. The route's dependency graph
-    resolves ``blind_index_or_503`` *before* the handler runs, so a deployment missing
-    the key would answer ``503`` and this test would be pinning the wrong refusal.
-    That ordering is a real property of the route, recorded as a limit in ``D10-93``.
+    The contact index is left unconfigured *deliberately*. The route used to answer
+    ``503`` in that state, because the dependency graph resolves ``blind_index_or_503``
+    before the handler runs — a switched-off route advertising itself with exactly the
+    status a missing route does not give, recorded as a limit in ``D10-93``. That
+    ordering is now enforced by ``_inbound_contact_index``, so the 404 has to hold for a
+    deployment that has neither a gateway nor an index key.
     """
     app = create_app(
         settings.model_copy(
             update={
                 "inbound_transport": "none",
                 "inbound_webhook_secret": SECRET,
-                "contact_blind_index_key": INDEX_KEY,
             }
         ),
         session_factory=session_factory,

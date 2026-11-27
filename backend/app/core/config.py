@@ -60,7 +60,14 @@ VoiceTransport = Literal["none", "ari"]
 #: A third independent switch, because sending and hearing are separate capabilities:
 #: ``SMS_TRANSPORT=textbee`` with ``INBOUND_TRANSPORT=none`` is a deployment that talks
 #: and cannot listen. The name exists only because :mod:`app.api.v1.inbound` does.
-InboundTransport = Literal["none", "textbee"]
+#:
+#: ``twilio`` is a member here even though sending through Twilio needs none of these:
+#: pushing and receiving are independent capabilities, and a deployment that sends with
+#: an API key while receiving on the account auth token is the ordinary shape. The two
+#: members differ in *how* they authenticate — ``textbee`` signs the raw body with a
+#: shared secret, ``twilio`` signs the URL plus the sorted form fields with the account
+#: token — so the route branches on this value rather than on a header's presence.
+InboundTransport = Literal["none", "textbee", "twilio"]
 #: Which selector answers "was this uploaded document examined for malware before it
 #: was stored". A fourth independent switch, and the only one here that is not a
 #: channel: a deployment can serve contracts without a scanner, exactly as it can send
@@ -718,6 +725,24 @@ class Settings(BaseSettings):
     #: thing standing between an internet-facing endpoint and anyone who can guess a
     #: phone number, so it is required whenever inbound is enabled and never defaulted.
     inbound_webhook_secret: str = ""
+    #: Twilio's inbound signing key, read only when ``inbound_transport == "twilio"``.
+    #:
+    #: The **account auth token**, not the API key secret. Twilio signs its webhook with
+    #: the account token no matter how outbound sends authenticate, so a deployment that
+    #: sends with an API key and receives on the account token is the ordinary shape
+    #: rather than a misconfiguration. Kept separate from ``inbound_webhook_secret`` for
+    #: the same reason ``voice_outcome_secret`` is: one leaked gateway secret must not
+    #: also authenticate the other route.
+    twilio_auth_token: str = ""
+    #: The exact public URL Twilio was configured to call, e.g.
+    #: ``https://reminders.example.com/api/v1/inbound/sms``.
+    #:
+    #: Twilio signs ``url + sorted(form fields)``, so the URL is *part of the signed
+    #: material*. It is therefore required rather than inferred: reconstructing it from
+    #: ``X-Forwarded-Proto``/``X-Forwarded-Host`` would let whoever is in front of the app
+    #: choose the string the caller's signature is checked against, and a forged request
+    #: that can name its own URL can sign itself. Required, never defaulted.
+    twilio_webhook_url: str = ""
     #: The key behind :mod:`app.core.blind_index`, which turns a normalized contact
     #: value into a searchable digest. Deliberately **not** derived from
     #: ``encryption_key``: that one is rotated (it has a retired-key ring) and a
@@ -1169,6 +1194,9 @@ class Settings(BaseSettings):
         # Inbound is the only feature that makes a reminder SMS stoppable, so enabling
         # it requires both halves. Refusing a half-configured gateway is what stops a
         # deployment that looks like it listens while every STOP lands nowhere.
+        #
+        # The vendor half first: it names the variable the operator reached for, where the
+        # shared index below would describe a requirement they have not seen yet.
         if self.inbound_transport == "textbee":
             secret = self.inbound_webhook_secret.strip()
             if not secret:
@@ -1184,14 +1212,63 @@ class Settings(BaseSettings):
                     f"{MIN_INBOUND_SECRET_LENGTH} characters; it is the signing key for "
                     "every inbound webhook"
                 )
-            if not self.contact_blind_index_key:
+
+        if self.inbound_transport == "twilio":
+            # Twilio's own token, not a secret we choose. It is the account auth token
+            # from the console, and Twilio signs with it whether or not *sending* uses an
+            # API key. So there is nothing to length-check: we do not get to change it,
+            # and refusing a valid one over its shape would be our bug, not the
+            # operator's.
+            if not self.twilio_auth_token.strip():
                 raise ValueError(
-                    "CONTACT_BLIND_INDEX_KEY must be set when INBOUND_TRANSPORT=textbee: "
-                    "an inbound reply carries a phone number and nothing else, and "
-                    "contact values are stored as ciphertext under a random IV, so "
-                    "without the index there is no way to find the contract it means. "
-                    "The route would accept every STOP and honour none of them."
+                    "TWILIO_AUTH_TOKEN must be set when INBOUND_TRANSPORT=twilio: it is "
+                    "the account auth token Twilio signs its webhook with, and it is not "
+                    "the API key secret used for sending. Without it every request would "
+                    "be refused, so every STOP would land nowhere."
                 )
+            # The URL is signed material, not a convenience setting: it decides what a
+            # signature is checked against, so an inferred one is an attacker's choice.
+            url = urlsplit(self.twilio_webhook_url)
+            host = url.hostname or ""
+            if not host:
+                raise ValueError(
+                    "TWILIO_WEBHOOK_URL must be the absolute URL Twilio calls when "
+                    f"INBOUND_TRANSPORT=twilio; got {self.twilio_webhook_url!r}. Twilio "
+                    "signs the URL as well as the form fields, so it cannot be inferred "
+                    "from the request without letting the caller choose it."
+                )
+            if host not in _LOOPBACK_HOSTS and url.scheme != "https":
+                raise ValueError(
+                    "TWILIO_WEBHOOK_URL must be https (or loopback) when "
+                    f"INBOUND_TRANSPORT=twilio; got {self.twilio_webhook_url!r}. The "
+                    "form carries the customer's phone number and the message body."
+                )
+            if self.inbound_webhook_secret:
+                # Not dangerous, but it means the operator believes this is what
+                # authenticates the route, and a settings file that describes a check the
+                # code does not make is how a configuration mistake gets investigated as
+                # a security incident. Same rule as an outcome secret on a build that
+                # never dials.
+                raise ValueError(
+                    "INBOUND_WEBHOOK_SECRET is set but INBOUND_TRANSPORT=twilio, which "
+                    "authenticates with TWILIO_AUTH_TOKEN instead. Remove the unused "
+                    "secret so the file does not describe a check that is never made."
+                )
+
+        # The contact index is required whichever gateway is listening. An inbound reply
+        # carries a phone number and nothing else, and contact values are stored as
+        # ciphertext under a random IV, so without the digest there is no way to find the
+        # contract that number means. That is a property of *listening*, not of a vendor,
+        # so it is checked once here instead of inside each branch above — and after them,
+        # so that a deployment missing everything is told about its gateway first.
+        if self.inbound_transport != "none" and not self.contact_blind_index_key:
+            raise ValueError(
+                "CONTACT_BLIND_INDEX_KEY must be set when INBOUND_TRANSPORT="
+                f"{self.inbound_transport}: an inbound reply carries a phone number and "
+                "nothing else, and contact values are stored as ciphertext under a random "
+                "IV, so without the index there is no way to find the contract it means. "
+                "The route would accept every STOP and honour none of them."
+            )
 
         # A scanner sits on the far side of a plain, unauthenticated socket, and what
         # crosses it is a customer's contract in the clear. A clamd on a *public*
@@ -1233,10 +1310,10 @@ class Settings(BaseSettings):
             # condition is the *actual* precondition — that this deployment can read a
             # reply. Sending without listening is still refused, which is what the
             # original rule was protecting.
-            if self.sms_transport != "none" and self.inbound_transport != "textbee":
+            if self.sms_transport != "none" and self.inbound_transport == "none":
                 raise ValueError(
                     f"SMS_TRANSPORT={self.sms_transport} is not available in "
-                    f"{self.app_env} without INBOUND_TRANSPORT=textbee: a customer "
+                    f"{self.app_env} with INBOUND_TRANSPORT=none: a customer "
                     "could not withdraw consent by asking and nothing would honour "
                     "it, which makes the reminder an unsolicited message rather than "
                     "a smaller one. Configure inbound, or use development."

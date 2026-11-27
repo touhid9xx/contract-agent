@@ -12192,10 +12192,9 @@ reply". Adding a member to the `Literal` would have left a `twilio` deployment p
 and production with no inbound adapter at all — no STOP route, no withdrawal, exactly the
 unsolicited message the rule exists to prevent — and it would have arrived by *adding* to an enum,
 with every existing test still green because every existing test names `textbee`. Widened to
-`sms_transport != "none"`, which is what the sentence always meant. The consequence is a limitation
-and is recorded as one: Twilio has no inbound adapter here, so a Twilio deployment is
-development-only until one is written. A guard that only ever names one transport is a guard about
-that transport.
+`sms_transport != "none"`, which is what the sentence always meant. `D10-158` has since removed the
+limitation that left in place by writing the inbound adapter, so the clause now reads
+`inbound_transport == "none"` and names no vendor either.
 
 **`P2-D` was settled by measurement rather than by wiring.** `OLLAMA_BASE_URL` pointing at
 `localhost` names the container from inside a container, so it is
@@ -12217,5 +12216,66 @@ changed to `TimeoutError`.
 request the adapter builds, byte for byte, against a stub transport — the same standard
 `TextbeeSender` is held to and no stronger. `_sms_provider_id` now reads `sid` as well as
 `id`/`messageId`, which means one function's key list serves two gateways and can drift from either.
-And the widened guard buys consent coverage at the cost of leaving Twilio unavailable where it would
-be most useful, which is the correct trade only for as long as nobody writes the inbound adapter.
+And the widened guard bought consent coverage at the cost of leaving Twilio unusable where it would
+be most useful for exactly one slice, because `D10-158` removed that cost by writing the adapter
+rather than by loosening the rule.
+
+### D10-158 — The STOP route was one vendor away, and the guard said so
+
+`D10-157` closed by calling the missing Twilio inbound adapter the price of widening the consent
+guard, and by saying that price was the correct trade only for as long as nobody wanted the adapter.
+Nobody had written it. This slice writes it, and the interesting part is again not the adapter: one
+clause of a safety rule turned out to be the same clause that had already been fixed on the sending
+side, unfixed here, and invisible for the same reason — every test names `textbee`.
+
+**The receiving guard had the sending guard's exact shape.** `InboundTransport` was
+`Literal["none", "textbee"]` and two other rules were written when it had one member. The
+contact-index requirement read `inbound_transport != "textbee"`, which means "a listener needs a
+key"; adding a `twilio` member would have made it mean "only the textbee listener needs a key", so a
+Twilio deployment would have booted in staging and production with no `CONTACT_BLIND_INDEX_KEY` —
+able to answer every STOP with the same 202 and resolve none of them, because a phone number is
+Fernet ciphertext under a random IV and only the keyed digest can find the contract it belongs to.
+Both rules now name no vendor: the index is required when `inbound_transport != "none"`, and the
+production send guard requires `inbound_transport == "none"` — that is, listening, not listening *to
+this one vendor*. Each vendor's own secret is then checked in its own branch, which is where a
+vendor's name belongs.
+
+**The webhook URL is configuration, and that is a security decision rather than a convenience.**
+Twilio signs `HMAC-SHA1(account_auth_token, url + sorted form fields)`, so the URL is part of the
+authenticated message. Reconstructing it from `X-Forwarded-Proto` and `X-Forwarded-Host` would let
+the caller choose the very string its own signature is checked against — the check would still pass,
+and would authenticate nothing. `TWILIO_WEBHOOK_URL` is therefore an absolute setting, required
+under `INBOUND_TRANSPORT=twilio`, https unless loopback on the same rule the gateway origins already
+follow, because the form carries the customer's number and the body carries what they typed.
+
+**Two Twilio secrets, kept apart on purpose.** The API key secret authenticates the send side; the
+account *auth token* signs the webhook. One shared setting would have been tidier and would have
+meant a leaked send credential also authenticates a forged STOP, which is the direction that
+suppresses a customer's messages. They are separate fields with separate lifetimes, and a leftover
+`INBOUND_WEBHOOK_SECRET` under a twilio transport is refused at boot rather than ignored: a secret
+sitting in a file describing a check nobody makes is a lie the next operator will trust. The
+signature comparisons themselves are constant-time over bytes and fail closed on a missing token, a
+missing URL or a non-ASCII header.
+
+**`D10-93`'s limit was closed by a dependency, not by another check.** The switched-off inbound
+route answered 503, which advertises that the route exists; the intent was a 404. It answered 503
+because FastAPI resolves dependencies before the handler body, and `blind_index_or_503` is a
+dependency — so the handler's own 404 ran second. `_inbound_contact_index` answers 404 when
+`inbound_transport == "none"` and delegates to `blind_index_or_503` otherwise. The handler keeps its
+own check, deliberately redundant, so a future re-ordering cannot silently unmount the gate.
+
+**Three defects in the tests written for this slice, all found by running them rather than by
+reading them.** The golden signature vector was wrong: Twilio's published example signs
+`example.com/myapp.php`, and I had written `mycompany.com` from memory, so a correct implementation
+failed its own test — confirmed against the vendor's documentation, then the arithmetic reproduced
+by hand before the test was changed. An assertion read `before_value` from `AuditLog`, which has
+`before_state` and `after_state`. And a fabricated blind-index key was 26 characters where the
+validator requires 32, with `app_env` passed twice because it lives inside the shared staging shape.
+
+**Limits.** No real Twilio webhook was delivered: the scheme is pinned against a vector borrowed
+from the vendor's own documentation and against independently reimplemented HMAC in the tests, which
+catches a wrong algorithm and does not prove the round trip. `TWILIO_WEBHOOK_URL` is hand-maintained
+and fails closed rather than loudly — if the public URL changes and this setting does not, every
+genuine webhook is refused as a forged one, and the customer's STOP does nothing while the gateway
+is told 202. Nothing here verifies that the number in the form belongs to the tenant that contract
+belongs to; the lookup is on the digest alone, exactly as the textbee route has always been.

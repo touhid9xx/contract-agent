@@ -410,7 +410,7 @@ def test_sms_without_an_inbound_route_is_refused_outside_development(env: str) -
     deployed environment, and the message names the setting that would let it through
     rather than reading as "SMS is unavailable".
     """
-    with pytest.raises(ValueError, match="INBOUND_TRANSPORT=textbee"):
+    with pytest.raises(ValueError, match="INBOUND_TRANSPORT=none"):
         sms_settings(app_env=env)
 
 
@@ -677,11 +677,32 @@ def test_a_twilio_origin_with_no_host_is_refused() -> None:
 
 @pytest.mark.parametrize("env", ["staging", "production"])
 def test_twilio_is_refused_outside_development_without_an_inbound_route(env: str) -> None:
-    """The rule widened with the transport, deliberately.
+    """The rule is about listening, not about a vendor.
 
-    Twilio has no inbound adapter, so a Twilio deployment cannot hear STOP. Allowing
-    it in a deployed environment would make the earlier ``textbee``-only rule look
-    like a rule about textbee rather than about consent. Development stays open.
+    This test once asserted that Twilio could not run outside development *at all*,
+    because there was no Twilio inbound adapter. There is one now, so the refusal has
+    narrowed to the real precondition — with ``INBOUND_TRANSPORT=none`` the customer
+    still cannot withdraw consent by asking, and that is what makes the reminder
+    unsolicited rather than smaller.
     """
-    with pytest.raises(ValueError, match="INBOUND_TRANSPORT=textbee"):
-        twilio_settings(**STAGING_SHAPE)
+    with pytest.raises(ValueError, match="INBOUND_TRANSPORT=none"):
+        twilio_settings(**{**STAGING_SHAPE, "app_env": env})
+
+
+@pytest.mark.parametrize("env", ["staging", "production"])
+def test_twilio_that_also_listens_boots_outside_development(env: str) -> None:
+    """The other half, and the point of the widening: a Twilio deployment that can hear
+    STOP is as consent-safe as a textbee one, so it is allowed where it sends."""
+    settings = twilio_settings(
+        **{**STAGING_SHAPE, "app_env": env},
+        inbound_transport="twilio",
+        twilio_auth_token="an-account-auth-token",
+        twilio_webhook_url="https://reminders.example.test/api/v1/inbound/sms",
+        # 32 characters because the index key is key material, not a password: the
+        # validator refuses anything shorter, and a fixture that trips its own guard
+        # would prove the guard rather than the rule under test.
+        contact_blind_index_key="b" * 32,
+    )
+
+    assert settings.sms_transport == "twilio"
+    assert settings.inbound_transport == "twilio"

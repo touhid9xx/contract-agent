@@ -9490,8 +9490,9 @@ assuming the channel identifies the transport.
 `sms_transport == "textbee"` and is now `!= "none"`: adding a member to the `Literal` would
 otherwise have permitted a `twilio` deployment in staging and production with no inbound adapter and
 therefore no STOP route — the unsolicited message the rule exists to prevent — while every existing
-test stayed green because every one of them names `textbee`. Twilio is development-only until an
-inbound adapter is written, and `.env.example` says so at the switch.
+test stayed green because every one of them names `textbee`. That left Twilio development-only,
+which `D10-158` closed by writing the inbound adapter; the rule now reads
+`inbound_transport == "none"` and names no vendor at all.
 
 **`P2-D`, measured.** `OLLAMA_BASE_URL` is `http://host.docker.internal:11434` because `localhost`
 inside a container is the container; confirmed by having `api` print its own settings and fetch both
@@ -9502,10 +9503,40 @@ reminder.
 | Added | `TwilioSender`, `create_twilio_sender`; `SmsTransport` gains `twilio` |
 | Dispatch | `build_sender` chooses the SMS gateway from `SMS_TRANSPORT` |
 | Refused at boot | any `TWILIO_*` missing; `SK…` in the account slot; non-https origin |
-| Guard widened | any `SMS_TRANSPORT` but `none` needs `INBOUND_TRANSPORT=textbee` |
-| Twilio is | development-only until an inbound adapter exists; there is no STOP route |
+| Guard widened | any `SMS_TRANSPORT` but `none` needs `INBOUND_TRANSPORT` set (`D10-158`) |
+| Twilio is | send and inbound both implemented by `D10-158`; not development-only |
 | Ollama | reached from a container at `host.docker.internal:11434`; extraction stays `pattern` |
 | Gates | pytest 1499 / 1497 passed / 2 skipped / 0 failed; ruff, 160 formatted, mypy 80 |
+
+### D10-158 — Inbound SMS learns a second signer
+
+**Inbound SMS gained its second signer, and the guard that named one vendor lost its name.**
+`InboundTransport` is `Literal["none", "textbee", "twilio"]`; `twilio_signature_matches` checks
+`HMAC-SHA1(account_auth_token, url + sorted fields)` as base64, constant-time and fail-closed;
+`receive_sms` branches per transport and delegates the opt-out tail to one shared path, so the two
+cannot drift about what a STOP does. `D10-157`'s recorded limitation — Twilio development-only — is
+closed.
+
+**Both listening rules named `textbee`, and both were fixed to name none.** The contact-index rule
+read `!= "textbee"` and would have exempted a `twilio` listener, which would then answer every STOP
+correctly and match none of them; it now reads `!= "none"`. The production send guard read
+`inbound_transport != "textbee"` and would have *refused* a Twilio deployment that listens properly;
+it now reads `== "none"`. A vendor-specific secret check lives in each vendor's branch, which is the
+only place a vendor's name belongs.
+
+**The webhook URL is a setting because Twilio signs it.** Rebuilding the signed URL from
+`X-Forwarded-*` would let a caller choose the string its own signature is checked against.
+`TWILIO_AUTH_TOKEN` is a different secret from the API key that sends — one authenticates a webhook,
+the other sends a message — and a stale `INBOUND_WEBHOOK_SECRET` under twilio is a boot refusal, not
+a warning.
+
+| Added | `twilio_signature_matches`, `TWILIO_SIGNATURE_HEADER`, `_inbound_contact_index` |
+| Switch | `InboundTransport` gains `twilio`; the STOP tail is one shared path |
+| Refused at boot | no `TWILIO_AUTH_TOKEN`; no/relative/plaintext-remote webhook URL |
+| Refused at boot | `INBOUND_WEBHOOK_SECRET` set under a twilio transport; no index key |
+| Guard widened | index needed when listening; production send needs `INBOUND_TRANSPORT` |
+| D10-93 limit | a switched-off route answers 404, not 503, because a dependency decides |
+| Gates | pytest 1522 / 1520 passed / 2 skipped / 0 failed; ruff, 165 formatted, mypy 80 |
 
 ## Non-negotiable reminders
 
