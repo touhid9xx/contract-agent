@@ -147,7 +147,7 @@ jobs:
       # socket while a family the sweep never writes arrives with no sample.
       #
       # ~~That was one worker of six.~~ **`D10-110` finished the sentence:** the step
-      # now starts all six worker modules, each on its own port, and fails unless
+      # now starts all eight worker modules, each on its own port, and fails unless
       # every one answers a scrape, holds no sample for a family another worker
       # writes, and releases its port on death. The seeded zero `D10-109` added is
       # asserted in the relay, which can never write it — which is why the alert
@@ -156,7 +156,7 @@ jobs:
       # No service container, no new dependency, and not collected by pytest: the
       # file is `smoke_worker_metrics.py`, so it runs here once rather than as a
       # test that spawns an interpreter per case.
-      - name: smoke worker metrics (six real workers, six real sockets)
+      - name: smoke worker metrics (eight real workers, eight real sockets)
         run: python backend/tests/smoke_worker_metrics.py
 
       # And the companion `D10-108` left open. That step scraped a worker whose
@@ -689,7 +689,7 @@ jobs:
   #
   # The worker list is *read out of* `docker-compose.yml` rather than restated
   # here, for the same reason the Prometheus tag lives in `env:` above: a second
-  # copy is a second thing to forget. A seventh worker added to the stack is
+  # copy is a second thing to forget. An eighth worker added to the stack is
   # imported by this job on the next run without anybody editing it.
   #
   # The last step runs a real worker to completion rather than importing it,

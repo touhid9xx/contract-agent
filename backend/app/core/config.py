@@ -253,6 +253,26 @@ class Settings(BaseSettings):
     outbox_max_attempts: int = Field(default=10, gt=0, le=100)
     outbox_poll_interval_seconds: float = Field(default=0.5, gt=0, le=60)
 
+    # --- outbox retention (gap 25's residue) -----------------------------
+    #: Days a *settled* outbox row is kept before the scheduled prune deletes it.
+    #: ``0`` — the default — switches the pass off, so the table keeps every row
+    #: until an operator says otherwise: retention is a policy a deployment states,
+    #: not one this program invents. ``published`` rows are cut on ``published_at``
+    #: and never before; ``pending``/``publishing`` rows are outside the predicate,
+    #: so no setting here can delete an event that has not been delivered.
+    outbox_retention_days: int = Field(default=0, ge=0, le=3650)
+    #: Rows deleted per statement. A page that comes back full means the cutoff
+    #: still covers rows the pass did not reach, so the worker repeats until a
+    #: page comes back short — bounded by ``MAX_PRUNE_PAGES`` per tick.
+    outbox_prune_batch_size: int = Field(default=1000, gt=0, le=10_000)
+    #: Whether the pass also deletes rows parked ``failed``. Off by default, and
+    #: deliberately a second switch: a parked row is a row a person was supposed to
+    #: read, and time-based deletion ends that possibility permanently.
+    outbox_prune_include_failed: bool = False
+    #: Wait between passes. A day by default, because the cutoff is expressed in
+    #: days and a finer sweep would only re-read the same rows.
+    outbox_prune_interval_seconds: float = Field(default=86_400.0, gt=0, le=604_800)
+
     # --- readiness (F5) --------------------------------------------------
     #: Upper bound on one dependency check in ``/health/ready``. Readiness has to
     #: answer or fail quickly: an orchestrator that receives no answer cannot

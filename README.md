@@ -89,7 +89,7 @@ with the matching `*_PORT` variable from `.env.example`.
 | --- | --- |
 | <http://localhost:3000> | The application: contracts, review queue, decisions, queues. |
 | <http://127.0.0.1:3001> | Grafana. The dashboard under `ops/grafana/dashboards/` plots every family `app/core/metrics.py` declares. Sign in as `admin` with `GRAFANA_ADMIN_PASSWORD`; anonymous access is off. |
-| <http://127.0.0.1:9090> | Prometheus. `/targets` is the honest answer to "is anything being scraped" — the API and all seven workers are targets, and `up{job="workers"}` is a question a boot cannot answer for itself. |
+| <http://127.0.0.1:9090> | Prometheus. `/targets` is the honest answer to "is anything being scraped" — the API and all eight workers are targets, and `up{job="workers"}` is a question a boot cannot answer for itself. |
 | <http://127.0.0.1:9093> | Alertmanager. `/alerts` lists what fired; silences and the notification log live here too, and die with the container. |
 | <http://127.0.0.1:8025> | Mailpit. Everything the stack mails — escalation alerts, attention alerts, and any notification sent with `NOTIFICATION_TRANSPORT=smtp` — arrives here and can be *read* rather than inferred from a log line saying it was sent. |
 

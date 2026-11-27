@@ -3926,13 +3926,16 @@ above read "passed" because a hook finally ran and passed.
     whole of what is left.~~ **Answered and closed by `D10-131`:** `none` keeps meaning enqueue and
     park, because after `D10-130` established that no consumer is coming under any transport,
     discarding at write time preserves nothing and costs the one record that an event was meant.
-    ~~What stays open here is retention rather than semantics — nothing prunes the outbox, so
-    the explained parks grow without bound.~~ **Amended by `D10-148`, not deleted:** a retention
-    path now exists — `python -m app.cli outbox-prune --before <instant>` deletes settled rows
-    past the operator's cutoff — so "nothing prunes the outbox" is no longer true. What is still
-    true is that nothing *schedules* it, so a table pruned only when somebody types the command
-    still grows. The heading's "nothing says so" is likewise narrower than it reads: something
-    says so now, quietly and on a timer, to a log nobody reads.
+    ~~What stays open here is retention rather than semantics — nothing prunes the outbox, so the
+    explained parks grow without bound.~~ **Amended by `D10-148`, not deleted:** a retention path
+    now exists — `python -m app.cli outbox-prune --before <instant>` deletes settled rows past the
+    operator's cutoff — so "nothing prunes the outbox" is no longer true. ~~What is still true is
+    that nothing *schedules* it, so a table pruned only when somebody types the command still
+    grows.~~ **Amended by `D10-159`, not deleted:** it is scheduled now —
+    `python -m app.workers.outbox_pruner` runs on the stack beside the other workers and applies the
+    same predicate on `OUTBOX_PRUNE_INTERVAL_SECONDS` — so the table stops growing on any deployment
+    that sets `OUTBOX_RETENTION_DAYS`. The heading's "nothing says so" is likewise narrower than it
+    reads: something says so now, quietly and on a timer, to a log nobody reads.
 
 ## The workers have a daemon ✅ (`D10-25`)
 
@@ -8583,10 +8586,15 @@ reader is coming under any transport.
 only `relay_failed`, so a bus its owner switched off never pages; and no tenant sees the count, on
 the rule that a tenant's board holds only what a tenant can clear.
 
-**What is still wrong, and is not this gap.** Nothing prunes the outbox — `prune` covers
+~~**What is still wrong, and is not this gap.** Nothing prunes the outbox — `prune` covers
 `login_attempts` only — so the parked rows grow without bound and only someone scraping the gauge
 sees it. That is a retention slice; it is written down here so a clean answer to the semantics
-question is not mistaken for a clean stack.
+question is not mistaken for a clean stack.~~ **Answered by `D10-148` and `D10-159`, not deleted:**
+the retention slice it points at landed in two steps —
+`python -m app.cli outbox-prune --before <instant>` deletes settled rows past an operator's cutoff,
+and `python -m app.workers.outbox_pruner` applies the same predicate on a timer, off until
+`OUTBOX_RETENTION_DAYS` is set. A default stack still grows; what changed is that continuing to grow
+is a choice an operator writes down rather than a gap nobody closed.
 
 **Gates.** No code, no test, no rule: `DECISIONS.md` and `STATUS.md` only. The ledger close check
 passes over every block from `D10-111` onward, every added line fits in `100` columns, and nineteen
@@ -9167,11 +9175,14 @@ check run from the repository root — `mypy` clean over 79 source files, and th
 at 76 blocks with 23 deferring and 0 failed. Eighteen cases are new; the two that carry the weight
 are the negative ones, `pending`/`publishing` surviving any cutoff and a dry run deleting nothing.
 
-**Limits.** Nothing schedules it: a table pruned only when somebody types the command still grows,
-so the deployment that needs retention is a cron entry that does not exist yet. Parked rows are
-only deleted once an operator decides the parks are explained, which `D10-131` left open rather
-than something this closes. And it has never run against a deployment's data — only SQLite in
-tests, the limit `reseal-fields` and `backfill-blind-index` also carry.
+**Limits.** ~~Nothing schedules it: a table pruned only when somebody types the command still grows,
+so the deployment that needs retention is a cron entry that does not exist yet.~~ **Amended by
+`D10-159`, not deleted:** the cron entry exists — `python -m app.workers.outbox_pruner` applies this
+command's own predicate on `OUTBOX_PRUNE_INTERVAL_SECONDS` and deletes nothing until
+`OUTBOX_RETENTION_DAYS` is set — so the header is true only of a deployment that never configures
+it. Parked rows are still only deleted once an operator decides the parks are explained, which
+`D10-131` left open rather than something this closes. And it has never run against a deployment's
+data — only SQLite in tests, the limit `reseal-fields` and `backfill-blind-index` also carry.
 
 **Landed.** `a2b8590`, and CI run `45591767419` is ten jobs of ten on it, `CI gate` included.
 
@@ -9537,6 +9548,41 @@ a warning.
 | Guard widened | index needed when listening; production send needs `INBOUND_TRANSPORT` |
 | D10-93 limit | a switched-off route answers 404, not 503, because a dependency decides |
 | Gates | pytest 1522 / 1520 passed / 2 skipped / 0 failed; ruff, 165 formatted, mypy 80 |
+
+### D10-159 — The outbox is pruned on a clock, and off is still the default
+
+**The outbox has a schedule, and `D10-148`'s residue is closed.**
+`python -m app.workers.outbox_pruner` is an eighth container on the stack beside the other seven
+workers: it reads `OUTBOX_RETENTION_DAYS` and applies `prune_terminal_before` — the predicate
+`outbox-prune` already used — on `OUTBOX_PRUNE_INTERVAL_SECONDS`, repeating until a page comes back
+short. `D10-148`'s sentence saying nothing schedules the command is struck in both ledgers, and gap
+25's copy of it with it.
+
+**Off is the shipped value, and off touches no table.** The default is `0`, and a pass at `0`
+returns before a session is opened, so a stock deployment keeps every row it ever wrote. Turning
+retention on is a line an operator writes, which is what "the cutoff is a policy" meant in practice.
+`OUTBOX_PRUNE_INCLUDE_FAILED` stays a second, default-off switch: a parked row is one a person was
+meant to read, and time cannot be undone.
+
+**The report admits when the count is a floor.** A full page is read again, up to
+`MAX_PRUNE_PAGES = 100` a tick, and `truncated` is true when the bound was the reason it stopped —
+so a fifty-thousand-row backlog drains over days rather than one unbounded transaction, and the log
+says which of the two happened. A disabled pruner announces itself once at startup and never again;
+an enabled one logs every pass, empty ones included, because a daily line is the only evidence the
+timer is alive.
+
+**The wiring is checked rather than remembered.** `test_worker_wiring` derives the worker list from
+each module's own AST and holds compose and Prometheus to it, so the service, the scrape target, the
+listener and the smoke script cannot drift apart. The listener publishes host port 9108 — 9107 is
+the extractor's — and the worker declares no family, so a scrape answers only whether the schedule
+started.
+
+| Added | `app/workers/outbox_pruner.py` — `OutboxPruner`, `PruneReport` |
+| Settings | `OUTBOX_RETENTION_DAYS` (0 = off) and three bounded siblings |
+| Reused | `prune_terminal_before` — undelivered rows are outside the statement |
+| A floor | a full page repeats, capped at 100 a tick; `truncated` says which |
+| Wired | compose, Prometheus, listener 9108, smoke script, wiring test |
+| Gates | 1537 tests, 1535 passed, 2 skipped; ruff, mypy clean |
 
 ## Non-negotiable reminders
 

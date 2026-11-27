@@ -79,3 +79,4 @@ scrape_configs:
           - "scanner:9101"
           - "attention:9101"
           - "extractor:9101"
+          - "pruner:9101"

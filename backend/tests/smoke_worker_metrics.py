@@ -1,4 +1,4 @@
-"""Seven real worker processes, seven real sockets, one scrape each.
+"""Eight real worker processes, eight real sockets, one scrape each.
 
 Why this file exists
 --------------------
@@ -37,11 +37,11 @@ belong to ``tests/test_metrics_server.py``. It does not scrape a *container*:
 the published ports are exercised here as local *processes*, so nothing below
 proves the image, the volume or the network namespace. ~~It runs one worker, not
 six.~~ **Amended by ``D10-110``:** it runs every one of them — six when that
-paragraph was written, seven since ``D10-120`` — but a process is not a container
-and this file is still about the process, the socket and the sample. And it says
-nothing about fidelity to Prometheus: parsing the text here is not the same as
-Prometheus parsing it, which is why the rule that reads this series is evaluated
-in the ledger's measurement rather than here.
+paragraph was written, seven since ``D10-120``, eight since ``D10-159`` — but a
+process is not a container and this file is still about the process, the socket
+and the sample. And it says nothing about fidelity to Prometheus: parsing the
+text here is not the same as Prometheus parsing it, which is why the rule that
+reads this series is evaluated in the ledger's measurement rather than here.
 
 How to run it
 -------------
@@ -104,7 +104,7 @@ RETRY_SECONDS = 0.2
 
 #: A fast tick, so the first scrape attempt does not race a one-hour default.
 #: Every worker setting it drives has ``gt=0`` in ``app.core.config``, so a
-#: half-second is legal for all seven.
+#: half-second is legal for all eight.
 POLL_INTERVAL_SECONDS = "0.5"
 
 #: Key material for the one worker that refuses to start without it (``D10-120``).
@@ -221,6 +221,18 @@ WORKERS: tuple[Worker, ...] = (
         "extraction",
         "app.workers.extraction_worker",
         "EXTRACTION_SCAN_POLL_INTERVAL_SECONDS",
+    ),
+    # ``D10-159``. Last, where ``docker-compose.yml`` lists it. Same description as
+    # the extraction worker, for a different reason: its shipped
+    # ``OUTBOX_RETENTION_DAYS=0`` is off, so a tick is a log line and no query at
+    # all. This sweep therefore proves the listener binds and answers, and it says
+    # nothing about the delete. That is deliberate — the smoke runs against an
+    # empty database and a pruner told to delete nothing would prove nothing about
+    # the predicate; ``test_outbox_pruner.py`` owns the predicate.
+    Worker(
+        "outbox_pruner",
+        "app.workers.outbox_pruner",
+        "OUTBOX_PRUNE_INTERVAL_SECONDS",
     ),
 )
 

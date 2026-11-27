@@ -44,17 +44,17 @@
 #        runs — gap 17, and the reason the default is the provable backend.
 name: contract-agent
 
-# Two images. `Dockerfile.backend` is nine processes: the API, the attention watcher,
-# six workers and one one-shot migration, each being the API image with a different
+# Two images. `Dockerfile.backend` is ten processes: the API, the attention watcher,
+# seven workers and one one-shot migration, each being the API image with a different
 # `command`, so worker code is never a second copy of the application.
 # `Dockerfile.frontend` (D10-128) is the one service a browser talks to.
 # `.github/workflows/ci.yml` builds this file and starts
 # every entry point named below (`D10-112`), so that list is not a note about
-# deployment — it is what CI executes. The ninth, `migrate`, is the one entry point
+# deployment — it is what CI executes. The tenth, `migrate`, is the one entry point
 # the import list cannot cover, because it starts a console script rather than an
 # `app.workers` module; the image job runs it instead (`D10-114`).
 #
-# The shared half is anchored rather than repeated — six near-identical service
+# The shared half is anchored rather than repeated — seven near-identical service
 # blocks are exactly where a `read_only` or a `no-new-privileges` line goes
 # missing in one of them, and then one worker is quietly less contained than the
 # others.
@@ -92,7 +92,7 @@ x-worker: &worker
     # container listens on 9101 and only the HOST port differs. Reading it from
     # .env would let a host-side edit desynchronise the mapping, and a `0` there
     # (listener off) would make `up` fail on an unparseable port instead of
-    # closing it. This variable still governs a worker run by hand, where six
+    # closing it. This variable still governs a worker run by hand, where seven
     # processes on one loopback do need distinct values.
     WORKER_METRICS_PORT: 9101
   volumes:
@@ -294,8 +294,8 @@ services:
       - python
       - -m
       - app.workers.outbox_relay
-    # One host port per worker, because all six containers listen on 9101 inside
-    # their own network namespace and one machine publishes all of them. The relay
+    # One host port per worker, because all of them listen on 9101 inside their
+    # own network namespace and one machine publishes every one. The relay
     # writes no family of its own — its registry holds the API's zeros — so a
     # scrape here answers "is this listener alive", not "is the relay working".
     # `outbox_pending_count` is served by the attention watcher (`D10-134`).
@@ -428,6 +428,36 @@ services:
     # that tells a worker keeping up apart from a worker with nothing to do.
     ports:
       - "127.0.0.1:${EXTRACTOR_METRICS_PORT:-9107}:9101"
+
+  pruner:
+    <<: *worker
+    # Gap 25's residue. `python -m app.cli outbox-prune` has existed since `D10-148`
+    # and nothing ever called it, so the retention policy that command implements was
+    # a command a person had to remember. A policy nobody runs is a table that grows
+    # for the life of the deployment, and the only place that growth is visible is
+    # `outbox_pending_count`, which then reads as a backlog the relay is failing to
+    # clear. This is the same predicate on a schedule.
+    #
+    # Off by default (`OUTBOX_RETENTION_DAYS=0`, the shipped value in Settings): how
+    # long a deployment keeps settled events is a decision an operator makes about
+    # their own database, not a default this repository can pick for them. A tick with
+    # retention at 0 opens no session at all — it logs once a day, at info, that the
+    # schedule is running and disabled, rather than a per-tick debug line nobody reads.
+    #
+    # It deletes only what the relay has settled: `prune_terminal_before` carries the
+    # status predicate, so no setting here reaches a `pending` or `publishing` row.
+    # `OUTBOX_PRUNE_INCLUDE_FAILED=false` also keeps `failed` rows, because a parked
+    # event is one an operator was meant to read before it disappears.
+    command:
+      - python
+      - -m
+      - app.workers.outbox_pruner
+    # It writes no family of its own, so a scrape here answers "did the schedule
+    # start", which is the one question a maintenance worker with an empty queue
+    # otherwise leaves silent. Deleting is the whole of its work and a delete that
+    # reports a count nobody scrapes is still a delete with no witness.
+    ports:
+      - "127.0.0.1:${PRUNER_METRICS_PORT:-9108}:9101"
 
   prometheus:
     # D10-111. `D10-91` wrote a rule nobody could load: there was no config in this

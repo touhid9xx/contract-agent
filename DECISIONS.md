@@ -10531,13 +10531,20 @@ its transport off. No tenant sees any of it, and that is the route's stated rule
 oversight — a count belongs on a tenant's board when a tenant can clear it from a screen they
 already have, and a tenant cannot clear a relay fault.
 
-**What this does not fix, said here so the close does not read as a clean bill.** Nothing prunes the
-outbox. `prune` exists in this codebase for `login_attempts` and nowhere else, so under `none` with
-the relay running, every ingest adds a row that parks and stays, indefinitely. Those rows are
+~~**What this does not fix, said here so the close does not read as a clean bill.** Nothing prunes
+the outbox. `prune` exists in this codebase for `login_attempts` and nowhere else, so under `none`
+with the relay running, every ingest adds a row that parks and stays, indefinitely. Those rows are
 explained, which is why `doctor` exits `0`, and they are the `transport_disabled` population, which
 is why no alert fires: on a default stack the backlog grows and is visible only to someone who
 scrapes the gauge. That is a retention question and a different slice's — but a reader who takes
-"explained" for "harmless" will be wrong, and this is where that is written down.
+"explained" for "harmless" will be wrong, and this is where that is written down.~~ **Answered by
+`D10-148` and `D10-159`, not deleted:** the retention slice it names landed in two steps —
+`python -m app.cli outbox-prune --before <instant>` deletes settled rows past an operator's cutoff,
+and `python -m app.workers.outbox_pruner` applies the same predicate on a timer, off until
+`OUTBOX_RETENTION_DAYS` is set, so a default stack still grows and an operator can stop it growing.
+The last sentence survives in a narrower form: the rows retention reaches last are the parked ones,
+because `OUTBOX_PRUNE_INCLUDE_FAILED` defaults off — a park is a row a person was meant to read, and
+time is the one deletion reason that cannot be undone.
 
 **The historical close that named this stays as written.** `D10-117` ended its "what it does not
 close" paragraph by saying gap 25's semantics were an owner's decision, and that was true of the
@@ -11640,13 +11647,16 @@ what `ruff format --check .` prints from the repository root; CI runs `ruff form
 and prints 156. Both were measured on this tree, and file discovery finds the same 155 files either
 way, so nothing was reformatted — only the number a reader compares against the CI log changes.
 
-**Limits.** Nothing schedules it: a table pruned only when somebody types the command still grows,
-so the deployment that needs retention is a cron entry that does not exist yet. A parked row is
-only deleted once an operator decides the parks are explained, which is what `D10-131` left open
-rather than something this closes. And it has never run against a deployment's data — only SQLite
-in tests, the same limit `reseal-fields` and `backfill-blind-index` carry: MySQL's
-`DELETE ... WHERE id IN (...)` at the default bound of 1000 rows is one statement whose cost on a
-large table has not been measured.
+**Limits.** ~~Nothing schedules it: a table pruned only when somebody types the command still grows,
+so the deployment that needs retention is a cron entry that does not exist yet.~~ **Amended by
+`D10-159`, not deleted:** that cron entry is `python -m app.workers.outbox_pruner`, a container on
+the stack that applies this command's own `prune_terminal_before` predicate on a timer, off until
+`OUTBOX_RETENTION_DAYS` is set — so the sentence above holds only for a deployment left at the
+default. A parked row is only deleted once an operator decides the parks are explained, which is
+what `D10-131` left open rather than something this closes. And it has never run against a
+deployment's data — only SQLite in tests, the same limit `reseal-fields` and `backfill-blind-index`
+carry: MySQL's `DELETE ... WHERE id IN (...)` at the default bound of 1000 rows is one statement
+whose cost on a large table has not been measured.
 
 **Landed.** `a2b8590`, and CI run `45591767419` built it green: ten jobs of ten, `CI gate` among
 them, read from the run's own job list rather than from a badge.
@@ -12279,3 +12289,64 @@ and fails closed rather than loudly — if the public URL changes and this setti
 genuine webhook is refused as a forged one, and the customer's STOP does nothing while the gateway
 is told 202. Nothing here verifies that the number in the form belongs to the tenant that contract
 belongs to; the lookup is on the digest alone, exactly as the textbee route has always been.
+
+### D10-159 — Retention had a command, and what it lacked was a clock
+
+`D10-148` shipped `outbox-prune` and made the cutoff an operator's argument on purpose: how long
+this deployment keeps its own delivery history is a policy, and a default written here would be this
+file deciding it. The residue it recorded in the same breath has been true of every deployment since
+— *nothing schedules it* — and gap 25 said the same thing in its own words. A policy nobody runs is
+a table that grows for the life of a deployment, and the growth is not even neutral:
+`outbox_pending_count` counts parked rows, so an unpruned history reads on the dashboard as a
+backlog the relay is failing to clear.
+
+**The worker is the schedule and invents no cutoff.** `OutboxPruner` reads `OUTBOX_RETENTION_DAYS`,
+whose default is `0`, and a pass at `0` returns a disabled report *before* `session_scope` is
+entered — no session, no query, so "off" is provably indistinguishable from absent rather than
+merely unlikely to delete. A stock `.env.example` therefore keeps every row it ever wrote, and
+turning retention on is a visible line in a deployment's configuration. The setting, the batch size,
+the parked-row switch and the interval are all bounded in `Settings` like every other numeric
+setting, so `test_limit_guards` holds them without an edit.
+
+**The deletion predicate is reused, not restated.** Each page goes through `prune_terminal_before`,
+the function `outbox-prune` already calls, so `pending` and `publishing` rows are outside the
+statement rather than filtered out of its result: no value of any setting here can delete an event
+that was never delivered. `OUTBOX_PRUNE_INCLUDE_FAILED` stays a second, default-off switch for the
+reason `D10-148` gave — a parked row is one a person was meant to read and replay, and time is the
+one deletion reason that cannot be undone.
+
+**A full page is a floor, and the report says so.** One page per invocation is right for a person
+watching a terminal and wrong for a timer: a backlog of fifty thousand rows would drain at a
+thousand a day and the operator would reasonably conclude the schedule was broken. The pass repeats
+until a page comes back short, bounded by `MAX_PRUNE_PAGES = 100` so one tick cannot hold a
+transaction open indefinitely, and `PruneReport.truncated` is true when the bound — not the data —
+is why it stopped. That is the same distinction `attention_report` draws with
+`field_scan_truncated`: a floor read as a total is the reading that misleads.
+
+**Off is announced once at startup, and an empty pass once a day.** A disabled process logs
+`outbox_prune_disabled` with how to enable it and then never mentions retention again, because a
+per-tick "nothing happened" is noise with a daily period. An enabled one logs every pass, the empty
+ones included, at `info` rather than `debug` — unlike `AttentionWatch`'s clean board, which ticks
+every few minutes, a daily line is the heartbeat that tells a working schedule apart from a
+container that never started. A pass that raises is logged and the loop survives: each page is its
+own transaction, so nothing is left half-done and the next tick retries.
+
+**The wiring was the part that could have shipped silently wrong.** A worker module on its own is a
+process the stack never starts, which is precisely the defect `D10-25` recorded.
+`test_worker_wiring` derives the worker list from each module's own AST — the
+`publish_metrics(settings, worker=...)` call — and holds `docker-compose.yml` and
+`ops/prometheus/prometheus.yml` to it, so the new service, the new scrape target, the metrics
+listener and the smoke script are checked against each other rather than remembered. The listener is
+published on host port 9108 because 9107 is the extractor's; the worker writes no family of its own,
+so a scrape answers only "did the schedule start", which is the one question a maintenance worker
+with an empty queue otherwise leaves silent.
+
+**Limits.** Retention has still never run against a deployment's data — only SQLite in tests, the
+same limit `reseal-fields` and `backfill-blind-index` carry, and the one `D10-148` recorded; MySQL's
+`DELETE ... WHERE id IN (...)` at the default thousand-row bound is one statement whose cost on a
+large table remains unmeasured, and this slice makes that statement recurring rather than one-off
+without measuring it. The window is in days, so the finest retention a deployment can state is a
+day. A large backlog drains over several days by design, which means `pruned` is a floor whenever
+`truncated` is true. And retention deletes history nobody exported: the outbox is the only record
+that an event was ever meant, so a deployment that turns this on discards its own audit trail on a
+clock — correctly, if that is the decision it wrote down.
