@@ -413,6 +413,74 @@ function boardHeadings() {
 }
 
 /**
+ * Every panel card on the loaded board, in DOM order.
+ *
+ * All of them, rather than the three fixed panels the row check below names: the
+ * claim being measured is that the board *tiles*, and three boxes cannot tell a
+ * board from three boxes with four panels piled on top of them.
+ */
+async function boardCards(page) {
+  const cards = page.locator("div.rounded-card");
+  const count = await cards.count();
+  need(count >= 3, `the dashboard rendered ${count} card(s), fewer than its three fixed panels`);
+  const boxes = [];
+  for (let i = 0; i < count; i += 1) {
+    const box = await cards.nth(i).boundingBox();
+    need(box, `the dashboard's card ${i} has no box`);
+    boxes.push({ index: i, ...box });
+  }
+  return boxes;
+}
+
+/** The distinct left edges the cards landed on, i.e. the columns actually used. */
+function columnXs(boxes) {
+  const xs = [];
+  for (const { x } of boxes) {
+    if (!xs.some((at) => Math.abs(at - x) <= 1)) xs.push(x);
+  }
+  return xs.sort((a, b) => a - b);
+}
+
+/** Whether two boxes share more than a pixel of area. */
+function overlapping(a, b) {
+  const across = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
+  const down = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
+  return across > 1 && down > 1;
+}
+
+/**
+ * Assert the board uses exactly `expected` columns and nothing sits on anything.
+ *
+ * Two defects this catches that a same-row check cannot: a panel pushed into a
+ * fourth column (a fourth left edge), and panels whose columns shadow each other
+ * (the right edge of one past the left edge of the next).
+ */
+async function assertBoardColumns(page, expected, width) {
+  const boxes = await boardCards(page);
+  const where = boxes
+    .map((box) => `#${box.index} at x=${Math.round(box.x)} y=${Math.round(box.y)}`)
+    .join(", ");
+
+  const xs = columnXs(boxes);
+  need(
+    xs.length === expected,
+    `at ${width}px the dashboard's ${boxes.length} panels used ${xs.length} column(s), ` +
+      `not ${expected} (${where})`,
+  );
+
+  for (let i = 0; i < boxes.length; i += 1) {
+    for (let j = i + 1; j < boxes.length; j += 1) {
+      need(
+        !overlapping(boxes[i], boxes[j]),
+        `at ${width}px the dashboard's panels #${boxes[i].index} and #${boxes[j].index} ` +
+          `overlap (${where})`,
+      );
+    }
+  }
+  return boxes;
+}
+
+/**
  * Measure where the board's panels actually landed.
  *
  * Every other check in this file asks whether a screen rendered. That question is
@@ -431,6 +499,10 @@ async function assertBoardIsGrid(page) {
   // The board is rendered only once the fetch lands, so wait for the first panel
   // rather than measuring the loading card that stands in for it.
   await waitForText(page, headings[0], "the dashboard board");
+
+  // The whole board, not just the three panels named below: every card must land
+  // on one of xl's three columns and none may sit on another.
+  await assertBoardColumns(page, 3, 1280);
 
   const boxes = [];
   for (const text of headings) {
@@ -469,6 +541,36 @@ async function assertBoardIsGrid(page) {
     span > 768,
     `the dashboard board spans ${Math.round(span)}px, no wider than the 768px reading ` +
       `column it was widened out of, so the panels are not using the page (${where})`,
+  );
+
+  /*
+    Then the other half of `md:grid-cols-2 xl:grid-cols-3`, at a width where only the
+    `md` rule applies. A board that tiles at xl and collapses below it is still a
+    defect, and it is the one a laptop at default zoom actually shows. Measured by
+    resizing the live page rather than reloading, so the two readings describe the
+    same rendered board; the viewport is put back so the passes that follow run at
+    the width they expect.
+  */
+  await page.setViewportSize({ width: 900, height: 900 });
+  await settleLayout(page);
+  await assertBoardColumns(page, 2, 900);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await settleLayout(page);
+}
+
+/**
+ * Wait for the browser to re-run layout after a viewport change.
+ *
+ * `boundingBox()` flushes layout itself, so this guards the frame in which the
+ * viewport change has been applied but the next layout has not been produced —
+ * two animation frames, because one can be the frame that was already in flight.
+ */
+async function settleLayout(page) {
+  await page.evaluate(
+    () =>
+      new Promise((settled) => {
+        requestAnimationFrame(() => requestAnimationFrame(settled));
+      }),
   );
 }
 

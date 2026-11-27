@@ -9659,6 +9659,34 @@ The file was then restored byte-identically and the smoke re-run green.
 | Blindness measured | stacked, all eleven screens still reported `ok` |
 | Gates | smoke green; eslint 0; vitest 395/395; prettier clean on the file |
 
+### D10-162 — The board's columns are a number now
+
+**The board's columns are counted now.** `D10-161` measured the three top-row panels' row, order and
+span, and recorded that a fourth column or two overlapping columns would pass regardless.
+`assertBoardColumns` closes that: it counts the distinct left edges of every card on the board —
+seven in the seeded smoke, not three — and rejects any pair whose boxes share more than a pixel of
+area. It runs at 1280x900 expecting three columns, and at 900px, the `md` half of
+`md:grid-cols-2 xl:grid-cols-3`, expecting two, resizing the live page and restoring the width
+afterwards.
+
+**Falsified three ways, and one of them stayed green.** `xl:grid-cols-4` reddens at 1280 while
+`/en/dashboard` still reports `ok`; removing the container's `md:grid-cols-2` alone stays green,
+because the Recent card's `md:col-span-2` supplies the second track; nulling that span as well
+reddens at 900. The rule and the span are a pair — either one alone yields two columns — and the
+layout was left untouched, since only the pair collapses it and the pair works.
+
+**Limits.** Columns and overlap, nothing finer: not flush edges, not gaps, not order within a
+column, not the empty-portfolio card, which renders only at zero contracts and is therefore never on
+the smoke's board, and not 768-899 or anything above 1280. It runs only in the browser smoke, so a
+unit-test run cannot see it.
+
+| Guard | `assertBoardColumns` — every card's left edges, plus a pairwise overlap test |
+| Asserts | exactly 3 columns at 1280x900; exactly 2 at 900px, after resizing the live page |
+| Falsified | `xl:grid-cols-4` red at 1280; `md:grid-cols-1` + `md:col-span-1` red at 900 |
+| Found | removing `md:grid-cols-2` alone is green — the Recents span supplies the track |
+| Gates | build clean; smoke green; prettier clean on the file; eslint 0; vitest 395/395 |
+| Unseen | column alignment and gaps; the empty-portfolio card; widths other than 1280 and 900 |
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

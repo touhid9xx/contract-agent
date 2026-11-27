@@ -12456,9 +12456,63 @@ and the harness stops with the stacked-column message; restoring the file and `g
 clean confirms the measurement was of the defect and not of a typo. The smoke was then run again on
 the fixed tree and reports `ok /en/dashboard tiles its board`.
 
-**Limits.** One viewport, one row. The two full-width cards and the 1024px two-column arrangement
-are not measured, and a regression that kept three columns but made them overlap, or that moved a
-panel out of the first row into a fourth column, would not be caught by an x-order and a span. It
-runs headless Chromium on a machine that can build the frontend, so it is invisible to a unit-test
-run, and it is slower than the text assertions beside it for the same reason it can see anything at
-all.
+**Limits.** One viewport, one row. `D10-162` has since widened this to the whole board's columns:
+`assertBoardColumns` counts every card's distinct left edges and rejects any pair that overlaps, at
+1280x900 and again at 900px, so a fourth column or two columns shadowing each other no longer pass.
+What remains unseen is the empty-portfolio card, which renders only when the tenant has no contracts
+and is therefore never on the smoke's board, and the two full-width cards' spans — the column count
+sees where a card starts, not that it runs the width it claims. Alignment, gaps and order within a
+column are unasserted, and every width other than 1280 and 900 is unmeasured; the 900px reading is
+one point inside a range, chosen because the `md` rule applies there rather than because a laptop is
+that wide. The reading this check was built from stands: with a `space-y-6` wrapper in place of the
+grid the three headings measure x=88, x=88, x=88 and y=132, 519, 722, and the harness goes red while
+every other screen still reports `ok`. It runs headless Chromium inside a smoke that builds the
+frontend, so it is invisible to a unit-test run and slower than the text assertions beside it for
+the same reason it can see anything at all.
+
+### D10-162 — The board's columns are counted, not inferred
+
+`D10-161` measured one row at one viewport and then recorded what an x-order and a span cannot see:
+three columns that overlapped, or a panel pushed out into a fourth, would pass anyway. That was the
+right thing to write down and still a hole, because the cheapest way to break this layout is to add
+a panel, and an added panel changes the column count without moving any of the three headings the
+row check names. This slice measures the number the limit was about.
+
+**The guard counts columns and forbids overlap.** `assertBoardColumns(page, expected, width)` takes
+every `div.rounded-card` on the loaded board — all seven in the seeded smoke, not the three the row
+check names — groups their left edges into columns at a one-pixel tolerance, and fails unless there
+are exactly `expected` of them. Then it compares every pair of boxes and fails if any two share more
+than a pixel of area. The count is the half a class name cannot do: it is a count of what the
+browser laid out, so an eighth panel landing in an `xl:grid-cols-4` fourth column is a fourth edge
+and a red run. The overlap test is the other half — two columns that shadow each other share area,
+and the failure names both card indices and every measured box.
+
+**It runs twice, at the width the harness sets and at the width below it.** The existing reading at
+1280x900 is `xl` itself and expects three columns. The screen is specified as
+`md:grid-cols-2 xl:grid-cols-3`, so the second sets the viewport to 900px — inside `md`, below `lg`
+and `xl` — waits two animation frames for the browser to re-run layout (`settleLayout`, because a
+viewport applied but not yet laid out would measure the arrangement that was there before), expects
+two columns, and restores 1280x900 so the passes that follow see the width they expect. A board that
+tiles at `xl` and collapses on a laptop at default zoom is exactly the half of the specification
+nothing here touched.
+
+**Three mutations were measured, and the second one taught something.** `xl:grid-cols-4` on the
+container: red at 1280 — *7 panels used 4 column(s), not 3* — while `/en/dashboard` still reported
+`ok` and every other screen was untouched, which is `D10-160`'s blindness reproduced in its new
+form. Removing the container's `md:grid-cols-2` outright: **green**, the 900px reading finding two
+columns anyway. Setting `md:grid-cols-1` *and* nulling the Recent card's span to `md:col-span-1`:
+red at 900 — *used 1 column(s), not 2*. So the container rule and the card's span are a pair, and
+only the pair is load-bearing: the measured half is that removing the rule alone changes nothing,
+because a `col-span-2` past the last declared track puts a second one there; the mirror case is
+definitional rather than measured, since `grid-template-columns: repeat(2, …)` declares two tracks
+and needs no span to fill them. That distinction is invisible in a class string and plain in a
+measured run. The layout was left exactly as it was: working and minimal are not the same claim, and
+only the first was measured.
+
+**What gated it.** `npm run build` clean, `npm run smoke:browser` green —
+`ok /en/dashboard tiles its board` among the eleven screens and the signed-in journey —
+`prettier --check` clean on the file, and `npm run lint` exit 0. No application source changed —
+`frontend/src` is not in this diff at all — so the frontend suite stays at 395/395: the harness is
+a Playwright script the smoke runs, not a Vitest spec, and `D10-161`'s spec-neutrality argument is
+unchanged. No Python changed either, so `ruff` and `mypy --strict` are unaffected and the
+pre-commit chain will re-run them over an untouched backend anyway.
