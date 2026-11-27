@@ -12341,8 +12341,10 @@ published on host port 9108 because 9107 is the extractor's; the worker writes n
 so a scrape answers only "did the schedule start", which is the one question a maintenance worker
 with an empty queue otherwise leaves silent.
 
-**Limits.** Retention has still never run against a deployment's data — only SQLite in tests, the
-same limit `reseal-fields` and `backfill-blind-index` carry, and the one `D10-148` recorded; MySQL's
+**Limits.** The process is now observed running at `62d170d` — fifteen containers, nine green
+scrape targets, one `outbox_prune_disabled` line — and that is the whole of what was observed:
+retention has still never deleted a row anywhere but SQLite in tests, the same limit
+`reseal-fields` and `backfill-blind-index` carry and the one `D10-148` recorded; MySQL's
 `DELETE ... WHERE id IN (...)` at the default thousand-row bound is one statement whose cost on a
 large table remains unmeasured, and this slice makes that statement recurring rather than one-off
 without measuring it. The window is in days, so the finest retention a deployment can state is a
@@ -12350,3 +12352,67 @@ day. A large backlog drains over several days by design, which means `pruned` is
 `truncated` is true. And retention deletes history nobody exported: the outbox is the only record
 that an event was ever meant, so a deployment that turns this on discards its own audit trail on a
 clock — correctly, if that is the decision it wrote down.
+
+### D10-160 — The one screen that is a board was wearing a form's width
+
+The report was that the dashboard layout was wrong in the running stack, and the first task was to
+establish *which* dashboard. Three candidates were measured rather than argued: the provisioned
+Grafana board tiles seventeen panels across twenty-four columns with no overlap, the served
+stylesheet is intact and still carries the classes the screens use, and the Next.js `/dashboard`
+screen renders seven cards stacked down a single column with two thirds of the page empty beside
+them. The defect was the last one, and it was structural rather than a rendering fault. Every screen
+in this app is deliberately `max-w-3xl`, which is the right width for a form or a single record, and
+the one screen whose content is a board inherited the wrapper along with everything else.
+
+**The width was already solved two routes away.** `contracts/page.tsx` widens to `max-w-6xl` once
+its board has data and stays narrow while it does not; the dashboard follows that rule rather than
+inventing one, keyed on `board === undefined` — the same condition its loading, error and empty
+branches already read. The panels are now one `grid` with `md:grid-cols-2 xl:grid-cols-3`, and the
+two cards that are not a panel — the empty-portfolio message and the recent-contracts list — span
+the full row at each breakpoint. A lone card in the first column reads as a panel that failed to
+load, and a list of names is the one shape here that scans better wide than tall.
+
+**The change was verified in the container, not in the working tree.** The frontend image is baked,
+so editing a `.tsx` file changes nothing a browser can see; and the route is a client component
+whose grid renders only once the board has loaded, so the server HTML of a signed-out visitor
+legitimately carries `max-w-3xl` and no grid at all — checking it would have been a false negative
+whichever way the fix went. What was measured is what the browser will execute:
+`docker compose build frontend`, then `up -d`, then the page's own thirteen `_next/static` scripts
+fetched and searched, of which one carries `xl:grid-cols-3`, `max-w-6xl` and `md:col-span-2`.
+
+**This rebuild did not repeat `D10-159`'s half-deployment.** The frontend publishes its own tag,
+`contract-agent-frontend:dev`, where the API and the eight workers share `contract-agent-api:dev`;
+recreating the one service was therefore enough, and no other container was left on a previous
+image. `prettier --check src` was run on the way: the changed file is clean, and the repository is
+not — twenty-three files this slice never touches are flagged, and `prettier` is not among the
+frontend gates CI runs, which are `typecheck`, `lint` and `build`. Reformatting them here would be
+churn in a slice that is not about formatting.
+
+**The second question had no answer in the README at all.** The stack boots with no users,
+deliberately — there is no seeded password to change — and `create-admin` appeared only in this
+ledger and in `STATUS.md`, so a person who brought the stack up was left with a login page and no
+way to learn why nothing opened it. `README.md` now carries a `## The first account` section: the
+command, the fact that the password is read from stdin so it never lands in a shell history, and the
+fact that the command refuses a slug that already exists rather than handing a second first
+administrator to a live tenant. No password was added to `.env.example`: that file is settings,
+`test_config` loads it by name, and a literal credential there is a copy-paste hazard rather than
+documentation.
+
+**The credential was proven against the running stack, and the script that proved it was wrong
+first.** `create-admin` reported `admin_created` with `tenant_created=False` — the tenant already
+existed, so an earlier attempt had created the tenant and no account. The first login answered `422`
+rather than the `401` being tested for: the script sent `tenant_slug`, which is a field of the
+*response*, while `LoginRequest` accepts `tenant`. Reading the model instead of re-guessing the
+payload fixed it, and both routes then answered `200` with `role: admin` — the API directly on
+`:8000` and `/api/v1/*` through the frontend's rewrite on `:3000`, which is the path a browser
+actually takes.
+
+**Limits.** The layout is verified as shipped bytes, not as pixels: that the served bundle carries
+the grid classes does not prove the grid looks right at any particular viewport, and nothing in
+either suite can see a layout regression — there is no visual test, and the dashboard's existing
+frontend assertions read text and roles rather than class names, which is exactly what made this
+change test-neutral. `xl` is 1280px, so a 1024px window gets two columns; that breakpoint was
+chosen, not measured. The administrator created during this session is state in one local MySQL
+volume, and another machine has the documented command and nothing more, because the repository
+still ships no fixture, seed or default account — and the credential used here is deliberately not
+recorded in any tracked file.

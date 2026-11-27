@@ -77,6 +77,25 @@ docker compose run --rm --no-deps --entrypoint python migrate \
 
 — and note that `docker compose down -v` answers the same error by deleting the database.
 
+## The first account
+
+The stack boots with no users, deliberately: there is no seeded password to change, and
+`login` cannot succeed for a tenant that has none. `create-admin` mints the first tenant
+and its one administrator; every account after that is made from the users screen by an
+administrator. It reads the password from stdin, so it never lands in your shell's
+history, and it refuses a slug that already exists rather than handing a second first
+administrator to a live tenant.
+
+```bash
+docker compose run --rm --no-deps --entrypoint python migrate \
+  -m app.cli create-admin --tenant-slug acme --email admin@acme.test \
+  --tenant-name "Acme Ltd" --password-stdin
+```
+
+The browser then signs in at <http://localhost:3000> with the tenant slug, that address
+and that password. Nothing else in the stack creates a user: there is no fixture, no seed
+and no default.
+
 ## Watch the stack
 
 The application is a background system: its workers tick quietly and most of what they

@@ -123,8 +123,16 @@ export default function DashboardPage() {
   const dateFormat = new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeZone: "UTC" });
   const board = view.data;
 
+  // Wider once the board is on screen, narrow while it is not — the same rule the
+  // contracts board uses. The panels below tile a three-column grid on a desktop and
+  // collapse to one column under `md`, so the page uses the width it has instead of
+  // stacking seven cards down a 768px strip.
   return (
-    <main className="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 px-6 py-12">
+    <main
+      className={`mx-auto flex min-h-screen flex-col gap-6 px-6 py-12 ${
+        board === undefined ? "max-w-3xl" : "max-w-6xl"
+      }`}
+    >
       <header className="space-y-2">
         <h1 className="text-2xl font-semibold">{t("dashboard.title")}</h1>
         <p className="text-sm text-muted-foreground">{t("dashboard.subtitle")}</p>
@@ -158,9 +166,9 @@ export default function DashboardPage() {
           </CardContent>
         </Card>
       ) : board === undefined ? null : (
-        <>
+        <div className="grid items-start gap-6 md:grid-cols-2 xl:grid-cols-3">
           {board.contracts_total === 0 ? (
-            <Card>
+            <Card className="md:col-span-2 xl:col-span-3">
               <CardHeader>
                 <CardTitle>{t("dashboard.emptyHeading")}</CardTitle>
               </CardHeader>
@@ -332,9 +340,7 @@ export default function DashboardPage() {
               <CardTitle>{t("dashboard.reviewHeading")}</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              <p className="text-2xl font-semibold tabular-nums">
-                {board.fields_awaiting_review}
-              </p>
+              <p className="text-2xl font-semibold tabular-nums">{board.fields_awaiting_review}</p>
               <p className="text-sm text-muted-foreground">{t("dashboard.reviewBody")}</p>
               <Link href={`/${locale}/review`}>
                 <Button size="sm" variant="secondary">
@@ -370,7 +376,13 @@ export default function DashboardPage() {
             </CardContent>
           </Card>
 
-          <Card>
+          {/*
+            The last card takes the whole row. Seven panels tile a three-column grid
+            as two full rows and one card, and a lone card in the first column would
+            read as a panel that failed to load rather than as the end of the board.
+            A list is the one shape here that only gets easier to scan when it is wide.
+          */}
+          <Card className="md:col-span-2 xl:col-span-3">
             <CardHeader>
               <CardTitle>{t("dashboard.recentHeading")}</CardTitle>
             </CardHeader>
@@ -418,7 +430,7 @@ export default function DashboardPage() {
               </Link>
             </CardContent>
           </Card>
-        </>
+        </div>
       )}
 
       <div>

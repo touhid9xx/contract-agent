@@ -471,6 +471,13 @@ services:
     # `depends_on`: a target that is down is what a target list is *for*, and
     # Prometheus says so with `up == 0` instead of refusing to start until six
     # workers are healthy.
+    #
+    # Mounted is not reloaded. The lifecycle API is off, so there is no
+    # `POST /-/reload`: a change to the mounted file arrives only when the process
+    # restarts. `D10-159` measured it — the API answered eight targets with the new
+    # `pruner:9101` line already on disk, and nine after `docker compose restart
+    # prometheus`. Turning the endpoint on instead would publish a mutating route
+    # on the container network to save an action taken once per slice.
     image: prom/prometheus:v2.55.0
     command:
       - --config.file=/etc/prometheus/prometheus.yml

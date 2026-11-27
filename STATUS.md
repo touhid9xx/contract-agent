@@ -9577,12 +9577,60 @@ listener and the smoke script cannot drift apart. The listener publishes host po
 the extractor's — and the worker declares no family, so a scrape answers only whether the schedule
 started.
 
+**What the running stack said at `62d170d`.** The images are baked, so the slice existed in git
+and nowhere else: the stack ran fourteen containers with no `pruner` until `docker compose build
+pruner` rebuilt `contract-agent-api:dev`. Started, it wrote `outbox_prune_disabled` once, with
+`how_to_enable` beside it — the shipped default stating itself rather than being discovered.
+Because that image is shared, the build left every other service on the previous one, so
+`docker compose up -d` recreated the API and the other seven workers; the whole stack now runs
+this commit, and fifteen containers come up.
+
+**The scrape target needed a restart to arrive.** `ops/prometheus/prometheus.yml` is mounted and
+already carried `pruner:9101`, but the API answered eight targets: the lifecycle API is off, so a
+mounted change waits for the process. After `docker compose restart prometheus` it answered nine,
+`workers/pruner:9101` green among them, and a scrape of `127.0.0.1:9108` returned the whole
+registry with no series of its own — the "did the schedule start" claim measured, not argued. The
+compose block now says so beside the mount, because the next target will need the same restart.
+
 | Added | `app/workers/outbox_pruner.py` — `OutboxPruner`, `PruneReport` |
 | Settings | `OUTBOX_RETENTION_DAYS` (0 = off) and three bounded siblings |
 | Reused | `prune_terminal_before` — undelivered rows are outside the statement |
 | A floor | a full page repeats, capped at 100 a tick; `truncated` says which |
 | Wired | compose, Prometheus, listener 9108, smoke script, wiring test |
+| Deployed | fifteen containers, `pruner` up, 9 / 9 scrape targets green at `62d170d` |
 | Gates | 1537 tests, 1535 passed, 2 skipped; ruff, mypy clean |
+
+### D10-160 — The dashboard is a board, and the first account is documented
+
+**The dashboard is a board now rather than a column.** `/dashboard` widens to `max-w-6xl` once the
+board loads — the same rule `contracts/page.tsx` already uses, keyed on the `board === undefined`
+branch the screen already had — and its seven panels tile `md:grid-cols-2 xl:grid-cols-3`, with the
+empty-portfolio and recent-contracts cards spanning the full row. `max-w-3xl` remains while signed
+out and while loading, so the pre-data screens are unchanged.
+
+**Verified in the running image, which is the only place it counts.** The frontend is baked:
+`docker compose build frontend` then `up -d` recreated the one service, on its own tag, so no other
+container was left behind. The page's thirteen `_next/static` scripts were then fetched and
+searched, and one carries `xl:grid-cols-3`, `max-w-6xl` and `md:col-span-2`. The server HTML cannot
+show this: the grid renders only after the board has loaded.
+
+**`README.md` now explains the otherwise empty login page.** A new `## The first account` section
+documents `create-admin` — password read from stdin, refusal on an existing slug, and no fixture,
+seed or default anywhere — because nothing outside the ledgers said how a fresh stack gets its first
+user.
+
+**The demo account exists in the local stack and its login is measured.** `create-admin` reported
+`admin_created`, and `POST /api/v1/auth/login` answers `200` both directly on `:8000` and through
+the frontend's `/api` rewrite on `:3000`, with `/auth/me` returning `role: admin`. The first attempt
+answered `422` because the script sent `tenant_slug`; the wire field is `tenant`.
+
+| Changed | `/dashboard` widens to `max-w-6xl` and tiles `md:2` / `xl:3` |
+| Spans | empty-portfolio and recent-contracts cards take the full row |
+| Verified | served chunk carries `xl:grid-cols-3`, `max-w-6xl`, `md:col-span-2` |
+| Image | `contract-agent-frontend:dev` — its own tag, so no half-deployment |
+| README | `## The first account` — `create-admin`, stdin password, no seed |
+| Login | `200` on `:8000` and via the frontend rewrite; `role: admin` |
+| Gates | 1537 tests, 1535 passed, 2 skipped; vitest 395; ruff, mypy, eslint |
 
 ## Non-negotiable reminders
 
