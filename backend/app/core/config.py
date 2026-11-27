@@ -42,9 +42,12 @@ NotificationTransport = Literal["none", "smtp"]
 #: ``NotificationTransport`` member**. The two channels are independently
 #: deployable — a relay with no gateway, a gateway with no relay — so one setting
 #: could not describe both without inventing a precedence rule nobody asked for.
-#: ``textbee`` selects :class:`~app.workers.senders.TextbeeSender`; as above, the
-#: name exists only because the adapter does.
-SmsTransport = Literal["none", "textbee"]
+#: ``textbee`` selects :class:`~app.workers.senders.TextbeeSender` and ``twilio``
+#: selects :class:`~app.workers.senders.TwilioSender`; as above, each name exists
+#: only because the adapter does. A member with no adapter would be a switch
+#: position that fails at the first send rather than at boot, and the scheduler
+#: sends *inside* the row lock, so that failure lands in the wrong place.
+SmsTransport = Literal["none", "textbee", "twilio"]
 #: Transport a voice reminder is *placed* through, and a **third switch rather than
 #: a ``NotificationTransport`` member**, for the same reason as :data:`SmsTransport`.
 #: ``ari`` selects :class:`~app.workers.senders.AriVoiceSender`, which dials through
@@ -626,6 +629,30 @@ class Settings(BaseSettings):
     #: ``smtp_timeout_seconds``: the scheduler sends while holding the row lock.
     sms_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
 
+    #: Twilio's credentials, read only when ``sms_transport == "twilio"``. Four
+    #: values rather than one URL because Twilio splits a message's identity across
+    #: them, and each fails somewhere different: the account SID is a path segment,
+    #: the username/password pair is the Basic credential, and the sender id is what
+    #: the message is *from*.
+    twilio_account_sid: str = ""
+    #: ``SK...`` when the deployment authenticates with an API key, or the account SID
+    #: (``AC...``) when it uses the primary auth token. Both are ordinary Basic auth
+    #: to Twilio, so which one an operator holds is not this file's business.
+    twilio_username: str = ""
+    #: The API key's secret, or the account's auth token. Never logged and never
+    #: returned, and kept out of ``TwilioSender.__repr__`` for the same reason
+    #: ``smtp_password`` is.
+    twilio_password: str = ""
+    #: The number messages are sent from (``+15551234567``), or a Messaging Service
+    #: SID (``MG...``). Twilio wants those in two *different* form fields, so the
+    #: adapter chooses between ``From`` and ``MessagingServiceSid`` by prefix rather
+    #: than making an operator discover which one is legal.
+    twilio_sender_id: str = ""
+    #: The API origin. Checked below to be https unless loopback, on exactly the rule
+    #: ``textbee_base_url`` follows: the body carries the customer's number and the
+    #: header carries the credential.
+    twilio_base_url: str = "https://api.twilio.com"
+
     # --- voice -----------------------------------------------------------
     #: Read only when ``voice_transport == "ari"``. Its own switch for the same
     #: reason ``sms_transport`` has one.
@@ -1023,6 +1050,52 @@ class Settings(BaseSettings):
                     "network unencrypted."
                 )
 
+        # Twilio's requirements, checked here for the same reason and with the same
+        # consequence as the gateway's above: every one of these is a value whose
+        # absence would otherwise surface at the first send, inside the row lock. The
+        # list is reported whole rather than one-at-a-time so an operator fills the
+        # form in one pass instead of restarting four times.
+        if self.sms_transport == "twilio":
+            missing = [
+                name
+                for name, value in (
+                    ("TWILIO_ACCOUNT_SID", self.twilio_account_sid),
+                    ("TWILIO_USERNAME", self.twilio_username),
+                    ("TWILIO_PASSWORD", self.twilio_password),
+                    ("TWILIO_SENDER_ID", self.twilio_sender_id),
+                )
+                if not value.strip()
+            ]
+            if missing:
+                raise ValueError(
+                    f"{' and '.join(missing)} must be set when SMS_TRANSPORT=twilio; "
+                    "Twilio addresses one message with all four (account, credential, "
+                    "sender), so a partial set is a request that cannot be made"
+                )
+            # A shape check, not a guess at the SID's meaning: the account is a path
+            # segment, so a key SID left in this slot builds a URL Twilio answers with
+            # 404 at the first send rather than an error here.
+            if not self.twilio_account_sid.strip().startswith("AC"):
+                raise ValueError(
+                    "TWILIO_ACCOUNT_SID must start with 'AC' when SMS_TRANSPORT=twilio; "
+                    f"got {self.twilio_account_sid[:2]!r}. An API key (SK...) belongs in "
+                    "TWILIO_USERNAME, not here"
+                )
+            url = urlsplit(self.twilio_base_url)
+            host = url.hostname or ""
+            if not host:
+                raise ValueError(
+                    "TWILIO_BASE_URL must be an absolute URL when "
+                    f"SMS_TRANSPORT=twilio; got {self.twilio_base_url!r}"
+                )
+            if host not in _LOOPBACK_HOSTS and url.scheme != "https":
+                raise ValueError(
+                    "TWILIO_BASE_URL must be https (or loopback) when "
+                    f"SMS_TRANSPORT=twilio; got {self.twilio_base_url!r}. The "
+                    "recipient number and the credential would otherwise cross the "
+                    "network unencrypted."
+                )
+
         # The dialler's requirements, checked at boot for the same reason the SMS ones
         # are: a half-configured transport would otherwise surface at the first ring,
         # which the scheduler performs *inside* the row lock.
@@ -1160,9 +1233,9 @@ class Settings(BaseSettings):
             # condition is the *actual* precondition — that this deployment can read a
             # reply. Sending without listening is still refused, which is what the
             # original rule was protecting.
-            if self.sms_transport == "textbee" and self.inbound_transport != "textbee":
+            if self.sms_transport != "none" and self.inbound_transport != "textbee":
                 raise ValueError(
-                    "SMS_TRANSPORT=textbee is not available in "
+                    f"SMS_TRANSPORT={self.sms_transport} is not available in "
                     f"{self.app_env} without INBOUND_TRANSPORT=textbee: a customer "
                     "could not withdraw consent by asking and nothing would honour "
                     "it, which makes the reminder an unsolicited message rather than "

@@ -20,9 +20,11 @@ Three properties get most of the attention here:
 
 from __future__ import annotations
 
+import base64
 import json
 import socket
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -39,8 +41,10 @@ from app.workers.dispatch import (
 from app.workers.senders import (
     RoutingSender,
     TextbeeSender,
+    TwilioSender,
     build_sender,
     create_textbee_sender,
+    create_twilio_sender,
 )
 
 #: The approved contact value. A send must reach it, and no error text may repeat it.
@@ -448,3 +452,236 @@ def test_inbound_without_both_halves_is_refused(override: dict[str, Any], named:
     """
     with pytest.raises(ValueError, match=named):
         sms_settings(**STAGING_SHAPE, inbound_transport="textbee", **override)
+
+
+# --- Twilio ----------------------------------------------------------------
+#: A syntactically shaped account SID and API key. Both are fabricated: this file is
+#: tracked, and a real key in a test is a real key in the history.
+TWILIO_ACCOUNT_SID = "AC" + "0" * 32
+TWILIO_USERNAME = "SKtest0000000000000000000000000000"
+TWILIO_PASSWORD = "twilio_test_secret_do_not_log"
+TWILIO_SENDER = "+15550001111"
+
+TWILIO_ENV: dict[str, Any] = {
+    "sms_transport": "twilio",
+    "twilio_account_sid": TWILIO_ACCOUNT_SID,
+    "twilio_username": TWILIO_USERNAME,
+    "twilio_password": TWILIO_PASSWORD,
+    "twilio_sender_id": TWILIO_SENDER,
+}
+
+
+def twilio_settings(**overrides: Any) -> Settings:
+    values: dict[str, Any] = dict(MINIMAL_ENV)
+    values.update(TWILIO_ENV)
+    values.update(overrides)
+    return Settings(**values)
+
+
+def form(transport: RecordingTransport, index: int = 0) -> dict[str, str]:
+    """The urlencoded body as a dict, so a test names fields instead of bytes."""
+    raw = transport.requests[index].data
+    if not isinstance(raw, bytes):
+        raise AssertionError(f"the body was {type(raw).__name__}, not bytes")
+    parsed = urllib.parse.parse_qs(raw.decode("utf-8"), keep_blank_values=True)
+    return {key: values[0] for key, values in parsed.items()}
+
+
+def twilio(transport: Any = None, **overrides: Any) -> TwilioSender:
+    return TwilioSender(
+        transport if transport is not None else RecordingTransport(b'{"sid": "SM1"}'),
+        account_sid=overrides.get("account_sid", TWILIO_ACCOUNT_SID),
+        username=overrides.get("username", TWILIO_USERNAME),
+        password=overrides.get("password", TWILIO_PASSWORD),
+        sender_id=overrides.get("sender_id", TWILIO_SENDER),
+        base_url=overrides.get("base_url", "https://api.twilio.com"),
+        timeout_seconds=overrides.get("timeout_seconds", 10.0),
+    )
+
+
+def test_the_message_goes_to_the_accounts_messages_route() -> None:
+    """The account SID is a path segment, so a wrong one is a 404 at the first send."""
+    transport = RecordingTransport(b'{"sid": "SM1"}')
+
+    twilio(transport).send(message())
+
+    assert transport.url() == (
+        f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json"
+    )
+    assert transport.requests[0].get_method() == "POST"
+
+
+def test_the_credential_rides_in_a_basic_authorization_header() -> None:
+    """Header, not body: a query string is what ends up in an access log."""
+    transport = RecordingTransport(b'{"sid": "SM1"}')
+
+    twilio(transport).send(message())
+
+    headers = transport.headers()
+    assert headers["content-type"] == "application/x-www-form-urlencoded"
+    encoded = headers["authorization"].removeprefix("Basic ")
+    decoded = base64.b64decode(encoded).decode("ascii")
+    assert decoded == f"{TWILIO_USERNAME}:{TWILIO_PASSWORD}"
+    # And the credential is in no field of the body, which is the half a gateway could
+    # log without logging headers.
+    raw = transport.requests[0].data
+    assert isinstance(raw, bytes)
+    assert TWILIO_PASSWORD not in raw.decode("utf-8", "replace")
+
+
+def test_the_twilio_recipient_and_a_value_free_body_are_what_cross_the_wire() -> None:
+    transport = RecordingTransport(b'{"sid": "SM1"}')
+
+    twilio(transport).send(message())
+
+    fields = form(transport)
+    assert fields["To"] == CONTACT_PHONE
+    assert fields["From"] == TWILIO_SENDER
+    # The body names no contact value and promises no opt-out it cannot keep.
+    assert "STOP" not in fields["Body"]
+    assert CONTACT_PHONE not in fields["Body"]
+
+
+def test_a_messaging_service_sid_is_sent_in_its_own_field() -> None:
+    """Twilio rejects an ``MG...`` in ``From``; picking by prefix spares an operator
+    a 21606 at the first send."""
+    transport = RecordingTransport(b'{"sid": "SM1"}')
+
+    twilio(transport, sender_id="MG" + "1" * 32).send(message())
+
+    fields = form(transport)
+    assert fields["MessagingServiceSid"] == "MG" + "1" * 32
+    assert "From" not in fields
+
+
+def test_the_twilio_send_is_bounded_by_the_configured_timeout() -> None:
+    transport = RecordingTransport(b'{"sid": "SM1"}')
+
+    twilio(transport, timeout_seconds=2.5).send(message())
+
+    assert transport.timeouts == [2.5]
+
+
+def test_the_twilio_trailing_slash_on_the_base_url_does_not_double_up() -> None:
+    transport = RecordingTransport(b'{"sid": "SM1"}')
+
+    twilio(transport, base_url="https://api.twilio.com/").send(message())
+
+    assert "com//2010" not in transport.url()
+
+
+def test_the_sid_in_the_reply_becomes_the_provider_id() -> None:
+    """Twilio spells the message id ``sid``, not ``id`` — the one place its vocabulary
+    differs from the textbee envelope closely enough to matter."""
+    assert twilio().send(message()) == "SM1"
+
+
+def test_a_twilio_reply_with_no_usable_id_is_not_a_failure() -> None:
+    """The message was accepted; a body we cannot parse must not turn that into an
+    error the scheduler would retry and the customer would receive twice."""
+    assert twilio(RecordingTransport(b"not json")).send(message()) is None
+
+
+def test_the_twilio_transport_declares_sms_only() -> None:
+    assert twilio().channels == frozenset({Channel.SMS})
+
+
+def test_twilio_refuses_a_channel_it_does_not_implement() -> None:
+    with pytest.raises(SenderError):
+        twilio().send(message(Channel.EMAIL))
+
+
+def test_a_twilio_refusal_names_the_code_and_not_the_number() -> None:
+    error = urllib.error.HTTPError(
+        "https://api.twilio.com/2010-04-01/Accounts/x/Messages.json",
+        400,
+        f"Unable to send to {CONTACT_PHONE}",
+        None,  # type: ignore[arg-type]
+        None,
+    )
+
+    with pytest.raises(SenderError) as caught:
+        twilio(RefusingTransport(error)).send(message())
+
+    assert "400" in str(caught.value)
+    assert CONTACT_PHONE not in str(caught.value)
+
+
+def test_a_twilio_timeout_is_reported_as_a_sender_error() -> None:
+    with pytest.raises(SenderError):
+        twilio(RefusingTransport(TimeoutError("timed out"))).send(message())
+
+
+def test_the_twilio_repr_carries_no_credential() -> None:
+    shown = repr(twilio())
+
+    assert TWILIO_PASSWORD not in shown
+    assert base64.b64encode(f"{TWILIO_USERNAME}:{TWILIO_PASSWORD}".encode()).decode() not in shown
+    # The identifier it is safe to log, so a trace says which account to look at.
+    assert TWILIO_ACCOUNT_SID in shown
+
+
+def test_building_the_twilio_sender_opens_no_connection() -> None:
+    built = create_twilio_sender(twilio_settings())
+
+    assert isinstance(built, TwilioSender)
+
+
+def test_the_switch_decides_which_gateway_is_built() -> None:
+    """Both members exist, so the channel alone no longer identifies the transport."""
+    assert isinstance(create_textbee_sender(sms_settings()), TextbeeSender)
+    assert isinstance(create_twilio_sender(twilio_settings()), TwilioSender)
+
+    built = build_sender(twilio_settings())
+
+    assert isinstance(built, RoutingSender)
+    assert built.channels == frozenset({Channel.SMS})
+
+
+def test_twilio_without_any_credential_is_refused_at_start_up() -> None:
+    with pytest.raises(ValueError, match="SMS_TRANSPORT=twilio") as caught:
+        twilio_settings(
+            twilio_account_sid="",
+            twilio_username="",
+            twilio_password="",
+            twilio_sender_id="",
+        )
+
+    # All four are named at once so the form is filled in one pass.
+    assert "TWILIO_ACCOUNT_SID" in str(caught.value)
+    assert "TWILIO_USERNAME" in str(caught.value)
+    assert "TWILIO_PASSWORD" in str(caught.value)
+    assert "TWILIO_SENDER_ID" in str(caught.value)
+
+
+def test_an_api_key_in_the_account_slot_is_refused() -> None:
+    """The mistake this rule exists for: the key is a credential and the account is a
+    path segment, so swapping them builds a URL Twilio 404s at the first send."""
+    with pytest.raises(ValueError, match="TWILIO_ACCOUNT_SID"):
+        twilio_settings(twilio_account_sid=TWILIO_USERNAME)
+
+
+def test_a_plaintext_remote_twilio_origin_is_refused() -> None:
+    with pytest.raises(ValueError, match="must be https"):
+        twilio_settings(twilio_base_url="http://api.twilio.com")
+
+
+def test_a_loopback_twilio_origin_may_stay_plaintext() -> None:
+    assert twilio_settings(twilio_base_url="http://127.0.0.1:8080").sms_transport == "twilio"
+
+
+def test_a_twilio_origin_with_no_host_is_refused() -> None:
+    with pytest.raises(ValueError, match="absolute URL"):
+        twilio_settings(twilio_base_url="not-a-url")
+
+
+@pytest.mark.parametrize("env", ["staging", "production"])
+def test_twilio_is_refused_outside_development_without_an_inbound_route(env: str) -> None:
+    """The rule widened with the transport, deliberately.
+
+    Twilio has no inbound adapter, so a Twilio deployment cannot hear STOP. Allowing
+    it in a deployed environment would make the earlier ``textbee``-only rule look
+    like a rule about textbee rather than about consent. Development stays open.
+    """
+    with pytest.raises(ValueError, match="INBOUND_TRANSPORT=textbee"):
+        twilio_settings(**STAGING_SHAPE)

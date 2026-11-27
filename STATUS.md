@@ -9478,6 +9478,35 @@ shell beats the file.
 | Kept | 13 tables at head `0008`, 4 contract rows |
 | Proved up | 15 services; `up` = 1 for the API and all seven workers |
 
+### D10-157 — Two switches had one adapter each
+
+**Two blocked items, one adapter, one guard.** `P2-E` needed gateway credentials and `P2-D` needed a
+served model; both arrived. `SmsTransport` gained `twilio`, `TwilioSender` sits beside
+`TextbeeSender` rather than under it (header versus query-string credential, form versus JSON body,
+`sid` versus `data.id`), and `build_sender` now picks the gateway from `SMS_TRANSPORT` instead of
+assuming the channel identifies the transport.
+
+**The guard widened with the transport, deliberately.** The production rule was
+`sms_transport == "textbee"` and is now `!= "none"`: adding a member to the `Literal` would
+otherwise have permitted a `twilio` deployment in staging and production with no inbound adapter and
+therefore no STOP route — the unsolicited message the rule exists to prevent — while every existing
+test stayed green because every one of them names `textbee`. Twilio is development-only until an
+inbound adapter is written, and `.env.example` says so at the switch.
+
+**`P2-D`, measured.** `OLLAMA_BASE_URL` is `http://host.docker.internal:11434` because `localhost`
+inside a container is the container; confirmed by having `api` print its own settings and fetch both
+models, and by the `OLLAMA_LIVE=1` test reading a labelled email from `qwen2:1.5b`. Extraction stays
+`pattern`: `build_extractor` swaps the backend wholesale, and a misread date is a silently wrong
+reminder.
+
+| Added | `TwilioSender`, `create_twilio_sender`; `SmsTransport` gains `twilio` |
+| Dispatch | `build_sender` chooses the SMS gateway from `SMS_TRANSPORT` |
+| Refused at boot | any `TWILIO_*` missing; `SK…` in the account slot; non-https origin |
+| Guard widened | any `SMS_TRANSPORT` but `none` needs `INBOUND_TRANSPORT=textbee` |
+| Twilio is | development-only until an inbound adapter exists; there is no STOP route |
+| Ollama | reached from a container at `host.docker.internal:11434`; extraction stays `pattern` |
+| Gates | pytest 1499 / 1497 passed / 2 skipped / 0 failed; ruff, 160 formatted, mypy 80 |
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

@@ -12157,3 +12157,65 @@ from the file an operator believes. And the stack is proved up at one instant on
 on intervals from minutes to hours, so what is recorded is that every process started, published
 `up`, and had a database it could read — not that any of them has since completed a cycle it was
 due.
+
+### D10-157 — Two switches had one adapter each, and a guard that had to widen
+
+Two items had stood in the ledger marked blocked on something outside the repository: `P2-E` needed
+real SMS credentials, `P2-D` needed a served model. Both arrived. The code that followed is small
+and the interesting part is not the adapter — it is that adding a member to an enum silently
+narrowed a safety rule, and that no test would have caught it.
+
+**Twilio is a sibling of `TextbeeSender`, not a subclass.** The two gateways disagree about nearly
+everything a shared base would have had to abstract: the credential rides in an `Authorization`
+header on one and in a query string on the other, the body is a form on one and JSON on the other,
+and the message id is `sid` at the top level on one and nested under `data` on the other. A base
+class would have carried three abstractions and shared one. What they do share is the part that
+matters, and it is enforced separately in each: one bounded request per message, and no recipient in
+any error string — the HTTP status is carried and the gateway's prose, which routinely quotes the
+number it rejected, is not.
+
+**Four settings, because Twilio splits one message's identity across four values.** The account SID
+is a path segment, the username/password pair is the Basic credential, and the sender is either a
+number in `From` or a Messaging Service SID in `MessagingServiceSid` — different fields, so the
+adapter picks by prefix rather than letting an operator find out from a 21606 at the first send. All
+four are checked at boot and reported together, so the form is filled in one pass rather than over
+four restarts. The shape check on the account SID is the one worth keeping: an `SK…` key pasted into
+that slot builds a URL Twilio answers with 404, so an error that would surface at send time — inside
+the row lock the scheduler holds — becomes a refusal at boot that names the field. The
+https-unless-loopback rule is the same one `TEXTBEE_BASE_URL` already followed, for the same reason:
+the body carries the customer's number and the header carries the credential.
+
+**The guard was the real finding.** `_reject_insecure_production_defaults` read
+`self.sms_transport == "textbee" and self.inbound_transport != "textbee"`. Written when `textbee`
+was the only member, that sentence means "SMS may not be sent by a deployment that cannot hear the
+reply". Adding a member to the `Literal` would have left a `twilio` deployment permitted in staging
+and production with no inbound adapter at all — no STOP route, no withdrawal, exactly the
+unsolicited message the rule exists to prevent — and it would have arrived by *adding* to an enum,
+with every existing test still green because every existing test names `textbee`. Widened to
+`sms_transport != "none"`, which is what the sentence always meant. The consequence is a limitation
+and is recorded as one: Twilio has no inbound adapter here, so a Twilio deployment is
+development-only until one is written. A guard that only ever names one transport is a guard about
+that transport.
+
+**`P2-D` was settled by measurement rather than by wiring.** `OLLAMA_BASE_URL` pointing at
+`localhost` names the container from inside a container, so it is
+`http://host.docker.internal:11434`; the evidence is the container's own answer —
+`docker compose exec api` printing its settings and fetching both `qwen2:7b` and `qwen2:1.5b` — plus
+the opt-in live test against the 1.5b model, which read a labelled email correctly. Extraction stays
+`pattern` on purpose: `build_extractor` replaces the backend wholesale rather than composing it, and
+a model that misreads a date produces a silently wrong reminder, which is worse than one that
+produces none.
+
+**Two defects in the tests written for this slice, both caught by tools and not by reading.** Four
+new tests shadowed existing ones by name: Pylance reported them as redeclarations, and a shadowed
+test does not fail — it disappears, so the suite stays green with less coverage than it reports. And
+the transport-failure test raised `ValueError`, which no handler in the adapter catches, so it
+proved the exception escaped rather than that a timeout becomes a `SenderError`. Renamed, and
+changed to `TimeoutError`.
+
+**Limits.** No message was sent: the credentials here are development ones, so what is pinned is the
+request the adapter builds, byte for byte, against a stub transport — the same standard
+`TextbeeSender` is held to and no stronger. `_sms_provider_id` now reads `sid` as well as
+`id`/`messageId`, which means one function's key list serves two gateways and can drift from either.
+And the widened guard buys consent coverage at the cost of leaving Twilio unavailable where it would
+be most useful, which is the correct trade only for as long as nobody writes the inbound adapter.

@@ -88,11 +88,13 @@ __all__ = [
     "SmtpClient",
     "SmtpSender",
     "TextbeeSender",
+    "TwilioSender",
     "build_sender",
     "build_ssl_context",
     "create_ari_sender",
     "create_smtp_sender",
     "create_textbee_sender",
+    "create_twilio_sender",
     "open_smtp_client",
 ]
 
@@ -383,11 +385,113 @@ def _sms_provider_id(raw: bytes) -> str | None:
     data = parsed.get("data") if isinstance(parsed, dict) else None
     for candidate in (data, parsed):
         if isinstance(candidate, dict):
-            for key in ("id", "messageId", "message_id"):
+            # ``sid`` is Twilio's spelling of the same fact. Added here rather than in
+            # a second parser because this function's job is "the id the gateway named,
+            # if any", and two copies of that rule would be two chances to disagree
+            # about what "absent" means.
+            for key in ("id", "messageId", "message_id", "sid"):
                 value = candidate.get(key)
                 if isinstance(value, str) and value:
                     return value
     return None
+
+
+class TwilioSender:
+    """Delivers one SMS per Twilio Messages API call.
+
+    A sibling of :class:`TextbeeSender` rather than a subclass, deliberately: the two
+    gateways disagree about nearly everything a base class would have to abstract —
+    a header versus Basic auth, JSON versus a form body, a message SID versus a data
+    envelope — and the common shape would have been thinner than the differences.
+    What they do agree about is the part that matters, and it is enforced in the same
+    places in both: one request per message, a bounded timeout, and no recipient in
+    any error.
+
+    The credential rides in an ``Authorization`` header, so it is built per request
+    and never stored in a form that a log line could carry; the account SID is a path
+    segment and appears in every Twilio console URL, which is why ``__repr__`` may
+    name it and may never name the password.
+    """
+
+    def __init__(
+        self,
+        transport: HttpTransport,
+        *,
+        account_sid: str,
+        username: str,
+        password: str,
+        sender_id: str,
+        base_url: str,
+        timeout_seconds: float,
+    ) -> None:
+        self._transport = transport
+        self._account_sid = account_sid
+        self._username = username
+        self._password = password
+        self._sender_id = sender_id
+        self._base_url = base_url.rstrip("/")
+        self._timeout = timeout_seconds
+
+    def __repr__(self) -> str:
+        # The password and the Basic header are the credentials here and must not
+        # reach a log line through an accidental repr; the account SID is an
+        # identifier on every console URL, so naming it is what makes a trace useful.
+        return (
+            f"TwilioSender(base_url={self._base_url!r}, "
+            f"account_sid={self._account_sid!r}, sender_id={self._sender_id!r})"
+        )
+
+    @property
+    def channels(self) -> frozenset[Channel]:
+        """SMS only: this transport has no way to deliver anything else."""
+        return frozenset({Channel.SMS})
+
+    def send(self, message: OutgoingMessage) -> str | None:
+        """Deliver one SMS, returning the message SID when Twilio supplies one."""
+        if message.channel is not Channel.SMS:
+            raise SenderError(
+                f"the SMS transport cannot deliver channel={message.channel.value}; "
+                "sms is the only channel it implements"
+            )
+
+        form = {
+            "To": message.recipient,
+            "Body": _SMS_BODY.format(contract_id=message.contract_id),
+        }
+        # A Messaging Service SID is not a sender number: Twilio rejects it in ``From``
+        # and wants this field instead. Decided by prefix here so an operator pastes
+        # whichever identifier their console shows and one of the two is right, rather
+        # than discovering the rule from a 21606 at the first send.
+        if self._sender_id.startswith("MG"):
+            form["MessagingServiceSid"] = self._sender_id
+        else:
+            form["From"] = self._sender_id
+
+        # The scheme is fixed by settings and the host is operator configuration
+        # validated at start-up (https, or loopback); bandit flags a non-literal URL.
+        request = urllib.request.Request(  # noqa: S310  # nosec B310
+            f"{self._base_url}/2010-04-01/Accounts/{self._account_sid}/Messages.json",
+            data=urllib.parse.urlencode(form).encode("utf-8"),
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Authorization": f"Basic {self._authorization()}",
+            },
+            method="POST",
+        )
+        try:
+            raw = self._transport(request, self._timeout)
+        except urllib.error.HTTPError as exc:
+            # The status code is the actionable part and is all this carries: the body
+            # is gateway prose that routinely quotes the rejected recipient.
+            raise SenderError(f"SMS delivery failed (HTTP {exc.code})") from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise SenderError(f"SMS delivery failed: {_failure_name(exc)}") from exc
+        return _sms_provider_id(raw)
+
+    def _authorization(self) -> str:
+        """The Basic credential, built here so the assembled string never lives on."""
+        pair = f"{self._username}:{self._password}".encode()
+        return base64.b64encode(pair).decode("ascii")
 
 
 #: The ARI resource that creates an outbound channel.
@@ -566,6 +670,24 @@ def create_textbee_sender(settings: Settings) -> TextbeeSender:
     )
 
 
+def create_twilio_sender(settings: Settings) -> TwilioSender:
+    """Build the SMS sender for the Twilio Messages API.
+
+    The username/password pair is passed through untouched: whether it holds an API
+    key and its secret, or the account SID and the primary auth token, is a choice
+    about which credential the operator rotates, and both are Basic auth to Twilio.
+    """
+    return TwilioSender(
+        _urlopen_transport,
+        account_sid=settings.twilio_account_sid,
+        username=settings.twilio_username,
+        password=settings.twilio_password,
+        sender_id=settings.twilio_sender_id,
+        base_url=settings.twilio_base_url,
+        timeout_seconds=settings.sms_timeout_seconds,
+    )
+
+
 def create_ari_sender(settings: Settings) -> AriVoiceSender:
     """Build the voice sender for the configured ARI dialler.
 
@@ -707,7 +829,13 @@ def build_sender(settings: Settings) -> MessageSender:
     # comprehension's result no longer satisfies ``dict[Channel, MessageSender]``.
     factories: dict[Channel, Callable[[Settings], MessageSender]] = {
         Channel.EMAIL: create_smtp_sender,
-        Channel.SMS: create_textbee_sender,
+        # Two gateways are implemented, so the channel alone no longer identifies the
+        # transport: ``SMS_TRANSPORT`` does, and it is the same setting that validated
+        # the credential at start-up. Picking here rather than inside one adapter keeps
+        # each adapter single-gateway, which is what makes its error text truthful.
+        Channel.SMS: (
+            create_twilio_sender if settings.sms_transport == "twilio" else create_textbee_sender
+        ),
         Channel.VOICE: create_ari_sender,
     }
     deliverable = settings.deliverable_notification_channels
