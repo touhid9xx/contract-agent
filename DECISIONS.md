@@ -12407,12 +12407,16 @@ payload fixed it, and both routes then answered `200` with `role: admin` — the
 `:8000` and `/api/v1/*` through the frontend's rewrite on `:3000`, which is the path a browser
 actually takes.
 
-**Limits.** The layout is verified as shipped bytes, not as pixels: that the served bundle carries
-the grid classes does not prove the grid looks right at any particular viewport, and nothing in
-either suite can see a layout regression — there is no visual test, and the dashboard's existing
-frontend assertions read text and roles rather than class names, which is exactly what made this
-change test-neutral. `xl` is 1280px, so a 1024px window gets two columns; that breakpoint was
-chosen, not measured. The administrator created during this session is state in one local MySQL
-volume, and another machine has the documented command and nothing more, because the repository
-still ships no fixture, seed or default account — and the credential used here is deliberately not
-recorded in any tracked file.
+**Limits.** The layout is verified as shipped bytes and as a rendered screen, not as geometry. The
+`browser (chromium renders every screen)` job that CI runs loads every screen under
+`src/app/[locale]` in Chromium at 1280x900 — the `xl` breakpoint itself — and in its second pass
+signs in and reaches each one by clicking, this screen among them, failing unless the screen is
+visible and logs nothing; the commit that carried this slice, `794e551`, passed it as run
+46076069279. What no test anywhere does is assert a width or a column count: the dashboard's
+frontend assertions read text and roles rather than class names, which is what made this change
+test-neutral, and the browser job asks whether a screen renders rather than where its boxes landed.
+A board quietly reverting to a single column would pass every suite in this repository. `xl` is
+1280px, so a 1024px window gets two columns; that breakpoint was chosen, not measured. The
+administrator created during this session is state in one local MySQL volume, and another machine
+has the documented command and nothing more, because the repository still ships no fixture, seed or
+default account — and the credential used here is deliberately not recorded in any tracked file.

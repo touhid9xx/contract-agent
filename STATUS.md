@@ -9631,6 +9631,7 @@ answered `422` because the script sent `tenant_slug`; the wire field is `tenant`
 | README | `## The first account` — `create-admin`, stdin password, no seed |
 | Login | `200` on `:8000` and via the frontend rewrite; `role: admin` |
 | Gates | 1537 tests, 1535 passed, 2 skipped; vitest 395; ruff, mypy, eslint |
+| CI | run 46076069279 on `794e551` — ten checks green, the browser job among them |
 
 ## Non-negotiable reminders
 
