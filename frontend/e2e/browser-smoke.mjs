@@ -387,6 +387,91 @@ async function waitForText(page, text, what) {
   }
 }
 
+// --- the board's geometry --------------------------------------------------
+
+/**
+ * The dashboard panels that must share the top row at this viewport.
+ *
+ * Read out of the i18n catalogue rather than written down here, for the reason the
+ * route list is walked out of the tree: a heading is copy, and copy gets reworded.
+ * A literal here would go red the day someone retitled a panel, and it would say
+ * the layout broke when nothing had moved.
+ *
+ * These three are the panels the board renders unconditionally; the rest depend on
+ * whether there is anything to show, so a count of them would not be stable.
+ */
+const BOARD_PANELS = ["totalsHeading", "expiringHeading", "reminderHeading"];
+
+function boardHeadings() {
+  const path = join(FRONTEND, "src", "i18n", "messages", `${LOCALE}.json`);
+  const catalogue = JSON.parse(readFileSync(path, "utf8"));
+  return BOARD_PANELS.map((key) => {
+    const text = catalogue.dashboard?.[key];
+    need(typeof text === "string" && text.length > 0, `the catalogue has no dashboard.${key}`);
+    return text;
+  });
+}
+
+/**
+ * Measure where the board's panels actually landed.
+ *
+ * Every other check in this file asks whether a screen rendered. That question is
+ * deaf to layout: seven cards stacked down a single narrow column render
+ * flawlessly, and every screen spec and every "is there text" assertion passes. The
+ * board was exactly that, so "the panels tile a grid" needs boxes measured, not a
+ * stylesheet inspected — a class name in the HTML says what was asked for, not what
+ * the browser did with it.
+ *
+ * `div.rounded-card` is the handle the screen specs already use to find a `Card`
+ * (`closest(".rounded-card")`), because that class is the only structural mark the
+ * primitive leaves behind.
+ */
+async function assertBoardIsGrid(page) {
+  const headings = boardHeadings();
+  // The board is rendered only once the fetch lands, so wait for the first panel
+  // rather than measuring the loading card that stands in for it.
+  await waitForText(page, headings[0], "the dashboard board");
+
+  const boxes = [];
+  for (const text of headings) {
+    const card = page
+      .locator("div.rounded-card")
+      .filter({ has: page.getByRole("heading", { name: text, exact: true }) })
+      .first();
+    const box = await card.boundingBox();
+    need(box, `the dashboard has no panel headed "${text}"`);
+    boxes.push({ text, ...box });
+  }
+
+  const where = boxes
+    .map((box) => `"${box.text}" at x=${Math.round(box.x)} y=${Math.round(box.y)}`)
+    .join(", ");
+
+  // xl is 1280px in Tailwind's default scale and `main()` opens the context at
+  // exactly that width, so `xl:grid-cols-3` applies to this run by construction.
+  const top = boxes[0];
+  need(
+    boxes.every((box) => Math.abs(box.y - top.y) <= 1),
+    `the dashboard board is stacked instead of tiled (${where}). At a 1280px viewport ` +
+      `these ${boxes.length} panels must share one top row.`,
+  );
+
+  for (let i = 1; i < boxes.length; i += 1) {
+    need(
+      boxes[i].x > boxes[i - 1].x,
+      `the dashboard panels are not laid out left to right (${where})`,
+    );
+  }
+
+  const last = boxes[boxes.length - 1];
+  const span = last.x + last.width - top.x;
+  need(
+    span > 768,
+    `the dashboard board spans ${Math.round(span)}px, no wider than the 768px reading ` +
+      `column it was widened out of, so the panels are not using the page (${where})`,
+  );
+}
+
 // --- the two passes --------------------------------------------------------
 
 /**
@@ -508,12 +593,11 @@ async function bootBackend() {
  */
 function builtProxy() {
   const manifestPath = join(FRONTEND, ".next", "routes-manifest.json");
-  need(
-    existsSync(manifestPath),
-    "frontend/ is not built: run `npm run build` in frontend/ first",
-  );
+  need(existsSync(manifestPath), "frontend/ is not built: run `npm run build` in frontend/ first");
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-  const rule = (manifest.rewrites?.afterFiles ?? []).find((entry) => entry.source === "/api/:path*");
+  const rule = (manifest.rewrites?.afterFiles ?? []).find(
+    (entry) => entry.source === "/api/:path*",
+  );
   need(rule, `the build has no "/api/:path*" rewrite, so no screen could reach the API`);
   const target = new URL(rule.destination);
   return {
@@ -640,8 +724,20 @@ async function main() {
     assertClean(problems, "the contract detail screen");
     say(`  ok  /${LOCALE}/contracts/${contractId}`);
 
+    // The board is the one screen whose claim is a shape and not a sentence: it has
+    // to tile. It is measured below instead of merely visited, which is why it is
+    // not in the loop's list.
+    await reachSignedIn(page, `/${LOCALE}/dashboard`, problems);
+    await assertBoardIsGrid(page);
+    say(`  ok  /${LOCALE}/dashboard tiles its board`);
+
     for (const route of routes) {
-      if (route === `/${LOCALE}` || route === `/${LOCALE}/contracts` || route === `/${LOCALE}/login`) {
+      if (
+        route === `/${LOCALE}` ||
+        route === `/${LOCALE}/contracts` ||
+        route === `/${LOCALE}/login` ||
+        route === `/${LOCALE}/dashboard`
+      ) {
         continue;
       }
       if (route.includes("[")) continue; // dynamic screens are covered above
@@ -679,7 +775,9 @@ async function main() {
 main().then(
   () => process.exit(0),
   (error) => {
-    process.stderr.write(`\nbrowser smoke failed: ${error instanceof Error ? error.message : error}\n`);
+    process.stderr.write(
+      `\nbrowser smoke failed: ${error instanceof Error ? error.message : error}\n`,
+    );
     process.exit(1);
   },
 );

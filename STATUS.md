@@ -9633,6 +9633,32 @@ answered `422` because the script sent `tenant_slug`; the wire field is `tenant`
 | Gates | 1537 tests, 1535 passed, 2 skipped; vitest 395; ruff, mypy, eslint |
 | CI | run 46076069279 on `794e551` — ten checks green, the browser job among them |
 
+### D10-161 — The board's geometry is a test now
+
+**The dashboard board now has a test that can fail.** `D10-160` fixed the layout and recorded the
+gap honestly — a board reverting to one column would have passed every suite here — and
+`frontend/e2e/browser-smoke.mjs` now measures it in real Chromium rather than asserting classes.
+`assertBoardIsGrid` takes the bounding boxes of the three top-row panels and fails unless they share
+a row, sit at increasing x, and span wider than 768px, the reading column the board was widened out
+of.
+
+**The headings come from the catalogue, the cards from `div.rounded-card`.** Neither is a new hook:
+copy is read out of `src/i18n/messages/en.json` so a reworded panel does not go red, and
+`rounded-card` is the handle the screen specs already use to reach a `Card`. The viewport is the
+harness's own 1280x900, which is `xl` itself.
+
+**Falsified first.** Restoring the defective wrapper — one `space-y-6` div in place of the grid —
+puts all three headings at x=88 with y=132, 519, 722 and turns the harness red, while every other
+assertion still reports `ok`; that run is the measured proof of the blindness `D10-160` described.
+The file was then restored byte-identically and the smoke re-run green.
+
+| Guard | `assertBoardIsGrid` in `frontend/e2e/browser-smoke.mjs` |
+| Asserts | one row, increasing x, span wider than 768px, at 1280x900 |
+| Derived | headings from `en.json`; cards by `div.rounded-card` |
+| Falsified | `space-y-6` wrapper gives x=88/88/88, y=132/519/722, red |
+| Blindness measured | stacked, all eleven screens still reported `ok` |
+| Gates | smoke green; eslint 0; vitest 395/395; prettier clean on the file |
+
 ## Non-negotiable reminders
 
 - No low-confidence field may reach the notification pipeline.

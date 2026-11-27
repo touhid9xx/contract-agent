@@ -12407,16 +12407,58 @@ payload fixed it, and both routes then answered `200` with `role: admin` — the
 `:8000` and `/api/v1/*` through the frontend's rewrite on `:3000`, which is the path a browser
 actually takes.
 
-**Limits.** The layout is verified as shipped bytes and as a rendered screen, not as geometry. The
+**Limits.** The layout is verified as shipped bytes, as a rendered screen, and — since `D10-161` —
+as geometry, but only of the three top-row panels at one viewport. The
 `browser (chromium renders every screen)` job that CI runs loads every screen under
-`src/app/[locale]` in Chromium at 1280x900 — the `xl` breakpoint itself — and in its second pass
-signs in and reaches each one by clicking, this screen among them, failing unless the screen is
-visible and logs nothing; the commit that carried this slice, `794e551`, passed it as run
-46076069279. What no test anywhere does is assert a width or a column count: the dashboard's
-frontend assertions read text and roles rather than class names, which is what made this change
-test-neutral, and the browser job asks whether a screen renders rather than where its boxes landed.
-A board quietly reverting to a single column would pass every suite in this repository. `xl` is
-1280px, so a 1024px window gets two columns; that breakpoint was chosen, not measured. The
-administrator created during this session is state in one local MySQL volume, and another machine
-has the documented command and nothing more, because the repository still ships no fixture, seed or
-default account — and the credential used here is deliberately not recorded in any tracked file.
+`src/app/[locale]` in Chromium at 1280x900, the `xl` breakpoint itself, and in its second pass signs
+in and reaches each one by clicking, this screen among them, failing unless the screen is visible
+and logs nothing; the commit that carried this slice, `794e551`, passed it as run 46076069279. What
+the frontend's own specs asserted was text and roles rather than class names, which is what made the
+change test-neutral, and the browser job asks whether a screen renders rather than where its boxes
+landed, so a board quietly reverting to a single column would have passed every suite here.
+`D10-161` closes that and nothing more: it measures the first row at 1280x900 and says nothing about
+the two full-width cards, the 1024px two-column arrangement, or any other viewport. `xl` is 1280px,
+so a 1024px window gets two columns; that breakpoint was chosen, not measured. The administrator
+created during this session is state in one local MySQL volume, and another machine has the
+documented command and nothing more, because the repository still ships no fixture, seed or default
+account, and the credential used here is deliberately not recorded in any tracked file.
+
+### D10-161 — The board's geometry is measured, not assumed
+
+`D10-160` widened the one screen in this app whose content is a board, gave it a grid, and then
+recorded what it could not prove: that the bytes a browser executes carry the grid classes is not
+that the grid looks like a grid, and that a board reverting to a single column would have passed
+every suite in this repository. Every other check here asks whether a screen rendered, and that
+question is deaf to shape. Seven cards stacked down one column render perfectly, log nothing, and
+satisfy each test in both suites.
+
+**The blindness was measured rather than asserted.** Putting the defective wrapper back — one
+`space-y-6` div in place of the grid, rebuilt and re-run — leaves all eleven screens reporting `ok`,
+the seeded contract among them, while the board is three cards in one column. That is exactly the
+failure the ledger had described, reproduced, and it is the reason a guard belongs in the browser
+harness rather than in another jsdom spec: the screen specs could only have been taught to assert
+class names, which is a claim about the source and not about the layout.
+
+**What the guard measures.** `assertBoardIsGrid` locates the three panel cards by the heading each
+contains and takes their bounding boxes. It fails unless all three share a row to within a pixel,
+sit at strictly increasing x, and span, leftmost edge to rightmost, more than 768px — the width of
+the reading column the board was widened out of, so a grid crammed back into `max-w-3xl` fails too.
+The viewport is the one the harness already sets, 1280x900, which is `xl` itself, so the assertion
+is about the layout this screen is specified to have at its narrowest desktop width. The headings
+are read out of `src/i18n/messages/en.json` rather than written into the harness, for the reason the
+route list is walked out of the tree: copy changes, and a guard that goes red for a reworded panel
+teaches people to ignore it. The cards are found by `div.rounded-card`, the handle the screen specs
+already use to reach a `Card`, since that class is the only structural mark the primitive leaves.
+
+**It was falsified before it was trusted.** A guard that has never been seen to fail is a comment.
+With the wrapper set to `space-y-6` the three headings measure x=88, x=88, x=88 and y=132, 519, 722,
+and the harness stops with the stacked-column message; restoring the file and `git status` returning
+clean confirms the measurement was of the defect and not of a typo. The smoke was then run again on
+the fixed tree and reports `ok /en/dashboard tiles its board`.
+
+**Limits.** One viewport, one row. The two full-width cards and the 1024px two-column arrangement
+are not measured, and a regression that kept three columns but made them overlap, or that moved a
+panel out of the first row into a fourth column, would not be caught by an x-order and a span. It
+runs headless Chromium on a machine that can build the frontend, so it is invisible to a unit-test
+run, and it is slower than the text assertions beside it for the same reason it can see anything at
+all.
