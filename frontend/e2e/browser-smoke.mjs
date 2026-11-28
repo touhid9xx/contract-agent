@@ -402,14 +402,53 @@ async function waitForText(page, text, what) {
  */
 const BOARD_PANELS = ["totalsHeading", "expiringHeading", "reminderHeading"];
 
+/**
+ * How many columns the contracts board tiles.
+ *
+ * Pinned, not counted off the headings: the number is a claim about the stylesheet
+ * (`xl:grid-cols-6`), and deriving it from the copy that fills the columns would let
+ * the check agree with whatever the page happened to do. The headings are still read
+ * from the catalogue below, so a *renamed* status does not turn this red; only a
+ * status appearing or disappearing does, which is when these numbers need a look.
+ */
+const CONTRACT_COLUMNS = 6;
+
+/** The message catalogue, parsed once. */
+let messageCatalogue = null;
+function catalogue() {
+  if (messageCatalogue === null) {
+    const path = join(FRONTEND, "src", "i18n", "messages", `${LOCALE}.json`);
+    messageCatalogue = JSON.parse(readFileSync(path, "utf8"));
+  }
+  return messageCatalogue;
+}
+
 function boardHeadings() {
-  const path = join(FRONTEND, "src", "i18n", "messages", `${LOCALE}.json`);
-  const catalogue = JSON.parse(readFileSync(path, "utf8"));
   return BOARD_PANELS.map((key) => {
-    const text = catalogue.dashboard?.[key];
+    const text = catalogue().dashboard?.[key];
     need(typeof text === "string" && text.length > 0, `the catalogue has no dashboard.${key}`);
     return text;
   });
+}
+
+/**
+ * The contracts board's column headings, in the order the filter list decides.
+ *
+ * Read out of the catalogue the way `contracts/page.test.tsx` reads them, and for the
+ * same reason: the board builds its columns from the status list rather than a second
+ * hand-written list, so the words a reader sees are the words the schema has.
+ */
+function contractColumnHeadings() {
+  const statuses = catalogue().contracts?.statuses;
+  need(statuses && typeof statuses === "object", "the catalogue has no contracts.statuses");
+  const labels = Object.values(statuses);
+  need(
+    labels.length === CONTRACT_COLUMNS,
+    `the catalogue names ${labels.length} contract statuses, not the ${CONTRACT_COLUMNS} ` +
+      `columns this board is asserted to tile — a status gained or lost a member, so the ` +
+      `grid rule and the counts here both need looking at`,
+  );
+  return labels;
 }
 
 /**
@@ -427,7 +466,7 @@ async function boardCards(page) {
   for (let i = 0; i < count; i += 1) {
     const box = await cards.nth(i).boundingBox();
     need(box, `the dashboard's card ${i} has no box`);
-    boxes.push({ index: i, ...box });
+    boxes.push({ name: `#${i}`, ...box });
   }
   return boxes;
 }
@@ -449,35 +488,36 @@ function overlapping(a, b) {
 }
 
 /**
- * Assert the board uses exactly `expected` columns and nothing sits on anything.
+ * Assert a measured set of boxes uses exactly `expected` columns, and that none of
+ * them sits on another.
  *
- * Two defects this catches that a same-row check cannot: a panel pushed into a
- * fourth column (a fourth left edge), and panels whose columns shadow each other
- * (the right edge of one past the left edge of the next).
+ * Two defects this catches that a same-row check cannot: a panel pushed into an extra
+ * column (an extra left edge), and columns whose boxes shadow each other (the right
+ * edge of one past the left edge of the next). Shared by both boards in this app —
+ * the dashboard's panels and the contracts board's columns — because "the columns are
+ * wrong" looks the same on either screen, and a second copy of this arithmetic is a
+ * second place for it to be subtly different.
  */
-async function assertBoardColumns(page, expected, width) {
-  const boxes = await boardCards(page);
+function assertColumns(boxes, expected, width, screen) {
   const where = boxes
-    .map((box) => `#${box.index} at x=${Math.round(box.x)} y=${Math.round(box.y)}`)
+    .map((box) => `${box.name} at x=${Math.round(box.x)} y=${Math.round(box.y)}`)
     .join(", ");
 
   const xs = columnXs(boxes);
   need(
     xs.length === expected,
-    `at ${width}px the dashboard's ${boxes.length} panels used ${xs.length} column(s), ` +
-      `not ${expected} (${where})`,
+    `at ${width}px ${screen} used ${xs.length} column(s), not ${expected} (${where})`,
   );
 
   for (let i = 0; i < boxes.length; i += 1) {
     for (let j = i + 1; j < boxes.length; j += 1) {
       need(
         !overlapping(boxes[i], boxes[j]),
-        `at ${width}px the dashboard's panels #${boxes[i].index} and #${boxes[j].index} ` +
-          `overlap (${where})`,
+        `at ${width}px ${screen} puts ${boxes[i].name} and ${boxes[j].name} on top of ` +
+          `each other (${where})`,
       );
     }
   }
-  return boxes;
 }
 
 /**
@@ -502,7 +542,7 @@ async function assertBoardIsGrid(page) {
 
   // The whole board, not just the three panels named below: every card must land
   // on one of xl's three columns and none may sit on another.
-  await assertBoardColumns(page, 3, 1280);
+  await assertColumns(await boardCards(page), 3, 1280, "the dashboard's board");
 
   const boxes = [];
   for (const text of headings) {
@@ -553,7 +593,7 @@ async function assertBoardIsGrid(page) {
   */
   await page.setViewportSize({ width: 900, height: 900 });
   await settleLayout(page);
-  await assertBoardColumns(page, 2, 900);
+  assertColumns(await boardCards(page), 2, 900, "the dashboard's board");
   await page.setViewportSize({ width: 1280, height: 900 });
   await settleLayout(page);
 }
@@ -572,6 +612,62 @@ async function settleLayout(page) {
         requestAnimationFrame(() => requestAnimationFrame(settled));
       }),
   );
+}
+
+/**
+ * Measure the contracts board — this app's second board, and its only six-column one.
+ *
+ * `D10-161` and `D10-162` gave the dashboard's grid a test that can fail. The listing
+ * is a board too, reached by a toggle instead of by URL, and it had no such test: drop
+ * `xl:grid-cols-6` and the six status columns stack down the page while every screen
+ * still renders and every suite in this repo still passes. That is the same blindness
+ * on the next screen along, so it is measured in the browser, where a grid becomes
+ * boxes.
+ *
+ * The columns are found the way `contracts/page.test.tsx` finds them — the nearest
+ * `div.rounded-lg` above the heading — so both tests are talking about the same
+ * element and this file invents no second structural convention. It leaves the screen
+ * back in list view, so the journey that called it continues where it was.
+ */
+async function assertContractsBoardIsColumns(page) {
+  const labels = contractColumnHeadings();
+  const copy = catalogue().contracts ?? {};
+
+  const toBoard = page.getByRole("button", { name: copy.viewBoard, exact: true });
+  await toBoard.waitFor({ state: "visible", timeout: 30_000 });
+  await toBoard.click();
+
+  // Re-measured rather than re-used: a box is a reading of one layout, and the resize
+  // below produces a different one.
+  const measure = async () => {
+    const boxes = [];
+    for (const label of labels) {
+      const heading = page.getByRole("heading", { name: label, exact: true }).first();
+      await heading.waitFor({ state: "visible", timeout: 30_000 });
+      const column = heading.locator("xpath=ancestor::div[contains(@class, 'rounded-lg')][1]");
+      const box = await column.boundingBox();
+      need(box, `the contracts board has no column headed "${label}"`);
+      boxes.push({ name: `"${label}"`, ...box });
+    }
+    return boxes;
+  };
+
+  // xl is 1280px in Tailwind's default scale and `main()` opens the context at exactly
+  // that width, so `xl:grid-cols-6` applies to this reading by construction: six
+  // statuses, six columns, one row.
+  assertColumns(await measure(), CONTRACT_COLUMNS, 1280, "the contracts board");
+
+  // Then the width where only `md:grid-cols-3` applies. All six still need somewhere
+  // to sit, so the board has to wrap into two rows of three rather than collapse.
+  await page.setViewportSize({ width: 900, height: 900 });
+  await settleLayout(page);
+  assertColumns(await measure(), 3, 900, "the contracts board");
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await settleLayout(page);
+
+  const toList = page.getByRole("button", { name: copy.viewList, exact: true });
+  await toList.click();
+  await settleLayout(page);
 }
 
 // --- the two passes --------------------------------------------------------
@@ -817,6 +913,13 @@ async function main() {
     // with the seeded token. If the proxy pointed anywhere else, it never appears.
     await waitForText(page, CUSTOMER_REF, `the contracts list (client-side fetching)`);
     say(`  ok  /${LOCALE}/contracts shows the seeded row`);
+
+    // The same screen's second reading, and the other half of its claim: the listing is
+    // a board, and a board tiles. Measured rather than merely visited, because "there is
+    // text on the screen" is deaf to a grid that has collapsed into one column.
+    await assertContractsBoardIsColumns(page);
+    await waitForText(page, CUSTOMER_REF, "the contracts list after leaving the board");
+    say(`  ok  /${LOCALE}/contracts tiles its six status columns`);
 
     problems.length = 0;
     await page.click(`a[href="/${LOCALE}/contracts/${contractId}"]`);

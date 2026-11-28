@@ -9663,11 +9663,12 @@ The file was then restored byte-identically and the smoke re-run green.
 
 **The board's columns are counted now.** `D10-161` measured the three top-row panels' row, order and
 span, and recorded that a fourth column or two overlapping columns would pass regardless.
-`assertBoardColumns` closes that: it counts the distinct left edges of every card on the board —
-seven in the seeded smoke, not three — and rejects any pair whose boxes share more than a pixel of
-area. It runs at 1280x900 expecting three columns, and at 900px, the `md` half of
+`assertColumns` closes that: it counts the distinct left edges of every card on the board — seven in
+the seeded smoke, not three — and rejects any pair whose boxes share more than a pixel of area. It
+runs at 1280x900 expecting three columns, and at 900px, the `md` half of
 `md:grid-cols-2 xl:grid-cols-3`, expecting two, resizing the live page and restoring the width
-afterwards.
+afterwards. `D10-163` later lifted that helper out of its dashboard-only form so the contracts board
+could call the same arithmetic; every reading described here is unchanged.
 
 **Falsified three ways, and one of them stayed green.** `xl:grid-cols-4` reddens at 1280 while
 `/en/dashboard` still reports `ok`; removing the container's `md:grid-cols-2` alone stays green,
@@ -9678,14 +9679,49 @@ layout was left untouched, since only the pair collapses it and the pair works.
 **Limits.** Columns and overlap, nothing finer: not flush edges, not gaps, not order within a
 column, not the empty-portfolio card, which renders only at zero contracts and is therefore never on
 the smoke's board, and not 768-899 or anything above 1280. It runs only in the browser smoke, so a
-unit-test run cannot see it.
+unit-test run cannot see it. `D10-163` has since applied the same reading to this app's other board,
+the contracts listing, through that shared `assertColumns`, and the helper named in the row above is
+now that function; what this paragraph records about the dashboard is unchanged.
 
-| Guard | `assertBoardColumns` — every card's left edges, plus a pairwise overlap test |
+| Guard | `assertColumns` — every card's left edges, plus a pairwise overlap test |
 | Asserts | exactly 3 columns at 1280x900; exactly 2 at 900px, after resizing the live page |
 | Falsified | `xl:grid-cols-4` red at 1280; `md:grid-cols-1` + `md:col-span-1` red at 900 |
 | Found | removing `md:grid-cols-2` alone is green — the Recents span supplies the track |
 | Gates | build clean; smoke green; prettier clean on the file; eslint 0; vitest 395/395 |
 | Unseen | column alignment and gaps; the empty-portfolio card; widths other than 1280 and 900 |
+
+### D10-163 — The listing's board is a board too
+
+**The listing's board is measured now.** `D10-161` and `D10-162` gave the dashboard's grid a test
+that can fail; `/contracts` is a board too and had none. `assertContractsBoardIsColumns` toggles the
+screen into board view, finds each of the six status columns as the nearest `div.rounded-lg` above
+its heading — the handle `contracts/page.test.tsx` uses, so both tests name the same element — and
+asserts six columns at 1280px and three at 900px with no overlap at either width. It toggles back to
+list view and the seeded row is re-asserted after it, so the journey continues where it was.
+
+**Six is pinned, not counted off the copy.** `CONTRACT_COLUMNS = 6` is a claim about
+`xl:grid-cols-6`; deriving it from the headings would let a seventh status raise the expectation
+instead of reddening the run. The labels still come from the catalogue, with a guard that it names
+exactly six, so a rename passes and a membership change does not.
+
+**Falsified, and the failure names the columns.** `xl:grid-cols-3` on the board container: red at
+1280 — *the contracts board used 3 column(s), not 6* — with every measured column printed at its
+coordinates, while all eleven screens still reported `ok` and the seeded row still showed. Restored
+byte-identically, re-ran green. The arithmetic itself was extracted from `D10-162`'s
+`assertBoardColumns` into a shared `assertColumns`, so the two boards cannot drift apart.
+
+**Limits.** One reading per width: not order, not gaps, not flush edges, not whether a column is
+narrow-but-present. Only 1280 and 900 are measured, so 469px and every width above 900 other than
+1280 are unmeasured. A missing or disabled board toggle fails as a wait timeout rather than as a
+geometry message. It runs only in the browser smoke, so a unit-test run cannot see it.
+
+| Guard | `assertContractsBoardIsColumns` — six status columns, plus a pairwise overlap test |
+| Reused | `assertColumns`, one arithmetic for both boards, lifted from `D10-162`'s guard |
+| Asserts | exactly 6 columns at 1280px; exactly 3 at 900px, after resizing the live page |
+| Handle | nearest `div.rounded-lg` above each heading, as `contracts/page.test.tsx` finds it |
+| Falsified | `xl:grid-cols-3` red at 1280, every column printed, all eleven screens still `ok` |
+| Gates | build clean; smoke green; prettier clean on the file; eslint 0; vitest 395/395 |
+| Unseen | column order, gaps and flush edges; widths other than 1280 and 900; toggle failure mode |
 
 ## Non-negotiable reminders
 

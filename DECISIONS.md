@@ -12457,18 +12457,19 @@ clean confirms the measurement was of the defect and not of a typo. The smoke wa
 the fixed tree and reports `ok /en/dashboard tiles its board`.
 
 **Limits.** One viewport, one row. `D10-162` has since widened this to the whole board's columns:
-`assertBoardColumns` counts every card's distinct left edges and rejects any pair that overlaps, at
+`assertColumns` counts every card's distinct left edges and rejects any pair that overlaps, at
 1280x900 and again at 900px, so a fourth column or two columns shadowing each other no longer pass.
-What remains unseen is the empty-portfolio card, which renders only when the tenant has no contracts
-and is therefore never on the smoke's board, and the two full-width cards' spans — the column count
-sees where a card starts, not that it runs the width it claims. Alignment, gaps and order within a
-column are unasserted, and every width other than 1280 and 900 is unmeasured; the 900px reading is
-one point inside a range, chosen because the `md` rule applies there rather than because a laptop is
-that wide. The reading this check was built from stands: with a `space-y-6` wrapper in place of the
-grid the three headings measure x=88, x=88, x=88 and y=132, 519, 722, and the harness goes red while
-every other screen still reports `ok`. It runs headless Chromium inside a smoke that builds the
-frontend, so it is invisible to a unit-test run and slower than the text assertions beside it for
-the same reason it can see anything at all.
+`D10-163` then pointed the same arithmetic at this app's other board, the contracts listing, which
+had no such reading at all. What remains unseen is the empty-portfolio card, which renders only when
+the tenant has no contracts and is therefore never on the smoke's board, and the two full-width
+cards' spans — the column count sees where a card starts, not that it runs the width it claims.
+Alignment, gaps and order within a column are unasserted, and every width other than 1280 and 900 is
+unmeasured; the 900px reading is one point inside a range, chosen because the `md` rule applies
+there rather than because a laptop is that wide. The reading this check was built from stands: with
+a `space-y-6` wrapper in place of the grid the three headings measure x=88, x=88, x=88 and y=132,
+519, 722, and the harness goes red while every other screen still reports `ok`. It runs headless
+Chromium inside a smoke that builds the frontend, so it is invisible to a unit-test run and slower
+than the text assertions beside it for the same reason it can see anything at all.
 
 ### D10-162 — The board's columns are counted, not inferred
 
@@ -12478,14 +12479,15 @@ right thing to write down and still a hole, because the cheapest way to break th
 a panel, and an added panel changes the column count without moving any of the three headings the
 row check names. This slice measures the number the limit was about.
 
-**The guard counts columns and forbids overlap.** `assertBoardColumns(page, expected, width)` takes
-every `div.rounded-card` on the loaded board — all seven in the seeded smoke, not the three the row
-check names — groups their left edges into columns at a one-pixel tolerance, and fails unless there
-are exactly `expected` of them. Then it compares every pair of boxes and fails if any two share more
-than a pixel of area. The count is the half a class name cannot do: it is a count of what the
-browser laid out, so an eighth panel landing in an `xl:grid-cols-4` fourth column is a fourth edge
-and a red run. The overlap test is the other half — two columns that shadow each other share area,
-and the failure names both card indices and every measured box.
+**The guard counts columns and forbids overlap.** `assertColumns(boxes, expected, width, screen)` —
+the shared helper `D10-163` extracted, so that both boards in this app use one copy of the
+arithmetic — takes every `div.rounded-card` on the loaded board, groups their left edges into
+columns at a one-pixel tolerance, and fails unless there are exactly `expected` of them. Then it
+compares every pair of boxes and fails if any two share more than a pixel of area. The count is the
+half a class name cannot do: it is a count of what the browser laid out, so an eighth panel landing
+in an `xl:grid-cols-4` fourth column is a fourth edge and a red run. The overlap test is the other
+half — two columns that shadow each other share area, and the failure names both boxes and every
+measured position.
 
 **It runs twice, at the width the harness sets and at the width below it.** The existing reading at
 1280x900 is `xl` itself and expects three columns. The screen is specified as
@@ -12516,3 +12518,58 @@ only the first was measured.
 a Playwright script the smoke runs, not a Vitest spec, and `D10-161`'s spec-neutrality argument is
 unchanged. No Python changed either, so `ruff` and `mypy --strict` are unaffected and the
 pre-commit chain will re-run them over an untouched backend anyway.
+
+### D10-163 — The other board is a board too
+
+`D10-161` and `D10-162` gave the dashboard's grid a test that can fail, and the listing next door
+had none. `/contracts` is a board too — six status columns, reached by a toggle rather than by URL —
+and one class name was holding it up: drop `xl:grid-cols-6` from the container and the six statuses
+stack down the page while every screen still renders, the seeded row is still printed, and every
+suite in this repo still passes. That is the blindness `D10-161` recorded, one screen along, so it
+is closed the same way: the browser measures the arrangement.
+
+**The guard.** `assertContractsBoardIsColumns(page)` toggles the screen into board view, reads the
+six status labels out of the catalogue's `contracts.statuses`, and finds each column as the nearest
+`div.rounded-lg` ancestor of that heading — the handle `contracts/page.test.tsx` already uses, so
+the two tests are talking about the same element and this file invents no second structural
+convention. It asserts six columns at 1280px, and three at 900px, where only `md:grid-cols-3`
+applies and the board must wrap into two rows of three rather than collapse, with no two columns
+overlapping at either width. It leaves the screen in list view so the journey that called it
+continues where it was, and the seeded row is re-asserted afterwards.
+
+**Six is pinned, not counted off the copy.** `CONTRACT_COLUMNS = 6` is a claim about the stylesheet,
+not about the message catalogue. Deriving the expected number from the headings would let the check
+agree with whatever the page happened to do — a seventh status would raise the expectation to meet
+it and the guard would pass a board that had quietly become seven columns. The headings are still
+read from the catalogue, guarded by an assertion that it names exactly six, so a *renamed* status
+does not redden this run and an added or removed one does.
+
+**Extracted, not duplicated.** `assertBoardColumns` became
+`assertColumns(boxes, expected, width, screen)`, and `boardCards` now names its boxes `#0`, `#1`, …
+so a failure reads the same on either screen. Two copies of *group the left edges, reject the
+overlaps, print every box* is two places for the arithmetic to drift apart, and the second copy is
+written by whoever reads the first. The dashboard's two readings assert exactly what they asserted
+before.
+
+**Falsified.** `xl:grid-cols-3` on the board container — six statuses into three columns, two rows —
+and the smoke went red at the 1280px reading: *the contracts board used 3 column(s), not 6*, with
+every measured box printed at its coordinates, tiling two rows at `y=809` and `y=930`. All eleven
+screens reported `ok` in that same run and `/en/contracts shows the seeded row` passed, which is
+precisely what the guard is for: no other assertion in this repository can see it. The line was
+restored byte-identically and the smoke re-ran green, both boards reading `ok`.
+
+**What gated it.** `npm run build` clean; `npm run smoke:browser` green,
+`ok /en/contracts tiles its six status columns` among the eleven screens and the signed-in journey;
+`prettier --check` clean on the file; `npm run lint` exit 0. `frontend/e2e` is the only source
+directory in this diff, so the frontend suite stays at 395/395 — the harness is a Playwright script
+the smoke runs, not a Vitest spec — and no Python changed, so `ruff` and `mypy --strict` are
+unaffected and the pre-commit chain re-runs them over an untouched backend anyway.
+
+**Limits.** One reading per width, like its sibling: column order, gaps, flush edges and whether a
+column is narrow-but-present all pass. Only 1280 and 900 are measured, so 469px — where
+`sm:grid-cols-2` would apply — is unmeasured, and that rule sits on `BoardTicket`, a different
+element from the columns. It assumes the board toggle exists and is enabled for the signed-in user;
+a missing toggle fails as a wait timeout rather than as a geometry message, which is a worse error
+to read than a wrong number. Unlike the dashboard, an empty column here still renders — the board
+prints its own sentence for a status with no contracts — so a zero-contract column is measured; an
+empty *portfolio* is a different screen state and not this reading.
