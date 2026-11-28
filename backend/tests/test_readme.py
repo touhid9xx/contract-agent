@@ -101,6 +101,12 @@ ROW_STATES = (
     (re.compile(r"unspecified"), "unspecified"),
 )
 
+#: The phrase that opens the `GATE 3` row's milestone list. Two forms, because a gate can
+#: be signed: `in progress:` while it is open, and `✅ signed …:` once it is not. Both are
+#: anchored at the colon that ends the phrase, so the phase cell's `P2-A … P2-L` range stays
+#: outside the parse — it is the *declared* range, not a statement about any milestone.
+ROW_LEAD = re.compile(r"(?:in progress|✅ signed[^:]*):")
+
 #: A full id (`P2-F`) or the shorthand the table uses after the first one (`-F`), each
 #: optionally carrying a possessive gloss (`P2-I's new views`). The gloss is dropped.
 FULL_ID = re.compile(r"P2-(?P<letter>[A-Z])(?:'s\b.*)?\Z")
@@ -208,19 +214,20 @@ def _table_milestones(text: str) -> dict[str, set[str]]:
     """The three states the delivery table's `GATE 3` row sorts milestones into."""
 
     row = next(
-        (line for line in text.splitlines() if "GATE 3" in line and "in progress" in line),
+        (line for line in text.splitlines() if "GATE 3" in line and ROW_LEAD.search(line)),
         None,
     )
     assert row is not None, (
-        "README.md no longer has a `GATE 3` row saying it is in progress. Either keep the "
-        "row checkable — `**GATE 3** — in progress: ...` — or delete this test with it"
+        "README.md no longer has a `GATE 3` row saying where the gate stands. Either keep "
+        "the row checkable — `**GATE 3** — in progress: ...`, or `**GATE 3** — ✅ signed "
+        "...: ...` — or delete this test with it"
     )
 
     found: dict[str, set[str]] = {}
     for segment in row.split(";"):
-        # Everything before `in progress:` is the phase cell, and it carries the range
+        # Everything before the lead phrase is the phase cell, and it carries the range
         # (`P2-A … P2-L`) — an id list that is not a statement about any milestone.
-        segment = segment.split("in progress:", 1)[-1]
+        segment = ROW_LEAD.split(segment, maxsplit=1)[-1]
         for phrase, state in ROW_STATES:
             match = phrase.search(segment)
             if match is not None:

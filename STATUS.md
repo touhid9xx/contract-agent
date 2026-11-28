@@ -1,5 +1,9 @@
 # Status
 
+**GATE 3 is signed for ten of Phase 2's twelve milestones** — `P2-A` … `P2-J` at `22f82a3`. `P2-K`
+and `P2-L` are not signed, because both are specified nowhere but the range in `README.md`'s
+delivery table. See *D10-164* below.
+
 Last updated: Phase 1 (real foundation), GATE 2 signed 2026-11-04 — **F1
 committed (`f0e1eef`), F2 committed
 (`331a7b4`) plus one follow-up fix to the MySQL test harness (`a79d893`), F3
@@ -9722,6 +9726,36 @@ geometry message. It runs only in the browser smoke, so a unit-test run cannot s
 | Falsified | `xl:grid-cols-3` red at 1280, every column printed, all eleven screens still `ok` |
 | Gates | build clean; smoke green; prettier clean on the file; eslint 0; vitest 395/395 |
 | Unseen | column order, gaps and flush edges; widths other than 1280 and 900; toggle failure mode |
+
+### D10-164 — GATE 3 is signed for ten of twelve
+
+**Ten of twelve, and the two that are missing could not be built.** `P2-A` through `P2-J` are signed
+at `22f82a3`: each has code, tests that can fail, a decision record and a status block. `P2-K` and
+`P2-L` are not signed and cannot be from inside a slice, because both are specified nowhere but the
+range in the delivery table and a slice here may not write its own requirements. The row in
+`README.md` now says that out loud instead of leaving `in progress` to imply that the missing pair
+is merely next.
+
+**The evidence is CI, not a reading of the tree.** Run `46088155354` on `22f82a3` passed all ten
+jobs, `browser` among them — the job that boots the real stack and drives Chromium through every
+screen and the signed-in journey. No source line changed between that run and this record.
+
+**What it does not certify.** That the ten are right; that the deployment is ready. The SMS path has
+never seen a real Twilio request, so *supports Twilio* is a claim about `twilio_signature_matches`;
+the pasted API key is still unrotated; there is no Kafka broker by decision (`D10-130`); and whether
+CI gates a merge is invisible to an unauthenticated read.
+
+**Limits.** The `README.md` statement this gate leans on is agreement-checked, never truth-checked,
+so the signature is no stronger than the row: it pins that the two statements move together and that
+the three states cover `P2-A … P2-L`. No source and no migration moved. `README.md` and one row
+anchor in `test_readme.py` did, because a signed row is a shape the old guard refused.
+
+| Gate | GATE 3 — signed for `P2-A` … `P2-J`; `P2-K`/`P2-L` not signed |
+| Evidence | CI `46088155354` on `22f82a3`, ten of ten jobs green |
+| Certifies | code, a failing test, a decision record and a status block, times ten |
+| Not signed | `P2-K`, `P2-L` — specified nowhere but the range; unbuildable here |
+| Moved | `README.md`'s row and status; `test_readme.py`'s row anchor |
+| Unmoved | no source file, no migration, no test logic |
 
 ## Non-negotiable reminders
 

@@ -5,7 +5,8 @@ per-field confidence, human review of low-confidence fields, channel selection
 (email / SMS / voice), T-60 / T-30 / T-14 reminders, two-week response tracking
 and escalation to a human operator.
 
-> **Status: Phase 1 complete — GATE 1 and GATE 2 both signed.**
+> **Status: Phase 1 complete — GATE 1 and GATE 2 both signed; GATE 3 signed for ten of
+> Phase 2's twelve milestones, with `P2-K` and `P2-L` not signed.**
 > The real application in `backend/` and `frontend/` runs against MySQL, writes every
 > side effect through a transactional outbox, authenticates real users with Argon2id
 > and rotating refresh tokens, seals PII with Fernet, extracts contract fields, gates
@@ -170,7 +171,7 @@ that matters.
 | --- | --- | --- |
 | 0 | Interactive mocked demo — every screen, all states, one command | **GATE 1** — ✅ approved |
 | 1 | Real foundation F1–F10 (infra, DB/outbox, auth, bus, observability, review, decisions, dispatch, PII encryption) | **GATE 2** — ✅ signed (`5c3e077`) |
-| 2 | P2-A … P2-L features, one milestone per commit, human picks the order | **GATE 3** — in progress: P2-A, -B, -C, -D, -E, -F, -G, -H, -I and -J have landed slices; nothing has no code at all; P2-K/-L unspecified (see `STATUS.md`) |
+| 2 | P2-A … P2-L features, one milestone per commit, human picks the order | **GATE 3** — ✅ signed for ten of twelve at `22f82a3`: P2-A, -B, -C, -D, -E, -F, -G, -H, -I and -J have landed slices; nothing has no code at all; P2-K/-L unspecified and **not signed**, so the gate stays open for the two of them (see `STATUS.md`) |
 
 Rules that are not negotiable anywhere in this repo:
 

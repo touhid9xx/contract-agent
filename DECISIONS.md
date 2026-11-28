@@ -12573,3 +12573,48 @@ a missing toggle fails as a wait timeout rather than as a geometry message, whic
 to read than a wrong number. Unlike the dashboard, an empty column here still renders — the board
 prints its own sentence for a status with no contracts — so a zero-contract column is measured; an
 empty *portfolio* is a different screen state and not this reading.
+
+### D10-164 — GATE 3 is signed for ten of twelve
+
+`GATE 1` approved the mocked demo and `GATE 2` signed the real foundation at `5c3e077`. The third
+gate was defined in `README.md` as *P2-A … P2-L features, one milestone per commit, human picks the
+order*, and that row named twelve milestones. Ten have landed slices; two have nothing that could.
+`P2-K` and `P2-L` are specified nowhere in this repository but the range in that table, and no slice
+here may write its own requirements — the rule that makes an acceptance test worth having. That is
+why the pair has stayed unbuilt through every slice since the range was declared, and it is why this
+record cannot close the gate on twelve. It signs the ten.
+
+**What the signature certifies is ten milestones, each with four things.** Code in `backend/` or
+`frontend/`; tests that can fail and that name the failure; a `D10` decision record giving the
+reasoning and the alternatives that were refused; and a status block in `STATUS.md` giving the
+limits rather than the claims. The mapping is not invented here: `README.md` already records that
+`P2-I`'s timeline, board and dashboard landed as `D10-135`, `D10-136` and `D10-137`, `P2-H`'s
+pull-mode ingestion as `D10-143` and `P2-F`'s ARI dialler as `D10-144`, and every other milestone
+carries its reasoning in the `D10` block that built it.
+
+**The evidence is a run, not a reading.** CI run `46088155354` executed on `22f82a3`, the commit
+this record sits on top of, and all ten jobs passed: python static, backend pytest, MySQL 8.4
+integration, the frontend typecheck/eslint/vitest/build job, the demo frontend, hygiene and
+`gitleaks`, `observability`, `image`, the `browser` job that boots the stack and drives Chromium
+through every screen and the signed-in journey, and the `gate` job that fails when any of the nine
+does. The `browser` job matters most to this signature: the screens this gate covers are the ones no
+unit test can see, and that job spent 127 seconds proving they render.
+
+**What the signature does not certify.** Not that the ten are right, only that they are built and
+tested. Not production readiness: the SMS path has been proved against an independently
+reimplemented signature scheme and never against a real Twilio request, so *supports Twilio* is
+today a statement about `twilio_signature_matches` rather than about Twilio; the API key pasted into
+this session's history is still unrotated; there is no Kafka broker or `contract.ingested` consumer,
+by decision rather than omission (`D10-130`); and whether CI *gates* a merge is a repository setting
+an unauthenticated read cannot see, which `README.md` already says in as many words. Each of those
+is a carried item on this gate, not a footnote to it.
+
+**Limits.** The milestone statement in `README.md` is checked for agreement between its two copies
+and never for truth — `test_readme.py`'s docstring says so at length — so this sign-off inherits the
+narrower guarantee its row gives: a milestone cannot move in one statement and not the other, and
+the three states must partition `P2-A … P2-L`, but nothing verifies that `P2-D` has the code it is
+credited with. Nothing else in the tree moved: no source file, no migration, no test logic. The one
+test that changed is the row anchor in `test_readme.py`, widened to accept a signed row while still
+parsing all three states and still demanding the declared range. The signature is a claim about the
+tree at `22f82a3`, and a later commit that breaks a covered milestone makes it false without making
+it wrong about the tree it named.
